@@ -1,0 +1,36 @@
+# AI agent files
+claude.md
+.claude/
+.cursor/
+.aider/
+copilot.md
+
+# Secrets
+.secrets/
+*.env
+.env*
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Cache
+.cache/
+*.grib2
+grid_coords.npz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

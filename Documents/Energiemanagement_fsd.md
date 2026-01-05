@@ -3,11 +3,11 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs  
 **Location:** Lausen (BL), Switzerland  
-**Version:** 1.0  
-**Status:** consolidated, ready for implementation  
+**Version:** 1.2  
+**Status:** PV forecast implemented  
 **Implementation:** Python  
 **Data storage:** InfluxDB  
-**Weather/forecast data:** MeteoSwiss (ICON Open Data)
+**Weather/forecast data:** MeteoSwiss (ICON-CH2-EPS Open Data)
 
 ---
 
@@ -56,7 +56,10 @@ analysis, explanation, and suggestion functions only.
 ## 3. System overview
 
 ```
-MeteoSwiss ICON forecast
+MeteoSwiss ICON-CH2-EPS forecast (STAC API)
+            |
+            v
+      GRIB parser (eccodes)
             |
             v
       PV forecast (pvlib)
@@ -92,7 +95,7 @@ MeteoSwiss ICON forecast
 |--------------------|--------------------------------------|---------|
 | pv_power_ac        | PV AC power                          | W       |
 | house_power        | House consumption                    | W       |
-| grid_power         | Grid power (+import / -export)        | W       |
+| grid_power         | Grid power (+import / -export)       | W       |
 | battery_soc        | Battery state of charge              | %       |
 | battery_power      | Battery power                        | W       |
 | ev_power           | Wallbox / EV power                   | W       |
@@ -112,34 +115,95 @@ Tariffs are time-dependent and known for the planning horizon.
 
 ### 5.1 Meteorological inputs
 
-Source: MeteoSwiss ICON Open Data
+**Source:** MeteoSwiss ICON-CH2-EPS Open Data via STAC API
 
-Required:
-- Global horizontal irradiance (GHI)
-- Air temperature (2 m)
+**API Configuration:**
+- STAC API URL: `https://data.geo.admin.ch/api/stac/v1`
+- Collection: `ch.meteoschweiz.ogd-forecasting-icon-ch2`
 
-Optional:
-- Wind speed
-- Direct / diffuse irradiance
+**Variables used:**
+
+| ICON Variable | Description                    | Unit  | PV Variable |
+|---------------|--------------------------------|-------|-------------|
+| asob_s        | Net shortwave radiation        | W/m²  | ghi         |
+| aswdir_s      | Direct shortwave radiation     | W/m²  | dni         |
+| aswdifd_s     | Diffuse shortwave radiation    | W/m²  | dhi         |
+| t_2m          | Air temperature at 2m          | K     | temp_air    |
+| u_10m         | Wind speed at 10m              | m/s   | wind_speed  |
+
+**ICON Grid:** Unstructured triangular grid (283,876 points). Grid coordinates
+(tlat/tlon) are extracted from the horizontal constants file and cached locally.
+Nearest-neighbor interpolation is used to extract values at the PV location.
 
 ### 5.2 Model chain
 
-- Solar position
-- Decomposition of GHI -> DNI/DHI (if needed)
-- Transposition to plane of array (POA)
-- Cell temperature model
-- DC -> AC power (inverter)
+- Solar position (pvlib.solarposition)
+- Decomposition of GHI -> DNI/DHI if not provided (Erbs model)
+- Transposition to plane of array (POA) - isotropic sky model
+- Cell temperature model (Faiman)
+- DC power (PVWatts model with temperature coefficient)
+- AC power (inverter efficiency + clipping)
 
-Implementation with pvlib (ModelChain or equivalent).
+### 5.3 PV configuration hierarchy
 
-### 5.3 PV array configuration (current installation)
+The PV system is configured hierarchically:
 
-| Array       | Latitude         | Longitude        | Azimuth (deg) | Tilt (deg) | Modules power (W) | Inverter size (W) |
-|------------|------------------|------------------|---------------|------------|-------------------|-------------------|
-| East       | 47.474642646392  | 7.767323255538941| 90            | 15         | 3800              | 5000              |
-| West       | 47.474642646392  | 7.767323255538941| 270           | 15         | 4275              | 5000              |
-| South Front| 47.474642646392  | 7.767323255538941| 180           | 70         | 900               | 900               |
-| South back | 47.4747060995744 | 7.767339348793031| 180           | 60         | 600               | -                 |
+```
+panels (catalog)
+    |
+plants (location)
+    |
+    +-- inverters (max_power, efficiency)
+            |
+            +-- strings (azimuth, tilt, panel reference, count)
+```
+
+**Panels:** Define panel types once, referenced by id in strings.
+
+**Plants:** Physical locations with geographic coordinates. A system can have
+multiple plants (e.g., house, garage, carport).
+
+**Inverters:** Define max AC power (clipping) and efficiency. Each inverter
+groups one or more strings.
+
+**Strings:** Define orientation (azimuth, tilt), reference a panel type, and
+specify the panel count. String DC power is calculated as count × panel pdc0.
+
+### 5.4 Panel types
+
+| ID          | Model                    | Pdc0 (W) | γ (1/K)  |
+|-------------|--------------------------|----------|----------|
+| AE455       | AE Solar AC-455MH/144V   | 455      | -0.0035  |
+| Generic400  | Generic 400W             | 400      | -0.0035  |
+
+### 5.5 Plant configuration
+
+**Plant: House**
+
+| Parameter  | Value                |
+|------------|----------------------|
+| Latitude   | 47.475053232432145   |
+| Longitude  | 7.767335653734485    |
+| Altitude   | 330 m                |
+| Timezone   | Europe/Zurich        |
+
+**Inverters:**
+
+| Inverter   | Max Power (W) | Efficiency | Strings                    |
+|------------|---------------|------------|----------------------------|
+| East+West  | 10000         | 0.82       | East, West                 |
+| South      | 1500          | 0.80       | South Front, South Back    |
+
+**Strings:**
+
+| String       | Azimuth (°) | Tilt (°) | Panel     | Count | DC Power (W) |
+|--------------|-------------|----------|-----------|-------|--------------|
+| East         | 90          | 15       | AE455     | 8     | 3640         |
+| West         | 270         | 15       | AE455     | 9     | 4095         |
+| South Front  | 180         | 70       | Generic400| 3     | 1200         |
+| South Back   | 180         | 60       | Generic400| 2     | 800          |
+
+**Total installed:** 9,735 W DC
 
 ---
 
