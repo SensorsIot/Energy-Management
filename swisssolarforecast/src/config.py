@@ -7,7 +7,8 @@ import yaml
 from pathlib import Path
 
 # Load configuration from YAML
-CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
+# Try multiple paths: options.json, config_pv.yaml, etc.
+CONFIG_PATH = Path(__file__).parent.parent / "config_pv.yaml"
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
