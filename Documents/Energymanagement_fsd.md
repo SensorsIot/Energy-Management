@@ -3,8 +3,8 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 1.12
-**Status:** Updated Energy Dashboard config, removed Forecast.Solar
+**Version:** 1.13
+**Status:** Added SwissSolarForecast add-on chapter, updated InfluxDB schema
 **Implementation:** Python
 **Data storage:** InfluxDB
 **Weather/forecast data:** MeteoSwiss ICON-CH1/CH2-EPS (11/21 ensemble members)
@@ -849,72 +849,14 @@ Cumulative energy from forecast start, calculated by integrating power.
 pv_energy_p50[t] = sum(pv_power_p50[0:t]) × 0.25h
 ```
 
-#### 6.12.4 InfluxDB Storage Schema
+#### 6.12.4 InfluxDB Storage
 
-**Measurement:** `pv_forecast`
+Forecast data is written to the `pv_forecast` bucket by the SwissSolarForecast add-on.
 
-| Tag | Description | Example |
-|-----|-------------|---------|
-| `percentile` | P10, P50, or P90 | `P50` |
-| `run_time` | When forecast was calculated | `2026-01-06T12:00:00Z` |
-| `model` | ICON model used | `ch1` or `ch2` or `hybrid` |
+**Key design:** One point per timestamp with all P10/P50/P90 values stored together,
+guaranteeing exact timestamp alignment for MPC calculations.
 
-| Field | Description | Unit |
-|-------|-------------|------|
-| `power_w` | Forecasted PV power | W |
-| `energy_wh` | Cumulative energy from start | Wh |
-
-| Timestamp | Description |
-|-----------|-------------|
-| `_time` | Future time (bucket timestamp) |
-
-**Example data points:**
-```
-pv_forecast,percentile=P50,run_time=2026-01-06T12:00:00Z,model=hybrid power_w=2340,energy_wh=585 1736168400000000000
-pv_forecast,percentile=P50,run_time=2026-01-06T12:00:00Z,model=hybrid power_w=2520,energy_wh=1215 1736169300000000000
-pv_forecast,percentile=P10,run_time=2026-01-06T12:00:00Z,model=hybrid power_w=1890,energy_wh=472 1736168400000000000
-pv_forecast,percentile=P90,run_time=2026-01-06T12:00:00Z,model=hybrid power_w=2780,energy_wh=695 1736168400000000000
-```
-
-#### 6.12.5 Grafana Visualization
-
-The forecast can be visualized in Grafana with future timestamps:
-
-```flux
-// Query forecast with uncertainty band
-from(bucket: "EnergyV1")
-  |> range(start: now(), stop: 48h)
-  |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r._field == "power_w")
-  |> pivot(rowKey: ["_time"], columnKey: ["percentile"], valueColumn: "_value")
-```
-
-**Visualization options:**
-- P50 as main line
-- P10-P90 as shaded uncertainty band
-- Overlay actual production for comparison
-
-#### 6.12.6 Forecast Accuracy Tracking
-
-Each forecast run is tagged with `run_time` to enable accuracy analysis:
-
-```flux
-// Compare forecast vs actual for a specific run
-forecast = from(bucket: "EnergyV1")
-  |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r.percentile == "P50")
-  |> filter(fn: (r) => r.run_time == "2026-01-05T12:00:00Z")
-
-actual = from(bucket: "EnergyV1")
-  |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r._measurement == "Energy")
-  |> filter(fn: (r) => r._field == "solar_ac_total_power")
-
-// Join and calculate error
-join(tables: {forecast: forecast, actual: actual}, on: ["_time"])
-  |> map(fn: (r) => ({r with error: r._value_forecast - r._value_actual}))
-```
+See **Chapter 18** for complete schema details, Grafana queries, and configuration.
 
 ---
 
@@ -1229,18 +1171,21 @@ The system is considered successful when:
 
 ---
 
-## 15. Forecast Data Architecture
+## 15. Forecast Data Architecture (Standalone Mode)
+
+**Note:** This chapter describes the standalone systemd-based deployment for development
+and testing. For production use with Home Assistant, see **Chapter 18: SwissSolarForecast Add-on**.
 
 ### 15.1 Overview
 
-The forecast system is split into two components:
+The standalone forecast system uses two components:
 
 1. **Data Fetchers** (scheduled systemd jobs)
    - Download ICON forecast data from MeteoSwiss STAC API
    - Run on fixed schedules matching MeteoSwiss model runs
    - Store data locally in `/home/energymanagement/forecastData/`
 
-2. **Calculation Program** (on-demand)
+2. **Calculation Program** (on-demand CLI tool)
    - Reads locally cached forecast data
    - Calculates PV power forecast using pvlib
    - Auto-selects optimal model based on forecast horizon
@@ -1530,6 +1475,224 @@ display_zero_lines:
 | `sensor.load_power` | Power | W | Home consumption |
 | `sensor.evcc_actec_charge_power` | Power | kW | EV charging |
 | `sensor.enphase_energy_power` | Power | W | Enphase solar |
+
+---
+
+## 18. SwissSolarForecast Home Assistant Add-on
+
+### 18.1 Overview
+
+The SwissSolarForecast add-on is a Home Assistant add-on that automates PV power forecasting
+using MeteoSwiss ICON ensemble data and pvlib. It runs as a containerized service with
+internal scheduling.
+
+**Key Features:**
+- Fetches ICON-CH1 (33h) and ICON-CH2 (120h) ensemble data from MeteoSwiss STAC API
+- Calculates P10/P50/P90 probabilistic forecasts using pvlib
+- Writes energy balance to InfluxDB at 15-minute resolution
+- Queries load forecast and calculates net (surplus/deficit)
+- All values guaranteed to have identical timestamps for MPC alignment
+
+### 18.2 Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    SwissSolarForecast Add-on                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  FETCHER (scheduled: CH1 every 3h, CH2 every 6h)                    │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ MeteoSwiss STAC API  ───▶  GRIB files (local /share/data)    │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                      │                               │
+│                                      │ (files on disk)               │
+│                                      ▼                               │
+│  CALCULATOR (scheduled: every 15 min)                                │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ GRIB files ───▶ pvlib ───▶ PV forecast ───┐                  │   │
+│  │ Load forecast query ─────────────────────►├──▶ InfluxDB      │   │
+│  │ Net calculation (PV - Load) ─────────────►┘                  │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 18.3 Installation
+
+**Via HACS:**
+1. Add repository: `https://github.com/SensorsIot/Energy-Management`
+2. Install "SwissSolarForecast" add-on
+3. Configure InfluxDB connection and PV system
+4. Start the add-on
+
+### 18.4 Configuration
+
+Configuration is stored in `/data/options.json` with optional YAML override in
+`/config/swisssolarforecast.yaml` for panels/plants.
+
+```yaml
+influxdb:
+  host: "192.168.0.203"
+  port: 8087
+  token: "your-influxdb-token"
+  org: "energymanagement"
+  bucket: "pv_forecast"
+  load_bucket: "load_forecast"  # Source for load forecast
+
+location:
+  latitude: 47.475
+  longitude: 7.767
+  altitude: 330
+  timezone: "Europe/Zurich"
+
+schedule:
+  ch1_cron: "30 2,5,8,11,14,17,20,23 * * *"  # UTC
+  ch2_cron: "45 2,8,14,20 * * *"              # UTC
+  calculator_interval_minutes: 15
+
+storage:
+  data_path: "/share/swisssolarforecast"
+  max_storage_gb: 3.0
+  cleanup_old_runs: true
+```
+
+### 18.5 InfluxDB Output Schema
+
+**Measurement:** `pv_forecast`
+
+**Resolution:** 15-minute intervals (aligned to :00, :15, :30, :45)
+
+**One point per timestamp** with all values stored together:
+
+| Tag | Description |
+|-----|-------------|
+| `inverter` | Inverter identifier (e.g., `total`) |
+| `model` | ICON model (`ch1`, `ch2`, `hybrid`) |
+| `run_time` | When forecast was calculated (ISO timestamp) |
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `power_w_p10` | W | PV power (pessimistic) |
+| `power_w_p50` | W | PV power (expected) |
+| `power_w_p90` | W | PV power (optimistic) |
+| `energy_wh_p10` | Wh | Cumulative PV energy (pessimistic) |
+| `energy_wh_p50` | Wh | Cumulative PV energy (expected) |
+| `energy_wh_p90` | Wh | Cumulative PV energy (optimistic) |
+| `load_power_w` | W | Load/consumption power |
+| `load_energy_wh` | Wh | Cumulative load energy |
+| `net_power_w_p10` | W | Net = PV_p10 - Load |
+| `net_power_w_p50` | W | Net = PV_p50 - Load |
+| `net_power_w_p90` | W | Net = PV_p90 - Load |
+| `net_energy_wh_p10` | Wh | Cumulative net (pessimistic) |
+| `net_energy_wh_p50` | Wh | Cumulative net (expected) |
+| `net_energy_wh_p90` | Wh | Cumulative net (optimistic) |
+| `ghi` | W/m² | Global horizontal irradiance |
+| `temp_air` | °C | Air temperature |
+
+### 18.6 Grafana Visualization
+
+**PV Power Forecast with uncertainty band:**
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r.inverter == "total")
+  |> filter(fn: (r) => r._field == "power_w_p10" or r._field == "power_w_p50" or r._field == "power_w_p90")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+```
+
+**Net Power (surplus/deficit):**
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r._field == "net_power_w_p50")
+```
+
+**Energy Balance (PV vs Load):**
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r._field == "energy_wh_p50" or r._field == "load_energy_wh" or r._field == "net_energy_wh_p50")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+```
+
+**Forecast vs Actual:**
+```flux
+forecast = from(bucket: "pv_forecast")
+  |> range(start: -24h, stop: now())
+  |> filter(fn: (r) => r.inverter == "total")
+  |> filter(fn: (r) => r._field == "power_w_p50")
+
+actual = from(bucket: "EnergyV1")
+  |> range(start: -24h, stop: now())
+  |> filter(fn: (r) => r._field == "solar_ac_total_power")
+
+union(tables: [forecast, actual])
+```
+
+### 18.7 MPC Integration
+
+The MPC optimizer queries the `pv_forecast` bucket to get aligned PV and load forecasts:
+
+```flux
+// Get next 24h energy balance for MPC
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 24h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r.inverter == "total")
+  |> filter(fn: (r) =>
+       r._field == "power_w_p50" or
+       r._field == "load_power_w" or
+       r._field == "net_power_w_p50")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+```
+
+**Key guarantees:**
+- All fields in a single point share the exact same timestamp
+- 15-minute resolution matches MPC timestep
+- Net values pre-calculated for direct use
+
+### 18.8 Directory Structure
+
+```
+/home/energymanagement/swisssolarforecast/
+├── config.yaml                    # Add-on metadata and options schema
+├── Dockerfile                     # Alpine-based container with eccodes
+├── run.py                         # Main entry point
+├── requirements.txt               # Python dependencies
+├── DOCS.md                        # User documentation
+├── CHANGELOG.md                   # Version history
+├── translations/
+│   └── en.yaml                    # English translations
+└── src/                           # Core modules
+    ├── config.py                  # Configuration loader
+    ├── grib_parser.py             # GRIB file handling
+    ├── icon_fetcher.py            # MeteoSwiss STAC API client
+    ├── pv_model.py                # pvlib power calculations
+    ├── influxdb_writer.py         # InfluxDB forecast writer
+    └── scheduler.py               # APScheduler-based scheduler
+```
+
+### 18.9 Troubleshooting
+
+**No forecast data:**
+```bash
+ls -la /share/swisssolarforecast/icon-ch1/
+ls -la /share/swisssolarforecast/icon-ch2/
+```
+
+**InfluxDB connection failed:**
+```bash
+curl -H "Authorization: Token YOUR_TOKEN" \
+  http://192.168.0.203:8087/api/v2/buckets
+```
+
+**Check add-on logs:**
+```
+Settings > Add-ons > SwissSolarForecast > Log
+```
 
 ---
 
