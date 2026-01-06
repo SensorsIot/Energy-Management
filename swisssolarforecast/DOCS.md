@@ -105,25 +105,34 @@ schedule:
 
 **Resolution:** 15-minute intervals (aligned to :00, :15, :30, :45)
 
+**One point per timestamp** - all P10/P50/P90 values in a single record for guaranteed timestamp alignment.
+
 | Tag | Values |
 |-----|--------|
-| `percentile` | P10, P50, P90 |
 | `inverter` | total, East+West, South, etc. |
 | `model` | ch1, ch2, hybrid |
 | `run_time` | ISO timestamp of forecast calculation |
 
 | Field | Unit | Description |
 |-------|------|-------------|
-| `power_w` | Watts | PV production power |
-| `energy_wh` | Wh | Cumulative PV energy (ever-increasing) |
+| `power_w_p10` | Watts | PV power (pessimistic) |
+| `power_w_p50` | Watts | PV power (expected) |
+| `power_w_p90` | Watts | PV power (optimistic) |
+| `energy_wh_p10` | Wh | Cumulative PV energy (pessimistic) |
+| `energy_wh_p50` | Wh | Cumulative PV energy (expected) |
+| `energy_wh_p90` | Wh | Cumulative PV energy (optimistic) |
 | `load_power_w` | Watts | Load/consumption power |
 | `load_energy_wh` | Wh | Cumulative load energy |
-| `net_power_w` | Watts | Net = PV - Load (positive = surplus) |
-| `net_energy_wh` | Wh | Cumulative net energy |
+| `net_power_w_p10` | Watts | Net P10 = PV_p10 - Load |
+| `net_power_w_p50` | Watts | Net P50 = PV_p50 - Load |
+| `net_power_w_p90` | Watts | Net P90 = PV_p90 - Load |
+| `net_energy_wh_p10` | Wh | Cumulative net (pessimistic) |
+| `net_energy_wh_p50` | Wh | Cumulative net (expected) |
+| `net_energy_wh_p90` | Wh | Cumulative net (optimistic) |
 | `ghi` | W/m² | Global horizontal irradiance |
 | `temp_air` | °C | Air temperature |
 
-**Note:** Each timestamp has 3 data points (P10/P50/P90), each with the same load values but different PV and net values. This allows the MPC to plan for pessimistic (P10), expected (P50), or optimistic (P90) scenarios.
+**Note:** All values share the exact same timestamp, ensuring perfect alignment for MPC calculations.
 
 ## Grafana Query Examples
 
@@ -134,8 +143,8 @@ from(bucket: "pv_forecast")
   |> range(start: now(), stop: 24h)
   |> filter(fn: (r) => r._measurement == "pv_forecast")
   |> filter(fn: (r) => r.inverter == "total")
-  |> filter(fn: (r) => r._field == "power_w")
-  |> pivot(rowKey:["_time"], columnKey: ["percentile"], valueColumn: "_value")
+  |> filter(fn: (r) => r._field == "power_w_p10" or r._field == "power_w_p50" or r._field == "power_w_p90")
+  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
 ```
 
 ### Net Power (Surplus/Deficit)
@@ -144,9 +153,8 @@ from(bucket: "pv_forecast")
 from(bucket: "pv_forecast")
   |> range(start: now(), stop: 24h)
   |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r.percentile == "P50")
   |> filter(fn: (r) => r.inverter == "total")
-  |> filter(fn: (r) => r._field == "net_power_w")
+  |> filter(fn: (r) => r._field == "net_power_w_p50")
 ```
 
 ### Energy Balance (PV vs Load)
@@ -155,9 +163,8 @@ from(bucket: "pv_forecast")
 from(bucket: "pv_forecast")
   |> range(start: now(), stop: 24h)
   |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r.percentile == "P50")
   |> filter(fn: (r) => r.inverter == "total")
-  |> filter(fn: (r) => r._field == "energy_wh" or r._field == "load_energy_wh" or r._field == "net_energy_wh")
+  |> filter(fn: (r) => r._field == "energy_wh_p50" or r._field == "load_energy_wh" or r._field == "net_energy_wh_p50")
   |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
 ```
 
@@ -166,8 +173,8 @@ from(bucket: "pv_forecast")
 ```flux
 from(bucket: "pv_forecast")
   |> range(start: today(), stop: tomorrow())
-  |> filter(fn: (r) => r.percentile == "P50" and r.inverter == "total")
-  |> filter(fn: (r) => r._field == "energy_wh")
+  |> filter(fn: (r) => r.inverter == "total")
+  |> filter(fn: (r) => r._field == "energy_wh_p50")
   |> last()
   |> map(fn: (r) => ({r with _value: r._value / 1000.0}))  // Wh to kWh
 ```
@@ -177,8 +184,8 @@ from(bucket: "pv_forecast")
 ```flux
 forecast = from(bucket: "pv_forecast")
   |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r.percentile == "P50" and r.inverter == "total")
-  |> filter(fn: (r) => r._field == "power_w")
+  |> filter(fn: (r) => r.inverter == "total")
+  |> filter(fn: (r) => r._field == "power_w_p50")
 
 actual = from(bucket: "HomeAssistant")
   |> range(start: -24h, stop: now())
