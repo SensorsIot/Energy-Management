@@ -20,10 +20,17 @@ __pycache__/
 dist/
 build/
 
+# Forecast data (downloaded from MeteoSwiss)
+forecastData/
+*.grib2
+
 # Cache
 .cache/
-*.grib2
-grid_coords.npz
+grid_coords_*.npz
+*.tmp
+
+# Logs
+*.log
 
 # IDE
 .idea/
