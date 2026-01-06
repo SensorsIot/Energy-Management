@@ -1,0 +1,25 @@
+configuration:
+  influxdb:
+    name: InfluxDB
+    description: InfluxDB connection settings for storing forecast data
+  location:
+    name: Location
+    description: Geographic location for PV forecast calculations
+  panels:
+    name: Solar Panels
+    description: Define your solar panel types (id, model, pdc0, gamma_pdc)
+  plants:
+    name: PV Plants
+    description: Configure your PV installation (inverters, strings)
+  schedule:
+    name: Schedule
+    description: Cron schedules for data fetching and calculation
+  notifications:
+    name: Notifications
+    description: Telegram notification settings for alerts
+  storage:
+    name: Storage
+    description: GRIB file storage configuration
+  log_level:
+    name: Log Level
+    description: Logging verbosity (debug, info, warning, error)

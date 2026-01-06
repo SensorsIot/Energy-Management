@@ -1,0 +1,105 @@
+name: "SwissSolarForecast"
+version: "1.0.0"
+slug: "swisssolarforecast"
+description: "Swiss PV power forecast using MeteoSwiss ICON ensemble data with pvlib"
+url: "https://github.com/spiessa/energymanagement"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+
+# Startup configuration
+startup: services
+boot: auto
+timeout: 300
+
+# Storage mapping
+map:
+  - share:rw           # Store GRIB data in /share/swisssolarforecast
+  - config:ro          # Read HA config for YAML-based PV system config
+
+# Options with defaults
+options:
+  influxdb:
+    host: "192.168.0.203"
+    port: 8087
+    token: ""
+    org: "energymanagement"
+    bucket: "pv_forecast"
+
+  location:
+    latitude: 47.475
+    longitude: 7.767
+    altitude: 330
+    timezone: "Europe/Zurich"
+
+  panels: []
+  plants: []
+
+  schedule:
+    ch1_cron: "30 2,5,8,11,14,17,20,23 * * *"
+    ch2_cron: "45 2,8,14,20 * * *"
+    calculator_interval_minutes: 15
+
+  notifications:
+    telegram_enabled: false
+    telegram_bot_token: ""
+    telegram_chat_id: ""
+
+  storage:
+    data_path: "/share/swisssolarforecast"
+    max_storage_gb: 3.0
+    cleanup_old_runs: true
+
+  log_level: "info"
+
+# Schema validation
+schema:
+  influxdb:
+    host: str
+    port: port
+    token: str
+    org: str
+    bucket: str
+
+  location:
+    latitude: "float(-90,90)"
+    longitude: "float(-180,180)"
+    altitude: "int(0,9000)"
+    timezone: str
+
+  panels:
+    - id: str
+      model: str
+      pdc0: "int(1,1000)"
+      gamma_pdc: "float(-0.01,0)?"
+
+  plants:
+    - name: str
+      inverters:
+        - name: str
+          max_power: "int(100,100000)"
+          efficiency: "float(0.5,1.0)?"
+          strings:
+            - name: str
+              azimuth: "int(0,360)"
+              tilt: "int(0,90)"
+              panel: str
+              count: "int(1,100)"
+
+  schedule:
+    ch1_cron: str
+    ch2_cron: str
+    calculator_interval_minutes: "int(5,60)"
+
+  notifications:
+    telegram_enabled: bool
+    telegram_bot_token: "str?"
+    telegram_chat_id: "str?"
+
+  storage:
+    data_path: str
+    max_storage_gb: "float(1,50)"
+    cleanup_old_runs: bool
+
+  log_level: "list(debug|info|warning|error)"
