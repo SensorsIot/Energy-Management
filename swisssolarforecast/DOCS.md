@@ -103,22 +103,42 @@ schedule:
 
 **Measurement:** `pv_forecast`
 
+**Resolution:** 15-minute intervals (aligned to :00, :15, :30, :45)
+
 | Tag | Values |
 |-----|--------|
 | `percentile` | P10, P50, P90 |
 | `inverter` | total, East+West, South, etc. |
 | `model` | ch1, ch2, hybrid |
-| `run_time` | ISO timestamp |
+| `run_time` | ISO timestamp of forecast calculation |
 
-| Field | Unit |
-|-------|------|
-| `power_w` | Watts |
-| `ghi` | W/m² |
-| `temp_air` | °C |
+| Field | Unit | Description |
+|-------|------|-------------|
+| `power_w` | Watts | PV production power |
+| `energy_wh` | Wh | Cumulative PV energy (ever-increasing) |
+| `load_power_w` | Watts | Load/consumption power |
+| `load_energy_wh` | Wh | Cumulative load energy |
+| `net_power_w` | Watts | Net = PV - Load (positive = surplus) |
+| `net_energy_wh` | Wh | Cumulative net energy |
+| `ghi` | W/m² | Global horizontal irradiance |
+| `temp_air` | °C | Air temperature |
+
+**Note:** Each timestamp has 3 data points (P10/P50/P90), each with the same load values but different PV and net values. This allows the MPC to plan for pessimistic (P10), expected (P50), or optimistic (P90) scenarios.
 
 ## Grafana Query Examples
 
-### Current Forecast
+### PV Power Forecast (P10/P50/P90 bands)
+
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 24h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r.inverter == "total")
+  |> filter(fn: (r) => r._field == "power_w")
+  |> pivot(rowKey:["_time"], columnKey: ["percentile"], valueColumn: "_value")
+```
+
+### Net Power (Surplus/Deficit)
 
 ```flux
 from(bucket: "pv_forecast")
@@ -126,7 +146,30 @@ from(bucket: "pv_forecast")
   |> filter(fn: (r) => r._measurement == "pv_forecast")
   |> filter(fn: (r) => r.percentile == "P50")
   |> filter(fn: (r) => r.inverter == "total")
-  |> filter(fn: (r) => r._field == "power_w")
+  |> filter(fn: (r) => r._field == "net_power_w")
+```
+
+### Energy Balance (PV vs Load)
+
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 24h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r.percentile == "P50")
+  |> filter(fn: (r) => r.inverter == "total")
+  |> filter(fn: (r) => r._field == "energy_wh" or r._field == "load_energy_wh" or r._field == "net_energy_wh")
+  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+```
+
+### Today's Total Energy Forecast
+
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: today(), stop: tomorrow())
+  |> filter(fn: (r) => r.percentile == "P50" and r.inverter == "total")
+  |> filter(fn: (r) => r._field == "energy_wh")
+  |> last()
+  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))  // Wh to kWh
 ```
 
 ### Forecast vs Actual
