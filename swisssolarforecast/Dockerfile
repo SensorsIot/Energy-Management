@@ -2,21 +2,15 @@
 # Swiss PV power forecast using MeteoSwiss ICON ensemble data
 
 ARG BUILD_FROM
-FROM $BUILD_FROM
+FROM ${BUILD_FROM}
 
 # Install system dependencies
-# eccodes is required for GRIB file parsing
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libeccodes-dev \
+    libeccodes-tools \
     python3 \
-    py3-pip \
-    py3-numpy \
-    py3-pandas \
-    eccodes \
-    build-base \
-    python3-dev \
-    gfortran \
-    openblas-dev \
-    && rm -rf /var/cache/apk/*
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set up Python environment
 WORKDIR /app
@@ -25,9 +19,10 @@ WORKDIR /app
 COPY requirements.txt /app/
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
-# Copy source code
+# Copy source code and config
 COPY src/ /app/src/
 COPY run.py /app/
+COPY config_pv.yaml /app/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

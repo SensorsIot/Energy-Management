@@ -1,0 +1,355 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": null,
+    "title": "Forecast",
+    "tags": ["pv", "forecast", "solar"],
+    "timezone": "browser",
+    "schemaVersion": 39,
+    "refresh": "5m",
+    "time": {
+      "from": "now-6h",
+      "to": "now+24h"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "PV Power Forecast (P10/P50/P90)",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "watt",
+            "custom": {
+              "fillOpacity": 10,
+              "lineWidth": 2
+            }
+          },
+          "overrides": [
+            {
+              "matcher": { "id": "byName", "options": "power_w_p10" },
+              "properties": [
+                { "id": "displayName", "value": "P10 (Low)" },
+                { "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "power_w_p50" },
+              "properties": [
+                { "id": "displayName", "value": "P50 (Expected)" },
+                { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } },
+                { "id": "custom.lineWidth", "value": 3 }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "power_w_p90" },
+              "properties": [
+                { "id": "displayName", "value": "P90 (High)" },
+                { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }
+              ]
+            }
+          ]
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"power_w_p10\" or r._field == \"power_w_p50\" or r._field == \"power_w_p90\")"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Net Power (PV - Load)",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 8, "w": 12, "h": 6 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "watt",
+            "custom": {
+              "fillOpacity": 20,
+              "lineWidth": 2,
+              "gradientMode": "scheme",
+              "thresholdsStyle": { "mode": "area" }
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 0 },
+                { "color": "green", "value": 500 }
+              ]
+            }
+          },
+          "overrides": [
+            {
+              "matcher": { "id": "byName", "options": "net_power_w_p50" },
+              "properties": [
+                { "id": "displayName", "value": "Net P50 (Surplus/Deficit)" }
+              ]
+            }
+          ]
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"net_power_w_p10\" or r._field == \"net_power_w_p50\" or r._field == \"net_power_w_p90\")"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Cumulative Energy",
+        "type": "timeseries",
+        "gridPos": { "x": 12, "y": 8, "w": 12, "h": 6 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "watth",
+            "custom": {
+              "fillOpacity": 5,
+              "lineWidth": 2
+            }
+          },
+          "overrides": [
+            {
+              "matcher": { "id": "byName", "options": "energy_wh_p50" },
+              "properties": [
+                { "id": "displayName", "value": "PV Energy (P50)" },
+                { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "load_energy_wh" },
+              "properties": [
+                { "id": "displayName", "value": "Load Energy" },
+                { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "net_energy_wh_p50" },
+              "properties": [
+                { "id": "displayName", "value": "Net Energy (P50)" },
+                { "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }
+              ]
+            }
+          ]
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"energy_wh_p50\" or r._field == \"load_energy_wh\" or r._field == \"net_energy_wh_p50\")"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Weather - GHI",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 14, "w": 12, "h": 5 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "watt/m²",
+            "custom": {
+              "fillOpacity": 30,
+              "lineWidth": 1,
+              "gradientMode": "opacity"
+            },
+            "color": { "fixedColor": "yellow", "mode": "fixed" }
+          }
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"ghi\")"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Weather - Temperature",
+        "type": "timeseries",
+        "gridPos": { "x": 12, "y": 14, "w": 12, "h": 5 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "celsius",
+            "custom": {
+              "fillOpacity": 10,
+              "lineWidth": 2
+            },
+            "color": { "fixedColor": "blue", "mode": "fixed" }
+          }
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"temp_air\")"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Load Power",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 19, "w": 12, "h": 5 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "watt",
+            "custom": {
+              "fillOpacity": 30,
+              "lineWidth": 2
+            },
+            "color": { "fixedColor": "red", "mode": "fixed" }
+          }
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"load_power_w\")"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "All Values Table",
+        "type": "table",
+        "gridPos": { "x": 12, "y": 19, "w": 12, "h": 5 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "align": "right"
+            }
+          },
+          "overrides": [
+            {
+              "matcher": { "id": "byName", "options": "_time" },
+              "properties": [
+                { "id": "custom.width", "value": 150 }
+              ]
+            }
+          ]
+        },
+        "options": {
+          "showHeader": true,
+          "sortBy": [{ "displayName": "_time", "desc": true }]
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"power_w_p10\", \"power_w_p50\", \"power_w_p90\", \"load_power_w\", \"net_power_w_p50\", \"ghi\", \"temp_air\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 20)"
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Today's Energy Forecast",
+        "type": "stat",
+        "gridPos": { "x": 0, "y": 24, "w": 8, "h": 4 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "kWh",
+            "decimals": 1,
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 5 },
+                { "color": "green", "value": 10 }
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "textMode": "value_and_name"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: today(), stop: tomorrow())\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"energy_wh_p50\")\n  |> last()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))"
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "Peak Power Today",
+        "type": "stat",
+        "gridPos": { "x": 8, "y": 24, "w": 8, "h": 4 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "watt",
+            "decimals": 0,
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 1000 },
+                { "color": "green", "value": 2000 }
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: today(), stop: tomorrow())\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"power_w_p50\")\n  |> max()"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "title": "Current Temperature",
+        "type": "stat",
+        "gridPos": { "x": 16, "y": 24, "w": 8, "h": 4 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "celsius",
+            "decimals": 1,
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "blue", "value": null },
+                { "color": "green", "value": 10 },
+                { "color": "orange", "value": 25 },
+                { "color": "red", "value": 35 }
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: -1h, stop: 1h)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"temp_air\")\n  |> last()"
+          }
+        ]
+      }
+    ],
+    "templating": {
+      "list": []
+    },
+    "annotations": {
+      "list": []
+    }
+  },
+  "overwrite": true
+}

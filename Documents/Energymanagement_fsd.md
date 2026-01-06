@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 1.13
+**Version:** 1.14
 **Status:** Added SwissSolarForecast add-on chapter, updated InfluxDB schema
 **Implementation:** Python
 **Data storage:** InfluxDB
@@ -1519,11 +1519,23 @@ internal scheduling.
 
 ### 18.3 Installation
 
-**Via HACS:**
-1. Add repository: `https://github.com/SensorsIot/Energy-Management`
+**Local Add-on (tested):**
+1. Copy add-on files to Home Assistant:
+   ```bash
+   mkdir -p /addons/swisssolarforecast
+   # Copy from development machine
+   scp -r /home/energymanagement/swisssolarforecast/* root@<HA_IP>:/addons/swisssolarforecast/
+   ```
+2. In HA: **Settings** → **Add-ons** → **Add-on Store** → **⋮** → **Check for updates**
+3. Find "SwissSolarForecast" under **Local add-ons**
+4. Click **Install** (builds Docker image, ~2-3 min)
+5. Configure in **Configuration** tab (see 18.4)
+6. Click **Start**
+
+**Via GitHub Repository:**
+1. Add repository URL to HA Add-on Store
 2. Install "SwissSolarForecast" add-on
-3. Configure InfluxDB connection and PV system
-4. Start the add-on
+3. Configure and start
 
 ### 18.4 Configuration
 
@@ -1659,11 +1671,15 @@ from(bucket: "pv_forecast")
 ```
 /home/energymanagement/swisssolarforecast/
 ├── config.yaml                    # Add-on metadata and options schema
-├── Dockerfile                     # Alpine-based container with eccodes
+├── build.yaml                     # HA base image specification (Debian)
+├── Dockerfile                     # Debian-based container with eccodes
 ├── run.py                         # Main entry point
 ├── requirements.txt               # Python dependencies
+├── config_pv.yaml                 # PV system configuration
 ├── DOCS.md                        # User documentation
 ├── CHANGELOG.md                   # Version history
+├── grafana-forecast-dashboard.json  # Importable Grafana dashboard
+├── test_pipeline.py               # Standalone pipeline test
 ├── translations/
 │   └── en.yaml                    # English translations
 └── src/                           # Core modules
@@ -1675,7 +1691,26 @@ from(bucket: "pv_forecast")
     └── scheduler.py               # APScheduler-based scheduler
 ```
 
-### 18.9 Troubleshooting
+### 18.9 Grafana Dashboard
+
+A pre-built Grafana dashboard is available at `grafana-forecast-dashboard.json`.
+
+**Import:**
+1. Grafana → **Dashboards** → **New** → **Import**
+2. Upload JSON file or paste contents
+3. Select InfluxDB-V2 datasource
+4. Dashboard URL: `http://192.168.0.203:3000/d/cf9druxb33yf4e/forecast`
+
+**Panels included:**
+- PV Power Forecast (P10/P50/P90 bands)
+- Net Power (surplus/deficit)
+- Cumulative Energy (PV vs Load vs Net)
+- Weather (GHI, Temperature)
+- Load Power
+- All Values Table
+- Stats (Today's energy, Peak power, Temperature)
+
+### 18.10 Troubleshooting
 
 **No forecast data:**
 ```bash

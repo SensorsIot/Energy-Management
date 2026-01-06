@@ -7,6 +7,7 @@ arch:
   - aarch64
   - amd64
   - armv7
+init: false
 
 # Startup configuration
 startup: services
@@ -65,43 +66,43 @@ schema:
     load_bucket: str?
 
   location:
-    latitude: "float(-90,90)"
-    longitude: "float(-180,180)"
-    altitude: "int(0,9000)"
+    latitude: float
+    longitude: float
+    altitude: int
     timezone: str
 
   panels:
     - id: str
       model: str
-      pdc0: "int(1,1000)"
-      gamma_pdc: "float(-0.01,0)?"
+      pdc0: int
+      gamma_pdc: float?
 
   plants:
     - name: str
       inverters:
         - name: str
-          max_power: "int(100,100000)"
-          efficiency: "float(0.5,1.0)?"
+          max_power: int
+          efficiency: float?
           strings:
             - name: str
-              azimuth: "int(0,360)"
-              tilt: "int(0,90)"
+              azimuth: int
+              tilt: int
               panel: str
-              count: "int(1,100)"
+              count: int
 
   schedule:
     ch1_cron: str
     ch2_cron: str
-    calculator_interval_minutes: "int(5,60)"
+    calculator_interval_minutes: int
 
   notifications:
     telegram_enabled: bool
-    telegram_bot_token: "str?"
-    telegram_chat_id: "str?"
+    telegram_bot_token: str?
+    telegram_chat_id: str?
 
   storage:
     data_path: str
-    max_storage_gb: "float(1,50)"
+    max_storage_gb: float
     cleanup_old_runs: bool
 
   log_level: "list(debug|info|warning|error)"

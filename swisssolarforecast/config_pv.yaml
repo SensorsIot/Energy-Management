@@ -1,0 +1,34 @@
+# PV System Configuration for testing
+
+meteoswiss:
+  stac_api_url: "https://data.geo.admin.ch/api/stac/v0.9"
+  icon_collection: "ch.meteoschweiz.ogd-icon-ch1"
+
+panels:
+  - id: "AE455"
+    model: "AE Solar AC-455MH/144V"
+    pdc0: 455
+    gamma_pdc: -0.0035
+
+plants:
+  - name: "House"
+    location:
+      latitude: 47.475
+      longitude: 7.767
+      altitude: 330
+      timezone: "Europe/Zurich"
+    inverters:
+      - name: "EastWest"
+        max_power: 10000
+        efficiency: 0.82
+        strings:
+          - name: "East"
+            azimuth: 90
+            tilt: 15
+            panel: "AE455"
+            count: 8
+          - name: "West"
+            azimuth: 270
+            tilt: 15
+            panel: "AE455"
+            count: 9
