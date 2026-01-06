@@ -100,11 +100,41 @@ class ForecastWriter:
             org=self.org,
         )
 
+    def _resample_forecast(self, forecast: pd.DataFrame, minutes: int = 15) -> pd.DataFrame:
+        """
+        Resample forecast to specified minute intervals using interpolation.
+
+        Aligns timestamps to exact 15-min boundaries (00, 15, 30, 45)
+        for synchronization with actual consumption data.
+        """
+        if len(forecast) < 2:
+            return forecast
+
+        # Get start/end aligned to minute boundaries
+        start = forecast.index.min().floor(f'{minutes}min')
+        end = forecast.index.max().ceil(f'{minutes}min')
+
+        # Create new index at exact intervals
+        new_index = pd.date_range(start=start, end=end, freq=f'{minutes}min')
+
+        # Reindex and interpolate
+        forecast_resampled = forecast.reindex(
+            forecast.index.union(new_index)
+        ).interpolate(method='linear').reindex(new_index)
+
+        # Ensure timezone
+        if forecast_resampled.index.tzinfo is None:
+            forecast_resampled.index = forecast_resampled.index.tz_localize('UTC')
+
+        logger.debug(f"Resampled forecast from {len(forecast)} to {len(forecast_resampled)} points ({minutes} min)")
+        return forecast_resampled
+
     def write_forecast(
         self,
         forecast: pd.DataFrame,
         model: str = "hybrid",
         run_time: Optional[datetime] = None,
+        resample_minutes: int = 15,
     ):
         """
         Write forecast DataFrame to InfluxDB.
@@ -114,6 +144,7 @@ class ForecastWriter:
                      Index must be datetime (future timestamps)
             model: Model identifier (ch1, ch2, hybrid)
             run_time: When this forecast was calculated (defaults to now)
+            resample_minutes: Resample to this interval (default 15 min for MPC)
         """
         if run_time is None:
             run_time = datetime.now(timezone.utc)
@@ -127,9 +158,25 @@ class ForecastWriter:
                 first_time = first_time.replace(tzinfo=timezone.utc)
             self.delete_future_forecasts(first_time)
 
+        # Resample to finer resolution (15 min) for MPC optimizer
+        forecast = self._resample_forecast(forecast, resample_minutes)
+
+        # Time step in hours for energy integration (15 min = 0.25 h)
+        time_diff = resample_minutes / 60.0
+
+        # Calculate cumulative energy for each percentile
+        # Energy is ever-increasing: cumsum of power × time_step
+        cumulative_energy = {}
+        for percentile in ["p10", "p50", "p90"]:
+            power_col = f"total_ac_power_{percentile}"
+            if power_col in forecast.columns:
+                # Energy (Wh) = cumulative sum of power (W) × time_step (h)
+                # This gives monotonically increasing energy at each 15-min interval
+                cumulative_energy[percentile] = (forecast[power_col].cumsum() * time_diff).values
+
         points = []
 
-        for timestamp, row in forecast.iterrows():
+        for idx, (timestamp, row) in enumerate(forecast.iterrows()):
             # Ensure timestamp is timezone-aware
             if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is None:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
@@ -147,8 +194,11 @@ class ForecastWriter:
                     .tag("model", model)
                     .tag("run_time", run_time_str)
                     .field("power_w", float(row[power_col]))
-                    .time(timestamp, WritePrecision.S)
                 )
+
+                # Add cumulative energy
+                if percentile in cumulative_energy:
+                    point = point.field("energy_wh", float(cumulative_energy[percentile][idx]))
 
                 # Add GHI if available
                 if "ghi" in row and pd.notna(row["ghi"]):
@@ -158,6 +208,7 @@ class ForecastWriter:
                 if "temp_air" in row and pd.notna(row["temp_air"]):
                     point = point.field("temp_air", float(row["temp_air"]))
 
+                point = point.time(timestamp, WritePrecision.S)
                 points.append(point)
 
             # Write per-inverter data if available
@@ -198,3 +249,157 @@ class ForecastWriter:
             .time(datetime.now(timezone.utc), WritePrecision.S)
         )
         self.write_api.write(bucket=self.bucket, org=self.org, record=point)
+
+    def query_load_forecast(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        source_bucket: str = "load_forecast",
+    ) -> pd.DataFrame:
+        """
+        Query load forecast for net calculation.
+
+        Args:
+            start_time: Start of query range
+            end_time: End of query range
+            source_bucket: Bucket containing load forecast
+
+        Returns:
+            DataFrame with load_power_w column indexed by timestamp
+        """
+        query_api = self.client.query_api()
+
+        query = f'''
+        from(bucket: "{source_bucket}")
+          |> range(start: {start_time.isoformat()}, stop: {end_time.isoformat()})
+          |> filter(fn: (r) => r._measurement == "load_forecast")
+          |> filter(fn: (r) => r._field == "power_w")
+          |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+        '''
+
+        try:
+            result = query_api.query_data_frame(query)
+            if result.empty:
+                logger.warning("No load forecast data found")
+                return pd.DataFrame()
+
+            result = result.set_index("_time")
+            result = result.rename(columns={"power_w": "load_power_w"})
+            return result[["load_power_w"]]
+        except Exception as e:
+            logger.warning(f"Could not query load forecast: {e}")
+            return pd.DataFrame()
+
+    def write_energy_balance(
+        self,
+        pv_forecast: pd.DataFrame,
+        load_forecast: Optional[pd.DataFrame] = None,
+        model: str = "hybrid",
+        run_time: Optional[datetime] = None,
+        resample_minutes: int = 15,
+    ):
+        """
+        Write energy balance to InfluxDB with aligned timestamps.
+
+        Stores PV forecast, load forecast, and net difference (available - used).
+        All values are at exact 15-min boundaries for MPC synchronization.
+
+        Args:
+            pv_forecast: PV power forecast (P10/P50/P90)
+            load_forecast: Load/consumption forecast (optional)
+            model: Model identifier
+            run_time: Forecast calculation time
+            resample_minutes: Time resolution (default 15 min)
+        """
+        if run_time is None:
+            run_time = datetime.now(timezone.utc)
+
+        run_time_str = run_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Resample PV forecast to 15-min intervals
+        pv_forecast = self._resample_forecast(pv_forecast, resample_minutes)
+
+        if len(pv_forecast) == 0:
+            logger.warning("No PV forecast data to write")
+            return
+
+        # Delete existing forecasts
+        first_time = pv_forecast.index.min()
+        if hasattr(first_time, 'tzinfo') and first_time.tzinfo is None:
+            first_time = first_time.replace(tzinfo=timezone.utc)
+        self.delete_future_forecasts(first_time)
+
+        # Time step for energy integration
+        time_diff = resample_minutes / 60.0
+
+        # Resample load forecast to match PV forecast timestamps if available
+        if load_forecast is not None and len(load_forecast) > 0:
+            load_forecast = load_forecast.reindex(pv_forecast.index, method='nearest')
+        else:
+            # No load forecast - create zeros
+            load_forecast = pd.DataFrame(
+                {"load_power_w": 0.0},
+                index=pv_forecast.index
+            )
+
+        # Calculate cumulative energy
+        pv_cumulative = {}
+        load_cumulative = (load_forecast["load_power_w"].cumsum() * time_diff).values
+
+        for percentile in ["p10", "p50", "p90"]:
+            power_col = f"total_ac_power_{percentile}"
+            if power_col in pv_forecast.columns:
+                pv_cumulative[percentile] = (pv_forecast[power_col].cumsum() * time_diff).values
+
+        points = []
+
+        for idx, timestamp in enumerate(pv_forecast.index):
+            # Ensure timestamp is timezone-aware
+            if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+
+            row = pv_forecast.loc[timestamp]
+            load_power = load_forecast.loc[timestamp, "load_power_w"] if "load_power_w" in load_forecast.columns else 0.0
+
+            for percentile in ["p10", "p50", "p90"]:
+                power_col = f"total_ac_power_{percentile}"
+                if power_col not in row:
+                    continue
+
+                pv_power = float(row[power_col])
+                net_power = pv_power - load_power  # Positive = surplus, negative = deficit
+
+                pv_energy = float(pv_cumulative[percentile][idx]) if percentile in pv_cumulative else 0.0
+                load_energy = float(load_cumulative[idx])
+                net_energy = pv_energy - load_energy
+
+                point = (
+                    Point("pv_forecast")
+                    .tag("percentile", percentile.upper())
+                    .tag("inverter", "total")
+                    .tag("model", model)
+                    .tag("run_time", run_time_str)
+                    .field("power_w", pv_power)              # PV production power
+                    .field("energy_wh", pv_energy)          # Cumulative PV energy
+                    .field("load_power_w", float(load_power))  # Consumption power
+                    .field("load_energy_wh", load_energy)   # Cumulative consumption
+                    .field("net_power_w", net_power)        # Net = PV - Load
+                    .field("net_energy_wh", net_energy)     # Cumulative net
+                    .time(timestamp, WritePrecision.S)
+                )
+
+                # Add weather data if available
+                if "ghi" in row and pd.notna(row["ghi"]):
+                    point = point.field("ghi", float(row["ghi"]))
+                if "temp_air" in row and pd.notna(row["temp_air"]):
+                    point = point.field("temp_air", float(row["temp_air"]))
+
+                points.append(point)
+
+        # Write all points
+        if points:
+            logger.info(f"Writing {len(points)} energy balance points to InfluxDB")
+            self.write_api.write(bucket=self.bucket, org=self.org, record=points)
+            logger.info("Energy balance written successfully")
+        else:
+            logger.warning("No energy balance data to write")
