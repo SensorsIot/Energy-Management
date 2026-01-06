@@ -227,16 +227,8 @@ class IconFetcher:
             member: Ensemble member (0=control, 1+=perturbed - but perturbed file contains ALL members)
         """
         perturbed = member > 0
+        member_str = "perturbed" if perturbed else "m00"
 
-        # For perturbed files, we only need to download once (all 10 members are in one file)
-        # Use "perturbed" suffix instead of member number
-        if perturbed:
-            member_str = "perturbed"
-        else:
-            member_str = "m00"
-
-        # Standardize filename to 12-digit timestamp (YYYYMMDDHHMM)
-        # Extract from ISO format: "2026-01-06T03:00:00Z" -> "202601060300"
         run_compact = run_iso[:16].replace('-', '').replace('T', '').replace(':', '')
         filename = f"icon-{self.model}-{run_compact}-h{hour:03d}-{var.lower()}-{member_str}.grib2"
         output_path = run_dir / filename
@@ -283,14 +275,9 @@ class IconFetcher:
 
         logger.info(f"Fetching {self.model.upper()} run {run_iso}, hours {self.hour_start}-{self.hour_end}")
 
-        # Build list of items to download
-        # MeteoSwiss provides: control file (member=0) + perturbed file (all 10 members in one)
-        # So we only need to request member 0 and member 1 (which triggers perturbed download)
+        # Build download task list: control (0) + perturbed trigger (1)
         download_tasks = []
-        if self.include_ensemble:
-            members = [0, 1]  # 0=control, 1=triggers perturbed file (contains all 10 members)
-        else:
-            members = [0]  # control only
+        members = [0, 1] if self.include_ensemble else [0]
 
         for var in self.variables:
             for hour in range(self.hour_start, self.hour_end + 1):
@@ -458,17 +445,10 @@ def fetch_icon_data(
     Returns:
         Dict with metadata about the fetch
     """
-    # Set default hours based on model
-    # CH1: 0-33h (full horizon, higher resolution)
-    # CH2: 33-48h only (no overlap with CH1)
+    # Default hours: CH1 0-33, CH2 33-48 (no overlap)
     if hour_end is None:
-        if model == "ch1":
-            hour_end = 33
-        else:
-            hour_end = 48
-
+        hour_end = 33 if model == "ch1" else 48
     if hour_start == 0 and model == "ch2":
-        # CH2 should only fetch hours beyond CH1's range to avoid redundancy
         hour_start = 33
 
     model_dir = output_dir / f"icon-{model}"

@@ -21,8 +21,10 @@ logger = logging.getLogger(__name__)
 # STAC API for grid coordinates
 STAC_API_URL = "https://data.geo.admin.ch/api/stac/v1"
 
-# Grid cache for each model
-_GRID_CACHE = {}
+# Caches
+_GRID_CACHE = {}  # Grid coordinates per model
+_INDEX_CACHE = {}  # Nearest index per (lat, lon, model)
+_FILENAME_CACHE = {}  # Parsed filename metadata
 
 
 def get_grid_coords(model: str = "ch2", cache_dir: Optional[Path] = None) -> tuple[np.ndarray, np.ndarray]:
@@ -107,25 +109,28 @@ def get_grid_coords(model: str = "ch2", cache_dir: Optional[Path] = None) -> tup
 
 
 def find_nearest_index(lat: float, lon: float, model: str = "ch2") -> int:
-    """Find the grid index nearest to a given location."""
+    """Find the grid index nearest to a given location. Results are cached."""
+    cache_key = (lat, lon, model)
+    if cache_key in _INDEX_CACHE:
+        return _INDEX_CACHE[cache_key]
+
     lats, lons = get_grid_coords(model)
     dist = np.sqrt((lats - lat)**2 + (lons - lon)**2)
-    return int(np.argmin(dist))
+    idx = int(np.argmin(dist))
+    _INDEX_CACHE[cache_key] = idx
+    return idx
 
 
 def parse_filename(path: Path) -> dict:
     """
-    Extract metadata from GRIB filename.
-
-    Supports multiple naming conventions:
-    - icon-ch{1,2}-YYYYMMDDHHMM[SS]-hHHH-VARIABLE-mNN.grib2 (ensemble)
-    - icon-ch{1,2}-YYYYMMDDHHMM[SS]-hHHH-VARIABLE-ctrl.grib2 (control)
-    - icon-ch{1,2}-YYYYMMDDHHMM-HOUR-VARIABLE.grib2 (legacy)
-    - icon-ch{1,2}-eps-YYYYMMDDHHMM-HOUR-VARIABLE-TYPE.grib2 (old format)
-    - Any file with identifiable patterns
+    Extract metadata from GRIB filename. Results are cached.
 
     Returns dict with: model, run_time, forecast_hour, variable, member
     """
+    cache_key = str(path)
+    if cache_key in _FILENAME_CACHE:
+        return _FILENAME_CACHE[cache_key]
+
     name = path.stem
     result = {}
 
@@ -167,12 +172,12 @@ def parse_filename(path: Path) -> dict:
         if hour_match:
             result['forecast_hour'] = int(hour_match.group(1))
 
-    # Try to extract run time - multiple patterns
-    # Pattern 1: 12-14 digit timestamp (YYYYMMDDHHMM or YYYYMMDDHHMMSS)
+    # Try to extract run time (12-14 digit timestamp)
     time_match = re.search(r'(\d{12,14})', name)
     if time_match:
-        result['run_time'] = time_match.group(1)[:12]  # Normalize to 12 digits
+        result['run_time'] = time_match.group(1)[:12]
 
+    _FILENAME_CACHE[cache_key] = result
     return result
 
 
@@ -482,6 +487,22 @@ def load_local_forecast(
     return extract_pv_weather(grib_files, lat, lon)
 
 
+def deaccumulate_avg(values: np.ndarray, hours: np.ndarray) -> np.ndarray:
+    """
+    Convert running average to hourly values (vectorized).
+
+    MeteoSwiss radiation variables (ASOB_S, etc.) are time-mean values from hour 0.
+    Formula: hourly(h) = avg(h) * h - avg(h-1) * (h-1)
+    """
+    result = np.zeros_like(values, dtype=float)
+    result[0] = values[0]
+    if len(values) > 1:
+        prev_h = np.concatenate([[0], hours[:-1]])
+        prev_val = np.concatenate([[0], values[:-1]])
+        result[1:] = values[1:] * hours[1:] - prev_val[1:] * prev_h[1:]
+    return np.clip(result, 0, None)
+
+
 def extract_ensemble_weather(
     grib_paths: list[Path],
     lat: float = LATITUDE,
@@ -489,12 +510,6 @@ def extract_ensemble_weather(
 ) -> dict[int, pd.DataFrame]:
     """
     Extract weather for all ensemble members from GRIB files.
-
-    MeteoSwiss GRIB files have two types:
-    - Control files (m00): Single GRIB message with perturbationNumber=0
-    - Perturbed files (m01+): Multiple GRIB messages with perturbationNumber=1-10
-
-    Fault-tolerant: skips files that can't be read and logs warnings.
 
     Returns:
         Dict mapping member number to DataFrame with weather variables
@@ -634,59 +649,19 @@ def extract_ensemble_weather(
         # Map to standard PV variable names
         weather = pd.DataFrame(index=df.index)
 
-        # De-accumulate ASOB_S (it's a running average from hour 0, not hourly values)
-        # Formula: hourly_GHI(h) = avg(h) * h - avg(h-1) * (h-1)
+        # Calculate hours array once for de-accumulation
+        first_time = df.index[0]
+        hours = np.array([(t - first_time).total_seconds() / 3600 for t in df.index])
+
+        # De-accumulate radiation variables (running averages -> hourly)
         if 'asob_s' in df.columns:
-            asob = df['asob_s'].clip(lower=0)
-            # Calculate forecast hours from first timestamp
-            first_time = df.index[0]
-            hours = np.array([(t - first_time).total_seconds() / 3600 for t in df.index])
-
-            # De-accumulate: convert running average to hourly values
-            ghi_hourly = np.zeros(len(asob))
-            for i in range(len(asob)):
-                h = hours[i]
-                if h == 0:
-                    ghi_hourly[i] = asob.iloc[i]
-                else:
-                    # hourly = (avg_h * h - avg_h-1 * (h-1))
-                    prev_h = hours[i-1] if i > 0 else 0
-                    prev_val = asob.iloc[i-1] if i > 0 else 0
-                    ghi_hourly[i] = (asob.iloc[i] * h - prev_val * prev_h)
-
-            weather['ghi'] = np.clip(ghi_hourly, 0, None)
+            weather['ghi'] = deaccumulate_avg(df['asob_s'].clip(lower=0).values, hours)
 
         if 'aswdir_s' in df.columns:
-            # De-accumulate DNI similarly
-            aswdir = df['aswdir_s'].clip(lower=0)
-            first_time = df.index[0]
-            hours = np.array([(t - first_time).total_seconds() / 3600 for t in df.index])
-            dni_hourly = np.zeros(len(aswdir))
-            for i in range(len(aswdir)):
-                h = hours[i]
-                if h == 0:
-                    dni_hourly[i] = aswdir.iloc[i]
-                else:
-                    prev_h = hours[i-1] if i > 0 else 0
-                    prev_val = aswdir.iloc[i-1] if i > 0 else 0
-                    dni_hourly[i] = (aswdir.iloc[i] * h - prev_val * prev_h)
-            weather['dni'] = np.clip(dni_hourly, 0, None)
+            weather['dni'] = deaccumulate_avg(df['aswdir_s'].clip(lower=0).values, hours)
 
         if 'aswdifd_s' in df.columns:
-            # De-accumulate DHI similarly
-            aswdifd = df['aswdifd_s'].clip(lower=0)
-            first_time = df.index[0]
-            hours = np.array([(t - first_time).total_seconds() / 3600 for t in df.index])
-            dhi_hourly = np.zeros(len(aswdifd))
-            for i in range(len(aswdifd)):
-                h = hours[i]
-                if h == 0:
-                    dhi_hourly[i] = aswdifd.iloc[i]
-                else:
-                    prev_h = hours[i-1] if i > 0 else 0
-                    prev_val = aswdifd.iloc[i-1] if i > 0 else 0
-                    dhi_hourly[i] = (aswdifd.iloc[i] * h - prev_val * prev_h)
-            weather['dhi'] = np.clip(dhi_hourly, 0, None)
+            weather['dhi'] = deaccumulate_avg(df['aswdifd_s'].clip(lower=0).values, hours)
         if 't_2m' in df.columns:
             temp = df['t_2m']
             if temp.mean() > 100:
