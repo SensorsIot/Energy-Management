@@ -399,6 +399,30 @@ class ForecastWriter:
             point = point.time(timestamp, WritePrecision.S)
             points.append(point)
 
+            # Write per-inverter data if available (e.g., EastWest_ac_power_p50, South_ac_power_p50)
+            inverter_names = set()
+            for col in row.index:
+                if "_ac_power_p50" in col and col != "total_ac_power_p50":
+                    inv_name = col.replace("_ac_power_p50", "")
+                    inverter_names.add(inv_name)
+
+            for inv_name in inverter_names:
+                inv_point = (
+                    Point("pv_forecast")
+                    .tag("inverter", inv_name)
+                    .tag("model", model)
+                    .tag("run_time", run_time_str)
+                )
+
+                # Add P10/P50/P90 values for this inverter
+                for percentile in ["p10", "p50", "p90"]:
+                    inv_col = f"{inv_name}_ac_power_{percentile}"
+                    if inv_col in row and pd.notna(row[inv_col]):
+                        inv_point = inv_point.field(f"power_w_{percentile}", float(row[inv_col]))
+
+                inv_point = inv_point.time(timestamp, WritePrecision.S)
+                points.append(inv_point)
+
         # Write all points
         if points:
             logger.info(f"Writing {len(points)} energy balance points to InfluxDB")

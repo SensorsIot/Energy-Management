@@ -3,8 +3,8 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 1.14
-**Status:** Added SwissSolarForecast add-on chapter, updated InfluxDB schema
+**Version:** 1.15
+**Status:** Per-inverter forecasts (EastWest, South) with P10/P50/P90 percentiles
 **Implementation:** Python
 **Data storage:** InfluxDB
 **Weather/forecast data:** MeteoSwiss ICON-CH1/CH2-EPS (11/21 ensemble members)
@@ -1574,13 +1574,15 @@ storage:
 
 **Resolution:** 15-minute intervals (aligned to :00, :15, :30, :45)
 
-**One point per timestamp** with all values stored together:
+**Per-inverter storage:** Separate points for each inverter and total.
 
-| Tag | Description |
-|-----|-------------|
-| `inverter` | Inverter identifier (e.g., `total`) |
-| `model` | ICON model (`ch1`, `ch2`, `hybrid`) |
-| `run_time` | When forecast was calculated (ISO timestamp) |
+| Tag | Values | Description |
+|-----|--------|-------------|
+| `inverter` | `total`, `EastWest`, `South` | Inverter identifier |
+| `model` | `ch1`, `ch2`, `hybrid` | ICON model used |
+| `run_time` | ISO timestamp | When forecast was calculated |
+
+**Fields for `inverter="total"` (full energy balance):**
 
 | Field | Unit | Description |
 |-------|------|-------------|
@@ -1601,14 +1603,49 @@ storage:
 | `ghi` | W/m² | Global horizontal irradiance |
 | `temp_air` | °C | Air temperature |
 
+**Fields for `inverter="EastWest"` or `inverter="South"` (per-inverter):**
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `power_w_p10` | W | Inverter power (pessimistic) |
+| `power_w_p50` | W | Inverter power (expected) |
+| `power_w_p90` | W | Inverter power (optimistic) |
+
+**Inverter Configuration:**
+
+| Inverter | Panels | DC Power | Max AC |
+|----------|--------|----------|--------|
+| EastWest | 8× East + 9× West (AE455) | 7,735 W | 10,000 W |
+| South | 3× Front + 2× Back (Generic400) | 2,000 W | 1,500 W |
+| **Total** | 22 panels | 9,735 W | 11,500 W |
+
 ### 18.6 Grafana Visualization
 
-**PV Power Forecast with uncertainty band:**
+**PV Power Forecast with uncertainty band (total):**
 ```flux
 from(bucket: "pv_forecast")
   |> range(start: now(), stop: 48h)
   |> filter(fn: (r) => r._measurement == "pv_forecast")
   |> filter(fn: (r) => r.inverter == "total")
+  |> filter(fn: (r) => r._field == "power_w_p10" or r._field == "power_w_p50" or r._field == "power_w_p90")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+```
+
+**Per-inverter comparison (EastWest vs South):**
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r._field == "power_w_p50")
+  |> pivot(rowKey: ["_time"], columnKey: ["inverter"], valueColumn: "_value")
+```
+
+**Single inverter with uncertainty band:**
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r.inverter == "South")  // or "EastWest"
   |> filter(fn: (r) => r._field == "power_w_p10" or r._field == "power_w_p50" or r._field == "power_w_p90")
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
 ```
