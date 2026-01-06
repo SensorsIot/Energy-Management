@@ -105,27 +105,6 @@ ICON_COLLECTION = _config["meteoswiss"]["icon_collection"]
 
 
 # Helper functions
-def get_all_strings() -> list:
-    """Get flat list of all strings with location info."""
-    strings = []
-    for plant in PLANTS:
-        loc = plant["location"]
-        for inverter in plant["inverters"]:
-            for string in inverter["strings"]:
-                strings.append({
-                    **string,
-                    "latitude": loc["latitude"],
-                    "longitude": loc["longitude"],
-                    "altitude": loc["altitude"],
-                    "timezone": loc["timezone"],
-                    "inverter_name": inverter["name"],
-                    "inverter_max_power": inverter["max_power"],
-                    "inverter_efficiency": inverter["efficiency"],
-                    "plant_name": plant["name"],
-                })
-    return strings
-
-
 def get_all_inverters() -> list:
     """Get flat list of all inverters with location info."""
     inverters = []

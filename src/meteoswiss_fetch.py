@@ -1,5 +1,6 @@
 """
 MeteoSwiss ICON-CH2-EPS forecast data fetcher via STAC API.
+Supports forecasts for today and tomorrow.
 """
 
 import requests
@@ -8,6 +9,7 @@ from pathlib import Path
 import tempfile
 from typing import Optional
 import logging
+import re
 
 from .config import STAC_API_URL, ICON_COLLECTION, LATITUDE, LONGITUDE
 
@@ -68,38 +70,62 @@ def filter_items_for_date(
     """
     Filter items to get URLs for each forecast hour on target date.
     
-    Returns:
-        Dict mapping forecast_hour -> {variable: asset_url}
-    """
-    # Calculate which forecast hours correspond to target date
-    # Assuming 00:00 model run on previous day
-    model_run_date = target_date - timedelta(days=1)
+    Supports both today and tomorrow forecasts:
+    - Today: uses today's 00:00 run, hours 0-23
+    - Tomorrow: uses today's 00:00 run, hours 24-47
     
-    hours_for_date = {}  # hour -> {var: url}
+    Returns:
+        Dict mapping hour_of_day (0-23) -> {variable: asset_url}
+    """
+    now = datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    target = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    days_ahead = (target - today).days
+    
+    hours_for_date = {}  # hour_of_day -> {var: url}
     
     for item in items:
         item_id = item.get("id", "")
-        parts = item_id.split("-")
         
-        if len(parts) < 4:
+        # Parse item ID format: icon-ch2-eps-YYYYMMDDHHMM-HH-VARIABLE-ctrl
+        # Example: icon-ch2-eps-202501060000-30-asob_s-ctrl
+        match = re.match(r'icon-ch2-eps-(\d{12})-(\d+)-(\w+)-', item_id)
+        if not match:
             continue
         
         try:
-            # Parse item ID: MMDDYYYY-HHMM-HOUR-VARIABLE-TYPE-HASH
-            date_str = parts[0]
-            run_time = parts[1]
-            hour = int(parts[2])
-            var = parts[3]
+            run_datetime_str = match.group(1)  # YYYYMMDDHHMM
+            forecast_hour = int(match.group(2))
+            var = match.group(3)
             
-            # Check if this is for our target date
-            # Model run at 00:00: hours 24-47 = next day 00:00-23:00
-            # Model run at 12:00: hours 12-35 = next day 00:00-23:00
+            # Parse model run date
+            run_date = datetime.strptime(run_datetime_str[:8], "%Y%m%d")
+            run_hour = int(run_datetime_str[8:10])
             
-            if run_time == "0000" and 24 <= hour <= 47:
-                hour_of_day = hour - 24
-            elif run_time == "1200" and 12 <= hour <= 35:
-                hour_of_day = hour - 12
+            # Calculate which day this forecast hour corresponds to
+            # For 00:00 run: hour 0-23 = same day, hour 24-47 = next day
+            # For 12:00 run: hour 0-11 = same day, hour 12-35 = same day afternoon + next day
+            
+            if run_hour == 0:
+                if forecast_hour < 24:
+                    forecast_date = run_date
+                    hour_of_day = forecast_hour
+                else:
+                    forecast_date = run_date + timedelta(days=1)
+                    hour_of_day = forecast_hour - 24
+            elif run_hour == 12:
+                if forecast_hour < 12:
+                    forecast_date = run_date
+                    hour_of_day = forecast_hour + 12
+                else:
+                    forecast_date = run_date + timedelta(days=1)
+                    hour_of_day = forecast_hour - 12
             else:
+                continue
+            
+            # Check if this forecast is for our target date
+            if forecast_date.date() != target.date():
                 continue
             
             if var not in variables:
@@ -114,14 +140,17 @@ def filter_items_for_date(
             if not asset_url:
                 continue
             
-            if hour not in hours_for_date:
-                hours_for_date[hour] = {}
-            hours_for_date[hour][var] = asset_url
+            # Store by hour_of_day
+            if hour_of_day not in hours_for_date:
+                hours_for_date[hour_of_day] = {}
             
-        except (ValueError, IndexError):
+            # Prefer newer model runs
+            hours_for_date[hour_of_day][var] = asset_url
+            
+        except (ValueError, IndexError) as e:
             continue
     
-    logger.info(f"Found {len(hours_for_date)} forecast hours for target date")
+    logger.info(f"Found {len(hours_for_date)} forecast hours for {target.date()}")
     return hours_for_date
 
 
@@ -158,16 +187,16 @@ def fetch_forecast_data(
     Fetch forecast data for a target date.
     
     Args:
-        target_date: Date to fetch forecast for
+        target_date: Date to fetch forecast for (today or tomorrow)
         output_dir: Directory to save GRIB files
-        hours: Specific hours to fetch (0-23). Default: all daylight hours
+        hours: Specific hours to fetch (0-23). Default: daylight hours 6-19
     
     Returns:
         List of paths to downloaded GRIB files
     """
     if hours is None:
-        # Daylight hours (6:00-19:00)
-        hours = list(range(6, 20))
+        # Full 24-hour forecast (0:00-23:00)
+        hours = list(range(0, 24))
     
     # Get all items
     items = get_all_stac_items()
@@ -181,10 +210,7 @@ def fetch_forecast_data(
     
     # Download needed files
     downloaded = []
-    for forecast_hour, var_urls in sorted(hours_data.items()):
-        # Convert forecast hour to hour of day
-        hour_of_day = forecast_hour - 24 if forecast_hour >= 24 else forecast_hour
-        
+    for hour_of_day, var_urls in sorted(hours_data.items()):
         if hour_of_day not in hours:
             continue
         
@@ -193,7 +219,7 @@ def fetch_forecast_data(
                 path = download_grib(url, output_dir)
                 downloaded.append(path)
             except Exception as e:
-                logger.error(f"Failed to download {var} hour {forecast_hour}: {e}")
+                logger.error(f"Failed to download {var} hour {hour_of_day}: {e}")
     
     logger.info(f"Downloaded {len(downloaded)} GRIB files")
     return downloaded

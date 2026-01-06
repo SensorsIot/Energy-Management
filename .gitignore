@@ -34,3 +34,4 @@ grid_coords.npz
 # OS
 .DS_Store
 Thumbs.db
+Documents/secrets.txt
