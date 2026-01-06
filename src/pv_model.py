@@ -13,6 +13,15 @@ from .config import PLANTS, get_all_inverters
 logger = logging.getLogger(__name__)
 
 
+def align_weather_index(weather: pd.DataFrame, target_tz) -> pd.DataFrame:
+    """Align weather DataFrame index to target timezone."""
+    aligned = weather.copy()
+    if aligned.index.tz is None:
+        aligned.index = aligned.index.tz_localize("UTC")
+    aligned.index = aligned.index.tz_convert(target_tz)
+    return aligned
+
+
 def forecast_string_dc_power(
     weather: pd.DataFrame,
     string: dict,
@@ -214,19 +223,10 @@ def forecast_all_plants(
     output = pd.DataFrame(results, index=first_result.index)
 
     # Add GHI and temp from weather
+    weather_aligned = align_weather_index(weather, first_result.index.tz)
     if "ghi" in weather.columns:
-        # Align weather index with output index
-        weather_aligned = weather.copy()
-        if weather_aligned.index.tz is None:
-            weather_aligned.index = weather_aligned.index.tz_localize("UTC")
-        weather_aligned.index = weather_aligned.index.tz_convert(first_result.index.tz)
         output["ghi"] = weather_aligned["ghi"].values
-
     if "temp_air" in weather.columns:
-        weather_aligned = weather.copy()
-        if weather_aligned.index.tz is None:
-            weather_aligned.index = weather_aligned.index.tz_localize("UTC")
-        weather_aligned.index = weather_aligned.index.tz_convert(first_result.index.tz)
         output["temp_air"] = weather_aligned["temp_air"].values
 
     # Grand total if multiple plants
@@ -322,22 +322,12 @@ def forecast_ensemble_plants(
             output[f"{inv_name}_ac_power_p50"] = np.percentile(inv_array, 50, axis=0)
             output[f"{inv_name}_ac_power_p90"] = np.percentile(inv_array, 90, axis=0)
 
-    # Add weather from median member (member closest to P50)
-    # Use member 0 (control) as reference for weather variables
-    ref_weather = ensemble_weather[0]
+    # Add weather from control member (member 0) as reference
+    ref_weather = align_weather_index(ensemble_weather[0], index.tz)
     if "ghi" in ref_weather.columns:
-        weather_aligned = ref_weather.copy()
-        if weather_aligned.index.tz is None:
-            weather_aligned.index = weather_aligned.index.tz_localize("UTC")
-        weather_aligned.index = weather_aligned.index.tz_convert(index.tz)
-        output["ghi"] = weather_aligned["ghi"].reindex(index).values
-
+        output["ghi"] = ref_weather["ghi"].reindex(index).values
     if "temp_air" in ref_weather.columns:
-        weather_aligned = ref_weather.copy()
-        if weather_aligned.index.tz is None:
-            weather_aligned.index = weather_aligned.index.tz_localize("UTC")
-        weather_aligned.index = weather_aligned.index.tz_convert(index.tz)
-        output["temp_air"] = weather_aligned["temp_air"].reindex(index).values
+        output["temp_air"] = ref_weather["temp_air"].reindex(index).values
 
     # Add ensemble spread info
     output["ensemble_spread"] = p90 - p10

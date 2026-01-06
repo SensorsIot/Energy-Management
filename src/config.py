@@ -5,7 +5,6 @@ Loads hierarchical configuration: panels -> plants -> inverters -> strings
 
 import yaml
 from pathlib import Path
-from typing import Optional
 
 # Load configuration from YAML
 CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
