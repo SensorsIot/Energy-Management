@@ -3,8 +3,8 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 1.4
-**Status:** PV forecast implemented with ensemble uncertainty, codebase cleaned
+**Version:** 1.12
+**Status:** Updated Energy Dashboard config, removed Forecast.Solar
 **Implementation:** Python
 **Data storage:** InfluxDB
 **Weather/forecast data:** MeteoSwiss ICON-CH1/CH2-EPS (11/21 ensemble members)
@@ -110,27 +110,424 @@ MeteoSwiss ICON-CH2-EPS forecast (STAC API)
 
 ---
 
-## 5. Data basis (InfluxDB)
+## 5. Data Sources
 
-### 5.1 Measurements (required)
+This chapter consolidates all external data sources used by the energy management system.
 
-| Measurement        | Description                          | Unit    |
-|--------------------|--------------------------------------|---------|
-| pv_power_ac        | PV AC power                          | W       |
-| house_power        | House consumption                    | W       |
-| grid_power         | Grid power (+import / -export)       | W       |
-| battery_soc        | Battery state of charge              | %       |
-| battery_power      | Battery power                        | W       |
-| ev_power           | Wallbox / EV power                   | W       |
+### 5.1 Infrastructure Overview
 
-### 5.2 Tariff data
+| Service | Host | Port | Purpose |
+|---------|------|------|---------|
+| Home Assistant | 192.168.0.202 | 8123 | Device integration, Huawei Solar |
+| InfluxDB | 192.168.0.203 | 8087 | Time series storage |
+| Grafana | 192.168.0.203 | 3000 | Visualization |
+| MQTT Broker | 192.168.0.203 | 1883 | IoT messaging (Enphase, sensors) |
 
-| Measurement      | Description                 | Unit      |
-|------------------|-----------------------------|-----------|
-| tariff_import    | Import electricity price    | CHF/kWh   |
-| tariff_export    | Feed-in compensation (opt.) | CHF/kWh   |
+**Data flow:**
+- MQTT → Home Assistant → InfluxDB
+- Huawei Solar API → Home Assistant → InfluxDB
+- Shelly 3EM → Home Assistant → InfluxDB
 
-Tariffs are time-dependent and known for the planning horizon.
+Credentials are stored in `/home/energymanagement/Documents/secrets.txt`.
+
+### 5.2 Electrical System Overview
+
+```
+                                    GRID
+                                      │
+                                      ▼
+                          ┌───────────────────────┐
+                          │    EBL Smartmeter     │  Grid connection point
+                          │  (utility meter)      │  (import/export to grid)
+                          └───────────────────────┘
+                                      │
+                                      ▼
+                          ┌───────────────────────┐
+                          │      Wallbox          │  EV charging
+                          │   (between meters)    │
+                          └───────────────────────┘
+                                      │
+                                      ▼
+                          ┌───────────────────────┐
+                          │   Huawei Smartmeter   │  sensor.power_meter_active_power
+                          │   (DTSU666-H)         │  (neg = export, pos = import)
+                          └───────────────────────┘
+                                      │
+              ┌───────────────────────┼───────────────────────┐
+              │                       │                       │
+              ▼                       ▼                       ▼
+   ┌─────────────────┐    ┌─────────────────────┐    ┌───────────────┐
+   │  Huawei Sun2000 │    │    House Loads      │    │   Enphase     │
+   │    Inverter     │    │                     │    │ Microinverters│
+   │                 │    │  ┌───────────────┐  │    │               │
+   │  ┌───────────┐  │    │  │  Shelly 3EM   │  │    │  (3x IQ7+)    │
+   │  │  Battery  │  │    │  │  (CT clamps)  │  │    │               │
+   │  │  (LUNA)   │  │    │  │ phase_1/2/3   │  │    └───────────────┘
+   │  └───────────┘  │    │  └───────────────┘  │            │
+   │        │        │    │         │           │            │
+   │   charge/       │    │    Measures:        │       AC output
+   │   discharge     │    │    Pure load        │     sensor.enphase_
+   │                 │    │    consumption      │     energy_power
+   └─────────────────┘    └─────────────────────┘
+           │
+      DC input from
+      PV strings
+      (East/West)
+```
+
+**Measurement Points:**
+
+**Power (W) - Real-time:**
+
+| Category | Location | Device | Measures | Key Entity |
+|----------|----------|--------|----------|------------|
+| Grid | Grid | EBL Smartmeter | Grid import/export | (utility, not in HA) |
+| Grid | After Wallbox | Huawei DTSU666-H | Intermediate power flow | `sensor.power_meter_active_power` |
+| Solar | Inverter | Huawei Sun2000 | Inverter AC output | `sensor.inverter_active_power` |
+| Solar | Inverter | Huawei Sun2000 | DC input (strings) | `sensor.inverter_input_power` |
+| Solar | Microinverters | Enphase IQ7+ | AC output | `sensor.enphase_energy_power` |
+| Solar | Combined | HA Template | Total PV AC | `sensor.solar_pv_total_ac_power` |
+| Battery | Battery | Huawei LUNA | Charge/discharge | `sensor.battery_charge_discharge_power` |
+| Load | House | Shelly 3EM | Phase A | `sensor.phase_1_power` |
+| Load | House | Shelly 3EM | Phase B | `sensor.phase_2_power` |
+| Load | House | Shelly 3EM | Phase C | `sensor.phase_3_power` |
+| Load | Calculated | Huawei Integration | Load (balance) | `sensor.load_power` |
+
+**Energy (kWh) - Totals:**
+
+| Category | Location | Device | Measures | Key Entity |
+|----------|----------|--------|----------|------------|
+| Grid | After Wallbox | Huawei DTSU666-H | Grid import total | `sensor.power_meter_consumption` |
+| Grid | After Wallbox | Huawei DTSU666-H | Grid export total | `sensor.power_meter_exported` |
+| Solar | Inverter | Huawei Sun2000 | Daily yield | `sensor.inverter_daily_yield` |
+| Solar | Inverter | Huawei Sun2000 | Total yield | `sensor.inverter_total_yield` |
+| Solar | Microinverters | Enphase IQ7+ | Today | `sensor.enphase_energy_today` |
+| Solar | Microinverters | Enphase IQ7+ | Total | `sensor.enphase_energy_total` |
+| Battery | Battery | Huawei LUNA | Daily charge | `sensor.battery_day_charge` |
+| Battery | Battery | Huawei LUNA | Daily discharge | `sensor.battery_day_discharge` |
+| Battery | Battery | Huawei LUNA | Total charge | `sensor.battery_total_charge` |
+| Battery | Battery | Huawei LUNA | Total discharge | `sensor.battery_total_discharge` |
+| Load | House | Shelly 3EM | Phase A total | `sensor.phase_1_energy` |
+| Load | House | Shelly 3EM | Phase B total | `sensor.phase_2_energy` |
+| Load | House | Shelly 3EM | Phase C total | `sensor.phase_3_energy` |
+| Load | Calculated | Huawei Integration | Load total | `sensor.load_energy` |
+
+**State:**
+
+| Category | Device | Measures | Unit | Key Entity |
+|----------|--------|----------|------|------------|
+| Battery | Huawei LUNA | State of charge | % | `sensor.battery_state_of_capacity` |
+
+**HA Energy Dashboard Compatibility:**
+
+The HA Energy Dashboard requires sensors with specific attributes for proper statistics calculation:
+- `state_class: total_increasing` (handles meter resets)
+- `device_class: energy`
+- `unit_of_measurement: kWh`
+
+| Entity | state_class | Dashboard Compatible |
+|--------|-------------|---------------------|
+| `sensor.power_meter_consumption` | total_increasing | ✓ Grid import |
+| `sensor.power_meter_exported` | total_increasing | ✓ Grid export |
+| `sensor.solar_pv_total_ac_energy` | total_increasing | ✓ Solar production |
+| `sensor.load_energy` | total_increasing | ✓ House consumption |
+| `sensor.phase_1_energy` | total_increasing | ✓ Phase A (Shelly) |
+| `sensor.phase_2_energy` | total_increasing | ✓ Phase B (Shelly) |
+| `sensor.phase_3_energy` | total_increasing | ✓ Phase C (Shelly) |
+| `sensor.battery_day_charge` | total_increasing | ✓ Battery (daily) |
+| `sensor.battery_day_discharge` | total_increasing | ✓ Battery (daily) |
+| `sensor.battery_total_charge` | total | ✗ (use day counters) |
+| `sensor.battery_total_discharge` | total | ✗ (use day counters) |
+| `sensor.enphase_energy_total` | total | ✗ (use today counter) |
+
+**Recommended Energy Dashboard Configuration:**
+- **Grid consumption:** `sensor.power_meter_consumption`
+- **Return to grid:** `sensor.power_meter_exported`
+- **Solar production:** `sensor.solar_pv_total_ac_energy`
+- **Battery charge:** `sensor.battery_day_charge`
+- **Battery discharge:** `sensor.battery_day_discharge`
+
+**Note:** Forecast data (stored in InfluxDB with future timestamps) is separate from the Energy Dashboard, which only tracks historical consumption. The forecast bucket `pv_forecast` is used by the energy management add-on for decision-making, not for dashboard statistics.
+
+**Energy Balance:**
+
+```
+Grid Power = PV Production - Load + Battery Discharge - Battery Charge - Wallbox
+
+Where:
+  PV Production = Huawei Inverter + Enphase
+  Load = Shelly 3EM measurement (or calculated from balance)
+
+Huawei calculates: load = solar_pv_total - power_meter + battery_power
+```
+
+### 5.3 Home Assistant - Huawei Solar Integration
+
+Home Assistant provides the primary data source for solar/battery measurements via the
+`huawei_solar` integration. Data is written to InfluxDB bucket `EnergyV1` via the
+HA InfluxDB integration.
+
+#### 5.3.1 Power Measurements (W) - Real-time
+
+**Solar Production:**
+
+| Entity ID | Description | MPC Use |
+|-----------|-------------|---------|
+| `sensor.inverter_input_power` | DC input (both strings) | PV production |
+| `sensor.inverter_pv_1_power` | String 1 power | Per-string monitoring |
+| `sensor.inverter_pv_2_power` | String 2 power | Per-string monitoring |
+| `sensor.inverter_active_power` | Huawei inverter AC output | Huawei only |
+| `sensor.solar_pv_total_ac_power` | Total AC output (Huawei + Enphase) | **Primary PV input** |
+| `sensor.enphase_energy_power` | Enphase microinverter power | Secondary PV |
+| `sensor.inverter_day_active_power_peak` | Today's peak power | Peak tracking |
+
+Note: `sensor.solar_pv_total_ac_power` combines Huawei inverter + Enphase microinverters.
+
+**Battery:**
+
+| Entity ID | Description | MPC Use |
+|-----------|-------------|---------|
+| `sensor.battery_charge_discharge_power` | Charge/discharge power (+/-) | **Battery flow** |
+
+**Grid:**
+
+| Entity ID | Description | MPC Use |
+|-----------|-------------|---------|
+| `sensor.power_meter_active_power` | Grid power (neg=export) | **Critical: Grid flow** |
+| `sensor.power_meter_phase_a_active_power` | Phase A power | Load balancing |
+| `sensor.power_meter_phase_b_active_power` | Phase B power | Load balancing |
+| `sensor.power_meter_phase_c_active_power` | Phase C power | Load balancing |
+
+**Load (calculated):**
+
+| Entity ID | Description | MPC Use |
+|-----------|-------------|---------|
+| `sensor.load_power` | House consumption | **Critical: Load input** |
+
+Note: `sensor.load_power` is **calculated** by the huawei_solar integration using energy balance:
+```
+load = solar_pv_total_ac_power - power_meter_active_power + battery_charge_discharge_power
+```
+The Sun2000 inverter does not have a direct load meter. For actual measurement, see Section 5.3.6 (Shelly 3EM).
+
+#### 5.3.2 Energy Measurements (kWh) - Totals
+
+**Solar Production:**
+
+| Entity ID | Description | Use |
+|-----------|-------------|-----|
+| `sensor.inverter_daily_yield` | Today's production | Daily reporting |
+| `sensor.inverter_total_yield` | Lifetime AC yield | System totals |
+| `sensor.inverter_total_dc_input_energy` | Lifetime DC input | Efficiency calc |
+| `sensor.solar_pv_total_ac_energy` | Total AC energy | System totals |
+
+**Battery:**
+
+| Entity ID | Description | Use |
+|-----------|-------------|-----|
+| `sensor.battery_day_charge` | Today's charge | Daily reporting |
+| `sensor.battery_day_discharge` | Today's discharge | Daily reporting |
+| `sensor.battery_total_charge` | Lifetime charge | System totals |
+| `sensor.battery_total_discharge` | Lifetime discharge | System totals |
+
+**Grid:**
+
+| Entity ID | Description | Use |
+|-----------|-------------|-----|
+| `sensor.power_meter_consumption` | Total grid import | Cost calculation |
+| `sensor.power_meter_exported` | Total grid export | Revenue calculation |
+| `sensor.power_meter_total_energy_2` | Net energy (export - import) | Net metering |
+
+**Load:**
+
+| Entity ID | Description | Use |
+|-----------|-------------|-----|
+| `sensor.load_energy` | Total consumption | Historical analysis |
+
+#### 5.3.3 Battery State
+
+| Entity ID | Description | Unit | MPC Use |
+|-----------|-------------|------|---------|
+| `sensor.battery_state_of_capacity` | State of charge | % | **Critical: SOC for MPC** |
+| `sensor.battery_bus_voltage` | Battery voltage | V | Health monitoring |
+
+#### 5.3.4 Battery Control (Outputs)
+
+| Entity ID | Description | Unit | MPC Use |
+|-----------|-------------|------|---------|
+| `number.battery_maximum_discharging_power` | Max discharge limit | W | **Night strategy control** |
+| `number.battery_maximum_charging_power` | Max charge limit | W | Charge limiting |
+| `number.battery_end_of_discharge_soc` | Min SOC limit | % | SOC protection |
+| `number.battery_end_of_charge_soc` | Max SOC limit | % | SOC protection |
+| `number.battery_backup_power_soc` | Backup reserve | % | Emergency reserve |
+| `select.battery_working_mode` | Operating mode | - | Mode selection |
+
+#### 5.3.5 Shelly 3EM - Direct Load Measurement
+
+The Shelly 3EM (device ID: `shellyem3-ECFABCC7F0F5`) provides **direct measurement** of house
+load via 3-phase current transformers, as opposed to the calculated value from energy balance.
+
+**Power Measurements (W):**
+
+| Entity ID | Description | Phase |
+|-----------|-------------|-------|
+| `sensor.phase_1_power` | Phase A Power | L1 |
+| `sensor.phase_2_power` | Phase B Power | L2 |
+| `sensor.phase_3_power` | Phase C Power | L3 |
+
+**Energy Measurements (kWh):**
+
+| Entity ID | Description | Phase |
+|-----------|-------------|-------|
+| `sensor.phase_1_energy` | Phase A Energy (total) | L1 |
+| `sensor.phase_2_energy` | Phase B Energy (total) | L2 |
+| `sensor.phase_3_energy` | Phase C Energy (total) | L3 |
+| `sensor.phase_1_energy_returned` | Phase A Energy returned | L1 |
+| `sensor.phase_2_energy_returned` | Phase B Energy returned | L2 |
+| `sensor.phase_3_energy_returned` | Phase C Energy returned | L3 |
+
+**Additional Measurements:**
+
+| Entity ID | Description | Unit |
+|-----------|-------------|------|
+| `sensor.phase_1_current` | Phase A Current | A |
+| `sensor.phase_2_current` | Phase B Current | A |
+| `sensor.phase_3_current` | Phase C Current | A |
+| `sensor.phase_1_voltage` | Phase A Voltage | V |
+| `sensor.phase_2_voltage` | Phase B Voltage | V |
+| `sensor.phase_3_voltage` | Phase C Voltage | V |
+| `sensor.phase_1_power_factor` | Phase A Power Factor | % |
+| `sensor.phase_2_power_factor` | Phase B Power Factor | % |
+| `sensor.phase_3_power_factor` | Phase C Power Factor | % |
+
+**Total Load Calculation:**
+```
+load_measured = phase_1_power + phase_2_power + phase_3_power
+```
+
+**Comparison: Measured vs Calculated Load**
+
+| Source | Entity | Method |
+|--------|--------|--------|
+| Shelly 3EM | Sum of `sensor.phase_*_power` | Direct CT measurement |
+| Huawei Solar | `sensor.load_power` | Energy balance calculation |
+
+The Shelly 3EM measurement is more accurate for actual house consumption but may differ
+from the calculated value due to measurement timing, inverter/battery losses, and the
+measurement point location in the electrical system.
+
+#### 5.3.6 Enphase Microinverters
+
+The Enphase microinverters provide additional solar production separate from the Huawei
+inverter. Data is received via MQTT (Tasmota format) and integrated into Home Assistant.
+
+**MQTT Topics:**
+- `tele/Enphase/SENSOR` - Energy data (published every ~5 minutes)
+- `tele/Enphase/STATE` - Device state, WiFi info
+- `tele/Enphase/LWT` - Online/Offline status
+
+**MQTT Payload Example (`tele/Enphase/SENSOR`):**
+```json
+{
+  "Time": "2026-01-06T16:50:55",
+  "ENERGY": {
+    "TotalStartTime": "2023-02-11T10:09:42",
+    "Total": 3511.448,
+    "Yesterday": 6.986,
+    "Today": 0.612,
+    "Power": 4,
+    "ApparentPower": 86,
+    "ReactivePower": 86,
+    "Factor": 0.04,
+    "Voltage": 237,
+    "Current": 0.364
+  }
+}
+```
+
+**Home Assistant Entities:**
+
+| Entity ID | Description | Unit |
+|-----------|-------------|------|
+| `sensor.enphase_energy_power` | Current power output | W |
+| `sensor.enphase_energy_total` | Lifetime energy | kWh |
+| `sensor.enphase_energy_today` | Today's production | kWh |
+| `sensor.enphase_energy_yesterday` | Yesterday's production | kWh |
+| `sensor.enphase_energy_voltage` | Grid voltage | V |
+| `sensor.enphase_energy_current` | Output current | A |
+| `sensor.enphase_energy_factor` | Power factor | - |
+| `sensor.enphase_energy_apparentpower` | Apparent power | VA |
+| `sensor.enphase_energy_reactivepower` | Reactive power | var |
+| `switch.enphase` | On/Off control | - |
+
+**Integration with Huawei:**
+
+The total PV power combines both sources:
+```
+sensor.solar_pv_total_ac_power = sensor.inverter_active_power + sensor.enphase_energy_power
+```
+
+This calculation is done in Home Assistant (template sensor or automation).
+
+### 5.4 InfluxDB Buckets
+
+| Bucket | Source | Content | Update Frequency |
+|--------|--------|---------|------------------|
+| `EnergyV1` | Home Assistant | Huawei Solar data (FusionSolar API names) | ~30s |
+| `HomeAssistant` | Home Assistant | General HA entities | ~30s |
+
+**Primary bucket for MPC:** `EnergyV1` (written by Home Assistant InfluxDB integration)
+
+#### 5.4.1 EnergyV1 Field Mapping
+
+The `EnergyV1` bucket uses FusionSolar API field names:
+
+| InfluxDB Field | HA Entity | Description |
+|----------------|-----------|-------------|
+| `solar_ac_total_power` | `sensor.solar_pv_total_ac_power` | PV AC output |
+| `battery_state_of_capacity` | `sensor.battery_state_of_capacity` | Battery SOC |
+| `power_meter_active_power` | `sensor.power_meter_active_power` | Grid power |
+| `load_total_power` | `sensor.load_power` | House load |
+| `inverter_input_power` | `sensor.inverter_input_power` | PV DC input |
+| `battery_charge_discharge_power` | `sensor.battery_charge_discharge_power` | Battery flow |
+
+### 5.5 MeteoSwiss Weather Data
+
+See Section 6 for detailed MeteoSwiss ICON forecast data fetching.
+
+| Model | Source | Variables | Horizon |
+|-------|--------|-----------|---------|
+| ICON-CH1-EPS | MeteoSwiss STAC API | GHI, Temperature | 33h |
+| ICON-CH2-EPS | MeteoSwiss STAC API | GHI, Temperature | 5 days |
+
+### 5.6 Required Measurements Summary
+
+For the MPC optimizer, these are the **critical real-time inputs**:
+
+| Measurement | Source | InfluxDB Field | Unit |
+|-------------|--------|----------------|------|
+| PV AC power | HA → EnergyV1 | `solar_ac_total_power` | W |
+| Battery SOC | HA → EnergyV1 | `battery_state_of_capacity` | % |
+| Grid power | HA → EnergyV1 | `power_meter_active_power` | W |
+| House load (calculated) | HA → EnergyV1 | `load_total_power` | W |
+| House load (measured) | Shelly 3EM via HA | Sum of `phase_*_power` | W |
+| Battery power | HA → EnergyV1 | `battery_charge_discharge_power` | W |
+
+**Note on load measurements:** Two sources are available:
+1. **Calculated** (`sensor.load_power`): From energy balance, always available
+2. **Measured** (Shelly 3EM phases): Direct CT measurement, more accurate
+
+For MPC, either source can be used. The measured value is preferred when available.
+
+### 5.7 Tariff Data
+
+| Parameter | Description | Unit | Source |
+|-----------|-------------|------|--------|
+| `tariff_import_day` | Day import price | CHF/kWh | YAML config |
+| `tariff_import_night` | Night import price | CHF/kWh | YAML config |
+| `tariff_export` | Feed-in compensation | CHF/kWh | YAML config |
+
+Tariffs are time-dependent and defined in the YAML configuration file.
 
 ---
 
@@ -389,6 +786,134 @@ systemctl status icon-ch1-fetch
 
 # View logs
 journalctl -u icon-ch1-fetch -f
+```
+
+### 6.12 Forecast Output and Storage
+
+The solar forecast is calculated from MeteoSwiss weather data and stored in InfluxDB
+for use by the energy management system. Three percentile curves (P10/P50/P90) are
+produced from the ensemble members to quantify uncertainty.
+
+#### 6.12.1 Forecast Calculation Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  For each ensemble member (11 for CH1, 21 for CH2):             │
+│                                                                 │
+│  1. Extract GHI, Temperature at PV location                     │
+│  2. Decompose GHI → DNI + DHI (Erbs model)                      │
+│  3. Calculate solar position (pvlib)                            │
+│  4. Transpose to plane-of-array for each string orientation     │
+│  5. Calculate cell temperature (Faiman model)                   │
+│  6. Calculate DC power (PVWatts with temp coefficient)          │
+│  7. Apply inverter efficiency and clipping → AC power           │
+│  8. Sum all strings → total PV power for this member            │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Stack all members → array [members × time_steps]               │
+│                                                                 │
+│  Calculate percentiles across member axis:                      │
+│    • P10 = 10th percentile (pessimistic, 90% chance to exceed)  │
+│    • P50 = 50th percentile (median, expected value)             │
+│    • P90 = 90th percentile (optimistic, 10% chance to exceed)   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 6.12.2 Output Resolution
+
+| Parameter | Value |
+|-----------|-------|
+| Time resolution | 15 minutes |
+| Forecast horizon | 48 hours |
+| Buckets per forecast | 192 (48h × 4 per hour) |
+| Update frequency | Every 15 minutes |
+| Percentiles | P10, P50, P90 |
+
+#### 6.12.3 Power and Energy Curves
+
+**Power Forecast (W):**
+Instantaneous power at each 15-minute bucket.
+
+```
+pv_power_p10[t] = 10th percentile of ensemble at time t
+pv_power_p50[t] = 50th percentile of ensemble at time t
+pv_power_p90[t] = 90th percentile of ensemble at time t
+```
+
+**Energy Forecast (Wh):**
+Cumulative energy from forecast start, calculated by integrating power.
+
+```
+pv_energy_p50[t] = sum(pv_power_p50[0:t]) × 0.25h
+```
+
+#### 6.12.4 InfluxDB Storage Schema
+
+**Measurement:** `pv_forecast`
+
+| Tag | Description | Example |
+|-----|-------------|---------|
+| `percentile` | P10, P50, or P90 | `P50` |
+| `run_time` | When forecast was calculated | `2026-01-06T12:00:00Z` |
+| `model` | ICON model used | `ch1` or `ch2` or `hybrid` |
+
+| Field | Description | Unit |
+|-------|-------------|------|
+| `power_w` | Forecasted PV power | W |
+| `energy_wh` | Cumulative energy from start | Wh |
+
+| Timestamp | Description |
+|-----------|-------------|
+| `_time` | Future time (bucket timestamp) |
+
+**Example data points:**
+```
+pv_forecast,percentile=P50,run_time=2026-01-06T12:00:00Z,model=hybrid power_w=2340,energy_wh=585 1736168400000000000
+pv_forecast,percentile=P50,run_time=2026-01-06T12:00:00Z,model=hybrid power_w=2520,energy_wh=1215 1736169300000000000
+pv_forecast,percentile=P10,run_time=2026-01-06T12:00:00Z,model=hybrid power_w=1890,energy_wh=472 1736168400000000000
+pv_forecast,percentile=P90,run_time=2026-01-06T12:00:00Z,model=hybrid power_w=2780,energy_wh=695 1736168400000000000
+```
+
+#### 6.12.5 Grafana Visualization
+
+The forecast can be visualized in Grafana with future timestamps:
+
+```flux
+// Query forecast with uncertainty band
+from(bucket: "EnergyV1")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r._field == "power_w")
+  |> pivot(rowKey: ["_time"], columnKey: ["percentile"], valueColumn: "_value")
+```
+
+**Visualization options:**
+- P50 as main line
+- P10-P90 as shaded uncertainty band
+- Overlay actual production for comparison
+
+#### 6.12.6 Forecast Accuracy Tracking
+
+Each forecast run is tagged with `run_time` to enable accuracy analysis:
+
+```flux
+// Compare forecast vs actual for a specific run
+forecast = from(bucket: "EnergyV1")
+  |> range(start: -24h, stop: now())
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r.percentile == "P50")
+  |> filter(fn: (r) => r.run_time == "2026-01-05T12:00:00Z")
+
+actual = from(bucket: "EnergyV1")
+  |> range(start: -24h, stop: now())
+  |> filter(fn: (r) => r._measurement == "Energy")
+  |> filter(fn: (r) => r._field == "solar_ac_total_power")
+
+// Join and calculate error
+join(tables: {forecast: forecast, actual: actual}, on: ["_time"])
+  |> map(fn: (r) => ({r with error: r._value_forecast - r._value_actual}))
 ```
 
 ---
@@ -863,6 +1388,148 @@ energy_management:
     planning_hours: 36
     timestep_minutes: 15
 ```
+
+---
+
+## 17. Home Assistant
+
+Home Assistant serves as the central hub for device integration, data collection, and visualization.
+This chapter describes the dashboard configurations for monitoring the energy system.
+
+### 17.1 Energy Dashboard
+
+The built-in HA Energy Dashboard provides historical energy tracking with daily, weekly, and monthly views.
+It requires sensors with specific attributes for proper statistics calculation.
+
+#### 17.1.1 Requirements
+
+Sensors must have:
+- `state_class: total_increasing` (handles meter resets correctly)
+- `device_class: energy`
+- `unit_of_measurement: kWh`
+
+#### 17.1.2 Customizations
+
+Some sensors require state_class override via `/config/customize.yaml`:
+
+```yaml
+# Energy sensor state_class fixes for HA Energy Dashboard compatibility
+sensor.enphase_energy_total:
+  state_class: total_increasing
+
+sensor.inverter_total_yield:
+  state_class: total_increasing
+```
+
+Configuration reference in `/config/configuration.yaml`:
+```yaml
+homeassistant:
+  customize: !include customize.yaml
+```
+
+#### 17.1.3 Current Configuration
+
+The Energy Dashboard is configured in `/config/.storage/energy`:
+
+| Category | Sensor | Price (2026) |
+|----------|--------|--------------|
+| **Grid import** | `sensor.power_meter_consumption` | 0.2962 CHF/kWh |
+| **Grid export** | `sensor.power_meter_exported` | 0.2252 CHF/kWh |
+| **Solar (Huawei)** | `sensor.inverter_total_yield` | - |
+| **Solar (Enphase)** | `sensor.enphase_energy_total` | - |
+| **Battery charge** | `sensor.battery_day_charge` | - |
+| **Battery discharge** | `sensor.battery_day_discharge` | - |
+
+**Solar Forecast:** No external forecast services (e.g., Forecast.Solar) are used.
+Solar forecasts are generated by the custom MeteoSwiss/pvlib system (see Chapter 6).
+
+#### 17.1.4 Individual Devices
+
+For detailed consumption tracking, add individual device sensors:
+- `sensor.phase_1_energy` / `phase_2_energy` / `phase_3_energy` (Shelly 3EM per-phase)
+- `sensor.evcc_stat_total_charged_kwh` (EV total charged)
+
+### 17.2 Power Flow Dashboard
+
+Real-time power visualization using custom Lovelace cards.
+
+#### 17.2.1 Installed Cards (via HACS)
+
+| Card | Purpose |
+|------|---------|
+| `power-flow-card-plus` | Animated power flow diagram |
+| `apexcharts-card` | Custom power/energy graphs |
+
+#### 17.2.2 Power Flow Card Plus Configuration
+
+Recommended configuration for the system:
+
+```yaml
+type: custom:power-flow-card-plus
+entities:
+  grid:
+    entity: sensor.power_meter_active_power
+    invert_state: true  # negative = export
+  solar:
+    entity: sensor.solar_pv_total_ac_power
+    display_zero_state: true
+  battery:
+    entity: sensor.battery_charge_discharge_power
+    state_of_charge: sensor.battery_state_of_capacity
+  home:
+    entity: sensor.load_power
+  individual:
+    - entity: sensor.evcc_actec_charge_power
+      name: EV
+      icon: mdi:car-electric
+    - entity: sensor.enphase_energy_power
+      name: Enphase
+      icon: mdi:solar-panel
+watt_threshold: 50
+display_zero_lines:
+  mode: show
+```
+
+#### 17.2.3 Power Flow Visualization
+
+```
+                    ┌─────────┐
+                    │  Solar  │
+                    │ (total) │
+                    └────┬────┘
+                         │
+         ┌───────────────┼───────────────┐
+         │               │               │
+         ▼               ▼               ▼
+    ┌─────────┐    ┌─────────┐    ┌─────────┐
+    │  Grid   │◄──►│  Home   │◄──►│ Battery │
+    │         │    │  Load   │    │  (SOC)  │
+    └─────────┘    └────┬────┘    └─────────┘
+                        │
+              ┌─────────┴─────────┐
+              │                   │
+         ┌────▼────┐         ┌────▼────┐
+         │   EV    │         │ Enphase │
+         │Wallbox  │         │  (PV)   │
+         └─────────┘         └─────────┘
+```
+
+**Flow direction indicators:**
+- Arrow animation shows power flow direction
+- Colors indicate import (red) vs export (green) vs self-consumption (yellow)
+- SOC percentage displayed on battery icon
+
+#### 17.2.4 Entity Summary for Dashboards
+
+| Entity | Type | Unit | Dashboard Use |
+|--------|------|------|---------------|
+| `sensor.power_meter_active_power` | Power | W | Grid flow (neg=export) |
+| `sensor.solar_pv_total_ac_power` | Power | W | Solar production |
+| `sensor.battery_charge_discharge_power` | Power | W | Battery flow |
+| `sensor.battery_state_of_capacity` | State | % | Battery SOC |
+| `sensor.load_power` | Power | W | Home consumption |
+| `sensor.evcc_actec_charge_power` | Power | kW | EV charging |
+| `sensor.enphase_energy_power` | Power | W | Enphase solar |
 
 ---
 
