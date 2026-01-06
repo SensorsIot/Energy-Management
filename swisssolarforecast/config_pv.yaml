@@ -1,8 +1,9 @@
-# PV System Configuration for testing
+# PV System Configuration
+# Two inverters: East+West (main roof) and South (balcony)
 
 meteoswiss:
-  stac_api_url: "https://data.geo.admin.ch/api/stac/v0.9"
-  icon_collection: "ch.meteoschweiz.ogd-icon-ch1"
+  stac_api_url: "https://data.geo.admin.ch/api/stac/v1"
+  icon_collection: "ch.meteoschweiz.ogd-forecasting-icon-ch2"
 
 panels:
   - id: "AE455"
@@ -10,11 +11,16 @@ panels:
     pdc0: 455
     gamma_pdc: -0.0035
 
+  - id: "Generic400"
+    model: "Generic 400W"
+    pdc0: 400
+    gamma_pdc: -0.0035
+
 plants:
   - name: "House"
     location:
-      latitude: 47.475
-      longitude: 7.767
+      latitude: 47.475053232432145
+      longitude: 7.767335653734485
       altitude: 330
       timezone: "Europe/Zurich"
     inverters:
@@ -32,3 +38,18 @@ plants:
             tilt: 15
             panel: "AE455"
             count: 9
+
+      - name: "South"
+        max_power: 1500
+        efficiency: 0.80
+        strings:
+          - name: "SouthFront"
+            azimuth: 180
+            tilt: 70
+            panel: "Generic400"
+            count: 3
+          - name: "SouthBack"
+            azimuth: 180
+            tilt: 60
+            panel: "Generic400"
+            count: 2

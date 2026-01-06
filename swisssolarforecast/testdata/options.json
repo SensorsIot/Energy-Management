@@ -1,0 +1,63 @@
+{
+  "influxdb": {
+    "host": "192.168.0.203",
+    "port": 8087,
+    "token": "",
+    "org": "spiessa",
+    "bucket": "pv_forecast",
+    "load_bucket": "load_forecast"
+  },
+  "location": {
+    "latitude": 47.475,
+    "longitude": 7.767,
+    "altitude": 330,
+    "timezone": "Europe/Zurich"
+  },
+  "panels": [
+    {
+      "id": "AE455",
+      "model": "AE Solar AC-455MH/144V",
+      "pdc0": 455,
+      "gamma_pdc": -0.0035
+    }
+  ],
+  "plants": [
+    {
+      "name": "House",
+      "inverters": [
+        {
+          "name": "EastWest",
+          "max_power": 10000,
+          "efficiency": 0.82,
+          "strings": [
+            {
+              "name": "East",
+              "azimuth": 90,
+              "tilt": 15,
+              "panel": "AE455",
+              "count": 8
+            },
+            {
+              "name": "West",
+              "azimuth": 270,
+              "tilt": 15,
+              "panel": "AE455",
+              "count": 9
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "schedule": {
+    "ch1_cron": "30 2,5,8,11,14,17,20,23 * * *",
+    "ch2_cron": "45 2,8,14,20 * * *",
+    "calculator_interval_minutes": 15
+  },
+  "storage": {
+    "data_path": "/share/swisssolarforecast",
+    "max_storage_gb": 3.0,
+    "cleanup_old_runs": true
+  },
+  "log_level": "debug"
+}
