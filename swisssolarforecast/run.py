@@ -151,18 +151,41 @@ class SwissSolarForecast:
 
             logger.info(f"Loaded {len(ensemble_weather)} ensemble members")
 
-            # Calculate forecast
-            forecast = forecast_ensemble_plants(ensemble_weather)
-            logger.info(f"Generated forecast with {len(forecast)} time steps")
+            # Calculate PV forecast
+            pv_forecast = forecast_ensemble_plants(ensemble_weather)
+            logger.info(f"Generated PV forecast with {len(pv_forecast)} time steps")
 
-            # Write to InfluxDB
-            if self.influx_writer:
-                self.influx_writer.write_forecast(
-                    forecast,
-                    model="hybrid",
-                    run_time=datetime.now(timezone.utc),
+            # Query load forecast for energy balance calculation
+            load_forecast = None
+            if self.influx_writer and len(pv_forecast) > 0:
+                start_time = pv_forecast.index.min()
+                end_time = pv_forecast.index.max()
+                if hasattr(start_time, 'tzinfo') and start_time.tzinfo is None:
+                    start_time = start_time.replace(tzinfo=timezone.utc)
+                if hasattr(end_time, 'tzinfo') and end_time.tzinfo is None:
+                    end_time = end_time.replace(tzinfo=timezone.utc)
+
+                load_forecast = self.influx_writer.query_load_forecast(
+                    start_time=start_time,
+                    end_time=end_time,
+                    source_bucket=self.options.get("influxdb", {}).get("load_bucket", "load_forecast"),
                 )
-                logger.info("Forecast written to InfluxDB")
+                if load_forecast is not None and len(load_forecast) > 0:
+                    logger.info(f"Loaded {len(load_forecast)} load forecast points")
+                else:
+                    logger.info("No load forecast available, using zero load")
+
+            # Write energy balance to InfluxDB (PV, load, net at 15-min intervals)
+            if self.influx_writer:
+                run_time = datetime.now(timezone.utc)
+                self.influx_writer.write_energy_balance(
+                    pv_forecast=pv_forecast,
+                    load_forecast=load_forecast,
+                    model="hybrid",
+                    run_time=run_time,
+                    resample_minutes=15,
+                )
+                logger.info("Energy balance written to InfluxDB")
 
         except FileNotFoundError as e:
             logger.warning(f"No forecast data available: {e}")

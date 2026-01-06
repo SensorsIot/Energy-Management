@@ -26,6 +26,7 @@ options:
     token: ""
     org: "energymanagement"
     bucket: "pv_forecast"
+    load_bucket: "load_forecast"  # Bucket containing load/consumption forecast
 
   location:
     latitude: 47.475
@@ -61,6 +62,7 @@ schema:
     token: str
     org: str
     bucket: str
+    load_bucket: str?
 
   location:
     latitude: "float(-90,90)"
