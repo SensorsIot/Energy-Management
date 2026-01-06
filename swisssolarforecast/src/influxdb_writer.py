@@ -359,42 +359,45 @@ class ForecastWriter:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
 
             row = pv_forecast.loc[timestamp]
-            load_power = load_forecast.loc[timestamp, "load_power_w"] if "load_power_w" in load_forecast.columns else 0.0
+            load_power = float(load_forecast.loc[timestamp, "load_power_w"]) if "load_power_w" in load_forecast.columns else 0.0
+            load_energy = float(load_cumulative[idx])
 
+            # Single point per timestamp with ALL percentile values
+            # This guarantees exact same timestamp for P10/P50/P90
+            point = (
+                Point("pv_forecast")
+                .tag("inverter", "total")
+                .tag("model", model)
+                .tag("run_time", run_time_str)
+                .field("load_power_w", load_power)
+                .field("load_energy_wh", load_energy)
+            )
+
+            # Add P10/P50/P90 values as separate fields
             for percentile in ["p10", "p50", "p90"]:
                 power_col = f"total_ac_power_{percentile}"
                 if power_col not in row:
                     continue
 
                 pv_power = float(row[power_col])
-                net_power = pv_power - load_power  # Positive = surplus, negative = deficit
-
                 pv_energy = float(pv_cumulative[percentile][idx]) if percentile in pv_cumulative else 0.0
-                load_energy = float(load_cumulative[idx])
+                net_power = pv_power - load_power
                 net_energy = pv_energy - load_energy
 
-                point = (
-                    Point("pv_forecast")
-                    .tag("percentile", percentile.upper())
-                    .tag("inverter", "total")
-                    .tag("model", model)
-                    .tag("run_time", run_time_str)
-                    .field("power_w", pv_power)              # PV production power
-                    .field("energy_wh", pv_energy)          # Cumulative PV energy
-                    .field("load_power_w", float(load_power))  # Consumption power
-                    .field("load_energy_wh", load_energy)   # Cumulative consumption
-                    .field("net_power_w", net_power)        # Net = PV - Load
-                    .field("net_energy_wh", net_energy)     # Cumulative net
-                    .time(timestamp, WritePrecision.S)
-                )
+                # Field names: power_w_p10, power_w_p50, power_w_p90, etc.
+                point = point.field(f"power_w_{percentile}", pv_power)
+                point = point.field(f"energy_wh_{percentile}", pv_energy)
+                point = point.field(f"net_power_w_{percentile}", net_power)
+                point = point.field(f"net_energy_wh_{percentile}", net_energy)
 
-                # Add weather data if available
-                if "ghi" in row and pd.notna(row["ghi"]):
-                    point = point.field("ghi", float(row["ghi"]))
-                if "temp_air" in row and pd.notna(row["temp_air"]):
-                    point = point.field("temp_air", float(row["temp_air"]))
+            # Add weather data if available
+            if "ghi" in row and pd.notna(row["ghi"]):
+                point = point.field("ghi", float(row["ghi"]))
+            if "temp_air" in row and pd.notna(row["temp_air"]):
+                point = point.field("temp_air", float(row["temp_air"]))
 
-                points.append(point)
+            point = point.time(timestamp, WritePrecision.S)
+            points.append(point)
 
         # Write all points
         if points:
