@@ -4,8 +4,7 @@
     "port": 8087,
     "token": "",
     "org": "spiessa",
-    "bucket": "pv_forecast",
-    "load_bucket": "load_forecast"
+    "bucket": "pv_forecast"
   },
   "location": {
     "latitude": 47.475,

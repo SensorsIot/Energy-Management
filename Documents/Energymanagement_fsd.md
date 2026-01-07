@@ -1,1278 +1,875 @@
-# EnergyManagement.md
-## Functional System Document (FSD)
+# Energy Management System
+## Functional Specification Document (FSD)
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 1.15
-**Status:** Per-inverter forecasts (EastWest, South) with P10/P50/P90 percentiles
-**Implementation:** Python
-**Data storage:** InfluxDB
-**Weather/forecast data:** MeteoSwiss ICON-CH1/CH2-EPS (11/21 ensemble members)
+**Version:** 2.0
+**Status:** Active Development
+**Architecture:** 3 Home Assistant Add-ons
+**Data Storage:** InfluxDB
 
 ---
 
-## 1. Purpose
+# Chapter 1: System Overview
 
-Create an energy management system that optimizes
+## 1.1 Purpose
 
-- Battery charging/discharging while
-  respecting a night-tariff strategy: do not discharge the battery from 21:00-06:00
-  if it risks leaving insufficient energy for the next day (till sun is producing enough power), because grid energy is cheaper at night.
+This document describes an intelligent energy management system that optimizes household energy usage through:
 
-- Provide a start signal for the dishwasher (recommended time window)
-- Provide control signal (Ampere>6A) for the wallbox to optimize EV charging with solar energy
+- **PV Power Forecasting** - Probabilistic solar production forecasts (P10/P50/P90)
+- **Load Forecasting** - Statistical consumption predictions based on historical patterns
+- **Energy Optimization** - MPC-based control of battery, EV charging, and deferrable loads
 
----
+The system minimizes electricity costs while maximizing self-consumption and respecting device constraints.
 
-## 2. Goal and how it works
+## 1.2 Architecture Overview
 
-### 2.1 Goal
-
-The goal of this system is cost- and energy-optimized control of a household
-energy system consisting of:
-
-- Photovoltaic system
-- Battery storage
-- Electric vehicle (EV) with wallbox
-- Grid connection with time-varying tariffs (night tariff / time-of-use)
-
-The optimization is based on:
-- physically grounded PV yield forecasts (pvlib)
-- consumption forecasts from historical data
-- dynamically estimated system losses (no fixed lump sums)
-- a rolling optimizer (Model Predictive Control, MPC)
-- a daily, critical LLM analysis with improvement suggestions
-
-The system is deterministic, reproducible, and auditable. An LLM takes on
-analysis, explanation, and suggestion functions only.
-
-### 2.2 How it works
-
-1. Ingest current measurements and day-ahead forecasts (PV and load).
-2. Apply tariffs, constraints, and device policies from the YAML configuration.
-3. Run a rolling-horizon MPC to minimize total cost while meeting constraints.
-4. Emit control signals for battery, wallbox, and dishwasher.
-5. Store all results in InfluxDB and generate a daily LLM review.
-
----
-
-## 3. Principles
-
-1. **Deterministic core logic**  
-   All numerical calculations (forecasts, optimization) run without an LLM
-   and produce identical results for identical inputs.
-
-2. **LLM as co-pilot**  
-   The LLM analyzes results, detects patterns, and suggests improvements,
-   but it does not autonomously set setpoints or safety-relevant parameters.
-
-3. **InfluxDB as single source of truth**  
-   All measurement, forecast, optimization, and analysis results are stored
-   as time series in InfluxDB.
-
-4. **Rolling horizon**  
-   Decisions are recalculated regularly (e.g., every 5-15 minutes)
-   using current measurements and forecast data.
-
----
-
-## 4. System overview
+The system consists of three Home Assistant add-ons that work together:
 
 ```
-MeteoSwiss ICON-CH2-EPS forecast (STAC API)
-            |
-            v
-      GRIB parser (eccodes)
-            |
-            v
-      PV forecast (pvlib)
-            |
-            +--> Dynamic loss calibration
-            |
-            v
-     PV power forecast
-            |
-            v
-     Load forecast (InfluxDB)
-            |
-            v
-        Optimizer (MPC)
-            |
-            v
-   Battery & wallbox setpoints
-            |
-            v
-          InfluxDB
-            |
-            v
-      Daily LLM analysis
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Home Assistant                                   │
+│                                                                          │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  │
+│  │ SwissSolarFore- │  │   LoadForecast  │  │    EnergyOptimizer      │  │
+│  │      cast       │  │                 │  │        (MPC)            │  │
+│  │                 │  │                 │  │                         │  │
+│  │ PV P10/P50/P90  │  │ Load P10/P50/P90│  │  Battery/EV/Dishwasher  │  │
+│  │    Forecasts    │  │    Forecasts    │  │     Control Signals     │  │
+│  └────────┬────────┘  └────────┬────────┘  └────────────┬────────────┘  │
+│           │                    │                        │               │
+│           ▼                    ▼                        ▼               │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │                         InfluxDB                                  │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐  │  │
+│  │  │ pv_forecast  │  │load_forecast │  │     HomeAssistant      │  │  │
+│  │  │              │  │              │  │    (measurements)      │  │  │
+│  │  └──────────────┘  └──────────────┘  └────────────────────────┘  │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+## 1.3 Add-on Summary
 
-## 5. Data Sources
+| Add-on | Version | Purpose | Update Frequency |
+|--------|---------|---------|------------------|
+| **SwissSolarForecast** | 1.0.1 | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
+| **LoadForecast** | 1.0.1 | Statistical load consumption forecasting | Every hour |
+| **EnergyOptimizer** | Planned | MPC-based battery/EV/load optimization | Every 5-15 min |
 
-This chapter consolidates all external data sources used by the energy management system.
+## 1.4 Data Flow
 
-### 5.1 Infrastructure Overview
+```
+MeteoSwiss STAC API                    InfluxDB (HomeAssistant bucket)
+        │                                        │
+        │ GRIB weather data                      │ Historical load_power
+        ▼                                        ▼
+┌─────────────────┐                    ┌─────────────────┐
+│SwissSolarForecast│                    │   LoadForecast  │
+│                 │                    │                 │
+│ • Fetch ICON    │                    │ • Query 90 days │
+│ • Parse GRIB    │                    │ • Build profile │
+│ • Calculate PV  │                    │ • Generate 48h  │
+│   with pvlib    │                    │   forecast      │
+└────────┬────────┘                    └────────┬────────┘
+         │                                      │
+         │ Write to pv_forecast                 │ Write to load_forecast
+         ▼                                      ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                            InfluxDB                                  │
+│                                                                      │
+│  pv_forecast bucket          load_forecast bucket                   │
+│  • power_w_p10/p50/p90       • energy_wh_p10/p50/p90               │
+│  • energy_wh_p10/p50/p90     • Per 15-min periods                  │
+│  • Per-inverter data         • 48h horizon                          │
+│  • 48h horizon                                                      │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+                               │ Query forecasts + measurements
+                               ▼
+                    ┌─────────────────────┐
+                    │  EnergyOptimizer    │
+                    │       (MPC)         │
+                    │                     │
+                    │ • Read forecasts    │
+                    │ • Read current SOC  │
+                    │ • Apply tariffs     │
+                    │ • Optimize 24-48h   │
+                    │ • Output setpoints  │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    Battery / Wallbox / Dishwasher
+                         Control Signals
+```
+
+## 1.5 Infrastructure
 
 | Service | Host | Port | Purpose |
 |---------|------|------|---------|
-| Home Assistant | 192.168.0.202 | 8123 | Device integration, Huawei Solar |
+| Home Assistant | 192.168.0.202 | 8123 | Device integration, add-on host |
 | InfluxDB | 192.168.0.203 | 8087 | Time series storage |
 | Grafana | 192.168.0.203 | 3000 | Visualization |
-| MQTT Broker | 192.168.0.203 | 1883 | IoT messaging (Enphase, sensors) |
+| MQTT Broker | 192.168.0.203 | 1883 | IoT messaging (Enphase) |
 
-**Data flow:**
-- MQTT → Home Assistant → InfluxDB
-- Huawei Solar API → Home Assistant → InfluxDB
-- Shelly 3EM → Home Assistant → InfluxDB
+## 1.6 InfluxDB Buckets
 
-Credentials are stored in `/home/energymanagement/Documents/secrets.txt`.
+| Bucket | Source | Content | Retention |
+|--------|--------|---------|-----------|
+| `HomeAssistant` | HA Integration | Real-time measurements | Long-term |
+| `pv_forecast` | SwissSolarForecast | PV forecasts P10/P50/P90 | 30 days |
+| `load_forecast` | LoadForecast | Load forecasts P10/P50/P90 | 30 days |
 
-### 5.2 Electrical System Overview
+## 1.7 Physical System
 
-```
-                                    GRID
-                                      │
-                                      ▼
-                          ┌───────────────────────┐
-                          │    EBL Smartmeter     │  Grid connection point
-                          │  (utility meter)      │  (import/export to grid)
-                          └───────────────────────┘
-                                      │
-                                      ▼
-                          ┌───────────────────────┐
-                          │      Wallbox          │  EV charging
-                          │   (between meters)    │
-                          └───────────────────────┘
-                                      │
-                                      ▼
-                          ┌───────────────────────┐
-                          │   Huawei Smartmeter   │  sensor.power_meter_active_power
-                          │   (DTSU666-H)         │  (neg = export, pos = import)
-                          └───────────────────────┘
-                                      │
-              ┌───────────────────────┼───────────────────────┐
-              │                       │                       │
-              ▼                       ▼                       ▼
-   ┌─────────────────┐    ┌─────────────────────┐    ┌───────────────┐
-   │  Huawei Sun2000 │    │    House Loads      │    │   Enphase     │
-   │    Inverter     │    │                     │    │ Microinverters│
-   │                 │    │  ┌───────────────┐  │    │               │
-   │  ┌───────────┐  │    │  │  Shelly 3EM   │  │    │  (3x IQ7+)    │
-   │  │  Battery  │  │    │  │  (CT clamps)  │  │    │               │
-   │  │  (LUNA)   │  │    │  │ phase_1/2/3   │  │    └───────────────┘
-   │  └───────────┘  │    │  └───────────────┘  │            │
-   │        │        │    │         │           │            │
-   │   charge/       │    │    Measures:        │       AC output
-   │   discharge     │    │    Pure load        │     sensor.enphase_
-   │                 │    │    consumption      │     energy_power
-   └─────────────────┘    └─────────────────────┘
-           │
-      DC input from
-      PV strings
-      (East/West)
-```
+### 1.7.1 PV Installation
 
-**Measurement Points:**
+| Inverter | Panels | DC Power | Max AC | Orientation |
+|----------|--------|----------|--------|-------------|
+| EastWest (Huawei Sun2000) | 17× AE455 | 7,735 W | 10,000 W | East (8) + West (9) |
+| South (Enphase IQ7+) | 5× Generic400 | 2,000 W | 1,500 W | South facade |
+| **Total** | 22 panels | 9,735 W | 11,500 W | |
 
-**Power (W) - Real-time:**
+### 1.7.2 Energy Storage
 
-| Category | Location | Device | Measures | Key Entity |
-|----------|----------|--------|----------|------------|
-| Grid | Grid | EBL Smartmeter | Grid import/export | (utility, not in HA) |
-| Grid | After Wallbox | Huawei DTSU666-H | Intermediate power flow | `sensor.power_meter_active_power` |
-| Solar | Inverter | Huawei Sun2000 | Inverter AC output | `sensor.inverter_active_power` |
-| Solar | Inverter | Huawei Sun2000 | DC input (strings) | `sensor.inverter_input_power` |
-| Solar | Microinverters | Enphase IQ7+ | AC output | `sensor.enphase_energy_power` |
-| Solar | Combined | HA Template | Total PV AC | `sensor.solar_pv_total_ac_power` |
-| Battery | Battery | Huawei LUNA | Charge/discharge | `sensor.battery_charge_discharge_power` |
-| Load | House | Shelly 3EM | Phase A | `sensor.phase_1_power` |
-| Load | House | Shelly 3EM | Phase B | `sensor.phase_2_power` |
-| Load | House | Shelly 3EM | Phase C | `sensor.phase_3_power` |
-| Load | Calculated | Huawei Integration | Load (balance) | `sensor.load_power` |
+| Component | Specification |
+|-----------|--------------|
+| Battery | Huawei LUNA 2000 |
+| Usable Capacity | ~10 kWh |
+| Max Charge/Discharge | 5 kW |
 
-**Energy (kWh) - Totals:**
-
-| Category | Location | Device | Measures | Key Entity |
-|----------|----------|--------|----------|------------|
-| Grid | After Wallbox | Huawei DTSU666-H | Grid import total | `sensor.power_meter_consumption` |
-| Grid | After Wallbox | Huawei DTSU666-H | Grid export total | `sensor.power_meter_exported` |
-| Solar | Inverter | Huawei Sun2000 | Daily yield | `sensor.inverter_daily_yield` |
-| Solar | Inverter | Huawei Sun2000 | Total yield | `sensor.inverter_total_yield` |
-| Solar | Microinverters | Enphase IQ7+ | Today | `sensor.enphase_energy_today` |
-| Solar | Microinverters | Enphase IQ7+ | Total | `sensor.enphase_energy_total` |
-| Battery | Battery | Huawei LUNA | Daily charge | `sensor.battery_day_charge` |
-| Battery | Battery | Huawei LUNA | Daily discharge | `sensor.battery_day_discharge` |
-| Battery | Battery | Huawei LUNA | Total charge | `sensor.battery_total_charge` |
-| Battery | Battery | Huawei LUNA | Total discharge | `sensor.battery_total_discharge` |
-| Load | House | Shelly 3EM | Phase A total | `sensor.phase_1_energy` |
-| Load | House | Shelly 3EM | Phase B total | `sensor.phase_2_energy` |
-| Load | House | Shelly 3EM | Phase C total | `sensor.phase_3_energy` |
-| Load | Calculated | Huawei Integration | Load total | `sensor.load_energy` |
-
-**State:**
-
-| Category | Device | Measures | Unit | Key Entity |
-|----------|--------|----------|------|------------|
-| Battery | Huawei LUNA | State of charge | % | `sensor.battery_state_of_capacity` |
-
-**HA Energy Dashboard Compatibility:**
-
-The HA Energy Dashboard requires sensors with specific attributes for proper statistics calculation:
-- `state_class: total_increasing` (handles meter resets)
-- `device_class: energy`
-- `unit_of_measurement: kWh`
-
-| Entity | state_class | Dashboard Compatible |
-|--------|-------------|---------------------|
-| `sensor.power_meter_consumption` | total_increasing | ✓ Grid import |
-| `sensor.power_meter_exported` | total_increasing | ✓ Grid export |
-| `sensor.solar_pv_total_ac_energy` | total_increasing | ✓ Solar production |
-| `sensor.load_energy` | total_increasing | ✓ House consumption |
-| `sensor.phase_1_energy` | total_increasing | ✓ Phase A (Shelly) |
-| `sensor.phase_2_energy` | total_increasing | ✓ Phase B (Shelly) |
-| `sensor.phase_3_energy` | total_increasing | ✓ Phase C (Shelly) |
-| `sensor.battery_day_charge` | total_increasing | ✓ Battery (daily) |
-| `sensor.battery_day_discharge` | total_increasing | ✓ Battery (daily) |
-| `sensor.battery_total_charge` | total | ✗ (use day counters) |
-| `sensor.battery_total_discharge` | total | ✗ (use day counters) |
-| `sensor.enphase_energy_total` | total | ✗ (use today counter) |
-
-**Recommended Energy Dashboard Configuration:**
-- **Grid consumption:** `sensor.power_meter_consumption`
-- **Return to grid:** `sensor.power_meter_exported`
-- **Solar production:** `sensor.solar_pv_total_ac_energy`
-- **Battery charge:** `sensor.battery_day_charge`
-- **Battery discharge:** `sensor.battery_day_discharge`
-
-**Note:** Forecast data (stored in InfluxDB with future timestamps) is separate from the Energy Dashboard, which only tracks historical consumption. The forecast bucket `pv_forecast` is used by the energy management add-on for decision-making, not for dashboard statistics.
-
-**Energy Balance:**
+### 1.7.3 Electrical Topology
 
 ```
-Grid Power = PV Production - Load + Battery Discharge - Battery Charge - Wallbox
-
-Where:
-  PV Production = Huawei Inverter + Enphase
-  Load = Shelly 3EM measurement (or calculated from balance)
-
-Huawei calculates: load = solar_pv_total - power_meter + battery_power
+                                GRID
+                                  │
+                      ┌───────────────────────┐
+                      │    EBL Smartmeter     │  Grid connection point
+                      └───────────────────────┘
+                                  │
+                      ┌───────────────────────┐
+                      │      Wallbox          │  EV charging
+                      └───────────────────────┘
+                                  │
+                      ┌───────────────────────┐
+                      │   Huawei Smartmeter   │  sensor.power_meter_active_power
+                      │   (DTSU666-H)         │
+                      └───────────────────────┘
+                                  │
+          ┌───────────────────────┼───────────────────────┐
+          │                       │                       │
+          ▼                       ▼                       ▼
+┌─────────────────┐    ┌─────────────────────┐    ┌───────────────┐
+│  Huawei Sun2000 │    │    House Loads      │    │   Enphase     │
+│    Inverter     │    │                     │    │ Microinverters│
+│  ┌───────────┐  │    │  ┌───────────────┐  │    │  (3× IQ7+)    │
+│  │  Battery  │  │    │  │  Shelly 3EM   │  │    └───────────────┘
+│  │  (LUNA)   │  │    │  │  (CT clamps)  │  │
+│  └───────────┘  │    │  └───────────────┘  │
+└─────────────────┘    └─────────────────────┘
 ```
 
-### 5.3 Home Assistant - Huawei Solar Integration
+## 1.8 Key Measurements
 
-Home Assistant provides the primary data source for solar/battery measurements via the
-`huawei_solar` integration. Data is written to InfluxDB bucket `EnergyV1` via the
-HA InfluxDB integration.
+### Power (Real-time, W)
 
-#### 5.3.1 Power Measurements (W) - Real-time
+| Entity | Description | Source |
+|--------|-------------|--------|
+| `sensor.solar_pv_total_ac_power` | Total PV AC output | Huawei + Enphase |
+| `sensor.battery_charge_discharge_power` | Battery flow (+/-) | Huawei |
+| `sensor.power_meter_active_power` | Grid flow (neg=export) | Huawei DTSU |
+| `sensor.load_power` | House consumption | Calculated |
+| `sensor.phase_1/2/3_power` | Per-phase load | Shelly 3EM |
 
-**Solar Production:**
+### State
 
-| Entity ID | Description | MPC Use |
-|-----------|-------------|---------|
-| `sensor.inverter_input_power` | DC input (both strings) | PV production |
-| `sensor.inverter_pv_1_power` | String 1 power | Per-string monitoring |
-| `sensor.inverter_pv_2_power` | String 2 power | Per-string monitoring |
-| `sensor.inverter_active_power` | Huawei inverter AC output | Huawei only |
-| `sensor.solar_pv_total_ac_power` | Total AC output (Huawei + Enphase) | **Primary PV input** |
-| `sensor.enphase_energy_power` | Enphase microinverter power | Secondary PV |
-| `sensor.inverter_day_active_power_peak` | Today's peak power | Peak tracking |
+| Entity | Description | Unit |
+|--------|-------------|------|
+| `sensor.battery_state_of_capacity` | Battery SOC | % |
 
-Note: `sensor.solar_pv_total_ac_power` combines Huawei inverter + Enphase microinverters.
+## 1.9 Design Principles
 
-**Battery:**
-
-| Entity ID | Description | MPC Use |
-|-----------|-------------|---------|
-| `sensor.battery_charge_discharge_power` | Charge/discharge power (+/-) | **Battery flow** |
-
-**Grid:**
-
-| Entity ID | Description | MPC Use |
-|-----------|-------------|---------|
-| `sensor.power_meter_active_power` | Grid power (neg=export) | **Critical: Grid flow** |
-| `sensor.power_meter_phase_a_active_power` | Phase A power | Load balancing |
-| `sensor.power_meter_phase_b_active_power` | Phase B power | Load balancing |
-| `sensor.power_meter_phase_c_active_power` | Phase C power | Load balancing |
-
-**Load (calculated):**
-
-| Entity ID | Description | MPC Use |
-|-----------|-------------|---------|
-| `sensor.load_power` | House consumption | **Critical: Load input** |
-
-Note: `sensor.load_power` is **calculated** by the huawei_solar integration using energy balance:
-```
-load = solar_pv_total_ac_power - power_meter_active_power + battery_charge_discharge_power
-```
-The Sun2000 inverter does not have a direct load meter. For actual measurement, see Section 5.3.6 (Shelly 3EM).
-
-#### 5.3.2 Energy Measurements (kWh) - Totals
-
-**Solar Production:**
-
-| Entity ID | Description | Use |
-|-----------|-------------|-----|
-| `sensor.inverter_daily_yield` | Today's production | Daily reporting |
-| `sensor.inverter_total_yield` | Lifetime AC yield | System totals |
-| `sensor.inverter_total_dc_input_energy` | Lifetime DC input | Efficiency calc |
-| `sensor.solar_pv_total_ac_energy` | Total AC energy | System totals |
-
-**Battery:**
-
-| Entity ID | Description | Use |
-|-----------|-------------|-----|
-| `sensor.battery_day_charge` | Today's charge | Daily reporting |
-| `sensor.battery_day_discharge` | Today's discharge | Daily reporting |
-| `sensor.battery_total_charge` | Lifetime charge | System totals |
-| `sensor.battery_total_discharge` | Lifetime discharge | System totals |
-
-**Grid:**
-
-| Entity ID | Description | Use |
-|-----------|-------------|-----|
-| `sensor.power_meter_consumption` | Total grid import | Cost calculation |
-| `sensor.power_meter_exported` | Total grid export | Revenue calculation |
-| `sensor.power_meter_total_energy_2` | Net energy (export - import) | Net metering |
-
-**Load:**
-
-| Entity ID | Description | Use |
-|-----------|-------------|-----|
-| `sensor.load_energy` | Total consumption | Historical analysis |
-
-#### 5.3.3 Battery State
-
-| Entity ID | Description | Unit | MPC Use |
-|-----------|-------------|------|---------|
-| `sensor.battery_state_of_capacity` | State of charge | % | **Critical: SOC for MPC** |
-| `sensor.battery_bus_voltage` | Battery voltage | V | Health monitoring |
-
-#### 5.3.4 Battery Control (Outputs)
-
-| Entity ID | Description | Unit | MPC Use |
-|-----------|-------------|------|---------|
-| `number.battery_maximum_discharging_power` | Max discharge limit | W | **Night strategy control** |
-| `number.battery_maximum_charging_power` | Max charge limit | W | Charge limiting |
-| `number.battery_end_of_discharge_soc` | Min SOC limit | % | SOC protection |
-| `number.battery_end_of_charge_soc` | Max SOC limit | % | SOC protection |
-| `number.battery_backup_power_soc` | Backup reserve | % | Emergency reserve |
-| `select.battery_working_mode` | Operating mode | - | Mode selection |
-
-#### 5.3.5 Shelly 3EM - Direct Load Measurement
-
-The Shelly 3EM (device ID: `shellyem3-ECFABCC7F0F5`) provides **direct measurement** of house
-load via 3-phase current transformers, as opposed to the calculated value from energy balance.
-
-**Power Measurements (W):**
-
-| Entity ID | Description | Phase |
-|-----------|-------------|-------|
-| `sensor.phase_1_power` | Phase A Power | L1 |
-| `sensor.phase_2_power` | Phase B Power | L2 |
-| `sensor.phase_3_power` | Phase C Power | L3 |
-
-**Energy Measurements (kWh):**
-
-| Entity ID | Description | Phase |
-|-----------|-------------|-------|
-| `sensor.phase_1_energy` | Phase A Energy (total) | L1 |
-| `sensor.phase_2_energy` | Phase B Energy (total) | L2 |
-| `sensor.phase_3_energy` | Phase C Energy (total) | L3 |
-| `sensor.phase_1_energy_returned` | Phase A Energy returned | L1 |
-| `sensor.phase_2_energy_returned` | Phase B Energy returned | L2 |
-| `sensor.phase_3_energy_returned` | Phase C Energy returned | L3 |
-
-**Additional Measurements:**
-
-| Entity ID | Description | Unit |
-|-----------|-------------|------|
-| `sensor.phase_1_current` | Phase A Current | A |
-| `sensor.phase_2_current` | Phase B Current | A |
-| `sensor.phase_3_current` | Phase C Current | A |
-| `sensor.phase_1_voltage` | Phase A Voltage | V |
-| `sensor.phase_2_voltage` | Phase B Voltage | V |
-| `sensor.phase_3_voltage` | Phase C Voltage | V |
-| `sensor.phase_1_power_factor` | Phase A Power Factor | % |
-| `sensor.phase_2_power_factor` | Phase B Power Factor | % |
-| `sensor.phase_3_power_factor` | Phase C Power Factor | % |
-
-**Total Load Calculation:**
-```
-load_measured = phase_1_power + phase_2_power + phase_3_power
-```
-
-**Comparison: Measured vs Calculated Load**
-
-| Source | Entity | Method |
-|--------|--------|--------|
-| Shelly 3EM | Sum of `sensor.phase_*_power` | Direct CT measurement |
-| Huawei Solar | `sensor.load_power` | Energy balance calculation |
-
-The Shelly 3EM measurement is more accurate for actual house consumption but may differ
-from the calculated value due to measurement timing, inverter/battery losses, and the
-measurement point location in the electrical system.
-
-#### 5.3.6 Enphase Microinverters
-
-The Enphase microinverters provide additional solar production separate from the Huawei
-inverter. Data is received via MQTT (Tasmota format) and integrated into Home Assistant.
-
-**MQTT Topics:**
-- `tele/Enphase/SENSOR` - Energy data (published every ~5 minutes)
-- `tele/Enphase/STATE` - Device state, WiFi info
-- `tele/Enphase/LWT` - Online/Offline status
-
-**MQTT Payload Example (`tele/Enphase/SENSOR`):**
-```json
-{
-  "Time": "2026-01-06T16:50:55",
-  "ENERGY": {
-    "TotalStartTime": "2023-02-11T10:09:42",
-    "Total": 3511.448,
-    "Yesterday": 6.986,
-    "Today": 0.612,
-    "Power": 4,
-    "ApparentPower": 86,
-    "ReactivePower": 86,
-    "Factor": 0.04,
-    "Voltage": 237,
-    "Current": 0.364
-  }
-}
-```
-
-**Home Assistant Entities:**
-
-| Entity ID | Description | Unit |
-|-----------|-------------|------|
-| `sensor.enphase_energy_power` | Current power output | W |
-| `sensor.enphase_energy_total` | Lifetime energy | kWh |
-| `sensor.enphase_energy_today` | Today's production | kWh |
-| `sensor.enphase_energy_yesterday` | Yesterday's production | kWh |
-| `sensor.enphase_energy_voltage` | Grid voltage | V |
-| `sensor.enphase_energy_current` | Output current | A |
-| `sensor.enphase_energy_factor` | Power factor | - |
-| `sensor.enphase_energy_apparentpower` | Apparent power | VA |
-| `sensor.enphase_energy_reactivepower` | Reactive power | var |
-| `switch.enphase` | On/Off control | - |
-
-**Integration with Huawei:**
-
-The total PV power combines both sources:
-```
-sensor.solar_pv_total_ac_power = sensor.inverter_active_power + sensor.enphase_energy_power
-```
-
-This calculation is done in Home Assistant (template sensor or automation).
-
-### 5.4 InfluxDB Buckets
-
-| Bucket | Source | Content | Update Frequency |
-|--------|--------|---------|------------------|
-| `EnergyV1` | Home Assistant | Huawei Solar data (FusionSolar API names) | ~30s |
-| `HomeAssistant` | Home Assistant | General HA entities | ~30s |
-
-**Primary bucket for MPC:** `EnergyV1` (written by Home Assistant InfluxDB integration)
-
-#### 5.4.1 EnergyV1 Field Mapping
-
-The `EnergyV1` bucket uses FusionSolar API field names:
-
-| InfluxDB Field | HA Entity | Description |
-|----------------|-----------|-------------|
-| `solar_ac_total_power` | `sensor.solar_pv_total_ac_power` | PV AC output |
-| `battery_state_of_capacity` | `sensor.battery_state_of_capacity` | Battery SOC |
-| `power_meter_active_power` | `sensor.power_meter_active_power` | Grid power |
-| `load_total_power` | `sensor.load_power` | House load |
-| `inverter_input_power` | `sensor.inverter_input_power` | PV DC input |
-| `battery_charge_discharge_power` | `sensor.battery_charge_discharge_power` | Battery flow |
-
-### 5.5 MeteoSwiss Weather Data
-
-See Section 6 for detailed MeteoSwiss ICON forecast data fetching.
-
-| Model | Source | Variables | Horizon |
-|-------|--------|-----------|---------|
-| ICON-CH1-EPS | MeteoSwiss STAC API | GHI, Temperature | 33h |
-| ICON-CH2-EPS | MeteoSwiss STAC API | GHI, Temperature | 5 days |
-
-### 5.6 Required Measurements Summary
-
-For the MPC optimizer, these are the **critical real-time inputs**:
-
-| Measurement | Source | InfluxDB Field | Unit |
-|-------------|--------|----------------|------|
-| PV AC power | HA → EnergyV1 | `solar_ac_total_power` | W |
-| Battery SOC | HA → EnergyV1 | `battery_state_of_capacity` | % |
-| Grid power | HA → EnergyV1 | `power_meter_active_power` | W |
-| House load (calculated) | HA → EnergyV1 | `load_total_power` | W |
-| House load (measured) | Shelly 3EM via HA | Sum of `phase_*_power` | W |
-| Battery power | HA → EnergyV1 | `battery_charge_discharge_power` | W |
-
-**Note on load measurements:** Two sources are available:
-1. **Calculated** (`sensor.load_power`): From energy balance, always available
-2. **Measured** (Shelly 3EM phases): Direct CT measurement, more accurate
-
-For MPC, either source can be used. The measured value is preferred when available.
-
-### 5.7 Tariff Data
-
-| Parameter | Description | Unit | Source |
-|-----------|-------------|------|--------|
-| `tariff_import_day` | Day import price | CHF/kWh | YAML config |
-| `tariff_import_night` | Night import price | CHF/kWh | YAML config |
-| `tariff_export` | Feed-in compensation | CHF/kWh | YAML config |
-
-Tariffs are time-dependent and defined in the YAML configuration file.
+1. **Deterministic Core Logic** - All numerical calculations produce identical results for identical inputs
+2. **Probabilistic Uncertainty** - P10/P50/P90 percentiles quantify forecast uncertainty
+3. **InfluxDB as Single Source of Truth** - All data stored as time series
+4. **Rolling Horizon** - Decisions recalculated every 5-15 minutes
+5. **Decoupled Components** - Each add-on operates independently with clear interfaces
 
 ---
 
-## 6. Data Fetching (MeteoSwiss)
+# Chapter 2: SwissSolarForecast Add-on
 
-This chapter describes how weather forecast data is fetched from MeteoSwiss for
-PV power forecasting. The system uses the ICON (ICOsahedral Nonhydrostatic)
-numerical weather prediction model data provided as Open Data.
+## 2.1 Overview
 
-### 6.1 Data Source
+SwissSolarForecast generates probabilistic PV power forecasts using MeteoSwiss ICON ensemble weather data and the pvlib solar modeling library. It produces P10/P50/P90 percentile forecasts for each inverter and the total system.
 
-**Provider:** MeteoSwiss (Federal Office of Meteorology and Climatology)
+| Property | Value |
+|----------|-------|
+| Name | SwissSolarForecast |
+| Version | 1.0.1 |
+| Slug | `swisssolarforecast` |
+| Architectures | aarch64, amd64, armv7 |
+| Timeout | 300 seconds |
+| Storage | /share/swisssolarforecast (GRIB data) |
 
-**Access:** Open Government Data (OGD) via STAC API (SpatioTemporal Asset Catalog)
+## 2.2 Features
 
-**API Endpoint:** `https://data.geo.admin.ch/api/stac/v1`
+- **Weather Data**: MeteoSwiss ICON-CH1 (1km, 33h) and ICON-CH2 (2.1km, 120h) ensemble forecasts
+- **Ensemble Members**: 11 (CH1) or 21 (CH2) members for uncertainty quantification
+- **Output**: P10/P50/P90 percentiles at 15-minute resolution
+- **Per-Inverter**: Separate forecasts for each inverter (EastWest, South)
+- **Energy Balance**: Integrated with load forecast for net surplus/deficit calculation
+- **Notifications**: Optional Telegram alerts for errors
 
-**Collections:**
-- `ch.meteoschweiz.ogd-forecasting-icon-ch1` (ICON-CH1-EPS)
-- `ch.meteoschweiz.ogd-forecasting-icon-ch2` (ICON-CH2-EPS)
+## 2.3 Architecture
 
-**Data Format:** GRIB2 (GRIdded Binary, edition 2)
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    SwissSolarForecast Add-on                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  FETCHER (scheduled via cron)                                       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ CH1: 8× daily (30 2,5,8,11,14,17,20,23 * * *)                 │  │
+│  │ CH2: 4× daily (45 2,8,14,20 * * *)                            │  │
+│  │                                                                │  │
+│  │ MeteoSwiss STAC API ──▶ GRIB files (/share/swisssolarforecast)│  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                 │                                   │
+│                                 │ Local files                       │
+│                                 ▼                                   │
+│  CALCULATOR (every 15 minutes)                                      │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ 1. Load GRIB files from disk                                  │  │
+│  │ 2. Extract GHI + Temperature at location                      │  │
+│  │ 3. For each ensemble member:                                  │  │
+│  │    • Decompose GHI → DNI + DHI (Erbs model)                   │  │
+│  │    • Calculate solar position (pvlib)                         │  │
+│  │    • Calculate POA irradiance per string                      │  │
+│  │    • Calculate cell temperature (Faiman)                      │  │
+│  │    • Calculate DC power (PVWatts)                             │  │
+│  │    • Apply inverter efficiency + clipping                     │  │
+│  │ 4. Calculate P10/P50/P90 across ensemble members              │  │
+│  │ 5. Query load forecast from load_forecast bucket              │  │
+│  │ 6. Calculate energy balance (PV - Load)                       │  │
+│  │ 7. Write to InfluxDB pv_forecast bucket                       │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-**Grid Type:** Unstructured triangular grid (requires special handling)
-
-### 6.2 ICON Models
-
-Two ICON model variants are used for different forecast horizons:
+## 2.4 MeteoSwiss ICON Models
 
 | Property | ICON-CH1-EPS | ICON-CH2-EPS |
 |----------|--------------|--------------|
 | Resolution | 1 km | 2.1 km |
-| Forecast horizon | 33 hours | 120 hours (5 days) |
-| Ensemble members | 11 (1 ctrl + 10 pert) | 21 (1 ctrl + 20 pert) |
-| Model runs (UTC) | 00, 03, 06, 09, 12, 15, 18, 21 | 00, 06, 12, 18 |
-| Update frequency | Every 3 hours | Every 6 hours |
-| Grid points | ~1.1 million | 283,876 |
-| Publication delay | ~2.5 hours | ~2.5 hours |
+| Forecast Horizon | 33 hours | 120 hours (5 days) |
+| Ensemble Members | 11 (1 ctrl + 10 pert) | 21 (1 ctrl + 20 pert) |
+| Model Runs (UTC) | 00, 03, 06, 09, 12, 15, 18, 21 | 00, 06, 12, 18 |
+| Publication Delay | ~2.5 hours | ~2.5 hours |
+| Grid Points | ~1.1 million | 283,876 |
 
-**Model Selection Strategy:**
-- **Today's forecast:** Use ICON-CH1-EPS (higher resolution, sufficient horizon)
-- **Tomorrow's forecast:** Use ICON-CH2-EPS (longer horizon needed)
-- **Multi-day forecast:** Use ICON-CH2-EPS exclusively
-- **Hybrid mode:** CH1 for hours 0-33, CH2 for hours 33-48
+**Variables Fetched:**
 
-### 6.3 Variables to Fetch
+| Variable | ICON Name | Description | Unit |
+|----------|-----------|-------------|------|
+| GHI | `ASOB_S` | Net shortwave radiation at surface | W/m² |
+| Temperature | `T_2M` | Air temperature at 2m height | K |
 
-For PV power forecasting, the following meteorological variables are available:
+## 2.5 PV System Configuration
 
-| Variable | ICON Name | Description | Unit | Mode |
-|----------|-----------|-------------|------|------|
-| GHI | `ASOB_S` | Net shortwave radiation at surface | W/m² | Lite + Full |
-| Temperature | `T_2M` | Air temperature at 2m height | K | Lite + Full |
-| DNI | `ASWDIR_S` | Direct shortwave radiation | W/m² | Full only |
-| DHI | `ASWDIFD_S` | Diffuse shortwave radiation | W/m² | Full only |
-| Wind speed | `U_10M` | Wind speed at 10m height | m/s | Full only |
+Configuration is defined in `/config/swisssolarforecast.yaml` or via HA add-on options:
 
-**Lite Mode (default):** Uses only GHI and Temperature. DNI/DHI are derived
-from GHI using the Erbs decomposition model, which is well-established and
-introduces only ~5-10% additional uncertainty.
+```yaml
+panels:
+  - id: "AE455"
+    model: "AE Solar AC-455MH/144V"
+    pdc0: 455
+    gamma_pdc: -0.0035
 
-**Full Mode:** Downloads all 5 variables for maximum accuracy but requires
-~10x more disk space and download time.
+  - id: "Generic400"
+    model: "Generic 400W"
+    pdc0: 400
+    gamma_pdc: -0.0035
 
-### 6.4 Fetch Schedule
+plants:
+  - name: "House"
+    location:
+      latitude: 47.475053232432145
+      longitude: 7.767335653734485
+      altitude: 330
+      timezone: "Europe/Zurich"
+    inverters:
+      - name: "EastWest"
+        max_power: 10000
+        efficiency: 0.82
+        strings:
+          - name: "East"
+            azimuth: 90
+            tilt: 15
+            panel: "AE455"
+            count: 8
+          - name: "West"
+            azimuth: 270
+            tilt: 15
+            panel: "AE455"
+            count: 9
 
-Data fetching is scheduled via systemd timers to run shortly after MeteoSwiss
-publishes new model runs:
-
-**ICON-CH1-EPS Fetch Schedule (UTC):**
-```
-02:30, 05:30, 08:30, 11:30, 14:30, 17:30, 20:30, 23:30
-```
-(2.5 hours after each model run: 00, 03, 06, 09, 12, 15, 18, 21)
-
-**ICON-CH2-EPS Fetch Schedule (UTC):**
-```
-02:30, 08:30, 14:30, 20:30
-```
-(2.5 hours after each model run: 00, 06, 12, 18)
-
-**Fetch Strategy:**
-1. Query STAC API to find latest available model run
-2. Check if local data is already up-to-date
-3. Download all required variables for all ensemble members
-4. Download all forecast hours within the model's horizon
-5. Save files locally with standardized naming
-6. Clean up old runs to save disk space
-
-### 6.5 Data Volume and Optimizations
-
-To minimize download size and storage, several optimizations are applied:
-
-**Lite Mode (default):**
-- 2 variables only: GHI (ASOB_S) + Temperature (T_2M)
-- All 11 ensemble members included (1 control + 10 perturbed in single file)
-- DNI/DHI derived from GHI using Erbs decomposition model
-- No overlap: CH1 covers 0-33h, CH2 covers 33-48h only
-- Skip past hours: Only download future forecast hours to save bandwidth
-
-**MeteoSwiss File Structure:**
-- Control file: Single GRIB message per file (~2 MB)
-- Perturbed file: All 10 perturbed members in one file (~22 MB)
-- Total: 2 files per variable per hour (control + perturbed)
-
-| Model | Hours | Files | Approx. Size |
-|-------|-------|-------|--------------|
-| ICON-CH1-EPS | 0-33 | 2 vars × 34 hours × 2 files = 136 files | ~1.6 GB |
-| ICON-CH2-EPS | 33-48 | 2 vars × 16 hours × 2 files = 64 files | ~0.5 GB |
-| **Total** | 0-48 | 200 files | **~2.1 GB** |
-
-**Skip Past Hours Optimization:**
-When fetching, past forecast hours are automatically skipped to save bandwidth:
-- At 12:00 local, a 06:00 UTC run has 5 hours of past data (hours 0-4)
-- These are skipped, saving ~15-20% download volume
-- Use `--all-hours` flag to include past hours if needed for analysis
-
-**Storage Policy:** Only the latest run is kept; older runs are automatically deleted before downloading.
-
-### 6.6 File Naming Convention
-
-Downloaded GRIB files follow this naming pattern:
-```
-icon-{model}-{YYYYMMDDHHMM}-h{HHH}-{variable}-{member}.grib2
+      - name: "South"
+        max_power: 1500
+        efficiency: 0.80
+        strings:
+          - name: "SouthFront"
+            azimuth: 180
+            tilt: 70
+            panel: "Generic400"
+            count: 3
+          - name: "SouthBack"
+            azimuth: 180
+            tilt: 60
+            panel: "Generic400"
+            count: 2
 ```
 
-**Examples:**
-- `icon-ch1-202601060300-h012-asob_s-m00.grib2` (CH1, 03:00 run, hour 12, GHI, control)
-- `icon-ch1-202601060300-h012-asob_s-perturbed.grib2` (CH1, 03:00 run, hour 12, GHI, all perturbed)
-- `icon-ch2-202601060600-h048-t_2m-m00.grib2` (CH2, 06:00 run, hour 48, temp, control)
+## 2.6 Configuration Options
 
-**Member naming:**
-- `m00` = Control member (single GRIB message)
-- `perturbed` = All perturbed members (10 GRIB messages for CH1, 20 for CH2)
+```yaml
+influxdb:
+  host: "192.168.0.203"
+  port: 8087
+  token: "your-influxdb-token"
+  org: "energymanagement"
+  bucket: "pv_forecast"
+  load_bucket: "load_forecast"
 
-**GRIB file structure:**
-- Control files contain 1 GRIB message with `perturbationNumber=0`
-- Perturbed files contain multiple GRIB messages, each with a unique `perturbationNumber` (1-10 for CH1, 1-20 for CH2)
+location:
+  latitude: 47.475
+  longitude: 7.767
+  altitude: 330
+  timezone: "Europe/Zurich"
 
-### 6.7 STAC API Query
+schedule:
+  ch1_cron: "30 2,5,8,11,14,17,20,23 * * *"  # UTC, 2.5h after model runs
+  ch2_cron: "45 2,8,14,20 * * *"              # UTC, 2.75h after model runs
+  calculator_interval_minutes: 15
 
-The fetch process queries the STAC API with these parameters:
+storage:
+  data_path: "/share/swisssolarforecast"
+  max_storage_gb: 3.0
+  cleanup_old_runs: true
 
-```python
-POST https://data.geo.admin.ch/api/stac/v1/search
-{
-    "collections": ["ch.meteoschweiz.ogd-forecasting-icon-ch1"],
-    "forecast:reference_datetime": "2026-01-06T03:00:00Z",
-    "forecast:variable": "ASOB_S",
-    "forecast:horizon": "P0DT12H00M00S",  # ISO 8601 duration
-    "forecast:perturbed": false,  # true for ensemble members
-    "limit": 1
-}
+notifications:
+  telegram_enabled: false
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+
+log_level: "info"
 ```
 
-**Horizon format:** ISO 8601 duration `P{days}DT{hours}H{minutes}M{seconds}S`
-- Hour 0: `P0DT00H00M00S`
-- Hour 12: `P0DT12H00M00S`
-- Hour 36: `P1DT12H00M00S`
+## 2.7 InfluxDB Output Schema
 
-### 6.8 Fault Tolerance
+**Measurement:** `pv_forecast`
 
-The fetching system is designed to be fault-tolerant:
+**Resolution:** 15-minute intervals (aligned to :00, :15, :30, :45)
 
-**Download failures:**
-- Incomplete downloads are saved as `.tmp` files
-- Only `.grib2` files are considered complete
-- Failed downloads are logged but don't abort the process
-- Retry logic with exponential backoff
+### Tags
 
-**Parsing flexibility:**
-- Filename parsing supports multiple formats (12/14 digit timestamps)
-- Date/time is extracted from GRIB metadata (authoritative source)
-- Variable names are matched case-insensitively
-- Unknown files are skipped with warnings
+| Tag | Values | Description |
+|-----|--------|-------------|
+| `inverter` | `total`, `EastWest`, `South` | Inverter identifier |
+| `model` | `ch1`, `ch2`, `hybrid` | ICON model used |
+| `run_time` | ISO timestamp | When forecast was calculated |
 
-**Data availability:**
-- System checks for latest available run before downloading
-- Falls back to older runs if latest is not yet published
-- Partial data sets can still be used (with reduced ensemble size)
+### Fields (inverter="total")
 
-### 6.9 Grid Handling
+| Field | Unit | Description |
+|-------|------|-------------|
+| `power_w_p10` | W | PV power (pessimistic, 90% chance to exceed) |
+| `power_w_p50` | W | PV power (expected/median) |
+| `power_w_p90` | W | PV power (optimistic, 10% chance to exceed) |
+| `energy_wh_p10` | Wh | Per-period energy (pessimistic) |
+| `energy_wh_p50` | Wh | Per-period energy (expected) |
+| `energy_wh_p90` | Wh | Per-period energy (optimistic) |
+| `load_energy_wh_p10` | Wh | Load energy (pessimistic) |
+| `load_energy_wh_p50` | Wh | Load energy (expected) |
+| `load_energy_wh_p90` | Wh | Load energy (optimistic) |
+| `net_energy_wh_p10` | Wh | Net = PV_p10 - Load_p90 (pessimistic) |
+| `net_energy_wh_p50` | Wh | Net = PV_p50 - Load_p50 (expected) |
+| `net_energy_wh_p90` | Wh | Net = PV_p90 - Load_p10 (optimistic) |
+| `ghi` | W/m² | Global horizontal irradiance |
+| `temp_air` | °C | Air temperature |
 
-ICON uses an unstructured triangular grid, not a regular lat/lon grid:
+### Fields (inverter="EastWest" or "South")
 
-**Grid coordinates:**
-- Stored in a separate "horizontal constants" GRIB file
-- Variables: `tlat` (latitude), `tlon` (longitude) for each grid point
-- Coordinates are in radians, converted to degrees
+| Field | Unit | Description |
+|-------|------|-------------|
+| `power_w_p10` | W | Inverter power (pessimistic) |
+| `power_w_p50` | W | Inverter power (expected) |
+| `power_w_p90` | W | Inverter power (optimistic) |
 
-**Value extraction:**
-- Find nearest grid point to target location using Euclidean distance
-- Cache grid coordinates locally to avoid repeated downloads
-- Grid cache location: `/tmp/meteoswiss_grib/grid_coords_{model}.npz`
-
-### 6.10 Ensemble Processing
-
-All ensemble members are fetched to enable uncertainty quantification:
-
-**Ensemble statistics:**
-- P10 (10th percentile): Pessimistic estimate, 90% chance of exceeding
-- P50 (50th percentile): Median/expected value
-- P90 (90th percentile): Optimistic estimate, 10% chance of exceeding
-
-**Processing:**
-1. Calculate PV forecast for each ensemble member independently
-2. Stack results into array (members × time steps)
-3. Compute percentiles across member axis
-4. Report spread (P90 - P10) as uncertainty measure
-
-### 6.11 Fetcher and Calculator Separation
-
-The system uses a clear separation between data fetching and forecast calculation:
-
-**Fetcher Programs** (run independently via systemd timers):
-- `fetch_icon_ch1.py` - downloads CH1 data (hours 0-33, higher resolution)
-- `fetch_icon_ch2.py` - downloads CH2 data (hours 33-48 only, no overlap)
-
-**Calculator Program** (reads local data only):
-- `pv_forecast.py` - uses whatever data the fetchers have downloaded
-- Fails with error message if required data is missing
-
-**Manual Fetching:**
-
-```bash
-# Fetch CH1 data (skips past hours automatically)
-python3 fetch_icon_ch1.py
-
-# Fetch CH1 data including past hours (for analysis)
-python3 fetch_icon_ch1.py --all-hours
-
-# Fetch CH2 data (hours 33-48, no overlap with CH1)
-python3 fetch_icon_ch2.py
-```
-
-**Forecast Calculation:**
-
-```bash
-# Today's forecast (uses CH1 data only)
-python3 pv_forecast.py --today
-
-# Tomorrow's forecast (uses hybrid CH1+CH2 data)
-python3 pv_forecast.py --tomorrow
-
-# 48h forecast (uses hybrid CH1+CH2 data)
-python3 pv_forecast.py --ensemble
-```
-
-**Systemd commands:**
-```bash
-# Start fetch manually
-systemctl start icon-ch1-fetch
-
-# Check status
-systemctl status icon-ch1-fetch
-
-# View logs
-journalctl -u icon-ch1-fetch -f
-```
-
-### 6.12 Forecast Output and Storage
-
-The solar forecast is calculated from MeteoSwiss weather data and stored in InfluxDB
-for use by the energy management system. Three percentile curves (P10/P50/P90) are
-produced from the ensemble members to quantify uncertainty.
-
-#### 6.12.1 Forecast Calculation Pipeline
+## 2.8 Calculation Pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  For each ensemble member (11 for CH1, 21 for CH2):             │
-│                                                                 │
-│  1. Extract GHI, Temperature at PV location                     │
-│  2. Decompose GHI → DNI + DHI (Erbs model)                      │
-│  3. Calculate solar position (pvlib)                            │
-│  4. Transpose to plane-of-array for each string orientation     │
-│  5. Calculate cell temperature (Faiman model)                   │
-│  6. Calculate DC power (PVWatts with temp coefficient)          │
-│  7. Apply inverter efficiency and clipping → AC power           │
-│  8. Sum all strings → total PV power for this member            │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Stack all members → array [members × time_steps]               │
-│                                                                 │
-│  Calculate percentiles across member axis:                      │
-│    • P10 = 10th percentile (pessimistic, 90% chance to exceed)  │
-│    • P50 = 50th percentile (median, expected value)             │
-│    • P90 = 90th percentile (optimistic, 10% chance to exceed)   │
-└─────────────────────────────────────────────────────────────────┘
+For each ensemble member (11 for CH1, 21 for CH2):
+│
+├─► Extract GHI, Temperature at PV location
+│
+├─► Decompose GHI → DNI + DHI (Erbs model)
+│
+├─► For each string:
+│   ├─► Calculate solar position (lat/lon/time)
+│   ├─► Transpose to plane-of-array (azimuth/tilt)
+│   ├─► Calculate cell temperature (Faiman model)
+│   └─► Calculate DC power (PVWatts with γ coefficient)
+│
+├─► Sum strings → Inverter DC power
+│
+├─► Apply inverter efficiency
+│
+└─► Clip to max_power → Inverter AC power
+
+Stack all members → array [members × time_steps]
+│
+└─► Calculate percentiles:
+    • P10 = 10th percentile (pessimistic)
+    • P50 = 50th percentile (median)
+    • P90 = 90th percentile (optimistic)
 ```
 
-#### 6.12.2 Output Resolution
+## 2.9 Source Files
 
-| Parameter | Value |
-|-----------|-------|
-| Time resolution | 15 minutes |
-| Forecast horizon | 48 hours |
-| Buckets per forecast | 192 (48h × 4 per hour) |
-| Update frequency | Every 15 minutes |
-| Percentiles | P10, P50, P90 |
+| File | Lines | Purpose |
+|------|-------|---------|
+| `run.py` | 386 | Main entry point, scheduler initialization |
+| `src/icon_fetcher.py` | 466 | MeteoSwiss STAC API client, GRIB download |
+| `src/grib_parser.py` | 840 | GRIB file parsing, grid handling |
+| `src/pv_model.py` | 338 | pvlib-based PV power calculations |
+| `src/influxdb_writer.py` | 405 | InfluxDB forecast writer |
+| `src/scheduler.py` | 202 | APScheduler wrapper |
+| `src/config.py` | 146 | PV system configuration loader |
+| `src/notifications.py` | 135 | Telegram notifications |
 
-#### 6.12.3 Power and Energy Curves
-
-**Power Forecast (W):**
-Instantaneous power at each 15-minute bucket.
-
-```
-pv_power_p10[t] = 10th percentile of ensemble at time t
-pv_power_p50[t] = 50th percentile of ensemble at time t
-pv_power_p90[t] = 90th percentile of ensemble at time t
-```
-
-**Energy Forecast (Wh):**
-Cumulative energy from forecast start, calculated by integrating power.
+## 2.10 Dependencies
 
 ```
-pv_energy_p50[t] = sum(pv_power_p50[0:t]) × 0.25h
+pvlib>=0.10.0              # Industry-standard PV modeling
+pandas>=2.0.0              # Data manipulation
+numpy>=1.24.0              # Numerical computing
+requests>=2.28.0           # HTTP client for STAC API
+xarray>=2023.1.0           # N-dimensional arrays
+cfgrib>=0.9.10             # GRIB file handling
+eccodes>=1.5.0             # GRIB codec library
+PyYAML>=6.0                # YAML parsing
+influxdb-client>=1.36.0    # InfluxDB client
+APScheduler>=3.10.0        # Task scheduling
 ```
 
-#### 6.12.4 InfluxDB Storage
+## 2.11 Grafana Queries
 
-Forecast data is written to the `pv_forecast` bucket by the SwissSolarForecast add-on.
+**PV Power Forecast with uncertainty band:**
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r.inverter == "total")
+  |> filter(fn: (r) => r._field == "power_w_p10" or
+                       r._field == "power_w_p50" or
+                       r._field == "power_w_p90")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+```
 
-**Key design:** One point per timestamp with all P10/P50/P90 values stored together,
-guaranteeing exact timestamp alignment for MPC calculations.
+**Per-inverter comparison:**
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r._field == "power_w_p50")
+  |> pivot(rowKey: ["_time"], columnKey: ["inverter"], valueColumn: "_value")
+```
 
-See **Chapter 18** for complete schema details, Grafana queries, and configuration.
+**Energy Balance:**
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r.inverter == "total")
+  |> filter(fn: (r) => r._field == "energy_wh_p50" or
+                       r._field == "load_energy_wh_p50" or
+                       r._field == "net_energy_wh_p50")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+```
 
 ---
 
-## 7. PV forecast (pvlib, MeteoSwiss)
+# Chapter 3: LoadForecast Add-on
 
-### 7.1 Meteorological inputs
+## 3.1 Overview
 
-**Source:** MeteoSwiss ICON-CH2-EPS Open Data via STAC API
+LoadForecast generates statistical household load consumption forecasts using historical consumption patterns. It analyzes 90 days of historical data to build time-of-day profiles and produces P10/P50/P90 percentile forecasts.
 
-**API Configuration:**
-- STAC API URL: `https://data.geo.admin.ch/api/stac/v1`
-- Collection: `ch.meteoschweiz.ogd-forecasting-icon-ch2`
+| Property | Value |
+|----------|-------|
+| Name | LoadForecast |
+| Version | 1.0.1 |
+| Slug | `loadforecast` |
+| Architectures | aarch64, amd64, armv7 |
+| Timeout | 120 seconds |
+| Schedule | Hourly (cron: `15 * * * *`) |
 
-**Variables used:**
+## 3.2 Features
 
-| ICON Variable | Description                    | Unit  | PV Variable |
-|---------------|--------------------------------|-------|-------------|
-| asob_s        | Net shortwave radiation        | W/m²  | ghi         |
-| aswdir_s      | Direct shortwave radiation     | W/m²  | dni         |
-| aswdifd_s     | Diffuse shortwave radiation    | W/m²  | dhi         |
-| t_2m          | Air temperature at 2m          | K     | temp_air    |
-| u_10m         | Wind speed at 10m              | m/s   | wind_speed  |
+- **Statistical Profiling**: Time-of-day consumption profiles (96 daily slots)
+- **Historical Analysis**: Uses 90 days of consumption data
+- **Probabilistic Output**: P10/P50/P90 percentiles for uncertainty bands
+- **15-Minute Resolution**: Aligned with MPC optimization timestep
+- **48-Hour Horizon**: Sufficient for next-day planning
 
-**ICON Grid:** Unstructured triangular grid (283,876 points). Grid coordinates
-(tlat/tlon) are extracted from the horizontal constants file and cached locally.
-Nearest-neighbor interpolation is used to extract values at the PV location.
-
-### 7.2 Model chain
-
-- Solar position (pvlib.solarposition)
-- Decomposition of GHI -> DNI/DHI if not provided (Erbs model)
-- Transposition to plane of array (POA) - isotropic sky model
-- Cell temperature model (Faiman)
-- DC power (PVWatts model with temperature coefficient)
-- AC power (inverter efficiency + clipping)
-
-### 7.3 PV configuration hierarchy
-
-The PV system is configured hierarchically:
+## 3.3 Architecture
 
 ```
-panels (catalog)
-    |
-plants (location)
-    |
-    +-- inverters (max_power, efficiency)
-            |
-            +-- strings (azimuth, tilt, panel reference, count)
+┌─────────────────────────────────────────────────────────────────────┐
+│                       LoadForecast Add-on                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  FORECAST CYCLE (every hour at :15)                                  │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │ 1. Query 90 days of load_power from HomeAssistant bucket       │  │
+│  │                                                                 │  │
+│  │ 2. Build time-of-day profile:                                  │  │
+│  │    • Group into 96 daily slots (15-min periods)                │  │
+│  │    • Calculate P10/P50/P90 percentiles per slot                │  │
+│  │                                                                 │  │
+│  │ 3. Generate 48-hour forecast:                                  │  │
+│  │    • Map future timestamps to profile slots                    │  │
+│  │    • Look up P10/P50/P90 values                                │  │
+│  │                                                                 │  │
+│  │ 4. Write to load_forecast bucket                               │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Panels:** Define panel types once, referenced by id in strings.
+## 3.4 Algorithm
 
-**Plants:** Physical locations with geographic coordinates. A system can have
-multiple plants (e.g., house, garage, carport).
+### Time-of-Day Profiling
 
-**Inverters:** Define max AC power (clipping) and efficiency. Each inverter
-groups one or more strings.
+The algorithm divides each day into 96 slots (15-minute periods):
 
-**Strings:** Define orientation (azimuth, tilt), reference a panel type, and
-specify the panel count. String DC power is calculated as count × panel pdc0.
+```
+Slot = hour × 4 + (minute ÷ 15)
 
-### 7.4 Panel types
+Slot  0 = 00:00 - 00:15
+Slot  1 = 00:15 - 00:30
+...
+Slot 47 = 11:45 - 12:00
+Slot 48 = 12:00 - 12:15
+...
+Slot 95 = 23:45 - 00:00
+```
 
-| ID          | Model                    | Pdc0 (W) | γ (1/K)  |
-|-------------|--------------------------|----------|----------|
-| AE455       | AE Solar AC-455MH/144V   | 455      | -0.0035  |
-| Generic400  | Generic 400W             | 400      | -0.0035  |
+### Profile Building
 
-### 7.5 Plant configuration
+For each of the 96 slots:
+1. Collect all historical consumption values at that time slot
+2. Calculate statistics across the 90-day window:
+   - P10 (10th percentile): Low consumption, 90% chance to exceed
+   - P50 (50th percentile): Median/typical consumption
+   - P90 (90th percentile): High consumption, 10% chance to exceed
 
-**Plant: House**
+### Forecast Generation
 
-| Parameter  | Value                |
-|------------|----------------------|
-| Latitude   | 47.475053232432145   |
-| Longitude  | 7.767335653734485    |
-| Altitude   | 330 m                |
-| Timezone   | Europe/Zurich        |
+For each future timestamp in the 48-hour horizon:
+1. Calculate the slot number from the timestamp
+2. Look up P10/P50/P90 values from the profile
+3. Convert power (W) to per-period energy (Wh): `power × 0.25h`
 
-**Inverters:**
+## 3.5 Configuration Options
 
-| Inverter   | Max Power (W) | Efficiency | Strings                    |
-|------------|---------------|------------|----------------------------|
-| East+West  | 10000         | 0.82       | East, West                 |
-| South      | 1500          | 0.80       | South Front, South Back    |
+```yaml
+influxdb:
+  host: "192.168.0.203"
+  port: 8087
+  token: "your-influxdb-token"
+  org: "energymanagement"
+  source_bucket: "HomeAssistant"    # Where to read historical data
+  target_bucket: "load_forecast"     # Where to write forecasts
 
-**Strings:**
+load_sensor:
+  entity_id: "load_power"            # HA entity to use for load
 
-| String       | Azimuth (°) | Tilt (°) | Panel     | Count | DC Power (W) |
-|--------------|-------------|----------|-----------|-------|--------------|
-| East         | 90          | 15       | AE455     | 8     | 3640         |
-| West         | 270         | 15       | AE455     | 9     | 4095         |
-| South Front  | 180         | 70       | Generic400| 3     | 1200         |
-| South Back   | 180         | 60       | Generic400| 2     | 800          |
+forecast:
+  history_days: 90                   # Days of history to analyze
+  horizon_hours: 48                  # Forecast horizon
 
-**Total installed:** 9,735 W DC
+schedule:
+  cron: "15 * * * *"                 # Run at :15 every hour
+
+log_level: "info"
+```
+
+## 3.6 InfluxDB Output Schema
+
+**Measurement:** `load_forecast`
+
+**Resolution:** 15-minute intervals
+
+### Tags
+
+| Tag | Values | Description |
+|-----|--------|-------------|
+| `model` | `statistical` | Forecast model type |
+| `run_time` | ISO timestamp | When forecast was generated |
+
+### Fields
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `energy_wh_p10` | Wh | Per-period energy (low, 90% chance to exceed) |
+| `energy_wh_p50` | Wh | Per-period energy (median/typical) |
+| `energy_wh_p90` | Wh | Per-period energy (high, 10% chance to exceed) |
+
+**Note:** Values represent energy per 15-minute period, not instantaneous power.
+
+## 3.7 Data Source
+
+The add-on queries historical consumption data from the `HomeAssistant` InfluxDB bucket:
+
+```flux
+from(bucket: "HomeAssistant")
+  |> range(start: -90d)
+  |> filter(fn: (r) => r.entity_id == "load_power")
+  |> filter(fn: (r) => r._field == "value")
+  |> aggregateWindow(every: 15m, fn: mean)
+```
+
+**Important:** The `sensor.load_power` entity in Home Assistant is calculated by the Huawei Solar integration:
+```
+load = solar_pv_total_ac_power - power_meter_active_power + battery_charge_discharge_power
+```
+
+For more accurate measurements, Shelly 3EM phase sensors can be used as an alternative.
+
+## 3.8 Source Files
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `run.py` | 192 | Main entry point, scheduler loop |
+| `src/load_predictor.py` | 183 | Statistical forecasting algorithm |
+| `src/influxdb_writer.py` | 140 | InfluxDB forecast writer |
+
+## 3.9 Dependencies
+
+```
+pandas>=2.0.0              # Data manipulation
+numpy>=1.24.0              # Numerical computing
+influxdb-client>=1.36.0    # InfluxDB client
+croniter>=1.3.0            # Cron expression parsing
+```
+
+## 3.10 Grafana Queries
+
+**Load Forecast with uncertainty band:**
+```flux
+from(bucket: "load_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "load_forecast")
+  |> filter(fn: (r) => r._field == "energy_wh_p10" or
+                       r._field == "energy_wh_p50" or
+                       r._field == "energy_wh_p90")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+```
+
+**Forecast vs Actual:**
+```flux
+forecast = from(bucket: "load_forecast")
+  |> range(start: -24h, stop: now())
+  |> filter(fn: (r) => r._field == "energy_wh_p50")
+
+actual = from(bucket: "HomeAssistant")
+  |> range(start: -24h, stop: now())
+  |> filter(fn: (r) => r.entity_id == "load_power")
+  |> aggregateWindow(every: 15m, fn: mean)
+
+union(tables: [forecast, actual])
+```
+
+## 3.11 Limitations and Future Enhancements
+
+**Current Limitations:**
+- No weekday/weekend differentiation
+- No seasonal adjustment
+- No special event handling (holidays, vacations)
+- No appliance-level modeling
+
+**Potential Enhancements:**
+- Separate weekday/weekend profiles
+- Seasonal scaling factors
+- Short-term adaptation based on recent hours
+- Integration with calendar events
+- Machine learning models (LSTM, XGBoost)
 
 ---
 
-## 8. Dynamic loss modeling
+# Chapter 4: EnergyOptimizer Add-on (Planned)
 
-No fixed system losses are used.
+## 4.1 Overview
 
-### 8.1 Ideal power
+The EnergyOptimizer add-on will implement Model Predictive Control (MPC) to optimize battery charging/discharging, EV charging, and deferrable loads based on PV and load forecasts, tariff schedules, and device constraints.
 
-Calculation of an ideal, loss-free power:
+| Property | Planned Value |
+|----------|---------------|
+| Name | EnergyOptimizer |
+| Version | 0.1.0 (planned) |
+| Slug | `energyoptimizer` |
+| Update Frequency | Every 5-15 minutes |
+| Optimization Horizon | 24-48 hours |
 
-P_pv_ideal(t)
+## 4.2 Objectives
 
-### 8.2 Loss factor
+### Primary Objective
+**Minimize total electricity cost** over the optimization horizon:
 
-Comparison with measurement:
+```
+min Σ [ (P_import × tariff_import) - (P_export × tariff_export) ] × Δt
+```
 
-k(t) = P_pv_meas(t) / P_pv_ideal(t)
-
-- Plausibility checks and clipping
-- Smoothing (time-dependent)
-
-### 8.3 Use in the forecast
-
-P_pv_forecast(t) = k_forecast(t) * P_pv_ideal_forecast(t)
-
-The factor k reflects:
-- Soiling
-- Snow
-- Partial shading
-- Real inverter efficiency
-
----
-
-## 9. Load forecast
-
-### 9.1 Principle
-
-The load forecast uses only historical data
-(no leakage, no future information).
-
-### 9.2 Baseline model
-
-- Profiles by weekday and time slot (e.g., 15 min)
-- Robust statistics (median, trimmed mean)
-- Smoothing over time
-
-P_load_forecast(t) = Profile[weekday, slot]
-
-### 9.3 Short-term adaptation
-
-Scaling/offset based on the last hours to reflect day-specific patterns.
-
-### 9.4 Uncertainty band
-
-Calculation of P10/P50/P90 for risk-aware optimization.
-
----
-
-## 10. Optimization: battery & wallbox
-
-### 10.1 Decision variables
-
-- Battery power P_bat_set(t)
-- Wallbox power P_ev_set(t)
-
-### 10.2 Method
-
-- Rolling horizon MPC
-- Planning horizon: 24-48 h
-- Compute cycle: 5-15 min
-
-### 10.3 Objective and constraints reference
-
-Objectives, guardrails, and hard constraints are defined in Section 11 and in the
-YAML configuration.
-
----
-
-## 11. Energy Management
-
-### 11.1 Assumptions
-
-- Reliable PV power/energy forecast for today and tomorrow
-- Reliable consumption forecast for today and tomorrow
-- Current PV production, current consumption, and current battery SoC available
-
-### 11.2 Additional required inputs
-
-All constants and constraints are defined in a YAML configuration file
-(path configurable; default `/home/energymanagement/data/energy_management.yaml`).
-
-**Tariffs and grid economics**
-- Import tariff schedule (day/night windows and CHF/kWh)
-- Export remuneration (feed-in tariff), if export is allowed
-- Grid import/export limits (optional but recommended)
-
-**Battery model and limits**
-- Usable energy capacity (kWh)
-- Min/max SoC guardrails (%)
-- Max charge/discharge power (kW)
-- Charge/discharge efficiency (round-trip or separate)
-- Control interface (power setpoint vs. mode/SoC target)
-
-**EV / wallbox**
-- Departure time (deadline) and target energy/SoC
-- Max/min charging power (kW)
-- Phase switching capability and control granularity
-- Control interface (current limit, power limit, pause/resume)
-
-**Dishwasher (deferrable load)**
-- Earliest start and latest finish time
-- Typical cycle duration and energy use (kWh)
-- Allowed actuation method (smart plug, API, or notification only)
-
-**Policy parameters**
-- "Tomorrow reserve" rule: minimum SoC or kWh to keep at 06:00
-- Night usage rule: avoid discharging from 21:00-06:00 if reserve is at risk
-
-### 11.3 Optimization objectives and guardrails
-
-Primary objective:
-- Minimize total electricity cost over a 24-48 h horizon
-
-Secondary objectives:
+### Secondary Objectives
 - Maximize self-consumption
 - Preserve battery health (limit deep cycles)
-- Ensure EV target energy by departure time
+- Ensure EV reaches target SOC by departure time
+- Minimize grid peak power
 
-Hard constraints:
-- SoC_min <= SoC <= SoC_max
-- Battery power limits and efficiencies
-- EV charging power limits and deadlines
-- Grid import/export limits (if applicable)
-
-### 11.4 Control signals (outputs)
-
-**Battery**
-- battery_discharge_allowed (boolean for 21:00-06:00 rule)
-- battery_min_soc_target (overnight reserve)
-- battery_power_setpoint (optional, if supported)
-
-**Dishwasher**
-- dishwasher_start_recommended (boolean)
-- dishwasher_start_time (recommended slot)
-
-**Wallbox**
-- ev_charging_enabled (boolean)
-- ev_power_limit (kW)
-- ev_expected_energy_by_departure (diagnostic)
-
----
-
-## 12. LLM daily review & parameter tuning
-
-### 12.1 Purpose
-
-The LLM creates a daily (e.g., 08:00) critical analysis:
-
-- Forecast vs. reality
-- Loss model stability
-- Load forecast quality
-- Optimizer decisions
-- Cost and goal attainment
-
-### 12.2 Analysis contents
-
-1. Data quality (gaps, outliers, time shift)
-2. PV forecast bias and daily profiles
-3. Load forecast deviations
-4. Battery and EV behavior
-5. Tariff usage (night tariff)
-
-### 12.3 Improvement suggestions
-
-The LLM provides:
-- Concrete recommendations
-- Expected impact
-- Affected parameters
-- Validation steps
-
-### 12.4 Parameter governance
-
-- **Safe auto-tune** (e.g., smoothing factors)
-- **Review required** (e.g., SoC reserves)
-- **Never auto** (hardware and protection limits)
-
-All changes are made as suggestions (config diffs), not automatically.
-
----
-
-## 13. Outputs (InfluxDB)
-
-| Measurement                   | Content                           |
-|------------------------------|-----------------------------------|
-| pv_forecast_power_ac         | PV power forecast                 |
-| load_forecast_power          | Load forecast                     |
-| optimizer_battery_setpoint   | Battery setpoint                  |
-| optimizer_ev_setpoint        | Wallbox setpoint                  |
-| daily_llm_report             | Analysis & recommendations (text) |
-
----
-
-## 14. Success criteria
-
-The system is considered successful when:
-
-- Energy costs decrease compared to a baseline
-- EV targets are reliably met
-- Battery constraints are respected
-- Forecast errors are transparently detected and addressed
-- Improvements are traceable and rollbackable
-
----
-
-
----
-
-## 15. Forecast Data Architecture (Standalone Mode)
-
-**Note:** This chapter describes the standalone systemd-based deployment for development
-and testing. For production use with Home Assistant, see **Chapter 18: SwissSolarForecast Add-on**.
-
-### 15.1 Overview
-
-The standalone forecast system uses two components:
-
-1. **Data Fetchers** (scheduled systemd jobs)
-   - Download ICON forecast data from MeteoSwiss STAC API
-   - Run on fixed schedules matching MeteoSwiss model runs
-   - Store data locally in `/home/energymanagement/forecastData/`
-
-2. **Calculation Program** (on-demand CLI tool)
-   - Reads locally cached forecast data
-   - Calculates PV power forecast using pvlib
-   - Auto-selects optimal model based on forecast horizon
-
-### 15.2 ICON Models
-
-| Model | Resolution | Update Frequency | Horizon | Use Case |
-|-------|------------|------------------|---------|----------|
-| ICON-CH1-EPS | 1 km | Every 3 hours | 33h | Today / short-term |
-| ICON-CH2-EPS | 2.1 km | Every 6 hours | 5 days | Tomorrow / multi-day |
-
-**Model Run Times (UTC):**
-- CH1: 00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00
-- CH2: 00:00, 06:00, 12:00, 18:00
-
-**Data Availability:** ~2.5 hours after model run time
-
-### 15.3 Directory Structure
+## 4.3 Architecture
 
 ```
-/home/energymanagement/
-├── forecastData/
-│   ├── icon-ch1/
-│   │   └── YYYYMMDDHHMM/          # Latest run only
-│   │       ├── metadata.json
-│   │       └── *.grib2
-│   └── icon-ch2/
-│       └── YYYYMMDDHHMM/          # Latest run only
-│           ├── metadata.json
-│           └── *.grib2
-├── fetch_icon_ch1.py              # CH1 fetcher script
-├── fetch_icon_ch2.py              # CH2 fetcher script
-└── pv_forecast.py                 # Calculation program
+┌─────────────────────────────────────────────────────────────────────┐
+│                      EnergyOptimizer Add-on                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  OPTIMIZATION CYCLE (every 5-15 minutes)                            │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │ 1. READ INPUTS                                                 │  │
+│  │    • PV forecast P10/P50/P90 from pv_forecast bucket           │  │
+│  │    • Load forecast P10/P50/P90 from load_forecast bucket       │  │
+│  │    • Current battery SOC from HomeAssistant                    │  │
+│  │    • Current time and tariff period                            │  │
+│  │    • EV connection status and target                           │  │
+│  │                                                                 │  │
+│  │ 2. APPLY CONSTRAINTS                                           │  │
+│  │    • Battery: SOC limits, power limits, efficiency             │  │
+│  │    • EV: departure time, target SOC, power limits              │  │
+│  │    • Grid: import/export limits                                │  │
+│  │    • Policy: night reserve, discharge blocking                 │  │
+│  │                                                                 │  │
+│  │ 3. SOLVE OPTIMIZATION                                          │  │
+│  │    • Rolling horizon MPC (24-48h lookahead)                    │  │
+│  │    • Linear or MILP solver                                     │  │
+│  │    • Robust optimization using P10/P90 for constraints         │  │
+│  │                                                                 │  │
+│  │ 4. OUTPUT SETPOINTS                                            │  │
+│  │    • Battery: discharge_allowed, power_setpoint                │  │
+│  │    • Wallbox: charging_enabled, power_limit                    │  │
+│  │    • Dishwasher: start_recommended, start_time                 │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 15.4 Systemd Services
+## 4.4 Input Data
 
-**Services:**
-- `icon-ch1-fetch.service` - Fetches ICON-CH1-EPS data
-- `icon-ch2-fetch.service` - Fetches ICON-CH2-EPS data
+### From InfluxDB
 
-**Timers:**
-- `icon-ch1-fetch.timer` - Runs at xx:30 UTC (every 3 hours)
-- `icon-ch2-fetch.timer` - Runs at 02:30, 08:30, 14:30, 20:30 UTC
+| Source | Data | Use |
+|--------|------|-----|
+| `pv_forecast` | P10/P50/P90 power forecasts | Solar production prediction |
+| `load_forecast` | P10/P50/P90 energy forecasts | Consumption prediction |
+| `HomeAssistant` | Real-time measurements | Current state |
 
-**Retry Configuration:**
-- On failure: retry after 5 minutes
-- Maximum 5 attempts per hour
-- Timeout: 10 minutes per attempt
+### From Home Assistant
 
-**Commands:**
-```bash
-# Check timer status
-systemctl list-timers --all | grep icon
+| Entity | Description | Use |
+|--------|-------------|-----|
+| `sensor.battery_state_of_capacity` | Current SOC | Initial condition |
+| `sensor.battery_charge_discharge_power` | Current battery flow | Validation |
+| `sensor.power_meter_active_power` | Current grid flow | Validation |
+| `binary_sensor.ev_connected` | EV plug status | EV scheduling |
 
-# View logs
-journalctl -u icon-ch1-fetch --since "1 hour ago"
+### From Configuration
 
-# Manual trigger
-systemctl start icon-ch1-fetch
+| Parameter | Description |
+|-----------|-------------|
+| Tariff schedule | Day/night prices, time windows |
+| Battery limits | Capacity, power, efficiency, SOC bounds |
+| EV parameters | Departure time, target SOC, power limits |
+| Policy rules | Night reserve, discharge blocking |
+
+## 4.5 Decision Variables
+
+### Battery Control
+
+| Variable | Type | Unit | Description |
+|----------|------|------|-------------|
+| `P_bat[t]` | Continuous | W | Battery power (+ = discharge, - = charge) |
+| `discharge_allowed` | Binary | - | Allow discharge during night hours |
+| `min_soc_target` | Continuous | % | Overnight SOC reserve |
+
+### Wallbox Control
+
+| Variable | Type | Unit | Description |
+|----------|------|------|-------------|
+| `P_ev[t]` | Continuous | W | EV charging power |
+| `ev_charging_enabled` | Binary | - | Enable/disable charging |
+| `ev_phase_count` | Integer | - | Number of phases (1 or 3) |
+
+### Dishwasher Control
+
+| Variable | Type | Unit | Description |
+|----------|------|------|-------------|
+| `dishwasher_start[t]` | Binary | - | Start at time t |
+| `recommended_start_time` | Time | - | Suggested start time |
+
+## 4.6 Constraints
+
+### Battery Constraints
+
+```
+SOC_min ≤ SOC[t] ≤ SOC_max                    # SOC bounds
+-P_charge_max ≤ P_bat[t] ≤ P_discharge_max    # Power limits
+SOC[t+1] = SOC[t] - (P_bat[t] × Δt) / (C_bat × η)  # State update
 ```
 
-### 15.5 Calculation Program Usage
+### EV Constraints
 
-```bash
-# Forecast for today (auto-selects CH1)
-python pv_forecast.py --today
-
-# Forecast for tomorrow (auto-selects CH2)
-python pv_forecast.py --tomorrow
-
-# Specific date
-python pv_forecast.py --date 2025-01-15
-
-# Force specific model
-python pv_forecast.py --today --model ch2
-
-# Output to CSV
-python pv_forecast.py --tomorrow --output forecast.csv
+```
+0 ≤ P_ev[t] ≤ P_ev_max                        # Power limits
+Σ P_ev[t] × Δt ≥ E_target (by departure)      # Energy target
+P_ev[t] = 0 when not connected                # Connection status
 ```
 
----
+### Grid Constraints
 
-## 16. Appendix: Energy Management YAML Schema
+```
+P_grid[t] = P_load[t] - P_pv[t] + P_bat[t] + P_ev[t]  # Power balance
+-P_export_max ≤ P_grid[t] ≤ P_import_max              # Grid limits
+```
 
-The constants and constraints for energy management are defined in a single
-YAML file. Default path: `/home/energymanagement/data/energy_management.yaml`.
+### Policy Constraints
+
+**Night Reserve Rule:**
+```
+If time ∈ [21:00, 06:00]:
+    SOC[06:00] ≥ SOC_reserve
+    OR discharge_allowed = false
+```
+
+**Night Tariff Strategy:**
+```
+If time ∈ [21:00, 06:00] AND tariff = night:
+    Prefer: charge battery from grid
+    Avoid: discharge battery (unless SOC high and tomorrow sunny)
+```
+
+## 4.7 Configuration Schema
 
 ```yaml
 energy_management:
@@ -1282,490 +879,275 @@ energy_management:
         - name: night
           start: "21:00"
           end: "06:00"
-          price_chf_per_kwh: 0.00
+          price_chf_per_kwh: 0.15
         - name: day
           start: "06:00"
           end: "21:00"
-          price_chf_per_kwh: 0.00
+          price_chf_per_kwh: 0.30
     export:
-      price_chf_per_kwh: 0.00
-
-  grid:
-    max_import_kw: 0.0
-    max_export_kw: 0.0
+      price_chf_per_kwh: 0.08
 
   battery:
-    usable_kwh: 0.0
-    soc_min_pct: 0.0
-    soc_max_pct: 0.0
-    max_charge_kw: 0.0
-    max_discharge_kw: 0.0
-    eta_charge: 1.0
-    eta_discharge: 1.0
-    control_mode: "power_setpoint"  # or "soc_target"
+    usable_kwh: 10.0
+    soc_min_pct: 10.0
+    soc_max_pct: 100.0
+    max_charge_kw: 5.0
+    max_discharge_kw: 5.0
+    eta_charge: 0.95
+    eta_discharge: 0.95
+    control_mode: "power_setpoint"
 
   ev:
-    max_charge_kw: 0.0
-    min_charge_kw: 0.0
+    max_charge_kw: 11.0
+    min_charge_kw: 1.4      # Single phase minimum
     departure_time: "07:30"
-    target_energy_kwh: 0.0
-    phase_switching: false
-    control_granularity: "current_limit"  # or "power_limit" / "pause_resume"
+    target_energy_kwh: 20.0
+    phase_switching: true
 
   dishwasher:
     earliest_start: "09:00"
     latest_finish: "18:00"
     duration_h: 2.0
-    energy_kwh: 0.0
-    actuation: "notification"  # or "smart_plug" / "api"
+    energy_kwh: 1.5
+    actuation: "notification"
 
   policy:
     overnight_reserve:
-      type: "soc_pct"  # or "kwh"
-      value: 0.0
+      type: "soc_pct"
+      value: 30.0
       enforce_at: "06:00"
     night_discharge_block:
       start: "21:00"
       end: "06:00"
       allow_if_reserve_ok: true
 
-  horizon:
-    planning_hours: 36
+  optimizer:
+    horizon_hours: 36
     timestep_minutes: 15
+    update_interval_minutes: 15
+    solver: "highs"           # or "cbc", "glpk"
+    risk_mode: "robust"       # Use P10/P90 for constraints
+```
+
+## 4.8 Output Signals
+
+### Battery Control
+
+| Signal | Type | Description |
+|--------|------|-------------|
+| `battery_discharge_allowed` | Boolean | Allow discharge during current period |
+| `battery_power_setpoint` | Float (W) | Target battery power |
+| `battery_min_soc_target` | Float (%) | Overnight SOC reserve |
+
+### Wallbox Control
+
+| Signal | Type | Description |
+|--------|------|-------------|
+| `ev_charging_enabled` | Boolean | Enable/disable charging |
+| `ev_power_limit` | Float (W) | Maximum charging power |
+| `ev_phases` | Integer | Number of phases to use |
+
+### Dishwasher Control
+
+| Signal | Type | Description |
+|--------|------|-------------|
+| `dishwasher_start_recommended` | Boolean | Should start now |
+| `dishwasher_optimal_start` | Time | Recommended start time |
+
+## 4.9 Planned Dependencies
+
+```
+pandas>=2.0.0              # Data manipulation
+numpy>=1.24.0              # Numerical computing
+influxdb-client>=1.36.0    # InfluxDB client
+scipy>=1.10.0              # Optimization
+cvxpy>=1.3.0               # Convex optimization (optional)
+highspy>=1.5.0             # HiGHS MIP solver
+APScheduler>=3.10.0        # Task scheduling
+```
+
+## 4.10 Implementation Roadmap
+
+### Phase 1: Basic Battery Control
+- Read PV and load forecasts
+- Simple rule-based battery control
+- Night discharge blocking
+- InfluxDB logging of decisions
+
+### Phase 2: MPC Optimization
+- Linear programming formulation
+- Rolling horizon optimization
+- Cost minimization objective
+- SOC and power constraints
+
+### Phase 3: EV Integration
+- EV connection status detection
+- Departure time and target SOC
+- Coordinated battery/EV optimization
+
+### Phase 4: Advanced Features
+- Robust optimization with uncertainty
+- Dishwasher scheduling
+- Grid peak shaving
+- Dynamic tariff integration
+
+## 4.11 Integration with Home Assistant
+
+### Input Entities
+
+```yaml
+# Required sensors
+sensor.battery_state_of_capacity     # Battery SOC (%)
+sensor.battery_charge_discharge_power # Battery power (W)
+sensor.power_meter_active_power      # Grid power (W)
+
+# Optional for EV
+binary_sensor.ev_connected           # EV plug status
+sensor.ev_battery_level              # EV SOC (%)
+```
+
+### Output Entities
+
+```yaml
+# Battery control
+number.battery_maximum_discharging_power  # Limit discharge
+number.battery_end_of_discharge_soc       # Min SOC limit
+switch.battery_discharge_enabled          # Custom switch
+
+# Wallbox control
+number.wallbox_current_limit              # Charging current
+switch.wallbox_charging                   # Enable/disable
+```
+
+### Automation Example
+
+```yaml
+automation:
+  - alias: "Apply EnergyOptimizer Battery Setpoint"
+    trigger:
+      - platform: state
+        entity_id: sensor.energyoptimizer_battery_discharge_allowed
+    action:
+      - service: number.set_value
+        target:
+          entity_id: number.battery_maximum_discharging_power
+        data:
+          value: >
+            {% if states('sensor.energyoptimizer_battery_discharge_allowed') == 'on' %}
+              5000
+            {% else %}
+              0
+            {% endif %}
 ```
 
 ---
 
-## 17. Home Assistant
+# Appendix A: Installation Guide
 
-Home Assistant serves as the central hub for device integration, data collection, and visualization.
-This chapter describes the dashboard configurations for monitoring the energy system.
+## A.1 Prerequisites
 
-### 17.1 Energy Dashboard
+- Home Assistant OS or Supervised installation
+- InfluxDB 2.x with buckets configured
+- Network access to MeteoSwiss API
 
-The built-in HA Energy Dashboard provides historical energy tracking with daily, weekly, and monthly views.
-It requires sensors with specific attributes for proper statistics calculation.
+## A.2 Add Repository
 
-#### 17.1.1 Requirements
+1. Navigate to **Settings** → **Add-ons** → **Add-on Store**
+2. Click **⋮** → **Repositories**
+3. Add: `https://github.com/SensorsIot/Energy-Management`
 
-Sensors must have:
-- `state_class: total_increasing` (handles meter resets correctly)
-- `device_class: energy`
-- `unit_of_measurement: kWh`
+## A.3 Install Add-ons
 
-#### 17.1.2 Customizations
+1. Find each add-on in the store
+2. Click **Install**
+3. Configure options in the **Configuration** tab
+4. Start the add-on
 
-Some sensors require state_class override via `/config/customize.yaml`:
+## A.4 InfluxDB Setup
 
-```yaml
-# Energy sensor state_class fixes for HA Energy Dashboard compatibility
-sensor.enphase_energy_total:
-  state_class: total_increasing
+Create required buckets:
 
-sensor.inverter_total_yield:
-  state_class: total_increasing
+```bash
+influx bucket create --name pv_forecast --retention 30d
+influx bucket create --name load_forecast --retention 30d
 ```
 
-Configuration reference in `/config/configuration.yaml`:
-```yaml
-homeassistant:
-  customize: !include customize.yaml
+## A.5 Verify Operation
+
+Check add-on logs:
+```
+Settings → Add-ons → [Add-on Name] → Log
 ```
 
-#### 17.1.3 Current Configuration
-
-The Energy Dashboard is configured in `/config/.storage/energy`:
-
-| Category | Sensor | Price (2026) |
-|----------|--------|--------------|
-| **Grid import** | `sensor.power_meter_consumption` | 0.2962 CHF/kWh |
-| **Grid export** | `sensor.power_meter_exported` | 0.2252 CHF/kWh |
-| **Solar (Huawei)** | `sensor.inverter_total_yield` | - |
-| **Solar (Enphase)** | `sensor.enphase_energy_total` | - |
-| **Battery charge** | `sensor.battery_day_charge` | - |
-| **Battery discharge** | `sensor.battery_day_discharge` | - |
-
-**Solar Forecast:** No external forecast services (e.g., Forecast.Solar) are used.
-Solar forecasts are generated by the custom MeteoSwiss/pvlib system (see Chapter 6).
-
-#### 17.1.4 Individual Devices
-
-For detailed consumption tracking, add individual device sensors:
-- `sensor.phase_1_energy` / `phase_2_energy` / `phase_3_energy` (Shelly 3EM per-phase)
-- `sensor.evcc_stat_total_charged_kwh` (EV total charged)
-
-### 17.2 Power Flow Dashboard
-
-Real-time power visualization using custom Lovelace cards.
-
-#### 17.2.1 Installed Cards (via HACS)
-
-| Card | Purpose |
-|------|---------|
-| `power-flow-card-plus` | Animated power flow diagram |
-| `apexcharts-card` | Custom power/energy graphs |
-
-#### 17.2.2 Power Flow Card Plus Configuration
-
-Recommended configuration for the system:
-
-```yaml
-type: custom:power-flow-card-plus
-entities:
-  grid:
-    entity: sensor.power_meter_active_power
-    invert_state: true  # negative = export
-  solar:
-    entity: sensor.solar_pv_total_ac_power
-    display_zero_state: true
-  battery:
-    entity: sensor.battery_charge_discharge_power
-    state_of_charge: sensor.battery_state_of_capacity
-  home:
-    entity: sensor.load_power
-  individual:
-    - entity: sensor.evcc_actec_charge_power
-      name: EV
-      icon: mdi:car-electric
-    - entity: sensor.enphase_energy_power
-      name: Enphase
-      icon: mdi:solar-panel
-watt_threshold: 50
-display_zero_lines:
-  mode: show
+Query InfluxDB:
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> limit(n: 10)
 ```
-
-#### 17.2.3 Power Flow Visualization
-
-```
-                    ┌─────────┐
-                    │  Solar  │
-                    │ (total) │
-                    └────┬────┘
-                         │
-         ┌───────────────┼───────────────┐
-         │               │               │
-         ▼               ▼               ▼
-    ┌─────────┐    ┌─────────┐    ┌─────────┐
-    │  Grid   │◄──►│  Home   │◄──►│ Battery │
-    │         │    │  Load   │    │  (SOC)  │
-    └─────────┘    └────┬────┘    └─────────┘
-                        │
-              ┌─────────┴─────────┐
-              │                   │
-         ┌────▼────┐         ┌────▼────┐
-         │   EV    │         │ Enphase │
-         │Wallbox  │         │  (PV)   │
-         └─────────┘         └─────────┘
-```
-
-**Flow direction indicators:**
-- Arrow animation shows power flow direction
-- Colors indicate import (red) vs export (green) vs self-consumption (yellow)
-- SOC percentage displayed on battery icon
-
-#### 17.2.4 Entity Summary for Dashboards
-
-| Entity | Type | Unit | Dashboard Use |
-|--------|------|------|---------------|
-| `sensor.power_meter_active_power` | Power | W | Grid flow (neg=export) |
-| `sensor.solar_pv_total_ac_power` | Power | W | Solar production |
-| `sensor.battery_charge_discharge_power` | Power | W | Battery flow |
-| `sensor.battery_state_of_capacity` | State | % | Battery SOC |
-| `sensor.load_power` | Power | W | Home consumption |
-| `sensor.evcc_actec_charge_power` | Power | kW | EV charging |
-| `sensor.enphase_energy_power` | Power | W | Enphase solar |
 
 ---
 
-## 18. SwissSolarForecast Home Assistant Add-on
+# Appendix B: Grafana Dashboard
 
-### 18.1 Overview
-
-The SwissSolarForecast add-on is a Home Assistant add-on that automates PV power forecasting
-using MeteoSwiss ICON ensemble data and pvlib. It runs as a containerized service with
-internal scheduling.
-
-**Key Features:**
-- Fetches ICON-CH1 (33h) and ICON-CH2 (120h) ensemble data from MeteoSwiss STAC API
-- Calculates P10/P50/P90 probabilistic forecasts using pvlib
-- Writes energy balance to InfluxDB at 15-minute resolution
-- Queries load forecast and calculates net (surplus/deficit)
-- All values guaranteed to have identical timestamps for MPC alignment
-
-### 18.2 Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    SwissSolarForecast Add-on                         │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  FETCHER (scheduled: CH1 every 3h, CH2 every 6h)                    │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │ MeteoSwiss STAC API  ───▶  GRIB files (local /share/data)    │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│                                      │                               │
-│                                      │ (files on disk)               │
-│                                      ▼                               │
-│  CALCULATOR (scheduled: every 15 min)                                │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │ GRIB files ───▶ pvlib ───▶ PV forecast ───┐                  │   │
-│  │ Load forecast query ─────────────────────►├──▶ InfluxDB      │   │
-│  │ Net calculation (PV - Load) ─────────────►┘                  │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### 18.3 Installation
-
-**Local Add-on (tested):**
-1. Copy add-on files to Home Assistant:
-   ```bash
-   mkdir -p /addons/swisssolarforecast
-   # Copy from development machine
-   scp -r /home/energymanagement/swisssolarforecast/* root@<HA_IP>:/addons/swisssolarforecast/
-   ```
-2. In HA: **Settings** → **Add-ons** → **Add-on Store** → **⋮** → **Check for updates**
-3. Find "SwissSolarForecast" under **Local add-ons**
-4. Click **Install** (builds Docker image, ~2-3 min)
-5. Configure in **Configuration** tab (see 18.4)
-6. Click **Start**
-
-**Via GitHub Repository:**
-1. Add repository URL to HA Add-on Store
-2. Install "SwissSolarForecast" add-on
-3. Configure and start
-
-### 18.4 Configuration
-
-Configuration is stored in `/data/options.json` with optional YAML override in
-`/config/swisssolarforecast.yaml` for panels/plants.
-
-```yaml
-influxdb:
-  host: "192.168.0.203"
-  port: 8087
-  token: "your-influxdb-token"
-  org: "energymanagement"
-  bucket: "pv_forecast"
-  load_bucket: "load_forecast"  # Source for load forecast
-
-location:
-  latitude: 47.475
-  longitude: 7.767
-  altitude: 330
-  timezone: "Europe/Zurich"
-
-schedule:
-  ch1_cron: "30 2,5,8,11,14,17,20,23 * * *"  # UTC
-  ch2_cron: "45 2,8,14,20 * * *"              # UTC
-  calculator_interval_minutes: 15
-
-storage:
-  data_path: "/share/swisssolarforecast"
-  max_storage_gb: 3.0
-  cleanup_old_runs: true
-```
-
-### 18.5 InfluxDB Output Schema
-
-**Measurement:** `pv_forecast`
-
-**Resolution:** 15-minute intervals (aligned to :00, :15, :30, :45)
-
-**Per-inverter storage:** Separate points for each inverter and total.
-
-| Tag | Values | Description |
-|-----|--------|-------------|
-| `inverter` | `total`, `EastWest`, `South` | Inverter identifier |
-| `model` | `ch1`, `ch2`, `hybrid` | ICON model used |
-| `run_time` | ISO timestamp | When forecast was calculated |
-
-**Fields for `inverter="total"` (full energy balance):**
-
-| Field | Unit | Description |
-|-------|------|-------------|
-| `power_w_p10` | W | PV power (pessimistic) |
-| `power_w_p50` | W | PV power (expected) |
-| `power_w_p90` | W | PV power (optimistic) |
-| `energy_wh_p10` | Wh | Cumulative PV energy (pessimistic) |
-| `energy_wh_p50` | Wh | Cumulative PV energy (expected) |
-| `energy_wh_p90` | Wh | Cumulative PV energy (optimistic) |
-| `load_power_w` | W | Load/consumption power |
-| `load_energy_wh` | Wh | Cumulative load energy |
-| `net_power_w_p10` | W | Net = PV_p10 - Load |
-| `net_power_w_p50` | W | Net = PV_p50 - Load |
-| `net_power_w_p90` | W | Net = PV_p90 - Load |
-| `net_energy_wh_p10` | Wh | Cumulative net (pessimistic) |
-| `net_energy_wh_p50` | Wh | Cumulative net (expected) |
-| `net_energy_wh_p90` | Wh | Cumulative net (optimistic) |
-| `ghi` | W/m² | Global horizontal irradiance |
-| `temp_air` | °C | Air temperature |
-
-**Fields for `inverter="EastWest"` or `inverter="South"` (per-inverter):**
-
-| Field | Unit | Description |
-|-------|------|-------------|
-| `power_w_p10` | W | Inverter power (pessimistic) |
-| `power_w_p50` | W | Inverter power (expected) |
-| `power_w_p90` | W | Inverter power (optimistic) |
-
-**Inverter Configuration:**
-
-| Inverter | Panels | DC Power | Max AC |
-|----------|--------|----------|--------|
-| EastWest | 8× East + 9× West (AE455) | 7,735 W | 10,000 W |
-| South | 3× Front + 2× Back (Generic400) | 2,000 W | 1,500 W |
-| **Total** | 22 panels | 9,735 W | 11,500 W |
-
-### 18.6 Grafana Visualization
-
-**PV Power Forecast with uncertainty band (total):**
-```flux
-from(bucket: "pv_forecast")
-  |> range(start: now(), stop: 48h)
-  |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r.inverter == "total")
-  |> filter(fn: (r) => r._field == "power_w_p10" or r._field == "power_w_p50" or r._field == "power_w_p90")
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-```
-
-**Per-inverter comparison (EastWest vs South):**
-```flux
-from(bucket: "pv_forecast")
-  |> range(start: now(), stop: 48h)
-  |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r._field == "power_w_p50")
-  |> pivot(rowKey: ["_time"], columnKey: ["inverter"], valueColumn: "_value")
-```
-
-**Single inverter with uncertainty band:**
-```flux
-from(bucket: "pv_forecast")
-  |> range(start: now(), stop: 48h)
-  |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r.inverter == "South")  // or "EastWest"
-  |> filter(fn: (r) => r._field == "power_w_p10" or r._field == "power_w_p50" or r._field == "power_w_p90")
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-```
-
-**Net Power (surplus/deficit):**
-```flux
-from(bucket: "pv_forecast")
-  |> range(start: now(), stop: 48h)
-  |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r._field == "net_power_w_p50")
-```
-
-**Energy Balance (PV vs Load):**
-```flux
-from(bucket: "pv_forecast")
-  |> range(start: now(), stop: 48h)
-  |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r._field == "energy_wh_p50" or r._field == "load_energy_wh" or r._field == "net_energy_wh_p50")
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-```
-
-**Forecast vs Actual:**
-```flux
-forecast = from(bucket: "pv_forecast")
-  |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r.inverter == "total")
-  |> filter(fn: (r) => r._field == "power_w_p50")
-
-actual = from(bucket: "EnergyV1")
-  |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r._field == "solar_ac_total_power")
-
-union(tables: [forecast, actual])
-```
-
-### 18.7 MPC Integration
-
-The MPC optimizer queries the `pv_forecast` bucket to get aligned PV and load forecasts:
-
-```flux
-// Get next 24h energy balance for MPC
-from(bucket: "pv_forecast")
-  |> range(start: now(), stop: 24h)
-  |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r.inverter == "total")
-  |> filter(fn: (r) =>
-       r._field == "power_w_p50" or
-       r._field == "load_power_w" or
-       r._field == "net_power_w_p50")
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-```
-
-**Key guarantees:**
-- All fields in a single point share the exact same timestamp
-- 15-minute resolution matches MPC timestep
-- Net values pre-calculated for direct use
-
-### 18.8 Directory Structure
-
-```
-/home/energymanagement/swisssolarforecast/
-├── config.yaml                    # Add-on metadata and options schema
-├── build.yaml                     # HA base image specification (Debian)
-├── Dockerfile                     # Debian-based container with eccodes
-├── run.py                         # Main entry point
-├── requirements.txt               # Python dependencies
-├── config_pv.yaml                 # PV system configuration
-├── DOCS.md                        # User documentation
-├── CHANGELOG.md                   # Version history
-├── grafana-forecast-dashboard.json  # Importable Grafana dashboard
-├── test_pipeline.py               # Standalone pipeline test
-├── translations/
-│   └── en.yaml                    # English translations
-└── src/                           # Core modules
-    ├── config.py                  # Configuration loader
-    ├── grib_parser.py             # GRIB file handling
-    ├── icon_fetcher.py            # MeteoSwiss STAC API client
-    ├── pv_model.py                # pvlib power calculations
-    ├── influxdb_writer.py         # InfluxDB forecast writer
-    └── scheduler.py               # APScheduler-based scheduler
-```
-
-### 18.9 Grafana Dashboard
-
-A pre-built Grafana dashboard is available at `grafana-forecast-dashboard.json`.
+A pre-built Grafana dashboard is available at:
+`/home/energymanagement/swisssolarforecast/grafana-forecast-dashboard.json`
 
 **Import:**
 1. Grafana → **Dashboards** → **New** → **Import**
-2. Upload JSON file or paste contents
-3. Select InfluxDB-V2 datasource
-4. Dashboard URL: `http://192.168.0.203:3000/d/cf9druxb33yf4e/forecast`
+2. Upload JSON file
+3. Select InfluxDB datasource
 
-**Panels included:**
+**Panels:**
 - PV Power Forecast (P10/P50/P90 bands)
-- Net Power (surplus/deficit)
-- Cumulative Energy (PV vs Load vs Net)
+- Load Forecast (P10/P50/P90 bands)
+- Net Power (Surplus/Deficit)
+- Cumulative Energy
 - Weather (GHI, Temperature)
-- Load Power
-- All Values Table
-- Stats (Today's energy, Peak power, Temperature)
+- Statistics Table
 
-### 18.10 Troubleshooting
+---
 
-**No forecast data:**
+# Appendix C: Troubleshooting
+
+## C.1 No Forecast Data
+
+**Check GRIB downloads:**
 ```bash
 ls -la /share/swisssolarforecast/icon-ch1/
 ls -la /share/swisssolarforecast/icon-ch2/
 ```
 
-**InfluxDB connection failed:**
+**Check add-on logs for errors:**
+```
+Settings → Add-ons → SwissSolarForecast → Log
+```
+
+## C.2 InfluxDB Connection Failed
+
+**Test connection:**
 ```bash
 curl -H "Authorization: Token YOUR_TOKEN" \
   http://192.168.0.203:8087/api/v2/buckets
 ```
 
-**Check add-on logs:**
+**Verify credentials in add-on configuration.**
+
+## C.3 Load Forecast Empty
+
+**Check historical data exists:**
+```flux
+from(bucket: "HomeAssistant")
+  |> range(start: -7d)
+  |> filter(fn: (r) => r.entity_id == "load_power")
+  |> count()
 ```
-Settings > Add-ons > SwissSolarForecast > Log
-```
+
+**Verify entity_id matches your sensor.**
 
 ---
 
-**End of document**
+**End of Document**
+
+*Version 2.0 - January 2026*
