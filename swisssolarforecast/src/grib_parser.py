@@ -534,6 +534,7 @@ def extract_ensemble_weather(
 
     # Group files by member and then by time/variable
     data_by_member = {}
+    reference_time = None  # Track model run time for de-accumulation
     parse_errors = 0
     read_errors = 0
 
@@ -558,6 +559,10 @@ def extract_ensemble_weather(
                 var = file_meta.get('variable', 'unknown')
                 if var == 'unknown':
                     continue
+
+            # Capture reference time for de-accumulation
+            if reference_time is None and result.get('reference_time') is not None:
+                reference_time = result['reference_time']
 
             if 0 not in data_by_member:
                 data_by_member[0] = {}
@@ -649,9 +654,15 @@ def extract_ensemble_weather(
         # Map to standard PV variable names
         weather = pd.DataFrame(index=df.index)
 
-        # Calculate hours array once for de-accumulation
-        first_time = df.index[0]
-        hours = np.array([(t - first_time).total_seconds() / 3600 for t in df.index])
+        # Calculate forecast hours from model reference time for de-accumulation
+        # ICON radiation (asob_s) is running average from hour 0, so we need actual forecast hours
+        if reference_time is not None:
+            hours = np.array([(t - reference_time).total_seconds() / 3600 for t in df.index])
+        else:
+            # Fallback: assume hourly data starting at hour 1
+            hours = np.arange(1, len(df) + 1, dtype=float)
+
+        logger.debug(f"Member {member}: forecast hours range {hours[0]:.0f} to {hours[-1]:.0f}")
 
         # De-accumulate radiation variables (running averages -> hourly)
         if 'asob_s' in df.columns:
