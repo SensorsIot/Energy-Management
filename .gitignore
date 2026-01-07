@@ -9,6 +9,7 @@ copilot.md
 .secrets/
 *.env
 .env*
+testdata/options.json
 
 # Python
 .venv/
