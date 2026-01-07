@@ -1,0 +1,8 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# ==============================================================================
+# Start EnergyManager service
+# ==============================================================================
+bashio::log.info "Starting EnergyManager..."
+
+exec python3 /app/run.py

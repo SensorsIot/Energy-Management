@@ -21,6 +21,9 @@ RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 COPY src/ /app/src/
 COPY run.py /app/
 
+# Copy s6-overlay service definition
+COPY rootfs /
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 
@@ -31,6 +34,3 @@ LABEL \
     io.hass.arch="aarch64|amd64|armv7" \
     io.hass.type="addon" \
     io.hass.version="1.0.0"
-
-# Run the application
-CMD ["python3", "/app/run.py"]
