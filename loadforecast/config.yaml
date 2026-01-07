@@ -2,7 +2,7 @@ name: "LoadForecast"
 version: "1.0.1"
 slug: "loadforecast"
 description: "Statistical load forecast using historical consumption data"
-url: "https://github.com/spiessa/energymanagement"
+url: "https://github.com/SensorsIot/Energy-Management"
 arch:
   - aarch64
   - amd64
