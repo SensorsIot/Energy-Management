@@ -23,6 +23,7 @@ from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
 from src.appliance_signal import calculate_appliance_signal
 from src.influxdb_writer import SimulationWriter
+from src.notifications import init_telegram, notify_error
 
 # Swiss timezone for display
 SWISS_TZ = ZoneInfo("Europe/Zurich")
@@ -139,6 +140,13 @@ class EnergyManager:
             token=influx_token,
             org=influx_opts.get("org", "energymanagement"),
             bucket=self.output_bucket,
+        )
+
+        # Initialize Telegram notifications
+        telegram_opts = options.get("telegram", {})
+        init_telegram(
+            bot_token=telegram_opts.get("bot_token", ""),
+            chat_id=telegram_opts.get("chat_id", ""),
         )
 
     def connect(self):
@@ -258,15 +266,32 @@ class EnergyManager:
             logger.warning("No HA token, cannot control battery")
             return
 
-        try:
-            # Set max discharge power: 5000W if allowed, 0W if blocked
-            value = 5000 if discharge_allowed else 0
-            success = self.ha_client.set_number(self.discharge_control_entity, value)
-            if success:
-                self.last_discharge_allowed = discharge_allowed
-                logger.info(f"Battery control: {self.discharge_control_entity} = {value}W")
-        except Exception as e:
-            logger.error(f"Failed to control battery: {e}")
+        # Set max discharge power: 5000W if allowed, 0W if blocked
+        value = 5000 if discharge_allowed else 0
+        action = "enable" if discharge_allowed else "block"
+
+        success, error_msg = self.ha_client.set_battery_discharge_power(
+            self.discharge_control_entity,
+            value,
+            max_retries=5,
+        )
+
+        if success:
+            self.last_discharge_allowed = discharge_allowed
+            logger.info(f"Battery control: {self.discharge_control_entity} = {value}W")
+        else:
+            # All retries failed - send Telegram notification
+            logger.error(f"Failed to {action} battery discharge after 5 attempts")
+            notify_error(
+                title="Battery Control Failed",
+                message=(
+                    f"Failed to {action} battery discharge after 5 attempts.\n\n"
+                    f"Entity: {self.discharge_control_entity}\n"
+                    f"Target value: {value}W\n"
+                    f"Error: {error_msg}\n\n"
+                    f"The battery may not be in the expected state!"
+                ),
+            )
 
     def run_optimization(self):
         """Run battery optimization cycle."""

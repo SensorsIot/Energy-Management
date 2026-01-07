@@ -1,5 +1,5 @@
 name: "EnergyManager"
-version: "1.1.8"
+version: "1.1.9"
 slug: "energymanager"
 description: "Energy optimization using PV and load forecasts"
 url: "https://github.com/SensorsIot/Energy-Management"
@@ -65,6 +65,10 @@ options:
   schedule:
     update_interval_minutes: 15
 
+  telegram:
+    bot_token: ""
+    chat_id: ""
+
   log_level: "info"
 
 schema:
@@ -111,5 +115,9 @@ schema:
 
   schedule:
     update_interval_minutes: int
+
+  telegram:
+    bot_token: str?
+    chat_id: str?
 
   log_level: "list(debug|info|warning|error)"
