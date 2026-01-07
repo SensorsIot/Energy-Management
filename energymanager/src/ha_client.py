@@ -64,7 +64,7 @@ class HAClient:
         try:
             url = self._api_url(f"/states/{entity_id}")
             logger.debug(f"GET {url}")
-            response = requests.get(url, headers=self._headers(), timeout=10)
+            response = requests.get(url, headers=self._headers(), timeout=30)
             response.raise_for_status()
             return response.json()
         except Exception as e:
@@ -108,7 +108,7 @@ class HAClient:
             }
             logger.debug(f"POST {url} with {data}")
             response = requests.post(
-                url, headers=self._headers(), json=data, timeout=10
+                url, headers=self._headers(), json=data, timeout=30
             )
             response.raise_for_status()
             logger.info(f"Set {entity_id} to {value}")
