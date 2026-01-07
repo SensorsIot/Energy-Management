@@ -55,7 +55,7 @@ The system consists of three Home Assistant add-ons that work together:
 |--------|---------|---------|------------------|
 | **SwissSolarForecast** | 1.0.2 | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
 | **LoadForecast** | 1.0.1 | Statistical load consumption forecasting | Every hour |
-| **EnergyManager** | 1.1.8 | Battery/EV/appliance optimization signals | Every 15 min |
+| **EnergyManager** | 1.1.9 | Battery/EV/appliance optimization signals | Every 15 min |
 
 ## 1.4 Data Flow
 
@@ -616,6 +616,8 @@ The following table lists ALL parameters used in code, indicating whether each i
 | `ev_charging.min_power_w` | 4100 | User | Min EV charging power |
 | `ev_charging.max_power_w` | 11000 | User | Max EV charging power |
 | `schedule.update_interval_minutes` | 15 | Fixed | Optimization cycle interval |
+| `telegram.bot_token` | "" | User | Telegram bot token for error alerts |
+| `telegram.chat_id` | "" | User | Telegram chat ID for error alerts |
 | `log_level` | info | Default | Logging level |
 
 #### Parameter Summary by Category
@@ -628,6 +630,7 @@ The following table lists ALL parameters used in code, indicating whether each i
 | **Battery** | capacity, max_power, entities | charge/discharge_efficiency | - |
 | **Tariff** | All (depends on utility) | - | - |
 | **Appliances/EV** | power, energy values | - | - |
+| **Telegram** | bot_token, chat_id (optional) | - | - |
 | **Schedules** | - | cron expressions | MeteoSwiss fetch times |
 | **Forecast** | - | history_days, horizon_hours | update_interval |
 
@@ -1608,6 +1611,82 @@ cards:
     icon_color: >
       {{ 'green' if is_state('binary_sensor.battery_discharge_allowed', 'on') else 'orange' }}
 ```
+
+---
+
+## 4.9 Error Handling and Notifications
+
+### 4.9.1 Battery Control Retry Logic
+
+When controlling the battery via Home Assistant, the system implements retry logic to handle transient communication failures:
+
+**Retry Configuration:**
+- Maximum attempts: 5
+- Delay between retries: 2 seconds
+- Timeout per attempt: 30 seconds
+
+**Error Types Handled:**
+| Error Type | Behavior |
+|------------|----------|
+| Timeout | Retry after delay |
+| Connection Error | Retry after delay |
+| HTTP Error | Retry after delay |
+| No HA Token | Fail immediately (no retry) |
+
+### 4.9.2 Telegram Notifications
+
+If all retry attempts fail, a Telegram notification is sent to alert the user.
+
+**Configuration (in user YAML):**
+```yaml
+telegram:
+  bot_token: "your-bot-token-from-botfather"
+  chat_id: "your-chat-id"
+```
+
+**Notification Content:**
+```
+Error: Battery Control Failed
+
+Failed to [enable/block] battery discharge after 5 attempts.
+
+Entity: number.battery_maximum_discharging_power
+Target value: [0/5000]W
+Error: [error details]
+
+The battery may not be in the expected state!
+```
+
+### 4.9.3 Error Flow
+
+```
+control_battery(discharge_allowed)
+    │
+    ├── Attempt 1 → Fail → Wait 2s
+    ├── Attempt 2 → Fail → Wait 2s
+    ├── Attempt 3 → Fail → Wait 2s
+    ├── Attempt 4 → Fail → Wait 2s
+    └── Attempt 5 → Fail
+           │
+           ▼
+    Send Telegram Error Notification
+    Log error
+    (last_discharge_allowed unchanged - will retry next cycle)
+```
+
+### 4.9.4 Underlying Communication Chain
+
+The battery control command passes through multiple layers:
+
+```
+EnergyManager → HA REST API → Huawei Solar Integration → Modbus TCP → Inverter
+```
+
+Each layer has its own error handling:
+- **HA REST API**: 30s timeout, 5 retries (our code)
+- **Huawei Solar Integration**: Login verification, permission handling
+- **huawei-solar-lib**: 10s timeout, 3 retries with exponential backoff
+- **Modbus TCP**: pymodbus connection handling
 
 ---
 

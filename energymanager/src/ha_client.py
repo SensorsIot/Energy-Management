@@ -101,33 +101,66 @@ class HAClient:
             logger.error(f"Failed to parse state for {entity_id}: {e}")
             return None
 
-    def set_number(self, entity_id: str, value: float) -> bool:
+    def set_number(
+        self,
+        entity_id: str,
+        value: float,
+        max_retries: int = 5,
+        retry_delay: float = 2.0,
+    ) -> tuple[bool, str]:
         """
-        Set a number entity value.
+        Set a number entity value with retry logic.
+
+        Args:
+            entity_id: The entity to set
+            value: The value to set
+            max_retries: Maximum number of attempts (default: 5)
+            retry_delay: Delay between retries in seconds (default: 2.0)
 
         Returns:
-            True on success, False on error
+            Tuple of (success: bool, error_message: str)
+            error_message is empty on success
         """
-        if not self.token:
-            logger.warning("No token available for set_number")
-            return False
+        import time
 
-        try:
-            url = self._api_url("/services/number/set_value")
-            data = {
-                "entity_id": entity_id,
-                "value": value,
-            }
-            logger.debug(f"POST {url} with {data}")
-            response = requests.post(
-                url, headers=self._headers(), json=data, timeout=30
-            )
-            response.raise_for_status()
-            logger.info(f"Set {entity_id} to {value}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to set {entity_id}: {e}")
-            return False
+        if not self.token:
+            return False, "No HA token available"
+
+        url = self._api_url("/services/number/set_value")
+        data = {
+            "entity_id": entity_id,
+            "value": value,
+        }
+
+        last_error = ""
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.debug(f"POST {url} with {data} (attempt {attempt}/{max_retries})")
+                response = requests.post(
+                    url, headers=self._headers(), json=data, timeout=30
+                )
+                response.raise_for_status()
+                logger.info(f"Set {entity_id} to {value}")
+                return True, ""
+            except requests.Timeout as e:
+                last_error = f"Timeout after 30s (attempt {attempt})"
+                logger.warning(f"Attempt {attempt}/{max_retries}: {last_error}")
+            except requests.ConnectionError as e:
+                last_error = f"Connection error: {e} (attempt {attempt})"
+                logger.warning(f"Attempt {attempt}/{max_retries}: {last_error}")
+            except requests.HTTPError as e:
+                last_error = f"HTTP error {e.response.status_code}: {e} (attempt {attempt})"
+                logger.warning(f"Attempt {attempt}/{max_retries}: {last_error}")
+            except Exception as e:
+                last_error = f"Unexpected error: {e} (attempt {attempt})"
+                logger.warning(f"Attempt {attempt}/{max_retries}: {last_error}")
+
+            if attempt < max_retries:
+                logger.info(f"Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+
+        logger.error(f"Failed to set {entity_id} after {max_retries} attempts: {last_error}")
+        return False, last_error
 
     def get_battery_soc(self, entity_id: str = "sensor.battery_state_of_capacity") -> Optional[float]:
         """
@@ -145,15 +178,20 @@ class HAClient:
         self,
         entity_id: str,
         power_w: float,
-    ) -> bool:
+        max_retries: int = 5,
+    ) -> tuple[bool, str]:
         """
-        Set maximum battery discharge power.
+        Set maximum battery discharge power with retry logic.
 
         Args:
             entity_id: The number entity to control
             power_w: Maximum discharge power in watts (0 = block discharge)
+            max_retries: Maximum number of attempts
+
+        Returns:
+            Tuple of (success: bool, error_message: str)
         """
-        return self.set_number(entity_id, power_w)
+        return self.set_number(entity_id, power_w, max_retries=max_retries)
 
     def set_sensor_state(
         self,
