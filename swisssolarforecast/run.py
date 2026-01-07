@@ -222,19 +222,30 @@ class SwissSolarForecast:
         logger.info("SwissSolarForecast add-on stopped")
 
 
-def load_options() -> Dict:
-    """Load add-on options from /data/options.json."""
-    options_path = Path("/data/options.json")
+def deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge override into base dict."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
+
+def load_options() -> Dict:
+    """Load add-on options from user config file and/or HA options."""
+    # Load base options from HA Supervisor
+    options_path = Path("/data/options.json")
     if options_path.exists():
-        logger.info("Loading options from /data/options.json")
+        logger.info("Loading base options from /data/options.json")
         with open(options_path) as f:
             options = json.load(f)
     else:
         logger.warning("No options.json found, using defaults")
         options = {}
 
-    # Try to load YAML config for panels/plants
+    # Load user config file (deep merge on top of base options)
     yaml_paths = [
         Path("/config/swisssolarforecast.yaml"),
         Path("/share/swisssolarforecast/config.yaml"),
@@ -242,14 +253,10 @@ def load_options() -> Dict:
 
     for yaml_path in yaml_paths:
         if yaml_path.exists():
-            logger.info(f"Loading PV config from {yaml_path}")
+            logger.info(f"Loading user config from {yaml_path}")
             with open(yaml_path) as f:
-                yaml_config = yaml.safe_load(f)
-            if yaml_config:
-                if "panels" in yaml_config:
-                    options["panels"] = yaml_config["panels"]
-                if "plants" in yaml_config:
-                    options["plants"] = yaml_config["plants"]
+                yaml_config = yaml.safe_load(f) or {}
+            options = deep_merge(options, yaml_config)
             break
 
     return options
