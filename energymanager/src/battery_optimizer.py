@@ -171,7 +171,8 @@ class BatteryOptimizer:
                     hour=self.cheap_end_hour,
                     minute=self.cheap_end_minute
                 )
-                target = today.replace(hour=21, minute=0)
+                # Target is tomorrow 21:00 (end of next expensive period)
+                target = (today + timedelta(days=1)).replace(hour=21, minute=0)
                 is_cheap_now = False
 
         return TariffPeriod(
@@ -283,16 +284,38 @@ class BatteryOptimizer:
                 pd.DataFrame(),
             )
 
-        # Step 1: Simulate with battery always ON (full forecast period)
-        sim_always_on = self.simulate_soc(soc_percent, forecast)
-
-        # Get unclamped SOC at target time
-        forecast_at_target = sim_always_on[sim_always_on.index <= tariff.target]
-        if forecast_at_target.empty:
-            soc_at_target = soc_percent / 100 * self.capacity_wh
+        # Step 1: Calculate SOC at cheap_start (21:00 tonight)
+        # First simulate from now until cheap_start to get starting SOC
+        forecast_until_cheap = forecast[forecast.index < tariff.cheap_start]
+        if not forecast_until_cheap.empty:
+            sim_until_cheap = self.simulate_soc(soc_percent, forecast_until_cheap)
+            soc_at_cheap_start = sim_until_cheap["soc_percent"].iloc[-1]
         else:
-            soc_at_target = forecast_at_target["soc_wh_unclamped"].iloc[-1]
+            soc_at_cheap_start = soc_percent
 
+        logger.info(f"SOC at cheap start ({tariff.cheap_start.strftime('%H:%M')}): {soc_at_cheap_start:.1f}%")
+
+        # Step 2: Get forecast from cheap_start (21:00) to target (tomorrow 21:00)
+        forecast_from_cheap = forecast[forecast.index >= tariff.cheap_start]
+        if forecast_from_cheap.empty:
+            logger.warning("No forecast data from cheap start to target")
+            return (
+                DischargeDecision(
+                    discharge_allowed=True,
+                    switch_on_time=None,
+                    reason="No forecast data for simulation period",
+                    deficit_wh=0,
+                    saved_wh=0,
+                ),
+                pd.DataFrame(),
+                pd.DataFrame(),
+            )
+
+        # Step 3: Simulate with battery always ON from 21:00 to tomorrow 21:00
+        sim_always_on = self.simulate_soc(soc_at_cheap_start, forecast_from_cheap)
+
+        # Get unclamped SOC at target time (tomorrow 21:00)
+        soc_at_target = sim_always_on["soc_wh_unclamped"].iloc[-1]
         deficit_wh = max(0, -soc_at_target)
 
         logger.info(f"SOC at target (unclamped): {soc_at_target:.0f} Wh, "
@@ -312,12 +335,9 @@ class BatteryOptimizer:
                 sim_always_on,
             )
 
-        # Step 3: Calculate when to switch ON by accumulating savings during cheap period
-        # Use cheap_start from tariff (tonight's 21:00 if currently expensive)
-        block_start = tariff.cheap_start if tariff.is_cheap_now else tariff.target
-
+        # Step 4: Calculate when to switch ON by accumulating savings during cheap period
         forecast_cheap = sim_always_on[
-            (sim_always_on.index >= block_start) &
+            (sim_always_on.index >= tariff.cheap_start) &
             (sim_always_on.index < tariff.cheap_end)
         ]
 
@@ -334,10 +354,10 @@ class BatteryOptimizer:
 
         logger.info(f"Saved {saved_wh:.0f} Wh, switch ON at {switch_on_time}")
 
-        # Step 4: Simulate with strategy (block from cheap start until switch_on_time)
+        # Step 5: Simulate with strategy (block from cheap start until switch_on_time)
         sim_with_strategy = self.simulate_soc(
-            soc_percent,
-            forecast,
+            soc_at_cheap_start,
+            forecast_from_cheap,
             block_until=switch_on_time
         )
 
