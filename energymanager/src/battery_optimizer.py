@@ -186,6 +186,7 @@ class BatteryOptimizer:
         self,
         soc_percent: float,
         forecast: pd.DataFrame,
+        block_from: Optional[datetime] = None,
         block_until: Optional[datetime] = None,
     ) -> pd.DataFrame:
         """
@@ -194,6 +195,7 @@ class BatteryOptimizer:
         Args:
             soc_percent: Starting SOC (0-100)
             forecast: DataFrame with net_energy_wh column
+            block_from: Start blocking from this time (None = from start)
             block_until: Block discharge until this time (None = no blocking)
 
         Returns:
@@ -205,7 +207,13 @@ class BatteryOptimizer:
 
         for t, row in forecast.iterrows():
             net_wh = row["net_energy_wh"]
-            discharge_blocked = block_until and t < block_until
+            # Block only in the specified time window
+            in_block_window = (
+                block_until and
+                (block_from is None or t >= block_from) and
+                t < block_until
+            )
+            discharge_blocked = in_block_window
 
             if net_wh > 0:
                 # Surplus: charge battery
@@ -339,10 +347,12 @@ class BatteryOptimizer:
 
         logger.info(f"Saved {saved_wh:.0f} Wh, switch ON at {switch_on_time}")
 
-        # Step 5: Simulate with strategy - full trajectory from NOW with blocking
+        # Step 5: Simulate with strategy - full trajectory from NOW
+        # Blocking only applies during cheap tariff (21:00 to switch_on_time)
         sim_full_with_strategy = self.simulate_soc(
             soc_percent,
             forecast,
+            block_from=tariff.cheap_start,
             block_until=switch_on_time
         )
 
