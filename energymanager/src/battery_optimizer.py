@@ -12,10 +12,21 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, List
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# Swiss timezone for display
+SWISS_TZ = ZoneInfo("Europe/Zurich")
+
+
+def swiss_time(dt: datetime) -> str:
+    """Format datetime as HH:MM in Swiss timezone."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(SWISS_TZ).strftime("%H:%M")
 
 
 @dataclass
@@ -305,7 +316,7 @@ class BatteryOptimizer:
         else:
             soc_at_cheap_start = soc_percent
 
-        logger.info(f"SOC at cheap start ({tariff.cheap_start.strftime('%H:%M')}): {soc_at_cheap_start:.1f}%")
+        logger.info(f"SOC at cheap start ({swiss_time(tariff.cheap_start)}): {soc_at_cheap_start:.1f}%")
 
         # Step 2: Get unclamped SOC at target time (tomorrow 21:00)
         soc_at_target = sim_full_no_strategy["soc_wh_unclamped"].iloc[-1]
@@ -345,7 +356,7 @@ class BatteryOptimizer:
                 switch_on_time = t
                 break
 
-        logger.info(f"Saved {saved_wh:.0f} Wh, switch ON at {switch_on_time}")
+        logger.info(f"Saved {saved_wh:.0f} Wh, switch ON at {swiss_time(switch_on_time)}")
 
         # Step 5: Simulate with strategy - full trajectory from NOW
         # Blocking only applies during cheap tariff (21:00 to switch_on_time)
@@ -361,7 +372,7 @@ class BatteryOptimizer:
         # During cheap tariff: only allow after switch_on_time
         if not tariff.is_cheap_now:
             discharge_allowed = True
-            reason = (f"Expensive tariff - tonight block until {switch_on_time.strftime('%H:%M')} "
+            reason = (f"Expensive tariff - tonight block until {swiss_time(switch_on_time)} "
                      f"(deficit {deficit_wh:.0f} Wh)")
         elif now >= switch_on_time:
             discharge_allowed = True
@@ -369,10 +380,10 @@ class BatteryOptimizer:
         else:
             discharge_allowed = False
             if saved_wh < deficit_wh:
-                reason = (f"Block discharge until {switch_on_time.strftime('%H:%M')} - "
+                reason = (f"Block discharge until {swiss_time(switch_on_time)} - "
                          f"saved {saved_wh:.0f}/{deficit_wh:.0f} Wh (shortfall)")
             else:
-                reason = (f"Block discharge until {switch_on_time.strftime('%H:%M')} - "
+                reason = (f"Block discharge until {swiss_time(switch_on_time)} - "
                          f"saved {saved_wh:.0f} Wh")
 
         return (

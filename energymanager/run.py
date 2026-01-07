@@ -12,6 +12,7 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -21,12 +22,41 @@ from src.forecast_reader import ForecastReader
 from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
 
-# Configure logging
+# Swiss timezone for display
+SWISS_TZ = ZoneInfo("Europe/Zurich")
+
+
+def swiss_time(dt: datetime) -> str:
+    """Format datetime in Swiss timezone."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(SWISS_TZ).strftime("%H:%M")
+
+
+def swiss_datetime(dt: datetime) -> str:
+    """Format datetime in Swiss timezone with date."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(SWISS_TZ).strftime("%Y-%m-%d %H:%M")
+
+
+# Configure logging with Swiss timezone
+class SwissFormatter(logging.Formatter):
+    """Formatter that uses Swiss timezone."""
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=SWISS_TZ)
+        return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+# Apply Swiss formatter to root logger
+for handler in logging.root.handlers:
+    handler.setFormatter(SwissFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
+
 logger = logging.getLogger("energymanager")
 
 
@@ -234,10 +264,10 @@ class EnergyManager:
             tomorrow_target = (now + timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)
             end = max(tariff.target + timedelta(hours=1), tomorrow_target)
 
-            logger.info(f"Fetching forecasts from {start} to {end}")
+            logger.info(f"Fetching forecasts from {swiss_datetime(start)} to {swiss_datetime(end)}")
             logger.info(f"Tariff: cheap={'Yes' if tariff.is_cheap_now else 'No'}, "
-                       f"cheap_end={tariff.cheap_end.strftime('%m-%d %H:%M')}, "
-                       f"target={tariff.target.strftime('%m-%d %H:%M')}")
+                       f"cheap_end={swiss_datetime(tariff.cheap_end)}, "
+                       f"target={swiss_datetime(tariff.target)}")
 
             forecast = self.forecast_reader.get_combined_forecast(
                 start=start,
@@ -262,7 +292,7 @@ class EnergyManager:
             logger.info(f"Decision: discharge_allowed={decision.discharge_allowed}")
             logger.info(f"Reason: {decision.reason}")
             if decision.switch_on_time:
-                logger.info(f"Switch ON at: {decision.switch_on_time.strftime('%Y-%m-%d %H:%M')}")
+                logger.info(f"Switch ON at: {swiss_datetime(decision.switch_on_time)}")
 
             # Write results to InfluxDB
             self.write_soc_comparison(sim_no_strategy, sim_with_strategy)
