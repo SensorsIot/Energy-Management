@@ -220,7 +220,9 @@ class EnergyManager:
 
             # Get tariff periods to determine forecast end
             tariff = self.optimizer.get_tariff_periods(now)
-            end = tariff.target + timedelta(hours=1)
+            # Always fetch at least until tomorrow 21:00 for visualization
+            tomorrow_target = (now + timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)
+            end = max(tariff.target + timedelta(hours=1), tomorrow_target)
 
             logger.info(f"Fetching forecasts from {start} to {end}")
             logger.info(f"Tariff: cheap={'Yes' if tariff.is_cheap_now else 'No'}, "
