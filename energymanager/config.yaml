@@ -1,0 +1,110 @@
+name: "EnergyManager"
+version: "1.0.0"
+slug: "energymanager"
+description: "Energy optimization using PV and load forecasts"
+url: "https://github.com/SensorsIot/Energy-Management"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+
+startup: services
+boot: auto
+timeout: 120
+
+map:
+  - config:ro
+
+options:
+  influxdb:
+    host: "192.168.0.203"
+    port: 8087
+    token: ""
+    org: "spiessa"
+    pv_bucket: "pv_forecast"
+    load_bucket: "load_forecast"
+    output_bucket: "energy_manager"
+    soc_bucket: "HuaweiNew"
+    soc_measurement: "Energy"
+    soc_field: "BATT_Level"
+
+  home_assistant:
+    url: "http://supervisor/core"
+    token: ""
+
+  battery:
+    capacity_kwh: 10.0
+    reserve_percent: 10
+    charge_efficiency: 0.95
+    discharge_efficiency: 0.95
+    max_charge_w: 5000
+    max_discharge_w: 5000
+    soc_entity: "sensor.battery_state_of_capacity"
+    discharge_control_entity: "number.battery_maximum_discharging_power"
+
+  tariff:
+    weekday_cheap_start: "21:00"
+    weekday_cheap_end: "06:00"
+    weekend_all_day_cheap: true
+    holidays: []
+
+  appliances:
+    power_w: 2500
+    energy_wh: 1500
+
+  ev_charging:
+    min_power_w: 4100
+    max_power_w: 11000
+
+  schedule:
+    update_interval_minutes: 15
+
+  log_level: "info"
+
+schema:
+  influxdb:
+    host: str
+    port: port
+    token: str
+    org: str
+    pv_bucket: str
+    load_bucket: str
+    output_bucket: str
+    soc_bucket: str
+    soc_measurement: str
+    soc_field: str
+
+  home_assistant:
+    url: str
+    token: str?
+
+  battery:
+    capacity_kwh: float
+    reserve_percent: float
+    charge_efficiency: float
+    discharge_efficiency: float
+    max_charge_w: int
+    max_discharge_w: int
+    soc_entity: str
+    discharge_control_entity: str
+
+  tariff:
+    weekday_cheap_start: str
+    weekday_cheap_end: str
+    weekend_all_day_cheap: bool
+    holidays:
+      - str
+
+  appliances:
+    power_w: int
+    energy_wh: int
+
+  ev_charging:
+    min_power_w: int
+    max_power_w: int
+
+  schedule:
+    update_interval_minutes: int
+
+  log_level: "list(debug|info|warning|error)"

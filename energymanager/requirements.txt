@@ -1,0 +1,6 @@
+pandas>=2.0.0
+numpy>=1.24.0
+influxdb-client>=1.36.0
+requests>=2.28.0
+APScheduler>=3.10.0
+python-dateutil>=2.8.0
