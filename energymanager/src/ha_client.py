@@ -20,13 +20,19 @@ class HAClient:
         token: Optional[str] = None,
     ):
         self.url = url.rstrip("/")
-        # Use provided token, or supervisor token from environment
-        self.token = token if token else os.environ.get("SUPERVISOR_TOKEN")
+        self._provided_token = token
+        self._token = None
 
-        if self.token:
-            logger.info(f"HA client initialized with token (len={len(self.token)})")
-        else:
-            logger.warning("No HA token available - HA integration disabled")
+    @property
+    def token(self) -> Optional[str]:
+        """Get token lazily - check environment each time."""
+        if self._token:
+            return self._token
+        # Use provided token, or supervisor token from environment
+        self._token = self._provided_token if self._provided_token else os.environ.get("SUPERVISOR_TOKEN")
+        if self._token:
+            logger.info(f"HA client using token (len={len(self._token)})")
+        return self._token
 
     def _headers(self) -> dict:
         """Get request headers."""
@@ -34,6 +40,15 @@ class HAClient:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
+
+    def _api_url(self, path: str) -> str:
+        """Build API URL - handle supervisor vs direct access."""
+        # For supervisor access, URL is http://supervisor/core
+        # API path should be /api/...
+        if "supervisor" in self.url:
+            return f"{self.url}/api{path}"
+        else:
+            return f"{self.url}/api{path}"
 
     def get_state(self, entity_id: str) -> Optional[dict]:
         """
@@ -43,10 +58,12 @@ class HAClient:
             dict with 'state' and 'attributes', or None on error
         """
         if not self.token:
+            logger.warning("No token available for get_state")
             return None
 
         try:
-            url = f"{self.url}/api/states/{entity_id}"
+            url = self._api_url(f"/states/{entity_id}")
+            logger.debug(f"GET {url}")
             response = requests.get(url, headers=self._headers(), timeout=10)
             response.raise_for_status()
             return response.json()
@@ -80,14 +97,16 @@ class HAClient:
             True on success, False on error
         """
         if not self.token:
+            logger.warning("No token available for set_number")
             return False
 
         try:
-            url = f"{self.url}/api/services/number/set_value"
+            url = self._api_url("/services/number/set_value")
             data = {
                 "entity_id": entity_id,
                 "value": value,
             }
+            logger.debug(f"POST {url} with {data}")
             response = requests.post(
                 url, headers=self._headers(), json=data, timeout=10
             )
