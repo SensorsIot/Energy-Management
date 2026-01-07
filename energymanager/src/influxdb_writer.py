@@ -53,7 +53,7 @@ class SimulationWriter:
             delete_api.delete(
                 start=start,
                 stop=stop,
-                predicate='_measurement="soc_simulation"',
+                predicate='_measurement="soc_forecast"',
                 bucket=self.bucket,
                 org=self.org,
             )
@@ -61,35 +61,24 @@ class SimulationWriter:
         except Exception as e:
             logger.warning(f"Failed to delete old data: {e}")
 
-    def write_simulation(
+    def write_soc_forecast(
         self,
         simulation: pd.DataFrame,
-        run_time: Optional[datetime] = None,
     ):
         """
-        Write SOC simulation results to InfluxDB.
+        Write SOC forecast to InfluxDB.
+
+        FSD 4.2.3: Store only soc_percent to measurement 'soc_forecast'.
+        PV/Load data is already in input buckets.
 
         Args:
-            simulation: DataFrame with columns:
-                - soc_percent
-                - soc_wh
-                - pv_energy_wh
-                - load_energy_wh
-                - net_energy_wh
-                - battery_flow_wh
-                - grid_flow_wh
-            run_time: When this simulation was calculated
+            simulation: DataFrame with 'soc_percent' column, indexed by time
         """
         if simulation.empty:
             logger.warning("Empty simulation, nothing to write")
             return
 
-        if run_time is None:
-            run_time = datetime.now(timezone.utc)
-
-        run_time_str = run_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # Delete existing future data
+        # Delete existing future data before writing new forecast
         self.delete_future_data(simulation.index.min())
 
         points = []
@@ -100,23 +89,16 @@ class SimulationWriter:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
 
             point = (
-                Point("soc_simulation")
-                .tag("run_time", run_time_str)
+                Point("soc_forecast")
                 .field("soc_percent", float(row["soc_percent"]))
-                .field("soc_wh", float(row["soc_wh"]))
-                .field("pv_energy_wh", float(row["pv_energy_wh"]))
-                .field("load_energy_wh", float(row["load_energy_wh"]))
-                .field("net_energy_wh", float(row["net_energy_wh"]))
-                .field("battery_flow_wh", float(row["battery_flow_wh"]))
-                .field("grid_flow_wh", float(row["grid_flow_wh"]))
                 .time(timestamp, WritePrecision.S)
             )
             points.append(point)
 
         # Write all points
-        logger.info(f"Writing {len(points)} simulation points to InfluxDB")
+        logger.info(f"Writing {len(points)} SOC forecast points to InfluxDB")
         self.write_api.write(bucket=self.bucket, org=self.org, record=points)
-        logger.info("Simulation written successfully")
+        logger.info("SOC forecast written successfully")
 
     def write_decision(
         self,
