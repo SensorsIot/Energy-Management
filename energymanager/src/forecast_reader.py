@@ -144,7 +144,10 @@ class ForecastReader:
         df = df.dropna()
 
         # Filter to requested time range (InfluxDB may return extra data)
+        logger.info(f"DEBUG: Before filter: {len(df)} rows, range {df.index.min()} to {df.index.max()}")
+        logger.info(f"DEBUG: Filtering to start={start}, end={end}")
         df = df[(df.index >= start) & (df.index < end)]
+        logger.info(f"DEBUG: After filter: {len(df)} rows")
 
         # Calculate net energy (positive = surplus, negative = deficit)
         df["net_energy_wh"] = df["pv_energy_wh"] - df["load_energy_wh"]
