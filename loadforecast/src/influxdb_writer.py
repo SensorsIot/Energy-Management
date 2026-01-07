@@ -1,5 +1,7 @@
 """
 InfluxDB writer for load forecast data.
+
+Writes P10/P50/P90 energy forecasts per 15-minute period.
 """
 
 import logging
@@ -94,8 +96,8 @@ class LoadForecastWriter:
         Write load forecast to InfluxDB.
 
         Args:
-            forecast: DataFrame with energy_wh_p50 column
-                     Each value = expected Wh consumed in that 15-min period (P50 only)
+            forecast: DataFrame with energy_wh_p10, energy_wh_p50, energy_wh_p90 columns
+                     Each value = Wh consumed in that 15-min period
                      Index must be datetime (future timestamps)
             model: Model identifier
             run_time: When this forecast was calculated
@@ -118,11 +120,14 @@ class LoadForecastWriter:
             if hasattr(timestamp, "tzinfo") and timestamp.tzinfo is None:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
 
+            # Single point per timestamp with all percentile fields
             point = (
                 Point("load_forecast")
                 .tag("model", model)
                 .tag("run_time", run_time_str)
+                .field("energy_wh_p10", float(row["energy_wh_p10"]))
                 .field("energy_wh_p50", float(row["energy_wh_p50"]))
+                .field("energy_wh_p90", float(row["energy_wh_p90"]))
                 .time(timestamp, WritePrecision.S)
             )
             points.append(point)
