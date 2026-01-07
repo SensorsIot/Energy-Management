@@ -217,6 +217,15 @@ class BatteryOptimizer:
         results = []
 
         for t, row in forecast.iterrows():
+            # Record SOC at START of this period (before energy changes)
+            results.append({
+                "time": t,
+                "soc_percent": e_bat / self.capacity_wh * 100,
+                "soc_wh": e_bat,
+                "soc_wh_unclamped": e_bat_unclamped,
+                "discharge_wh": 0,  # Will be updated below
+            })
+
             net_wh = row["net_energy_wh"]
             # Block only in the specified time window
             in_block_window = (
@@ -257,13 +266,8 @@ class BatteryOptimizer:
                 e_bat_unclamped -= discharge_needed
                 discharge_wh = discharge_needed
 
-            results.append({
-                "time": t,
-                "soc_percent": e_bat / self.capacity_wh * 100,
-                "soc_wh": e_bat,
-                "soc_wh_unclamped": e_bat_unclamped,
-                "discharge_wh": discharge_wh,
-            })
+            # Update the last result with discharge_wh for this period
+            results[-1]["discharge_wh"] = discharge_wh
 
         return pd.DataFrame(results).set_index("time")
 
