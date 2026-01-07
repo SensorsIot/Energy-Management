@@ -1,5 +1,5 @@
 name: "SwissSolarForecast"
-version: "1.0.0"
+version: "1.0.1"
 slug: "swisssolarforecast"
 description: "Swiss PV power forecast using MeteoSwiss ICON ensemble data with pvlib"
 url: "https://github.com/spiessa/energymanagement"
