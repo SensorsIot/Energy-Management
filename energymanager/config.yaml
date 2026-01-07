@@ -26,7 +26,7 @@ options:
     host: "192.168.0.203"
     port: 8087
     token: ""
-    org: "spiessa"
+    org: "energymanagement"
     pv_bucket: "pv_forecast"
     load_bucket: "load_forecast"
     output_bucket: "energy_manager"

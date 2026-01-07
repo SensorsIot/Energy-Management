@@ -12,7 +12,7 @@ Home Assistant add-ons for energy forecasting and optimization.
 |--------|-------------|--------|
 | [SwissSolarForecast](swisssolarforecast/) | PV power forecast using MeteoSwiss ICON data | ![Version](https://img.shields.io/badge/v1.0.2-stable-green) |
 | [LoadForecast](loadforecast/) | Statistical load prediction from historical data | ![Version](https://img.shields.io/badge/v1.0.1-stable-green) |
-| EnergyManager | Energy optimization using forecasts | ![Status](https://img.shields.io/badge/coming-soon-yellow) |
+| [EnergyManager](energymanager/) | Battery/EV/appliance optimization using forecasts | ![Version](https://img.shields.io/badge/v1.1.8-stable-green) |
 
 ## Architecture
 
@@ -36,8 +36,9 @@ Home Assistant add-ons for energy forecasting and optimization.
               ┌─────────────────┐
               │  EnergyManager  │
               │  ─────────────  │
-              │  Optimization   │
-              │  (coming soon)  │
+              │  Battery Control│
+              │  Appliance Signal
+              │  SOC Forecast   │
               └─────────────────┘
 ```
 
@@ -55,7 +56,16 @@ Home Assistant add-ons for energy forecasting and optimization.
 
 3. **Configure**
 
-   Each add-on has its own configuration. See individual README files for details.
+   Each add-on requires a user configuration file in `/config/`:
+   - `/config/swisssolarforecast.yaml`
+   - `/config/loadforecast.yaml`
+   - `/config/energymanager.yaml`
+
+   At minimum, each needs the InfluxDB token:
+   ```yaml
+   influxdb:
+     token: "your-influxdb-token"
+   ```
 
 ## Requirements
 
@@ -63,6 +73,7 @@ Home Assistant add-ons for energy forecasting and optimization.
 - InfluxDB 2.x (for data storage)
 - For SwissSolarForecast: Location in Switzerland (MeteoSwiss data coverage)
 - For LoadForecast: Historical power consumption data in InfluxDB
+- For EnergyManager: PV and load forecasts from the other add-ons
 
 ## Data Flow
 
@@ -76,15 +87,24 @@ MeteoSwiss STAC API → GRIB files → pvlib → InfluxDB (pv_forecast bucket)
 InfluxDB (HomeAssistant bucket) → Statistical Model → InfluxDB (load_forecast bucket)
 ```
 
+### EnergyManager
+```
+InfluxDB (pv_forecast + load_forecast) → Optimization → Battery/Appliance Control
+```
+
 ## Output Format
 
-Both add-ons produce **15-minute resolution** forecasts with **P10/P50/P90 percentiles**:
+All add-ons produce **15-minute resolution** forecasts with **P10/P50/P90 percentiles**:
 
 - **P10**: Conservative estimate (10th percentile)
 - **P50**: Expected value (median)
 - **P90**: Optimistic estimate (90th percentile)
 
 This format is designed for integration with Model Predictive Control (MPC) and optimization systems.
+
+## Documentation
+
+See [Energymanagement_fsd.md](Documents/Energymanagement_fsd.md) for the complete Functional Specification Document.
 
 ## Contributing
 
