@@ -377,6 +377,79 @@ display_zero_lines:
 4. **Rolling Horizon** - Decisions recalculated every 5-15 minutes
 5. **Decoupled Components** - Each add-on operates independently with clear interfaces
 
+## 1.10 Unified Configuration
+
+All add-ons use a consistent two-layer configuration approach:
+
+### 1.10.1 Configuration Priority
+
+1. **User config file** (`/config/<addon>.yaml`) - Editable by user, NOT managed by HA Supervisor
+2. **HA Supervisor options** (`/data/options.json`) - Managed by HA, provides defaults
+
+The user config is **deep merged** on top of the Supervisor defaults, allowing partial overrides.
+
+### 1.10.2 User Config Files
+
+| Add-on | User Config File |
+|--------|------------------|
+| SwissSolarForecast | `/config/swisssolarforecast.yaml` |
+| LoadForecast | `/config/loadforecast.yaml` |
+| EnergyManager | `/config/energymanager.yaml` |
+
+### 1.10.3 Required User Configuration
+
+Each add-on requires the InfluxDB token (secret) in the user config file:
+
+```yaml
+# /config/<addon>.yaml
+influxdb:
+  token: "your-influxdb-token"
+```
+
+### 1.10.4 Add-on Specific Configuration
+
+**SwissSolarForecast** - PV system definition:
+```yaml
+# /config/swisssolarforecast.yaml
+influxdb:
+  token: "your-token"
+
+panels:
+  - id: "Panel400"
+    pdc0: 400
+    gamma_pdc: -0.0035
+
+plants:
+  - name: "House"
+    location:
+      latitude: 47.475
+      longitude: 7.767
+    inverters:
+      - name: "Main"
+        strings:
+          - azimuth: 180
+            tilt: 30
+            panel: "Panel400"
+            count: 10
+```
+
+**LoadForecast** - Load sensor entity:
+```yaml
+# /config/loadforecast.yaml
+influxdb:
+  token: "your-token"
+
+load_sensor:
+  entity_id: "sensor.load_power"
+```
+
+**EnergyManager** - Battery and tariff (optional, can use HA UI):
+```yaml
+# /config/energymanager.yaml
+influxdb:
+  token: "your-token"
+```
+
 ---
 
 # Chapter 2: SwissSolarForecast Add-on
@@ -1056,14 +1129,15 @@ Efficiency loss is applied when energy flows through the battery:
 ```
 Battery parameters:
   capacity = 10000 Wh
-  efficiency = 0.95 (per direction)
+  charge_efficiency = 0.95
+  discharge_efficiency = 0.95
 
 IF battery_flow > 0:  (charging)
-   energy_stored = battery_flow × efficiency
+   energy_stored = battery_flow × charge_efficiency
    soc_wh = soc_wh + energy_stored
 
 IF battery_flow < 0:  (discharging)
-   energy_withdrawn = |battery_flow| ÷ efficiency
+   energy_withdrawn = |battery_flow| ÷ discharge_efficiency
    soc_wh = soc_wh - energy_withdrawn
 
 Convert back to percent:
@@ -1102,7 +1176,7 @@ During cheap tariff (night), we want to preserve battery energy for the expensiv
 ### 4.3.2 Algorithm
 
 ```
-Every 15 minutes during cheap tariff:
+Every 15 minutes:
 
 1. RUN SOC SIMULATION (§4.2) until next 21:00
    → Get soc_at_target (can be negative = deficit)
@@ -1113,25 +1187,50 @@ Every 15 minutes during cheap tariff:
    ELSE:
       deficit_wh = |soc_at_target|/100 × capacity
 
-3. FIND SWITCH-ON TIME
+3. FIND SWITCH-ON TIME (only during cheap tariff)
    saved_wh = 0
    FOR each 15-min period during cheap tariff:
        IF net_wh < 0:
-           saved_wh += |net_wh| ÷ efficiency
+           saved_wh += |net_wh| ÷ discharge_efficiency
        IF saved_wh >= deficit_wh:
-           switch_on_time = now
+           switch_on_time = current_period
            BREAK
 
-   → Battery OFF until switch_on_time
-   → Battery ON after switch_on_time
+4. DETERMINE DISCHARGE STATE
+   IF expensive tariff (06:00-21:00):
+      → Battery always ON
+   ELSE IF cheap tariff AND now < switch_on_time:
+      → Battery OFF (block discharge)
+   ELSE:
+      → Battery ON
 
-4. DURING expensive tariff (06:00-21:00):
-   → Battery always ON
+5. RUN SOC SIMULATION WITH BLOCKING
+   → Simulate with block_discharge_from=cheap_start, block_discharge_until=switch_on_time
+   → Store both curves (with/without blocking) for dashboard visualization
 ```
 
-### 4.3.3 Output: binary_sensor.battery_discharge_allowed
+### 4.3.3 Blocking Mode in SocSimulator
 
-Controls the battery discharge switch in Home Assistant:
+The SocSimulator accepts blocking parameters to simulate the effect of discharge blocking:
+
+```
+Parameters:
+  block_discharge_from: datetime
+  block_discharge_until: datetime
+
+IF battery_flow < 0 AND time >= block_from AND time < block_until:
+   battery_flow = 0  (discharge blocked, load served by grid)
+   soc_wh unchanged
+```
+
+### 4.3.4 Output: number.battery_maximum_discharging_power
+
+Controls the battery discharge power in Home Assistant:
+
+| Value | Meaning |
+|-------|---------|
+| `5000` | Discharge allowed (max power) |
+| `0` | Discharge blocked |
 
 ```yaml
 service: number.set_value
@@ -1201,7 +1300,24 @@ ELSE:
 
 ---
 
-## 4.6 Configuration Schema
+## 4.6 Configuration
+
+### 4.6.1 User Config File
+
+The add-on reads configuration from `/config/energymanager.yaml` (user-editable, not managed by HA Supervisor).
+
+**Priority:**
+1. `/config/energymanager.yaml` - User config (merged on top of defaults)
+2. `/data/options.json` - HA Supervisor defaults (fallback)
+
+**Example:** Create `/config/energymanager.yaml` with only the values you want to override:
+
+```yaml
+influxdb:
+  token: "your-influxdb-token"
+```
+
+### 4.6.2 Full Configuration Schema
 
 ```yaml
 influxdb:
@@ -1209,22 +1325,28 @@ influxdb:
   port: 8087
   token: "your-token"
   org: "spiessa"
+  pv_bucket: "pv_forecast"
+  load_bucket: "load_forecast"
+  output_bucket: "energy_manager"
 
 home_assistant:
-  url: "http://192.168.0.202:8123"
-  token: "your-long-lived-token"
+  url: "http://supervisor/core"
+  token: ""  # Auto-provided by HA Supervisor
 
 battery:
-  capacity_wh: 10000
-  efficiency: 0.95
-  max_power_w: 5000
+  capacity_kwh: 10.0
+  charge_efficiency: 0.95
+  discharge_efficiency: 0.95
+  max_charge_w: 5000
+  max_discharge_w: 5000
   soc_entity: "sensor.battery_state_of_capacity"
-  discharge_entity: "number.battery_maximum_discharging_power"
+  discharge_control_entity: "number.battery_maximum_discharging_power"
 
 tariff:
-  cheap_start: "21:00"
-  cheap_end: "06:00"
-  weekend_all_day: true
+  weekday_cheap_start: "21:00"
+  weekday_cheap_end: "06:00"
+  weekend_all_day_cheap: true
+  holidays: []
 
 appliances:
   power_w: 2500
@@ -1233,30 +1355,41 @@ appliances:
 ev_charging:
   min_power_w: 4100
   max_power_w: 11000
-  evcc_url: "http://192.168.0.150:7070"
 
 schedule:
-  interval_minutes: 15
+  update_interval_minutes: 15
+
+log_level: "info"
 ```
 
 ---
 
 ## 4.7 InfluxDB Storage
 
+**Bucket:** `energy_manager`
+
 **Measurements:**
 
-| Measurement | Purpose |
-|-------------|---------|
-| `soc_forecast` | SOC trajectory from simulation |
-| `energy_decisions` | Battery/appliance/EV decisions |
+| Measurement | Purpose | Fields |
+|-------------|---------|--------|
+| `soc_forecast` | SOC trajectory from §4.2 | `soc_percent` |
+| `soc_comparison` | With/without strategy curves | `soc_percent` (tag: `scenario`) |
+| `discharge_decision` | Battery control decisions | `allowed`, `reason`, `deficit_wh`, `saved_wh` |
+| `appliance_signal` | Appliance signal output | `signal`, `reason`, `excess_power_w` |
 
-**Query for Grafana SOC curve:**
+**Query examples:**
 
 ```flux
+# SOC forecast curve
 from(bucket: "energy_manager")
   |> range(start: -1h, stop: 48h)
   |> filter(fn: (r) => r._measurement == "soc_forecast")
-  |> filter(fn: (r) => r._field == "soc_percent")
+
+# Compare with/without strategy
+from(bucket: "energy_manager")
+  |> range(start: -1h, stop: 48h)
+  |> filter(fn: (r) => r._measurement == "soc_comparison")
+  |> filter(fn: (r) => r.scenario == "no_strategy" or r.scenario == "with_strategy")
 ```
 
 ---

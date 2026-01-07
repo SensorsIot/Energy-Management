@@ -419,11 +419,38 @@ class EnergyManager:
         logger.info("Stopped")
 
 
-def load_options() -> dict:
-    """Load add-on options."""
-    # HA add-on options path
-    options_path = Path("/data/options.json")
+def deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge override into base dict."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
+
+def load_options() -> dict:
+    """Load add-on options from user config file or HA options."""
+    import yaml
+
+    # Priority 1: User config file (not managed by Supervisor)
+    user_config = Path("/config/energymanager.yaml")
+    if user_config.exists():
+        logger.info(f"Loading config from {user_config}")
+        with open(user_config) as f:
+            user_opts = yaml.safe_load(f) or {}
+
+        # Start with HA options as base (for defaults), merge user config on top
+        options_path = Path("/data/options.json")
+        if options_path.exists():
+            with open(options_path) as f:
+                base_opts = json.load(f)
+            return deep_merge(base_opts, user_opts)
+        return user_opts
+
+    # Priority 2: HA add-on options path
+    options_path = Path("/data/options.json")
     if options_path.exists():
         with open(options_path) as f:
             return json.load(f)

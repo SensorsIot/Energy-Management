@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
 from croniter import croniter
 
 # Configure logging
@@ -34,18 +35,21 @@ from src.load_predictor import LoadPredictor
 from src.influxdb_writer import LoadForecastWriter
 
 
+def deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge override into base dict."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 def load_options() -> dict:
-    """Load add-on options from /data/options.json or use defaults."""
-    options_path = Path("/data/options.json")
-
-    if options_path.exists():
-        logger.info("Loading options from /data/options.json")
-        with open(options_path) as f:
-            return json.load(f)
-
-    # Default options for local testing
-    logger.warning("No options.json found, using defaults")
-    return {
+    """Load add-on options from user config file and/or HA options."""
+    # Default options
+    defaults = {
         "influxdb": {
             "host": "192.168.0.203",
             "port": 8087,
@@ -66,6 +70,32 @@ def load_options() -> dict:
         },
         "log_level": "info",
     }
+
+    # Load base options from HA Supervisor
+    options_path = Path("/data/options.json")
+    if options_path.exists():
+        logger.info("Loading base options from /data/options.json")
+        with open(options_path) as f:
+            options = deep_merge(defaults, json.load(f))
+    else:
+        logger.warning("No options.json found, using defaults")
+        options = defaults
+
+    # Load user config file (deep merge on top of base options)
+    yaml_paths = [
+        Path("/config/loadforecast.yaml"),
+        Path("/share/loadforecast/config.yaml"),
+    ]
+
+    for yaml_path in yaml_paths:
+        if yaml_path.exists():
+            logger.info(f"Loading user config from {yaml_path}")
+            with open(yaml_path) as f:
+                yaml_config = yaml.safe_load(f) or {}
+            options = deep_merge(options, yaml_config)
+            break
+
+    return options
 
 
 def run_forecast(options: dict) -> bool:
