@@ -1,5 +1,5 @@
 name: "EnergyManager"
-version: "1.0.2"
+version: "1.0.3"
 slug: "energymanager"
 description: "Energy optimization using PV and load forecasts"
 url: "https://github.com/SensorsIot/Energy-Management"

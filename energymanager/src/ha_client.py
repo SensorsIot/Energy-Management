@@ -25,14 +25,10 @@ class HAClient:
 
     @property
     def token(self) -> Optional[str]:
-        """Get token lazily - check environment each time."""
-        if self._token:
-            return self._token
-        # Use provided token, or supervisor token from environment
-        self._token = self._provided_token if self._provided_token else os.environ.get("SUPERVISOR_TOKEN")
-        if self._token:
-            logger.info(f"HA client using token (len={len(self._token)})")
-        return self._token
+        """Get token - check environment each time (no caching)."""
+        # Use provided token first, then fall back to SUPERVISOR_TOKEN
+        token = self._provided_token if self._provided_token else os.environ.get("SUPERVISOR_TOKEN")
+        return token
 
     def _headers(self) -> dict:
         """Get request headers."""
