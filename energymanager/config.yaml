@@ -13,6 +13,9 @@ startup: services
 boot: auto
 timeout: 120
 
+# Enable Home Assistant API access for battery control
+homeassistant_api: true
+
 map:
   - config:ro
 
