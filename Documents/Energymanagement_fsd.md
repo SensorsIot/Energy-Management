@@ -1247,20 +1247,18 @@ Every 15 minutes:
       signal = GREEN
       reason = "Sufficient PV excess for full cycle"
 
-4. ORANGE signal (use battery, will recover):
-   ELIF battery_soc > 30%
-   AND forecast shows battery will recharge before evening:
-      remaining_pv_today = Σ pv_p50[t] for t in [now, sunset]
-      energy_to_recover = appliance_energy + (load - pv) until sunset
+4. ORANGE signal (enough forecast surplus):
+   Run base simulation (battery always ON, no optimization) until tomorrow 21:00
+   unclamped_soc = simulated SOC at tomorrow 21:00 (can go negative)
 
-      IF remaining_pv_today > energy_to_recover:
-         signal = ORANGE
-         reason = "Can use battery, will recharge by evening"
+   IF unclamped_soc >= appliance_energy (1500 Wh, configurable):
+      signal = ORANGE
+      reason = "Forecast shows sufficient surplus"
 
-5. OFF signal:
+5. RED signal:
    ELSE:
-      signal = OFF
-      reason = "Would require grid import or deplete battery"
+      signal = RED
+      reason = "Insufficient surplus - would require grid import"
 ```
 
 ### 4.6.3 Dashboard Display
@@ -1270,33 +1268,24 @@ The signal is exposed as Home Assistant entities for display on the kitchen dash
 ```yaml
 # Entities created by EnergyManager
 sensor.appliance_signal:
-  state: "green"  # or "orange" or "off"
+  state: "green"  # or "orange" or "red"
   attributes:
     reason: "Sufficient PV excess for full cycle"
     excess_power_w: 3200
-    recommended_until: "14:30"
+    forecast_surplus_wh: 2500
 
-# Alexa/Echo Show dashboard card
-type: custom:mushroom-chips-card
-chips:
-  - type: template
-    icon: mdi:washing-machine
-    icon_color: >
-      {% if states('sensor.appliance_signal') == 'green' %}
-        green
-      {% elif states('sensor.appliance_signal') == 'orange' %}
-        orange
-      {% else %}
-        grey
-      {% endif %}
-    content: >
-      {% if states('sensor.appliance_signal') == 'green' %}
-        Waschen OK
-      {% elif states('sensor.appliance_signal') == 'orange' %}
-        Waschen möglich
-      {% else %}
-        Warten
-      {% endif %}
+# Amazon Fire dashboard card
+type: button
+name: "Waschen"
+icon: mdi:washing-machine
+tap_action:
+  action: more-info
+  entity: sensor.appliance_signal
+card_mod:
+  style: |
+    ha-card {
+      --card-mod-icon-color: {% if states('sensor.appliance_signal') == 'green' %}green{% elif states('sensor.appliance_signal') == 'orange' %}orange{% else %}red{% endif %};
+    }
 ```
 
 ## 4.7 EV Charging Signal Logic

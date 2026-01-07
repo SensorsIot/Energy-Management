@@ -138,3 +138,41 @@ class HAClient:
             power_w: Maximum discharge power in watts (0 = block discharge)
         """
         return self.set_number(entity_id, power_w)
+
+    def set_sensor_state(
+        self,
+        entity_id: str,
+        state: Any,
+        attributes: Optional[dict] = None,
+    ) -> bool:
+        """
+        Set a sensor entity state directly via REST API.
+
+        Args:
+            entity_id: The sensor entity ID
+            state: The state value
+            attributes: Optional attributes dict
+
+        Returns:
+            True on success, False on error
+        """
+        if not self.token:
+            logger.warning("No token available for set_sensor_state")
+            return False
+
+        try:
+            url = self._api_url(f"/states/{entity_id}")
+            data = {
+                "state": str(state),
+                "attributes": attributes or {},
+            }
+            logger.debug(f"POST {url} with state={state}")
+            response = requests.post(
+                url, headers=self._headers(), json=data, timeout=30
+            )
+            response.raise_for_status()
+            logger.debug(f"Set {entity_id} to {state}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set {entity_id}: {e}")
+            return False
