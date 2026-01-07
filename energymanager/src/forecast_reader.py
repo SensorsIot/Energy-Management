@@ -145,6 +145,23 @@ class ForecastReader:
 
         # Filter to requested time range (InfluxDB may return extra data)
         logger.info(f"DEBUG: Before filter: {len(df)} rows, range {df.index.min()} to {df.index.max()}")
+
+        # Ensure start/end are timezone-aware UTC for comparison with df.index
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        else:
+            start = start.astimezone(timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        else:
+            end = end.astimezone(timezone.utc)
+
+        # Ensure df.index is UTC
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('UTC')
+        else:
+            df.index = df.index.tz_convert('UTC')
+
         logger.info(f"DEBUG: Filtering to start={start}, end={end}")
         df = df[(df.index >= start) & (df.index < end)]
         logger.info(f"DEBUG: After filter: {len(df)} rows")
