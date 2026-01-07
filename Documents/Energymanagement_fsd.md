@@ -1190,12 +1190,16 @@ Step 4: Decision
 
 ### 4.5.5 SOC Trajectory Visualization
 
-Two curves are written to InfluxDB for Grafana visualization:
+Two curves are written to InfluxDB for Grafana visualization, showing the full trajectory from **NOW until target (tomorrow 21:00)**:
 
 | Curve | Description |
 |-------|-------------|
 | **Without Strategy** (orange) | SOC if battery always ON - may hit 0% early |
 | **With Strategy** (green) | SOC with optimized discharge blocking |
+
+The simulation starts from the current time and SOC. During the daytime expensive tariff (06:00-21:00), both curves are identical because no blocking applies. The curves diverge at 21:00 when the cheap tariff starts and blocking kicks in for the "with strategy" scenario.
+
+**Note**: All times in logs and UI are displayed in Swiss timezone (Europe/Zurich), while internal processing uses UTC.
 
 Query:
 ```flux
