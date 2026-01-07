@@ -245,50 +245,9 @@ class ForecastWriter:
         )
         self.write_api.write(bucket=self.bucket, org=self.org, record=point)
 
-    def query_load_forecast(
-        self,
-        start_time: datetime,
-        end_time: datetime,
-        source_bucket: str = "load_forecast",
-    ) -> pd.DataFrame:
-        """
-        Query load forecast for net calculation.
-
-        Args:
-            start_time: Start of query range
-            end_time: End of query range
-            source_bucket: Bucket containing load forecast
-
-        Returns:
-            DataFrame with load_power_w column indexed by timestamp
-        """
-        query_api = self.client.query_api()
-
-        query = f'''
-        from(bucket: "{source_bucket}")
-          |> range(start: {start_time.isoformat()}, stop: {end_time.isoformat()})
-          |> filter(fn: (r) => r._measurement == "load_forecast")
-          |> filter(fn: (r) => r._field == "power_w")
-          |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-        '''
-
-        try:
-            result = query_api.query_data_frame(query)
-            if result.empty:
-                logger.warning("No load forecast data found")
-                return pd.DataFrame()
-
-            result = result.set_index("_time")
-            result = result.rename(columns={"power_w": "load_power_w"})
-            return result[["load_power_w"]]
-        except Exception as e:
-            logger.warning(f"Could not query load forecast: {e}")
-            return pd.DataFrame()
-
-    def write_energy_balance(
+    def write_pv_forecast(
         self,
         pv_forecast: pd.DataFrame,
-        load_forecast: Optional[pd.DataFrame] = None,
         model: str = "hybrid",
         run_time: Optional[datetime] = None,
         resample_minutes: int = 15,
@@ -297,12 +256,10 @@ class ForecastWriter:
         Write PV forecast to InfluxDB with aligned timestamps.
 
         Stores PV power and per-period energy (Wh per 15-min).
-        Load forecast is stored separately in load_forecast bucket.
         All values are at exact 15-min boundaries for MPC synchronization.
 
         Args:
             pv_forecast: PV power forecast (P10/P50/P90)
-            load_forecast: DEPRECATED - ignored, use separate load_forecast bucket
             model: Model identifier
             run_time: Forecast calculation time
             resample_minutes: Time resolution (default 15 min)

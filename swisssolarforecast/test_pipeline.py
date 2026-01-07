@@ -123,9 +123,8 @@ def main():
         writer.connect()
 
         run_time = datetime.now(timezone.utc)
-        writer.write_energy_balance(
+        writer.write_pv_forecast(
             pv_forecast=pv_forecast,
-            load_forecast=None,
             model="ch1",
             run_time=run_time,
             resample_minutes=15,
