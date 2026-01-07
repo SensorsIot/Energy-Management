@@ -14,10 +14,6 @@ logger = logging.getLogger(__name__)
 class HAClient:
     """Home Assistant API client."""
 
-    # Fallback external HA URL and token (used when supervisor access unavailable)
-    EXTERNAL_URL = "http://192.168.0.202:8123"
-    EXTERNAL_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI2ZDM1NzVjNTI1MmU0NDQ1ODg2ZmY4MDczNDNhYjcxZCIsImlhdCI6MTc0NTEyMzM4MywiZXhwIjoyMDYwNDgzMzgzfQ.rSmNu-ggLDxWXeEECVdtBRGWSCKUQH7HmfDq4DYh920"
-
     def __init__(
         self,
         url: str = "http://supervisor/core",
@@ -26,15 +22,10 @@ class HAClient:
         self.url = url.rstrip("/")
         self._provided_token = token
         self._token = None
-        self._use_external = False  # Flag to switch to external API
 
     @property
     def token(self) -> Optional[str]:
         """Get token - check environment each time (no caching)."""
-        # If using external fallback
-        if self._use_external:
-            return self.EXTERNAL_TOKEN
-
         # Use provided token first
         if self._provided_token:
             return self._provided_token
@@ -53,11 +44,8 @@ class HAClient:
         except FileNotFoundError:
             pass
 
-        # No supervisor token - switch to external API
-        logger.info("No supervisor token available, switching to external HA API")
-        self._use_external = True
-        self.url = self.EXTERNAL_URL
-        return self.EXTERNAL_TOKEN
+        logger.debug(f"No token found. Env vars: {[k for k in os.environ.keys() if 'TOKEN' in k or 'HASSIO' in k or 'SUPER' in k]}")
+        return None
 
     def _headers(self) -> dict:
         """Get request headers."""
