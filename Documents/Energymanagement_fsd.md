@@ -406,49 +406,113 @@ influxdb:
   token: "your-influxdb-token"
 ```
 
-### 1.10.4 Add-on Specific Configuration
+### 1.10.4 SwissSolarForecast User Config
 
-**SwissSolarForecast** - PV system definition:
+**File:** `/config/swisssolarforecast.yaml`
+
+**Required parameters** (must be in user config):
+
 ```yaml
-# /config/swisssolarforecast.yaml
 influxdb:
-  token: "your-token"
+  token: "your-influxdb-token"
+
+location:
+  latitude: 47.475
+  longitude: 7.767
+  altitude: 330
+  timezone: "Europe/Zurich"
 
 panels:
-  - id: "Panel400"
+  - id: "AE455"
+    model: "AE Solar AC-455MH/144V"
+    pdc0: 455
+    gamma_pdc: -0.0035
+
+  - id: "Generic400"
+    model: "Generic 400W"
     pdc0: 400
     gamma_pdc: -0.0035
 
 plants:
   - name: "House"
-    location:
-      latitude: 47.475
-      longitude: 7.767
     inverters:
-      - name: "Main"
+      - name: "EastWest"
+        max_power: 10000
+        efficiency: 0.82
         strings:
-          - azimuth: 180
-            tilt: 30
-            panel: "Panel400"
-            count: 10
+          - name: "East"
+            azimuth: 90
+            tilt: 15
+            panel: "AE455"
+            count: 8
+          - name: "West"
+            azimuth: 270
+            tilt: 15
+            panel: "AE455"
+            count: 9
+
+      - name: "South"
+        max_power: 1500
+        efficiency: 0.80
+        strings:
+          - name: "SouthFront"
+            azimuth: 180
+            tilt: 70
+            panel: "Generic400"
+            count: 3
 ```
 
-**LoadForecast** - Load sensor entity:
+### 1.10.5 LoadForecast User Config
+
+**File:** `/config/loadforecast.yaml`
+
+**Required parameters:**
+
 ```yaml
-# /config/loadforecast.yaml
 influxdb:
-  token: "your-token"
+  token: "your-influxdb-token"
 
 load_sensor:
-  entity_id: "sensor.load_power"
+  entity_id: "sensor.load_power"  # Your HA load sensor entity
 ```
 
-**EnergyManager** - Battery and tariff (optional, can use HA UI):
+### 1.10.6 EnergyManager User Config
+
+**File:** `/config/energymanager.yaml`
+
+**Required parameters:**
+
 ```yaml
-# /config/energymanager.yaml
 influxdb:
-  token: "your-token"
+  token: "your-influxdb-token"
 ```
+
+**Optional overrides** (defaults from HA UI):
+
+```yaml
+battery:
+  capacity_kwh: 10.0
+  charge_efficiency: 0.95
+  discharge_efficiency: 0.95
+
+tariff:
+  weekday_cheap_start: "21:00"
+  weekday_cheap_end: "06:00"
+  weekend_all_day_cheap: true
+  holidays:
+    - "2026-01-01"
+    - "2026-12-25"
+```
+
+### 1.10.7 Dependencies
+
+All add-ons require PyYAML for user config parsing:
+
+| Add-on | requirements.txt |
+|--------|-----------------|
+| SwissSolarForecast | `PyYAML>=6.0` |
+| LoadForecast | `PyYAML>=6.0` |
+| EnergyManager | `PyYAML>=6.0` |
 
 ---
 
