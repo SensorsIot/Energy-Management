@@ -53,8 +53,8 @@ def load_options() -> dict:
         "influxdb": {
             "host": "192.168.0.203",
             "port": 8087,
-            "token": os.environ.get("INFLUXDB_TOKEN", ""),
-            "org": "spiessa",
+            "token": "",
+            "org": "energymanagement",
             "source_bucket": "HomeAssistant",
             "target_bucket": "load_forecast",
         },
@@ -113,7 +113,7 @@ def run_forecast(options: dict) -> bool:
         host=influx_config.get("host", "192.168.0.203"),
         port=influx_config.get("port", 8087),
         token=influx_config.get("token", ""),
-        org=influx_config.get("org", "spiessa"),
+        org=influx_config.get("org", "energymanagement"),
         source_bucket=influx_config.get("source_bucket", "HomeAssistant"),
         load_entity=sensor_config.get("entity_id", "load_power"),
         history_days=forecast_config.get("history_days", 90),
@@ -148,7 +148,7 @@ def run_forecast(options: dict) -> bool:
             host=influx_config.get("host", "192.168.0.203"),
             port=influx_config.get("port", 8087),
             token=influx_config.get("token", ""),
-            org=influx_config.get("org", "spiessa"),
+            org=influx_config.get("org", "energymanagement"),
             bucket=influx_config.get("target_bucket", "load_forecast"),
         )
         writer.connect()

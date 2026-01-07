@@ -70,19 +70,21 @@ class EnergyManager:
 
         # Initialize InfluxDB components
         influx_opts = options.get("influxdb", {})
+        influx_token = influx_opts.get("token", "")
+
         self.forecast_reader = ForecastReader(
             host=influx_opts.get("host", "192.168.0.203"),
             port=influx_opts.get("port", 8087),
-            token=influx_opts.get("token", ""),
-            org=influx_opts.get("org", "spiessa"),
+            token=influx_token,
+            org=influx_opts.get("org", "energymanagement"),
             pv_bucket=influx_opts.get("pv_bucket", "pv_forecast"),
             load_bucket=influx_opts.get("load_bucket", "load_forecast"),
         )
 
         # InfluxDB client for writing results
         self.influx_url = f"http://{influx_opts.get('host', '192.168.0.203')}:{influx_opts.get('port', 8087)}"
-        self.influx_token = influx_opts.get("token", "")
-        self.influx_org = influx_opts.get("org", "spiessa")
+        self.influx_token = influx_token
+        self.influx_org = influx_opts.get("org", "energymanagement")
         self.output_bucket = influx_opts.get("output_bucket", "energy_manager")
         self.influx_client = None
         self.write_api = None
@@ -134,8 +136,8 @@ class EnergyManager:
         self.simulation_writer = SimulationWriter(
             host=influx_opts.get("host", "192.168.0.203"),
             port=influx_opts.get("port", 8087),
-            token=influx_opts.get("token", ""),
-            org=influx_opts.get("org", "spiessa"),
+            token=influx_token,
+            org=influx_opts.get("org", "energymanagement"),
             bucket=self.output_bucket,
         )
 

@@ -55,7 +55,7 @@ The system consists of three Home Assistant add-ons that work together:
 |--------|---------|---------|------------------|
 | **SwissSolarForecast** | 1.0.2 | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
 | **LoadForecast** | 1.0.1 | Statistical load consumption forecasting | Every hour |
-| **EnergyManager** | 1.1.6 | Battery/EV/appliance optimization signals | Every 15 min |
+| **EnergyManager** | 1.1.8 | Battery/EV/appliance optimization signals | Every 15 min |
 
 ## 1.4 Data Flow
 
@@ -460,6 +460,11 @@ plants:
             tilt: 70
             panel: "Generic400"
             count: 3
+          - name: "SouthBack"
+            azimuth: 180
+            tilt: 60
+            panel: "Generic400"
+            count: 2
 ```
 
 ### 1.10.5 LoadForecast User Config
@@ -514,6 +519,118 @@ All add-ons require PyYAML for user config parsing:
 | LoadForecast | `PyYAML>=6.0` |
 | EnergyManager | `PyYAML>=6.0` |
 
+### 1.10.8 Complete Parameter Reference
+
+The following table lists ALL parameters used in code, indicating whether each is user-specific (must be configured) or a fixed default (can use as-is).
+
+**Legend:**
+- **User**: Must be configured in user YAML file
+- **Default**: Sensible default, override only if needed
+- **Fixed**: System constant, do not change
+
+#### SwissSolarForecast Parameters
+
+| Parameter | Default | Type | Description |
+|-----------|---------|------|-------------|
+| `influxdb.host` | 192.168.0.203 | User | InfluxDB server IP/hostname |
+| `influxdb.port` | 8087 | User | InfluxDB HTTP port |
+| `influxdb.token` | (required) | User | InfluxDB API token (secret) |
+| `influxdb.org` | energymanagement | User | InfluxDB organization |
+| `influxdb.bucket` | pv_forecast | Default | Output bucket name |
+| `storage.data_path` | /share/swisssolarforecast | Fixed | GRIB data storage path |
+| `location.latitude` | 47.475 | User | PV installation latitude |
+| `location.longitude` | 7.767 | User | PV installation longitude |
+| `location.timezone` | Europe/Zurich | User | Local timezone |
+| `schedule.ch1_cron` | 30 2,5,8,11,14,17,20,23 * * * | Fixed | ICON-CH1 fetch schedule (UTC) |
+| `schedule.ch2_cron` | 45 2,8,14,20 * * * | Fixed | ICON-CH2 fetch schedule (UTC) |
+| `schedule.calculator_interval_minutes` | 15 | Fixed | Forecast recalculation interval |
+
+**PV System Configuration** (separate file: `config_pv.yaml`)
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `panels[].id` | User | Panel identifier |
+| `panels[].model` | User | Panel model name |
+| `panels[].pdc0` | User | Panel DC power at STC (W) |
+| `panels[].gamma_pdc` | Default | Temperature coefficient (%/°C), default -0.0035 |
+| `plants[].name` | User | Plant name |
+| `plants[].location.latitude` | User | Plant latitude |
+| `plants[].location.longitude` | User | Plant longitude |
+| `plants[].location.altitude` | User | Altitude (m) |
+| `plants[].location.timezone` | User | Plant timezone |
+| `plants[].inverters[].name` | User | Inverter name |
+| `plants[].inverters[].max_power` | User | Max AC power (W) |
+| `plants[].inverters[].efficiency` | User | Inverter efficiency (0-1) |
+| `plants[].inverters[].strings[].name` | User | String name |
+| `plants[].inverters[].strings[].azimuth` | User | Azimuth angle (°, 180=South) |
+| `plants[].inverters[].strings[].tilt` | User | Tilt angle (°) |
+| `plants[].inverters[].strings[].panel` | User | Reference to panel id |
+| `plants[].inverters[].strings[].count` | User | Number of panels |
+
+#### LoadForecast Parameters
+
+| Parameter | Default | Type | Description |
+|-----------|---------|------|-------------|
+| `influxdb.host` | 192.168.0.203 | User | InfluxDB server IP/hostname |
+| `influxdb.port` | 8087 | User | InfluxDB HTTP port |
+| `influxdb.token` | (required) | User | InfluxDB API token (secret) |
+| `influxdb.org` | energymanagement | User | InfluxDB organization |
+| `influxdb.source_bucket` | HomeAssistant | User | Bucket with historical load data |
+| `influxdb.target_bucket` | load_forecast | Default | Output bucket name |
+| `load_sensor.entity_id` | load_power | User | HA entity ID for load power |
+| `forecast.history_days` | 90 | Default | Days of history for profile |
+| `forecast.horizon_hours` | 48 | Default | Forecast horizon (hours) |
+| `schedule.cron` | 15 * * * * | Default | Cron schedule for forecast runs |
+| `log_level` | info | Default | Logging level |
+
+#### EnergyManager Parameters
+
+| Parameter | Default | Type | Description |
+|-----------|---------|------|-------------|
+| `influxdb.host` | 192.168.0.203 | User | InfluxDB server IP/hostname |
+| `influxdb.port` | 8087 | User | InfluxDB HTTP port |
+| `influxdb.token` | (required) | User | InfluxDB API token (secret) |
+| `influxdb.org` | energymanagement | User | InfluxDB organization |
+| `influxdb.pv_bucket` | pv_forecast | Default | PV forecast bucket |
+| `influxdb.load_bucket` | load_forecast | Default | Load forecast bucket |
+| `influxdb.output_bucket` | energy_manager | Default | Output bucket for decisions |
+| `influxdb.soc_bucket` | HuaweiNew | User | Bucket with actual SOC data |
+| `influxdb.soc_measurement` | Energy | User | Measurement name for SOC |
+| `influxdb.soc_field` | BATT_Level | User | Field name for SOC value |
+| `home_assistant.url` | http://supervisor/core | Fixed | HA API URL (via Supervisor) |
+| `home_assistant.token` | (auto) | Fixed | Uses SUPERVISOR_TOKEN env var |
+| `battery.capacity_kwh` | 10.0 | User | Usable battery capacity |
+| `battery.reserve_percent` | 10 | User | Minimum SOC reserve |
+| `battery.charge_efficiency` | 0.95 | Default | Charging efficiency (0-1) |
+| `battery.discharge_efficiency` | 0.95 | Default | Discharging efficiency (0-1) |
+| `battery.max_charge_w` | 5000 | User | Max charge power (W) |
+| `battery.max_discharge_w` | 5000 | User | Max discharge power (W) |
+| `battery.soc_entity` | sensor.battery_state_of_capacity | User | HA entity for current SOC |
+| `battery.discharge_control_entity` | number.battery_maximum_discharging_power | User | HA entity for discharge control |
+| `tariff.weekday_cheap_start` | 21:00 | User | Low tariff start (HH:MM) |
+| `tariff.weekday_cheap_end` | 06:00 | User | Low tariff end (HH:MM) |
+| `tariff.weekend_all_day_cheap` | true | User | Weekend uses low tariff |
+| `tariff.holidays` | [] | User | Holiday dates (low tariff) |
+| `appliances.power_w` | 2500 | User | Deferrable appliance power |
+| `appliances.energy_wh` | 1500 | User | Appliance energy per cycle |
+| `ev_charging.min_power_w` | 4100 | User | Min EV charging power |
+| `ev_charging.max_power_w` | 11000 | User | Max EV charging power |
+| `schedule.update_interval_minutes` | 15 | Fixed | Optimization cycle interval |
+| `log_level` | info | Default | Logging level |
+
+#### Parameter Summary by Category
+
+| Category | User-Specific | With Defaults | Fixed |
+|----------|---------------|---------------|-------|
+| **InfluxDB connection** | host, port, token, org | - | - |
+| **InfluxDB buckets** | soc_bucket (varies) | pv_forecast, load_forecast, energy_manager | - |
+| **Location/PV system** | All panel/plant/string config | gamma_pdc | - |
+| **Battery** | capacity, max_power, entities | charge/discharge_efficiency | - |
+| **Tariff** | All (depends on utility) | - | - |
+| **Appliances/EV** | power, energy values | - | - |
+| **Schedules** | - | cron expressions | MeteoSwiss fetch times |
+| **Forecast** | - | history_days, horizon_hours | update_interval |
+
 ---
 
 # Chapter 2: SwissSolarForecast Add-on
@@ -525,7 +642,7 @@ SwissSolarForecast generates probabilistic PV power forecasts using MeteoSwiss I
 | Property | Value |
 |----------|-------|
 | Name | SwissSolarForecast |
-| Version | 1.0.1 |
+| Version | 1.0.2 |
 | Slug | `swisssolarforecast` |
 | Architectures | aarch64, amd64, armv7 |
 | Timeout | 300 seconds |
@@ -908,7 +1025,7 @@ LoadForecast generates statistical household load consumption forecasts using hi
 | Property | Value |
 |----------|-------|
 | Name | LoadForecast |
-| Version | 1.0.1 |
+| Version | 1.0.2 |
 | Slug | `loadforecast` |
 | Architectures | aarch64, amd64, armv7 |
 | Timeout | 120 seconds |
@@ -1135,14 +1252,14 @@ from(bucket: "pv_forecast")
 from(bucket: "load_forecast")
   |> range(start: now(), stop: 48h)
   |> filter(fn: (r) => r._measurement == "load_forecast")
-  |> filter(fn: (r) => r._field == "power_w_p50")
+  |> filter(fn: (r) => r._field == "energy_wh_p50")
 ```
 
 | Field | Unit | Description |
 |-------|------|-------------|
-| `power_w_p10` | W | Low estimate |
-| `power_w_p50` | W | Most likely estimate |
-| `power_w_p90` | W | High estimate |
+| `energy_wh_p10` | Wh | Energy per 15-min period (low estimate) |
+| `energy_wh_p50` | Wh | Energy per 15-min period (most likely) |
+| `energy_wh_p90` | Wh | Energy per 15-min period (high estimate) |
 
 ### 4.1.3 Current SOC (from Home Assistant)
 
@@ -1340,6 +1457,8 @@ Every 15 minutes:
 
 ## 4.5 EV Charging Signal
 
+> **Status: NOT YET IMPLEMENTED** - This section describes planned functionality.
+
 ### 4.5.1 Problem
 
 EV charging requires minimum 4.1 kW. Should only charge with excess PV via EVCC.
@@ -1438,8 +1557,8 @@ log_level: "info"
 |-------------|---------|--------|
 | `soc_forecast` | SOC trajectory from §4.2 | `soc_percent` |
 | `soc_comparison` | With/without strategy curves | `soc_percent` (tag: `scenario`) |
-| `discharge_decision` | Battery control decisions | `allowed`, `reason`, `deficit_wh`, `saved_wh` |
-| `appliance_signal` | Appliance signal output | `signal`, `reason`, `excess_power_w` |
+| `discharge_decision` | Battery control decisions | `allowed`, `reason`, `deficit_wh`, `saved_wh`, `current_soc`, `switch_on_time` |
+| `appliance_signal` | Appliance signal output | `signal`, `reason`, `excess_power_w`, `forecast_surplus_wh` |
 
 **Query examples:**
 
