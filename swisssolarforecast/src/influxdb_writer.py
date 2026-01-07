@@ -7,7 +7,7 @@ Supports P10/P50/P90 percentiles from ensemble forecasts.
 
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Optional
 
 import pandas as pd
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -128,112 +128,6 @@ class ForecastWriter:
 
         logger.debug(f"Resampled forecast from {len(forecast)} to {len(forecast_resampled)} points ({minutes} min)")
         return forecast_resampled
-
-    def write_forecast(
-        self,
-        forecast: pd.DataFrame,
-        model: str = "hybrid",
-        run_time: Optional[datetime] = None,
-        resample_minutes: int = 15,
-    ):
-        """
-        Write forecast DataFrame to InfluxDB.
-
-        Args:
-            forecast: DataFrame with columns like total_ac_power_p10/p50/p90, ghi, etc.
-                     Index must be datetime (future timestamps)
-            model: Model identifier (ch1, ch2, hybrid)
-            run_time: When this forecast was calculated (defaults to now)
-            resample_minutes: Resample to this interval (default 15 min for MPC)
-        """
-        if run_time is None:
-            run_time = datetime.now(timezone.utc)
-
-        run_time_str = run_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # Delete existing future forecasts first
-        if len(forecast) > 0:
-            first_time = forecast.index.min()
-            if hasattr(first_time, 'tzinfo') and first_time.tzinfo is None:
-                first_time = first_time.replace(tzinfo=timezone.utc)
-            self.delete_future_forecasts(first_time)
-
-        # Resample to finer resolution (15 min) for MPC optimizer
-        forecast = self._resample_forecast(forecast, resample_minutes)
-
-        # Time step in hours for per-period energy (15 min = 0.25 h)
-        time_diff = resample_minutes / 60.0
-
-        points = []
-
-        for idx, (timestamp, row) in enumerate(forecast.iterrows()):
-            # Ensure timestamp is timezone-aware
-            if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
-
-            # Write P10/P50/P90 as separate points with percentile tag
-            for percentile in ["p10", "p50", "p90"]:
-                power_col = f"total_ac_power_{percentile}"
-                if power_col not in row:
-                    continue
-
-                pv_power = float(row[power_col])
-                # Per-period energy: power (W) × time_step (h) = Wh for this 15-min period
-                pv_energy = pv_power * time_diff
-
-                point = (
-                    Point("pv_forecast")
-                    .tag("percentile", percentile.upper())
-                    .tag("inverter", "total")
-                    .tag("model", model)
-                    .tag("run_time", run_time_str)
-                    .field("power_w", pv_power)
-                    .field("energy_wh", pv_energy)
-                )
-
-                # Add GHI if available
-                if "ghi" in row and pd.notna(row["ghi"]):
-                    point = point.field("ghi", float(row["ghi"]))
-
-                # Add temperature if available
-                if "temp_air" in row and pd.notna(row["temp_air"]):
-                    point = point.field("temp_air", float(row["temp_air"]))
-
-                point = point.time(timestamp, WritePrecision.S)
-                points.append(point)
-
-            # Write per-inverter data if available
-            for col in row.index:
-                if "_ac_power_p50" in col and col != "total_ac_power_p50":
-                    inverter_name = col.replace("_ac_power_p50", "")
-
-                    for percentile in ["p10", "p50", "p90"]:
-                        inv_col = f"{inverter_name}_ac_power_{percentile}"
-                        if inv_col not in row:
-                            continue
-
-                        inv_power = float(row[inv_col])
-                        inv_energy = inv_power * time_diff
-
-                        point = (
-                            Point("pv_forecast")
-                            .tag("percentile", percentile.upper())
-                            .tag("inverter", inverter_name)
-                            .tag("model", model)
-                            .tag("run_time", run_time_str)
-                            .field("power_w", inv_power)
-                            .field("energy_wh", inv_energy)
-                            .time(timestamp, WritePrecision.S)
-                        )
-                        points.append(point)
-
-        # Write all points
-        if points:
-            logger.info(f"Writing {len(points)} forecast points to InfluxDB")
-            self.write_api.write(bucket=self.bucket, org=self.org, record=points)
-            logger.info("Forecast written successfully")
-        else:
-            logger.warning("No forecast data to write")
 
     def write_metadata(self, key: str, value: str):
         """Write metadata point (e.g., last update time, status)."""
