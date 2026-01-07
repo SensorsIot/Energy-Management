@@ -55,7 +55,7 @@ The system consists of three Home Assistant add-ons that work together:
 |--------|---------|---------|------------------|
 | **SwissSolarForecast** | 1.0.2 | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
 | **LoadForecast** | 1.0.1 | Statistical load consumption forecasting | Every hour |
-| **EnergyManager** | 1.0.0 | Battery/EV/appliance optimization signals | Every 15 min |
+| **EnergyManager** | 1.1.6 | Battery/EV/appliance optimization signals | Every 15 min |
 
 ## 1.4 Data Flow
 
@@ -980,10 +980,11 @@ The EnergyManager add-on optimizes household energy usage by analyzing PV and lo
 | Property | Value |
 |----------|-------|
 | Name | EnergyManager |
-| Version | 1.0.0 |
+| Version | 1.1.6 |
 | Slug | `energymanager` |
 | Update Frequency | Every 15 minutes |
 | Forecast Horizon | 48 hours |
+| Init System | s6-overlay (for SUPERVISOR_TOKEN) |
 
 ## 4.2 Core Functions
 
@@ -1007,13 +1008,13 @@ The add-on provides three main optimization signals:
 
 | Signal | Color | Meaning |
 |--------|-------|---------|
-| **Green** | 🟢 | Enough PV excess to run appliance without using battery |
-| **Orange** | 🟠 | Can use battery now, will recharge before needing grid power |
-| **Off** | ⚫ | Running now would require grid import or deplete battery |
+| **Green** | 🟢 | Current PV excess > appliance power (2500W) - run now with pure solar |
+| **Orange** | 🟠 | Forecast shows sufficient surplus - safe to use battery, will recover |
+| **Red** | 🔴 | Insufficient surplus - would require grid import or deplete battery |
 
 **Output:**
-- `sensor.appliance_signal` (green/orange/off)
-- `sensor.appliance_signal_reason` (explanation text)
+- `sensor.appliance_signal` (green/orange/red)
+- Attributes: reason, excess_power_w, forecast_surplus_wh, icon
 
 ### 4.2.3 EV Charging Signal
 
@@ -1236,30 +1237,46 @@ appliances:
 Every 15 minutes:
 
 1. Calculate current PV excess:
-   excess_now = pv_power - load_power - ev_charging
+   excess_power = pv_power - load_power
 
-2. Calculate forecast excess for next hour:
-   excess_1h = Σ (pv_p50[t] - load_p50[t]) for t in [now, now+1h]
-
-3. GREEN signal (pure PV, no battery needed):
-   IF excess_now > appliance_power
-   AND excess_1h > appliance_energy:
+2. GREEN signal (pure PV, no battery needed):
+   IF excess_power > appliance_power_w (2500W configurable):
       signal = GREEN
-      reason = "Sufficient PV excess for full cycle"
+      reason = "Genug Überschuss" (Enough excess)
 
-4. ORANGE signal (enough forecast surplus):
-   Run base simulation (battery always ON, no optimization) until tomorrow 21:00
-   unclamped_soc = simulated SOC at tomorrow 21:00 (can go negative)
+3. ORANGE signal (enough forecast surplus):
+   Run BASE simulation (battery always ON, no optimization) until tomorrow 21:00
+   - This is the same simulation as battery optimizer but WITHOUT the discharge blocking
+   - Track unclamped SOC (can go negative, representing grid import needed)
 
-   IF unclamped_soc >= appliance_energy (1500 Wh, configurable):
+   unclamped_soc_wh = simulated SOC at tomorrow 21:00
+
+   IF unclamped_soc_wh >= appliance_energy_wh (1500 Wh configurable):
       signal = ORANGE
-      reason = "Forecast shows sufficient surplus"
+      reason = "Prognose zeigt genug Überschuss" (Forecast shows enough surplus)
 
-5. RED signal:
+   Explanation:
+   - If unclamped SOC at target >= appliance energy, we have enough surplus
+   - Running the appliance will use 1500 Wh from battery/grid mix
+   - But by tomorrow 21:00, PV will have recovered that energy
+   - Example: unclamped_soc = 3000 Wh, appliance = 1500 Wh
+     → After appliance: 3000 - 1500 = 1500 Wh remaining → Safe (Orange)
+
+4. RED signal:
    ELSE:
       signal = RED
-      reason = "Insufficient surplus - would require grid import"
+      reason = "Kein Überschuss" (No excess)
+
+   This means running the appliance would either:
+   - Cause grid import during expensive hours, OR
+   - Deplete battery below acceptable levels
 ```
+
+**Key Insight:** The Orange signal uses the BASE simulation (no optimization strategy).
+This shows what the "natural" energy balance would be if we just let the battery
+operate normally. We don't apply the discharge blocking strategy here because
+we want to know: "If we run the appliance now, will we still have positive
+balance by tomorrow evening?"
 
 ### 4.6.3 Dashboard Display
 
@@ -1270,23 +1287,34 @@ The signal is exposed as Home Assistant entities for display on the kitchen dash
 sensor.appliance_signal:
   state: "green"  # or "orange" or "red"
   attributes:
-    reason: "Sufficient PV excess for full cycle"
+    friendly_name: "Appliance Signal"
+    reason: "Genug Überschuss"
     excess_power_w: 3200
     forecast_surplus_wh: 2500
+    icon: mdi:washing-machine
 
-# Amazon Fire dashboard card
+# Amazon Fire dashboard card with card_mod styling
 type: button
-name: "Waschen"
+name: Waschen
 icon: mdi:washing-machine
+entity: sensor.appliance_signal
+show_state: false
 tap_action:
   action: more-info
-  entity: sensor.appliance_signal
 card_mod:
   style: |
     ha-card {
-      --card-mod-icon-color: {% if states('sensor.appliance_signal') == 'green' %}green{% elif states('sensor.appliance_signal') == 'orange' %}orange{% else %}red{% endif %};
+      {% if states('sensor.appliance_signal') == 'green' %}
+      --card-mod-icon-color: green;
+      {% elif states('sensor.appliance_signal') == 'orange' %}
+      --card-mod-icon-color: orange;
+      {% else %}
+      --card-mod-icon-color: red;
+      {% endif %}
     }
 ```
+
+**Note:** The card_mod template requires quotes around entity IDs in `states()` calls.
 
 ## 4.7 EV Charging Signal Logic
 
@@ -1410,10 +1438,15 @@ log_level: "info"
 
 | Entity | Type | Description |
 |--------|------|-------------|
-| `sensor.appliance_signal` | String | "green", "orange", or "off" |
-| `sensor.appliance_signal_reason` | String | Human-readable explanation |
-| `sensor.appliance_excess_power` | Float | Current excess power (W) |
-| `sensor.appliance_recommended_until` | Time | Good window end time |
+| `sensor.appliance_signal` | String | "green", "orange", or "red" |
+
+**Attributes:**
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `reason` | String | Human-readable explanation (German) |
+| `excess_power_w` | Float | Current PV excess power (W) |
+| `forecast_surplus_wh` | Float | Unclamped SOC at target (Wh) |
+| `icon` | String | mdi:washing-machine |
 
 ### 4.9.3 EV Charging
 
@@ -1638,4 +1671,4 @@ from(bucket: "HomeAssistant")
 
 **End of Document**
 
-*Version 2.1 - January 2026*
+*Version 2.2 - January 2026*
