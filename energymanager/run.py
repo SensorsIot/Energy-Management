@@ -167,17 +167,19 @@ class EnergyManager:
         if sim_no_strategy.empty or sim_with_strategy.empty:
             return
 
-        # Delete old comparison data
+        # Delete ALL future comparison data from NOW onwards
+        # This ensures old stale data doesn't interfere
         delete_api = self.influx_client.delete_api()
-        start = sim_no_strategy.index.min()
+        now = datetime.now(timezone.utc)
         try:
             delete_api.delete(
-                start=start,
-                stop=datetime.now(timezone.utc).replace(year=2100),
+                start=now,
+                stop=now.replace(year=2100),
                 predicate='_measurement="soc_comparison"',
                 bucket=self.output_bucket,
                 org=self.influx_org,
             )
+            logger.debug(f"Deleted soc_comparison data from {now} onwards")
         except Exception as e:
             logger.warning(f"Failed to delete old comparison data: {e}")
 
