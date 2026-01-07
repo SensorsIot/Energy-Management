@@ -161,18 +161,8 @@ class ForecastWriter:
         # Resample to finer resolution (15 min) for MPC optimizer
         forecast = self._resample_forecast(forecast, resample_minutes)
 
-        # Time step in hours for energy integration (15 min = 0.25 h)
+        # Time step in hours for per-period energy (15 min = 0.25 h)
         time_diff = resample_minutes / 60.0
-
-        # Calculate cumulative energy for each percentile
-        # Energy is ever-increasing: cumsum of power × time_step
-        cumulative_energy = {}
-        for percentile in ["p10", "p50", "p90"]:
-            power_col = f"total_ac_power_{percentile}"
-            if power_col in forecast.columns:
-                # Energy (Wh) = cumulative sum of power (W) × time_step (h)
-                # This gives monotonically increasing energy at each 15-min interval
-                cumulative_energy[percentile] = (forecast[power_col].cumsum() * time_diff).values
 
         points = []
 
@@ -187,18 +177,19 @@ class ForecastWriter:
                 if power_col not in row:
                     continue
 
+                pv_power = float(row[power_col])
+                # Per-period energy: power (W) × time_step (h) = Wh for this 15-min period
+                pv_energy = pv_power * time_diff
+
                 point = (
                     Point("pv_forecast")
                     .tag("percentile", percentile.upper())
                     .tag("inverter", "total")
                     .tag("model", model)
                     .tag("run_time", run_time_str)
-                    .field("power_w", float(row[power_col]))
+                    .field("power_w", pv_power)
+                    .field("energy_wh", pv_energy)
                 )
-
-                # Add cumulative energy
-                if percentile in cumulative_energy:
-                    point = point.field("energy_wh", float(cumulative_energy[percentile][idx]))
 
                 # Add GHI if available
                 if "ghi" in row and pd.notna(row["ghi"]):
@@ -221,13 +212,17 @@ class ForecastWriter:
                         if inv_col not in row:
                             continue
 
+                        inv_power = float(row[inv_col])
+                        inv_energy = inv_power * time_diff
+
                         point = (
                             Point("pv_forecast")
                             .tag("percentile", percentile.upper())
                             .tag("inverter", inverter_name)
                             .tag("model", model)
                             .tag("run_time", run_time_str)
-                            .field("power_w", float(row[inv_col]))
+                            .field("power_w", inv_power)
+                            .field("energy_wh", inv_energy)
                             .time(timestamp, WritePrecision.S)
                         )
                         points.append(point)
@@ -299,14 +294,15 @@ class ForecastWriter:
         resample_minutes: int = 15,
     ):
         """
-        Write energy balance to InfluxDB with aligned timestamps.
+        Write PV forecast to InfluxDB with aligned timestamps.
 
-        Stores PV forecast, load forecast, and net difference (available - used).
+        Stores PV power and per-period energy (Wh per 15-min).
+        Load forecast is stored separately in load_forecast bucket.
         All values are at exact 15-min boundaries for MPC synchronization.
 
         Args:
             pv_forecast: PV power forecast (P10/P50/P90)
-            load_forecast: Load/consumption forecast (optional)
+            load_forecast: DEPRECATED - ignored, use separate load_forecast bucket
             model: Model identifier
             run_time: Forecast calculation time
             resample_minutes: Time resolution (default 15 min)
@@ -329,27 +325,8 @@ class ForecastWriter:
             first_time = first_time.replace(tzinfo=timezone.utc)
         self.delete_future_forecasts(first_time)
 
-        # Time step for energy integration
+        # Time step for per-period energy (15 min = 0.25 h)
         time_diff = resample_minutes / 60.0
-
-        # Resample load forecast to match PV forecast timestamps if available
-        if load_forecast is not None and len(load_forecast) > 0:
-            load_forecast = load_forecast.reindex(pv_forecast.index, method='nearest')
-        else:
-            # No load forecast - create zeros
-            load_forecast = pd.DataFrame(
-                {"load_power_w": 0.0},
-                index=pv_forecast.index
-            )
-
-        # Calculate cumulative energy
-        pv_cumulative = {}
-        load_cumulative = (load_forecast["load_power_w"].cumsum() * time_diff).values
-
-        for percentile in ["p10", "p50", "p90"]:
-            power_col = f"total_ac_power_{percentile}"
-            if power_col in pv_forecast.columns:
-                pv_cumulative[percentile] = (pv_forecast[power_col].cumsum() * time_diff).values
 
         points = []
 
@@ -359,8 +336,6 @@ class ForecastWriter:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
 
             row = pv_forecast.loc[timestamp]
-            load_power = float(load_forecast.loc[timestamp, "load_power_w"]) if "load_power_w" in load_forecast.columns else 0.0
-            load_energy = float(load_cumulative[idx])
 
             # Single point per timestamp with ALL percentile values
             # This guarantees exact same timestamp for P10/P50/P90
@@ -369,8 +344,6 @@ class ForecastWriter:
                 .tag("inverter", "total")
                 .tag("model", model)
                 .tag("run_time", run_time_str)
-                .field("load_power_w", load_power)
-                .field("load_energy_wh", load_energy)
             )
 
             # Add P10/P50/P90 values as separate fields
@@ -380,15 +353,12 @@ class ForecastWriter:
                     continue
 
                 pv_power = float(row[power_col])
-                pv_energy = float(pv_cumulative[percentile][idx]) if percentile in pv_cumulative else 0.0
-                net_power = pv_power - load_power
-                net_energy = pv_energy - load_energy
+                # Per-period energy: power (W) × time_step (h) = Wh for this 15-min period
+                pv_energy = pv_power * time_diff
 
-                # Field names: power_w_p10, power_w_p50, power_w_p90, etc.
+                # Field names: power_w_p10, power_w_p50, power_w_p90, energy_wh_p10, etc.
                 point = point.field(f"power_w_{percentile}", pv_power)
                 point = point.field(f"energy_wh_{percentile}", pv_energy)
-                point = point.field(f"net_power_w_{percentile}", net_power)
-                point = point.field(f"net_energy_wh_{percentile}", net_energy)
 
             # Add weather data if available
             if "ghi" in row and pd.notna(row["ghi"]):
@@ -414,19 +384,22 @@ class ForecastWriter:
                     .tag("run_time", run_time_str)
                 )
 
-                # Add P10/P50/P90 values for this inverter
+                # Add P10/P50/P90 power and energy values for this inverter
                 for percentile in ["p10", "p50", "p90"]:
                     inv_col = f"{inv_name}_ac_power_{percentile}"
                     if inv_col in row and pd.notna(row[inv_col]):
-                        inv_point = inv_point.field(f"power_w_{percentile}", float(row[inv_col]))
+                        inv_power = float(row[inv_col])
+                        inv_energy = inv_power * time_diff
+                        inv_point = inv_point.field(f"power_w_{percentile}", inv_power)
+                        inv_point = inv_point.field(f"energy_wh_{percentile}", inv_energy)
 
                 inv_point = inv_point.time(timestamp, WritePrecision.S)
                 points.append(inv_point)
 
         # Write all points
         if points:
-            logger.info(f"Writing {len(points)} energy balance points to InfluxDB")
+            logger.info(f"Writing {len(points)} PV forecast points to InfluxDB")
             self.write_api.write(bucket=self.bucket, org=self.org, record=points)
-            logger.info("Energy balance written successfully")
+            logger.info("PV forecast written successfully")
         else:
-            logger.warning("No energy balance data to write")
+            logger.warning("No PV forecast data to write")
