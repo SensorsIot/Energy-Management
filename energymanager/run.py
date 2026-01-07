@@ -90,6 +90,9 @@ class EnergyManager:
         self.update_interval = schedule_opts.get("update_interval_minutes", 15)
         self.scheduler = BackgroundScheduler(timezone="UTC")
 
+        # Track last discharge state to only send signal on change
+        self.last_discharge_allowed = None
+
     def connect(self):
         """Connect to services."""
         logger.info("Connecting to services...")
@@ -191,16 +194,23 @@ class EnergyManager:
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=point)
 
     def control_battery(self, discharge_allowed: bool):
-        """Control battery discharge via Home Assistant."""
+        """Control battery discharge via Home Assistant - only on state change."""
+        # Only send signal if state has changed
+        if discharge_allowed == self.last_discharge_allowed:
+            logger.debug(f"Discharge state unchanged ({discharge_allowed}), no signal sent")
+            return
+
         if not self.ha_client.token:
-            logger.debug("No HA token, skipping battery control")
+            logger.warning("No HA token, cannot control battery")
             return
 
         try:
             # Set max discharge power: 5000W if allowed, 0W if blocked
             value = 5000 if discharge_allowed else 0
-            self.ha_client.set_number(self.discharge_control_entity, value)
-            logger.info(f"Set {self.discharge_control_entity} to {value}W")
+            success = self.ha_client.set_number(self.discharge_control_entity, value)
+            if success:
+                self.last_discharge_allowed = discharge_allowed
+                logger.info(f"Battery control: {self.discharge_control_entity} = {value}W")
         except Exception as e:
             logger.error(f"Failed to control battery: {e}")
 
