@@ -269,26 +269,8 @@ class BatteryOptimizer:
         logger.info(f"Tariff: cheap={tariff.is_cheap_now}, "
                    f"cheap_end={tariff.cheap_end}, target={tariff.target}")
 
-        # During expensive tariff: always allow discharge
-        if not tariff.is_cheap_now:
-            sim = self.simulate_soc(soc_percent, forecast)
-            return (
-                DischargeDecision(
-                    discharge_allowed=True,
-                    switch_on_time=None,
-                    reason="Expensive tariff - discharge allowed",
-                    deficit_wh=0,
-                    saved_wh=0,
-                ),
-                sim,
-                sim,
-            )
-
-        # Filter forecast to target period
-        forecast_to_target = forecast[forecast.index <= tariff.target]
-
-        if forecast_to_target.empty:
-            logger.warning("No forecast data for target period")
+        if forecast.empty:
+            logger.warning("No forecast data available")
             return (
                 DischargeDecision(
                     discharge_allowed=True,
@@ -301,11 +283,16 @@ class BatteryOptimizer:
                 pd.DataFrame(),
             )
 
-        # Step 1: Simulate with battery always ON
-        sim_always_on = self.simulate_soc(soc_percent, forecast_to_target)
+        # Step 1: Simulate with battery always ON (full forecast period)
+        sim_always_on = self.simulate_soc(soc_percent, forecast)
 
-        # Get unclamped SOC at target
-        soc_at_target = sim_always_on["soc_wh_unclamped"].iloc[-1]
+        # Get unclamped SOC at target time
+        forecast_at_target = sim_always_on[sim_always_on.index <= tariff.target]
+        if forecast_at_target.empty:
+            soc_at_target = soc_percent / 100 * self.capacity_wh
+        else:
+            soc_at_target = forecast_at_target["soc_wh_unclamped"].iloc[-1]
+
         deficit_wh = max(0, -soc_at_target)
 
         logger.info(f"SOC at target (unclamped): {soc_at_target:.0f} Wh, "
@@ -325,9 +312,12 @@ class BatteryOptimizer:
                 sim_always_on,
             )
 
-        # Step 3: Calculate when to switch ON by accumulating savings
+        # Step 3: Calculate when to switch ON by accumulating savings during cheap period
+        # Use cheap_start from tariff (tonight's 21:00 if currently expensive)
+        block_start = tariff.cheap_start if tariff.is_cheap_now else tariff.target
+
         forecast_cheap = sim_always_on[
-            (sim_always_on.index >= tariff.cheap_start) &
+            (sim_always_on.index >= block_start) &
             (sim_always_on.index < tariff.cheap_end)
         ]
 
@@ -344,22 +334,31 @@ class BatteryOptimizer:
 
         logger.info(f"Saved {saved_wh:.0f} Wh, switch ON at {switch_on_time}")
 
-        # Step 4: Simulate with strategy
+        # Step 4: Simulate with strategy (block from cheap start until switch_on_time)
         sim_with_strategy = self.simulate_soc(
             soc_percent,
-            forecast_to_target,
+            forecast,
             block_until=switch_on_time
         )
 
         # Determine if discharge is currently allowed
-        discharge_allowed = now >= switch_on_time
-
-        if saved_wh < deficit_wh:
-            reason = (f"Block discharge until {switch_on_time.strftime('%H:%M')} - "
-                     f"saved {saved_wh:.0f}/{deficit_wh:.0f} Wh (shortfall)")
+        # During expensive tariff: always allow
+        # During cheap tariff: only allow after switch_on_time
+        if not tariff.is_cheap_now:
+            discharge_allowed = True
+            reason = (f"Expensive tariff - tonight block until {switch_on_time.strftime('%H:%M')} "
+                     f"(deficit {deficit_wh:.0f} Wh)")
+        elif now >= switch_on_time:
+            discharge_allowed = True
+            reason = f"Cheap tariff - discharge enabled (saved {saved_wh:.0f} Wh)"
         else:
-            reason = (f"Block discharge until {switch_on_time.strftime('%H:%M')} - "
-                     f"saved {saved_wh:.0f} Wh")
+            discharge_allowed = False
+            if saved_wh < deficit_wh:
+                reason = (f"Block discharge until {switch_on_time.strftime('%H:%M')} - "
+                         f"saved {saved_wh:.0f}/{deficit_wh:.0f} Wh (shortfall)")
+            else:
+                reason = (f"Block discharge until {switch_on_time.strftime('%H:%M')} - "
+                         f"saved {saved_wh:.0f} Wh")
 
         return (
             DischargeDecision(
