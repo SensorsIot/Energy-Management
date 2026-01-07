@@ -1,0 +1,59 @@
+name: "LoadForecast"
+version: "1.0.0"
+slug: "loadforecast"
+description: "Statistical load forecast using historical consumption data"
+url: "https://github.com/spiessa/energymanagement"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+
+startup: services
+boot: auto
+timeout: 120
+
+map:
+  - config:ro
+
+options:
+  influxdb:
+    host: "192.168.0.203"
+    port: 8087
+    token: ""
+    org: "energymanagement"
+    source_bucket: "HomeAssistant"
+    target_bucket: "load_forecast"
+
+  load_sensor:
+    entity_id: "load_power"
+
+  forecast:
+    history_days: 90
+    horizon_hours: 48
+
+  schedule:
+    cron: "15 * * * *"
+
+  log_level: "info"
+
+schema:
+  influxdb:
+    host: str
+    port: port
+    token: str
+    org: str
+    source_bucket: str
+    target_bucket: str
+
+  load_sensor:
+    entity_id: str
+
+  forecast:
+    history_days: int
+    horizon_hours: int
+
+  schedule:
+    cron: str
+
+  log_level: "list(debug|info|warning|error)"

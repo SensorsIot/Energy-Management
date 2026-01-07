@@ -1,0 +1,5 @@
+# LoadForecast dependencies
+pandas>=2.0.0
+numpy>=1.24.0
+influxdb-client>=1.36.0
+croniter>=1.3.0
