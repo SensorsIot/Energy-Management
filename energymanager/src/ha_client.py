@@ -28,11 +28,13 @@ class HAClient:
         """Get token - check environment each time (no caching)."""
         # Use provided token first
         if self._provided_token:
+            logger.info("Using provided token from config")
             return self._provided_token
 
         # Try environment variables
         token = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
         if token:
+            logger.info("Using SUPERVISOR_TOKEN from environment")
             return token
 
         # Try token file (used by some HA add-on versions)
@@ -40,11 +42,14 @@ class HAClient:
             with open("/run/secrets/supervisor_token", "r") as f:
                 token = f.read().strip()
                 if token:
+                    logger.info("Using token from /run/secrets/supervisor_token")
                     return token
         except FileNotFoundError:
             pass
 
-        logger.debug(f"No token found. Env vars: {[k for k in os.environ.keys() if 'TOKEN' in k or 'HASSIO' in k or 'SUPER' in k]}")
+        # Log all environment variables for debugging
+        logger.warning(f"No token found. Token-related env vars: {[k for k in os.environ.keys() if 'TOKEN' in k.upper() or 'HASSIO' in k.upper() or 'SUPER' in k.upper()]}")
+        logger.warning(f"All env vars: {list(os.environ.keys())}")
         return None
 
     def _headers(self) -> dict:
