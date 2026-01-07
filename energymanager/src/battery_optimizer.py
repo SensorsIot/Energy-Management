@@ -284,44 +284,29 @@ class BatteryOptimizer:
                 pd.DataFrame(),
             )
 
-        # Step 1: Calculate SOC at cheap_start (21:00 tonight)
-        # First simulate from now until cheap_start to get starting SOC
+        # Step 1: Simulate full trajectory from NOW to target (tomorrow 21:00)
+        # This gives us the complete picture for visualization
+        sim_full_no_strategy = self.simulate_soc(soc_percent, forecast)
+
+        # Get SOC at cheap_start (21:00 tonight) for decision calculations
         forecast_until_cheap = forecast[forecast.index < tariff.cheap_start]
         if not forecast_until_cheap.empty:
-            sim_until_cheap = self.simulate_soc(soc_percent, forecast_until_cheap)
-            soc_at_cheap_start = sim_until_cheap["soc_percent"].iloc[-1]
+            soc_at_cheap_start = sim_full_no_strategy.loc[
+                sim_full_no_strategy.index < tariff.cheap_start, "soc_percent"
+            ].iloc[-1]
         else:
             soc_at_cheap_start = soc_percent
 
         logger.info(f"SOC at cheap start ({tariff.cheap_start.strftime('%H:%M')}): {soc_at_cheap_start:.1f}%")
 
-        # Step 2: Get forecast from cheap_start (21:00) to target (tomorrow 21:00)
-        forecast_from_cheap = forecast[forecast.index >= tariff.cheap_start]
-        if forecast_from_cheap.empty:
-            logger.warning("No forecast data from cheap start to target")
-            return (
-                DischargeDecision(
-                    discharge_allowed=True,
-                    switch_on_time=None,
-                    reason="No forecast data for simulation period",
-                    deficit_wh=0,
-                    saved_wh=0,
-                ),
-                pd.DataFrame(),
-                pd.DataFrame(),
-            )
-
-        # Step 3: Simulate with battery always ON from 21:00 to tomorrow 21:00
-        sim_always_on = self.simulate_soc(soc_at_cheap_start, forecast_from_cheap)
-
-        # Get unclamped SOC at target time (tomorrow 21:00)
-        soc_at_target = sim_always_on["soc_wh_unclamped"].iloc[-1]
+        # Step 2: Get unclamped SOC at target time (tomorrow 21:00)
+        soc_at_target = sim_full_no_strategy["soc_wh_unclamped"].iloc[-1]
         deficit_wh = max(0, -soc_at_target)
 
         logger.info(f"SOC at target (unclamped): {soc_at_target:.0f} Wh, "
                    f"deficit: {deficit_wh:.0f} Wh")
 
-        # Step 2: If no deficit, no blocking needed
+        # Step 3: If no deficit, no blocking needed
         if deficit_wh <= 0:
             return (
                 DischargeDecision(
@@ -331,14 +316,14 @@ class BatteryOptimizer:
                     deficit_wh=0,
                     saved_wh=0,
                 ),
-                sim_always_on,
-                sim_always_on,
+                sim_full_no_strategy,
+                sim_full_no_strategy,
             )
 
         # Step 4: Calculate when to switch ON by accumulating savings during cheap period
-        forecast_cheap = sim_always_on[
-            (sim_always_on.index >= tariff.cheap_start) &
-            (sim_always_on.index < tariff.cheap_end)
+        forecast_cheap = sim_full_no_strategy[
+            (sim_full_no_strategy.index >= tariff.cheap_start) &
+            (sim_full_no_strategy.index < tariff.cheap_end)
         ]
 
         saved_wh = 0
@@ -354,10 +339,10 @@ class BatteryOptimizer:
 
         logger.info(f"Saved {saved_wh:.0f} Wh, switch ON at {switch_on_time}")
 
-        # Step 5: Simulate with strategy (block from cheap start until switch_on_time)
-        sim_with_strategy = self.simulate_soc(
-            soc_at_cheap_start,
-            forecast_from_cheap,
+        # Step 5: Simulate with strategy - full trajectory from NOW with blocking
+        sim_full_with_strategy = self.simulate_soc(
+            soc_percent,
+            forecast,
             block_until=switch_on_time
         )
 
@@ -388,6 +373,6 @@ class BatteryOptimizer:
                 deficit_wh=deficit_wh,
                 saved_wh=saved_wh,
             ),
-            sim_always_on,
-            sim_with_strategy,
+            sim_full_no_strategy,
+            sim_full_with_strategy,
         )

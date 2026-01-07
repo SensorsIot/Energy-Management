@@ -1,0 +1,46 @@
+{
+  "influxdb": {
+    "host": "192.168.0.203",
+    "port": 8087,
+    "token": "",
+    "org": "spiessa",
+    "pv_bucket": "pv_forecast",
+    "load_bucket": "load_forecast",
+    "output_bucket": "energy_manager",
+    "soc_bucket": "HuaweiNew",
+    "soc_measurement": "Energy",
+    "soc_field": "BATT_Level"
+  },
+  "home_assistant": {
+    "url": "http://192.168.0.202:8123",
+    "token": ""
+  },
+  "battery": {
+    "capacity_kwh": 10.0,
+    "reserve_percent": 10,
+    "charge_efficiency": 0.95,
+    "discharge_efficiency": 0.95,
+    "max_charge_w": 5000,
+    "max_discharge_w": 5000,
+    "soc_entity": "sensor.battery_state_of_capacity",
+    "discharge_control_entity": "number.battery_maximum_discharging_power"
+  },
+  "tariff": {
+    "weekday_cheap_start": "21:00",
+    "weekday_cheap_end": "06:00",
+    "weekend_all_day_cheap": true,
+    "holidays": []
+  },
+  "appliances": {
+    "power_w": 2500,
+    "energy_wh": 1500
+  },
+  "ev_charging": {
+    "min_power_w": 4100,
+    "max_power_w": 11000
+  },
+  "schedule": {
+    "update_interval_minutes": 15
+  },
+  "log_level": "info"
+}
