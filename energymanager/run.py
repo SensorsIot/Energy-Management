@@ -167,19 +167,21 @@ class EnergyManager:
         if sim_no_strategy.empty or sim_with_strategy.empty:
             return
 
-        # Delete ALL future comparison data from NOW onwards
+        # Delete ALL comparison data from simulation start onwards
         # This ensures old stale data doesn't interfere
         delete_api = self.influx_client.delete_api()
-        now = datetime.now(timezone.utc)
+        sim_start = sim_no_strategy.index.min()
+        # Also delete from 1 hour before to catch any stale data
+        delete_start = sim_start - timedelta(hours=1)
         try:
             delete_api.delete(
-                start=now,
-                stop=now.replace(year=2100),
+                start=delete_start,
+                stop=datetime.now(timezone.utc).replace(year=2100),
                 predicate='_measurement="soc_comparison"',
                 bucket=self.output_bucket,
                 org=self.influx_org,
             )
-            logger.debug(f"Deleted soc_comparison data from {now} onwards")
+            logger.info(f"DEBUG: Deleted soc_comparison data from {delete_start} onwards")
         except Exception as e:
             logger.warning(f"Failed to delete old comparison data: {e}")
 
@@ -254,7 +256,7 @@ class EnergyManager:
         try:
             # Get current SOC
             current_soc = self.get_current_soc()
-            logger.info(f"Current battery SOC: {current_soc:.1f}%")
+            logger.info(f"DEBUG: Current battery SOC from get_current_soc(): {current_soc:.1f}%")
 
             # Get forecast
             now = datetime.now(timezone.utc)
@@ -282,6 +284,8 @@ class EnergyManager:
                 return
 
             logger.info(f"Got {len(forecast)} forecast periods")
+            logger.info(f"DEBUG: Forecast first timestamp: {forecast.index[0]}")
+            logger.info(f"DEBUG: Forecast last timestamp: {forecast.index[-1]}")
 
             # Calculate discharge decision
             decision, sim_no_strategy, sim_with_strategy = self.optimizer.calculate_decision(
@@ -289,6 +293,11 @@ class EnergyManager:
                 forecast=forecast,
                 now=now,
             )
+
+            # Debug: log first few simulation points
+            if not sim_no_strategy.empty:
+                logger.info(f"DEBUG: Simulation first timestamp: {sim_no_strategy.index[0]}")
+                logger.info(f"DEBUG: Simulation first SOC: {sim_no_strategy['soc_percent'].iloc[0]:.1f}%")
 
             # Log decision
             logger.info(f"Decision: discharge_allowed={decision.discharge_allowed}")
