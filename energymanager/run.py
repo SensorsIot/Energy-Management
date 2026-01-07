@@ -22,6 +22,7 @@ from src.forecast_reader import ForecastReader
 from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
 from src.appliance_signal import calculate_appliance_signal
+from src.influxdb_writer import SimulationWriter
 
 # Swiss timezone for display
 SWISS_TZ = ZoneInfo("Europe/Zurich")
@@ -129,6 +130,15 @@ class EnergyManager:
         # Track last discharge state to only send signal on change
         self.last_discharge_allowed = None
 
+        # SimulationWriter for FSD 4.2.3 output
+        self.simulation_writer = SimulationWriter(
+            host=influx_opts.get("host", "192.168.0.203"),
+            port=influx_opts.get("port", 8087),
+            token=influx_opts.get("token", ""),
+            org=influx_opts.get("org", "spiessa"),
+            bucket=self.output_bucket,
+        )
+
     def connect(self):
         """Connect to services."""
         logger.info("Connecting to services...")
@@ -139,6 +149,7 @@ class EnergyManager:
             org=self.influx_org
         )
         self.write_api = self.influx_client.write_api(write_options=SYNCHRONOUS)
+        self.simulation_writer.connect()
         logger.info("Connected successfully")
 
     def close(self):
@@ -146,6 +157,7 @@ class EnergyManager:
         self.forecast_reader.close()
         if self.influx_client:
             self.influx_client.close()
+        self.simulation_writer.close()
 
     def get_current_soc(self) -> float:
         """Get current battery SOC from HA or InfluxDB."""
@@ -312,6 +324,9 @@ class EnergyManager:
                 logger.info(f"Switch ON at: {swiss_datetime(decision.switch_on_time)}")
 
             # Write results to InfluxDB
+            # FSD 4.2.3: Write SOC forecast (baseline simulation)
+            self.simulation_writer.write_soc_forecast(sim_no_strategy)
+            # Additional: comparison for dashboard visualization
             self.write_soc_comparison(sim_no_strategy, sim_with_strategy)
             self.write_decision(decision, current_soc)
 

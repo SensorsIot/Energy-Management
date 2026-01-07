@@ -973,246 +973,167 @@ union(tables: [forecast, actual])
 
 # Chapter 4: EnergyManager Add-on
 
-## 4.1 Overview
+## 4.1 Inputs
 
-The EnergyManager add-on optimizes household energy usage by analyzing PV and load forecasts to make intelligent decisions about battery discharge, appliance scheduling, and EV charging.
+The EnergyManager requires three inputs to calculate energy decisions:
 
-| Property | Value |
-|----------|-------|
-| Name | EnergyManager |
-| Version | 1.1.6 |
-| Slug | `energymanager` |
-| Update Frequency | Every 15 minutes |
-| Forecast Horizon | 48 hours |
-| Init System | s6-overlay (for SUPERVISOR_TOKEN) |
+### 4.1.1 PV Forecast (from InfluxDB)
 
-## 4.2 Core Functions
-
-The add-on provides three main optimization signals:
-
-### 4.2.1 Battery Discharge Control
-
-**Problem:** Electricity is cheaper during night hours (21:00-06:00 on weekdays, all day on weekends/holidays). We don't want to discharge the battery during cheap tariff periods if that energy will be needed after 6:00 AM when prices are high.
-
-**Solution:** Block battery discharge during cheap tariff periods unless:
-- The battery will be fully recharged by PV before the next expensive period
-- There's sufficient PV forecast to cover morning load
-
-**Output:** `binary_sensor.battery_discharge_allowed`
-
-### 4.2.2 Appliance Signal (Washing Machine / Dishwasher)
-
-**Problem:** Running high-power appliances (2.5 kW) should be timed to maximize self-consumption.
-
-**Solution:** Two-level signal visible on kitchen dashboard:
-
-| Signal | Color | Meaning |
-|--------|-------|---------|
-| **Green** | 🟢 | Current PV excess > appliance power (2500W) - run now with pure solar |
-| **Orange** | 🟠 | Forecast shows sufficient surplus - safe to use battery, will recover |
-| **Red** | 🔴 | Insufficient surplus - would require grid import or deplete battery |
-
-**Output:**
-- `sensor.appliance_signal` (green/orange/red)
-- Attributes: reason, excess_power_w, forecast_surplus_wh, icon
-
-### 4.2.3 EV Charging Signal
-
-**Problem:** EV charging requires minimum 4.1 kW. Should only charge with excess PV to avoid grid import.
-
-**Solution:** Enable charging signal when PV excess exceeds configured threshold.
-
-**Output:**
-- `binary_sensor.ev_excess_charging_allowed`
-- `sensor.ev_available_power` (W)
-
-## 4.3 Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        EnergyManager Add-on                          │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  OPTIMIZATION CYCLE (every 15 minutes)                              │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │                                                                 │  │
-│  │  1. READ FORECASTS                                              │  │
-│  │     ├─► PV forecast (P10/P50/P90) from pv_forecast bucket      │  │
-│  │     └─► Load forecast (P10/P50/P90) from load_forecast bucket  │  │
-│  │                                                                 │  │
-│  │  2. READ CURRENT STATE                                          │  │
-│  │     ├─► Battery SOC from sensor.battery_state_of_capacity      │  │
-│  │     ├─► Current PV power from sensor.solar_pv_total_ac_power   │  │
-│  │     └─► Current load from sensor.load_power                    │  │
-│  │                                                                 │  │
-│  │  3. CALCULATE SIGNALS                                           │  │
-│  │     ├─► Battery discharge decision (tariff + forecast based)   │  │
-│  │     ├─► Appliance signal (green/orange/off)                    │  │
-│  │     └─► EV charging signal (excess power check)                │  │
-│  │                                                                 │  │
-│  │  4. OUTPUT TO HOME ASSISTANT                                    │  │
-│  │     ├─► Update HA entities via REST API                        │  │
-│  │     └─► Write decisions to InfluxDB for logging                │  │
-│  │                                                                 │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "pv_forecast")
+  |> filter(fn: (r) => r._field == "power_w_p50")
 ```
 
-## 4.4 Tariff Configuration
+| Field | Unit | Description |
+|-------|------|-------------|
+| `power_w_p10` | W | Conservative estimate (90% confidence) |
+| `power_w_p50` | W | Most likely estimate (median) |
+| `power_w_p90` | W | Optimistic estimate (10% confidence) |
 
-### 4.4.1 Time-of-Use Tariff Structure
+### 4.1.2 Load Forecast (from InfluxDB)
 
-| Period | Weekdays | Weekends/Holidays | Price |
-|--------|----------|-------------------|-------|
-| **Night (cheap)** | 21:00 - 06:00 | All day | Low |
-| **Day (expensive)** | 06:00 - 21:00 | - | High |
-
-### 4.4.2 Holiday Schedule
-
-Public holidays in Switzerland (canton-specific) are configured in YAML:
-
-```yaml
-tariff:
-  cheap_hours:
-    weekday_start: "21:00"
-    weekday_end: "06:00"
-    weekend_all_day: true
-    holidays_all_day: true
-
-  holidays_2026:
-    - "2026-01-01"  # Neujahr
-    - "2026-01-02"  # Berchtoldstag
-    - "2026-04-03"  # Karfreitag
-    - "2026-04-06"  # Ostermontag
-    - "2026-05-01"  # Tag der Arbeit
-    - "2026-05-14"  # Auffahrt
-    - "2026-05-25"  # Pfingstmontag
-    - "2026-08-01"  # Nationalfeiertag
-    - "2026-12-25"  # Weihnachten
-    - "2026-12-26"  # Stephanstag
+```flux
+from(bucket: "load_forecast")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "load_forecast")
+  |> filter(fn: (r) => r._field == "power_w_p50")
 ```
 
-## 4.5 Battery Discharge Logic
+| Field | Unit | Description |
+|-------|------|-------------|
+| `power_w_p10` | W | Low estimate |
+| `power_w_p50` | W | Most likely estimate |
+| `power_w_p90` | W | High estimate |
 
-### 4.5.1 Algorithm Overview
-
-The algorithm determines when to block battery discharge during cheap tariff periods to preserve energy for expensive periods. It uses a simple energy balance approach:
-
-1. **Target**: SOC = 0% at next 21:00 (start of next cheap tariff)
-2. **Goal**: Use all battery energy during expensive hours, arrive empty when cheap tariff starts
-3. **Method**: If battery would deplete too early, block discharge during cheap hours to save energy
-
-### 4.5.2 Tariff Period Calculation
+### 4.1.3 Current SOC (from Home Assistant)
 
 ```
-get_tariff_periods(now):
-
-    Weekday night (Mon-Thu):
-        cheap_start = today 21:00
-        cheap_end = tomorrow 06:00
-        target = tomorrow 21:00
-
-    Friday night:
-        cheap_start = Friday 21:00
-        cheap_end = Monday 06:00  (entire weekend is cheap)
-        target = Monday 21:00
-
-    Weekend (Sat/Sun):
-        cheap_start = now
-        cheap_end = Monday 06:00
-        target = Monday 21:00
-
-    Holiday:
-        Same as weekend
+sensor.battery_state_of_capacity → soc_percent (0-100%)
 ```
 
-### 4.5.3 Decision Algorithm
+The current SOC is **always read live** at the start of each simulation cycle. This is critical because the starting SOC shifts the entire forecast trajectory up or down.
+
+### 4.1.4 Tariff Schedule
+
+| Period | Weekdays | Weekends/Holidays |
+|--------|----------|-------------------|
+| **Cheap** | 21:00 - 06:00 | All day |
+| **Expensive** | 06:00 - 21:00 | - |
+
+Holidays: Read from calendar integration (future: HA calendar entity).
+
+---
+
+## 4.2 SOC Simulation
+
+The SOC simulation predicts battery state over the forecast horizon. This is the base curve for all energy management decisions.
+
+### 4.2.1 Basic Loop (net = PV - Load → battery flow)
+
+```
+FOR each 15-minute timestep from NOW to target (48h):
+
+  1. Get forecast values
+     pv_wh = pv_forecast[t]       (Wh produced in 15 min)
+     load_wh = load_forecast[t]   (Wh consumed in 15 min)
+
+  2. Calculate net energy
+     net_wh = pv_wh - load_wh
+
+  3. Determine battery flow
+     IF net_wh > 0:  battery_flow = +net_wh  (charge)
+     IF net_wh < 0:  battery_flow = net_wh   (discharge)
+
+  4. Memorize: time, pv_wh, load_wh, net_wh, battery_flow
+```
+
+### 4.2.2 Efficiency (battery flow → SOC change)
+
+Efficiency loss is applied when energy flows through the battery:
+
+```
+Battery parameters:
+  capacity = 10000 Wh
+  efficiency = 0.95 (per direction)
+
+IF battery_flow > 0:  (charging)
+   energy_stored = battery_flow × efficiency
+   soc_wh = soc_wh + energy_stored
+
+IF battery_flow < 0:  (discharging)
+   energy_withdrawn = |battery_flow| ÷ efficiency
+   soc_wh = soc_wh - energy_withdrawn
+
+Convert back to percent:
+   soc_percent = soc_wh / capacity × 100
+```
+
+**Example:**
+
+- Charge 1000 Wh → 950 Wh stored (50 Wh loss)
+- Discharge 1000 Wh needed → withdraw 1053 Wh (53 Wh loss)
+
+### 4.2.3 Output: SOC Forecast Curve (store into InfluxDB)
+
+The simulation writes only the SOC trajectory to InfluxDB (PV/Load already in input buckets):
+
+**Measurement:** `soc_forecast`
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `soc_percent` | % | Forecasted SOC at each 15-min timestep |
+
+```flux
+from(bucket: "energy_manager")
+  |> range(start: now(), stop: 48h)
+  |> filter(fn: (r) => r._measurement == "soc_forecast")
+```
+
+---
+
+## 4.3 Battery Discharge Optimization
+
+### 4.3.1 Problem
+
+During cheap tariff (night), we want to preserve battery energy for the expensive period (day). Goal: SOC = 0% at next 21:00.
+
+### 4.3.2 Algorithm
 
 ```
 Every 15 minutes during cheap tariff:
 
-1. SIMULATE with battery always ON:
-   - Start from current SOC
-   - Run through forecast until target (next 21:00)
-   - Track "unclamped" energy (can go negative)
-   - deficit_wh = max(0, -soc_at_target)
+1. RUN SOC SIMULATION (§4.2) until next 21:00
+   → Get soc_at_target (can be negative = deficit)
 
-2. IF deficit_wh <= 0:
-   → Battery stays ON, no action needed
-   → SOC will be >= 0% at target
+2. CALCULATE DEFICIT
+   IF soc_at_target >= 0%:
+      → Battery ON, no blocking needed
+   ELSE:
+      deficit_wh = |soc_at_target|/100 × capacity
 
-3. IF deficit_wh > 0:
-   → Need to save energy during cheap period
-
+3. FIND SWITCH-ON TIME
    saved_wh = 0
-   switch_on_time = cheap_end  (default: 06:00)
-
-   FOR each 15-min period from cheap_start to cheap_end:
-       IF net_energy < 0:  (load > PV, would discharge)
-           saved_wh += discharge_that_would_happen
-
+   FOR each 15-min period during cheap tariff:
+       IF net_wh < 0:
+           saved_wh += |net_wh| ÷ efficiency
        IF saved_wh >= deficit_wh:
-           switch_on_time = current_period
+           switch_on_time = now
            BREAK
 
-   → Battery OFF from cheap_start to switch_on_time
+   → Battery OFF until switch_on_time
    → Battery ON after switch_on_time
 
 4. DURING expensive tariff (06:00-21:00):
-   → Battery always ON (use stored energy)
+   → Battery always ON
 ```
 
-### 4.5.4 Example Calculation
+### 4.3.3 Output: binary_sensor.battery_discharge_allowed
 
-```
-Tuesday 22:00, SOC = 13%
-
-Step 1: Simulate until Wednesday 21:00
-  - Forecast shows: load > PV overnight and evening
-  - Unclamped SOC at 21:00 = -31% (3098 Wh deficit)
-
-Step 2: Need to save 3098 Wh during cheap period (21:00-06:00)
-
-Step 3: Accumulate savings from 21:00:
-  21:00: save 126 Wh (total: 126)
-  21:15: save 131 Wh (total: 257)
-  ...
-  05:45: save 77 Wh (total: 2755)
-  06:00: cheap tariff ends, only saved 2755 Wh
-
-Step 4: Decision
-  - Saved 2755 Wh < needed 3098 Wh
-  - Shortfall: 343 Wh (~2 periods)
-  - Battery OFF: 21:00 to 06:00
-  - Battery ON: 06:00 onwards
-  - Result: SOC hits 0% at 20:30 (30 min early)
-```
-
-### 4.5.5 SOC Trajectory Visualization
-
-Two curves are written to InfluxDB for Grafana visualization, showing the full trajectory from **NOW until target (tomorrow 21:00)**:
-
-| Curve | Description |
-|-------|-------------|
-| **Without Strategy** (orange) | SOC if battery always ON - may hit 0% early |
-| **With Strategy** (green) | SOC with optimized discharge blocking |
-
-The simulation starts from the current time and SOC. During the daytime expensive tariff (06:00-21:00), both curves are identical because no blocking applies. The curves diverge at 21:00 when the cheap tariff starts and blocking kicks in for the "with strategy" scenario.
-
-**Note**: All times in logs and UI are displayed in Swiss timezone (Europe/Zurich), while internal processing uses UTC.
-
-Query:
-```flux
-from(bucket: "energy_manager")
-  |> filter(fn: (r) => r._measurement == "soc_comparison")
-  |> filter(fn: (r) => r.scenario == "with_strategy" or r.scenario == "no_strategy")
-```
-
-### 4.5.6 Home Assistant Control
+Controls the battery discharge switch in Home Assistant:
 
 ```yaml
-# Block discharge by setting max power to 0
 service: number.set_value
 target:
   entity_id: number.battery_maximum_discharging_power
@@ -1220,345 +1141,156 @@ data:
   value: "{{ 5000 if discharge_allowed else 0 }}"
 ```
 
-## 4.6 Appliance Signal Logic
+---
 
-### 4.6.1 Configuration
+## 4.4 Appliance Signal
 
-```yaml
-appliances:
-  power_w: 2500           # Required power for appliance
-  energy_wh: 1500         # Energy consumption per cycle
-  min_runtime_minutes: 60 # Minimum runtime once started
-```
+### 4.4.1 Problem
 
-### 4.6.2 Signal Calculation
+High-power appliances (washing machine 2.5 kW) should run when there's sufficient solar surplus.
+
+### 4.4.2 Algorithm
 
 ```
 Every 15 minutes:
 
-1. Calculate current PV excess:
-   excess_power = pv_power - load_power
+1. GREEN: Current excess > 2500W
+   → Run now with pure solar
 
-2. GREEN signal (pure PV, no battery needed):
-   IF excess_power > appliance_power_w (2500W configurable):
-      signal = GREEN
-      reason = "Genug Überschuss" (Enough excess)
+2. ORANGE: Run SOC simulation
+   IF soc_at_target >= appliance_consumption (1500 Wh):
+   → Safe to run, battery will recover
 
-3. ORANGE signal (enough forecast surplus):
-   Run BASE simulation (battery always ON, no optimization) until tomorrow 21:00
-   - This is the same simulation as battery optimizer but WITHOUT the discharge blocking
-   - Track unclamped SOC (can go negative, representing grid import needed)
-
-   unclamped_soc_wh = simulated SOC at tomorrow 21:00
-
-   IF unclamped_soc_wh >= appliance_energy_wh (1500 Wh configurable):
-      signal = ORANGE
-      reason = "Prognose zeigt genug Überschuss" (Forecast shows enough surplus)
-
-   Explanation:
-   - If unclamped SOC at target >= appliance energy, we have enough surplus
-   - Running the appliance will use 1500 Wh from battery/grid mix
-   - But by tomorrow 21:00, PV will have recovered that energy
-   - Example: unclamped_soc = 3000 Wh, appliance = 1500 Wh
-     → After appliance: 3000 - 1500 = 1500 Wh remaining → Safe (Orange)
-
-4. RED signal:
-   ELSE:
-      signal = RED
-      reason = "Kein Überschuss" (No excess)
-
-   This means running the appliance would either:
-   - Cause grid import during expensive hours, OR
-   - Deplete battery below acceptable levels
+3. RED: Otherwise
+   → Would require grid import
 ```
 
-**Key Insight:** The Orange signal uses the BASE simulation (no optimization strategy).
-This shows what the "natural" energy balance would be if we just let the battery
-operate normally. We don't apply the discharge blocking strategy here because
-we want to know: "If we run the appliance now, will we still have positive
-balance by tomorrow evening?"
+### 4.4.3 Output: sensor.appliance_signal
 
-### 4.6.3 Dashboard Display
+| State | Meaning |
+|-------|---------|
+| `green` | Pure solar available now |
+| `orange` | Safe to run, will recover |
+| `red` | Insufficient surplus |
 
-The signal is exposed as Home Assistant entities for display on the kitchen dashboard:
+---
+
+## 4.5 EV Charging Signal
+
+### 4.5.1 Problem
+
+EV charging requires minimum 4.1 kW. Should only charge with excess PV via EVCC.
+
+### 4.5.2 Algorithm
+
+```
+excess_w = pv_power - load_power
+
+IF excess_w >= 4100:
+   charging_power = min(excess_w, 11000)
+ELSE:
+   charging_power = 0
+```
+
+### 4.5.3 Output: sensor.ev_charging_power
+
+| Value | Meaning |
+|-------|---------|
+| `0` | No charging |
+| `4100-11000` | Charging power for EVCC (W) |
+
+---
+
+## 4.6 Configuration Schema
 
 ```yaml
-# Entities created by EnergyManager
-sensor.appliance_signal:
-  state: "green"  # or "orange" or "red"
-  attributes:
-    friendly_name: "Appliance Signal"
-    reason: "Genug Überschuss"
-    excess_power_w: 3200
-    forecast_surplus_wh: 2500
-    icon: mdi:washing-machine
-
-# Amazon Fire dashboard card with card_mod styling
-type: button
-name: Waschen
-icon: mdi:washing-machine
-entity: sensor.appliance_signal
-show_state: false
-tap_action:
-  action: more-info
-card_mod:
-  style: |
-    ha-card {
-      {% if states('sensor.appliance_signal') == 'green' %}
-      --card-mod-icon-color: green;
-      {% elif states('sensor.appliance_signal') == 'orange' %}
-      --card-mod-icon-color: orange;
-      {% else %}
-      --card-mod-icon-color: red;
-      {% endif %}
-    }
-```
-
-**Note:** The card_mod template requires quotes around entity IDs in `states()` calls.
-
-## 4.7 EV Charging Signal Logic
-
-### 4.7.1 Configuration
-
-```yaml
-ev_charging:
-  min_power_w: 4100       # Minimum charging power (wallbox limit)
-  max_power_w: 11000      # Maximum charging power
-  control_mode: "signal"  # "signal" (advisory) or "evcc" (direct control)
-```
-
-### 4.7.2 Signal Calculation
-
-```
-Every 15 minutes:
-
-1. Calculate available excess power:
-   excess = pv_power - load_power - battery_charge_rate
-
-2. Check if excess exceeds minimum:
-   IF excess >= min_power_w:
-      ev_charging_allowed = true
-      available_power = min(excess, max_power_w)
-   ELSE:
-      ev_charging_allowed = false
-      available_power = 0
-
-3. Forecast-based recommendation:
-   Calculate best charging windows for next 24h
-   where pv_p50 - load_p50 > min_power_w
-```
-
-### 4.7.3 EVCC Integration (Optional)
-
-If using EVCC, the signal can be sent via its API:
-
-```yaml
-# Option 1: Advisory signal only
-binary_sensor.ev_excess_charging_allowed: true/false
-sensor.ev_available_power: 4500  # W
-
-# Option 2: Direct EVCC control (future)
-# POST to EVCC API to set charging mode
-```
-
-## 4.8 Configuration Schema
-
-```yaml
-# EnergyManager configuration (/config/energymanager.yaml)
-
 influxdb:
   host: "192.168.0.203"
   port: 8087
   token: "your-token"
   org: "spiessa"
-  pv_bucket: "pv_forecast"
-  load_bucket: "load_forecast"
 
 home_assistant:
   url: "http://192.168.0.202:8123"
   token: "your-long-lived-token"
 
 battery:
-  capacity_kwh: 10.0
-  reserve_percent: 20        # Minimum SOC to maintain
-  charge_efficiency: 0.95
-  discharge_efficiency: 0.95
-  max_charge_w: 5000
-  max_discharge_w: 5000
+  capacity_wh: 10000
+  efficiency: 0.95
+  max_power_w: 5000
   soc_entity: "sensor.battery_state_of_capacity"
-  discharge_control_entity: "number.battery_maximum_discharging_power"
+  discharge_entity: "number.battery_maximum_discharging_power"
 
 tariff:
-  cheap_hours:
-    weekday_start: "21:00"
-    weekday_end: "06:00"
-    weekend_all_day: true
-    holidays_all_day: true
-
-  holidays_2026:
-    - "2026-01-01"
-    - "2026-01-02"
-    - "2026-04-03"
-    - "2026-04-06"
-    - "2026-05-01"
-    - "2026-05-14"
-    - "2026-05-25"
-    - "2026-08-01"
-    - "2026-12-25"
-    - "2026-12-26"
+  cheap_start: "21:00"
+  cheap_end: "06:00"
+  weekend_all_day: true
 
 appliances:
-  power_w: 2500              # Required power (dishwasher/washing machine)
-  energy_wh: 1500            # Energy per cycle
-  min_runtime_minutes: 60
+  power_w: 2500
+  energy_wh: 1500
 
 ev_charging:
-  min_power_w: 4100          # Wallbox minimum (configurable)
+  min_power_w: 4100
   max_power_w: 11000
-  control_mode: "signal"     # "signal" or "evcc"
-  evcc_url: "http://192.168.0.xxx:7070"  # If using EVCC
+  evcc_url: "http://192.168.0.150:7070"
 
 schedule:
-  update_interval_minutes: 15
-
-log_level: "info"
+  interval_minutes: 15
 ```
 
-## 4.9 Output Entities
+---
 
-### 4.9.1 Battery Control
+## 4.7 InfluxDB Storage
 
-| Entity | Type | Description |
-|--------|------|-------------|
-| `binary_sensor.battery_discharge_allowed` | Boolean | Whether discharge is currently allowed |
-| `sensor.battery_discharge_reason` | String | Explanation of current decision |
-| `sensor.battery_morning_need_kwh` | Float | Forecasted energy needed after 6:00 |
+**Measurements:**
 
-### 4.9.2 Appliance Signal
+| Measurement | Purpose |
+|-------------|---------|
+| `soc_forecast` | SOC trajectory from simulation |
+| `energy_decisions` | Battery/appliance/EV decisions |
 
-| Entity | Type | Description |
-|--------|------|-------------|
-| `sensor.appliance_signal` | String | "green", "orange", or "red" |
+**Query for Grafana SOC curve:**
 
-**Attributes:**
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `reason` | String | Human-readable explanation (German) |
-| `excess_power_w` | Float | Current PV excess power (W) |
-| `forecast_surplus_wh` | Float | Unclamped SOC at target (Wh) |
-| `icon` | String | mdi:washing-machine |
-
-### 4.9.3 EV Charging
-
-| Entity | Type | Description |
-|--------|------|-------------|
-| `binary_sensor.ev_excess_charging_allowed` | Boolean | Excess available for EV |
-| `sensor.ev_available_power` | Float | Available charging power (W) |
-| `sensor.ev_next_window_start` | Time | Next good charging window |
-
-## 4.10 InfluxDB Logging
-
-All decisions are logged to InfluxDB for analysis:
-
-**Measurement:** `energy_manager`
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `discharge_allowed` | Boolean | Battery discharge decision |
-| `appliance_signal` | String | Appliance signal state |
-| `ev_charging_allowed` | Boolean | EV charging decision |
-| `pv_excess_w` | Float | Current PV excess |
-| `battery_soc` | Float | Current battery SOC |
-| `tariff_period` | String | "cheap" or "expensive" |
-
-## 4.11 Source Files
-
-| File | Purpose |
-|------|---------|
-| `run.py` | Main entry point, scheduler |
-| `src/forecast_reader.py` | Read PV/load forecasts from InfluxDB |
-| `src/tariff.py` | Tariff schedule and holiday handling |
-| `src/battery_optimizer.py` | Battery discharge decision logic |
-| `src/appliance_signal.py` | Green/orange/off signal calculation |
-| `src/ev_signal.py` | EV charging signal calculation |
-| `src/ha_client.py` | Home Assistant REST API client |
-| `src/influxdb_writer.py` | Decision logging |
-
-## 4.12 Dependencies
-
-```
-pandas>=2.0.0              # Data manipulation
-numpy>=1.24.0              # Numerical computing
-influxdb-client>=1.36.0    # InfluxDB client
-requests>=2.28.0           # HTTP client for HA API
-APScheduler>=3.10.0        # Task scheduling
-python-dateutil>=2.8.0     # Date handling
+```flux
+from(bucket: "energy_manager")
+  |> range(start: -1h, stop: 48h)
+  |> filter(fn: (r) => r._measurement == "soc_forecast")
+  |> filter(fn: (r) => r._field == "soc_percent")
 ```
 
-## 4.13 Implementation Phases
+---
 
-### Phase 1: Core Infrastructure
-- [ ] Add-on skeleton with HA configuration
-- [ ] InfluxDB forecast reader
-- [ ] Tariff schedule with holidays
-- [ ] Basic HA entity creation
+## 4.8 Dashboard Examples
 
-### Phase 2: Battery Optimization
-- [ ] Cheap tariff detection
-- [ ] Morning energy need calculation
-- [ ] PV recharge forecast
-- [ ] Discharge blocking logic
-- [ ] HA battery control integration
-
-### Phase 3: Appliance Signal
-- [ ] Real-time excess calculation
-- [ ] Green signal (pure PV)
-- [ ] Orange signal (battery + recovery)
-- [ ] Dashboard entity for Alexa
-
-### Phase 4: EV Charging
-- [ ] Excess power calculation
-- [ ] Minimum threshold check
-- [ ] EVCC integration (optional)
-
-## 4.14 Dashboard Examples
-
-### Kitchen Alexa Dashboard
+### Kitchen Dashboard (Mushroom Cards)
 
 ```yaml
-type: vertical-stack
+type: horizontal-stack
 cards:
-  - type: custom:mushroom-title-card
-    title: Energie Status
+  # Appliance Signal
+  - type: custom:mushroom-template-card
+    primary: Waschen
+    icon: mdi:washing-machine
+    icon_color: >
+      {% set s = states('sensor.appliance_signal') %}
+      {{ 'green' if s == 'green' else 'orange' if s == 'orange' else 'red' }}
 
-  - type: horizontal-stack
-    cards:
-      # Appliance Signal
-      - type: custom:mushroom-template-card
-        primary: Waschen
-        secondary: "{{ state_attr('sensor.appliance_signal', 'reason') }}"
-        icon: mdi:washing-machine
-        icon_color: >
-          {% set signal = states('sensor.appliance_signal') %}
-          {% if signal == 'green' %}green
-          {% elif signal == 'orange' %}orange
-          {% else %}grey{% endif %}
+  # EV Charging
+  - type: custom:mushroom-template-card
+    primary: Auto
+    secondary: "{{ states('sensor.ev_charging_power') | int }} W"
+    icon: mdi:car-electric
+    icon_color: >
+      {{ 'green' if states('sensor.ev_charging_power') | int > 0 else 'grey' }}
 
-      # EV Charging
-      - type: custom:mushroom-template-card
-        primary: Auto laden
-        secondary: "{{ states('sensor.ev_available_power') | int }} W"
-        icon: mdi:car-electric
-        icon_color: >
-          {{ 'green' if is_state('binary_sensor.ev_excess_charging_allowed', 'on') else 'grey' }}
-
-      # Battery Status
-      - type: custom:mushroom-template-card
-        primary: Batterie
-        secondary: "{{ states('sensor.battery_state_of_capacity') }}%"
-        icon: mdi:battery
-        icon_color: >
-          {{ 'green' if is_state('binary_sensor.battery_discharge_allowed', 'on') else 'orange' }}
+  # Battery
+  - type: custom:mushroom-template-card
+    primary: Batterie
+    secondary: "{{ states('sensor.battery_state_of_capacity') }}%"
+    icon: mdi:battery
+    icon_color: >
+      {{ 'green' if is_state('binary_sensor.battery_discharge_allowed', 'on') else 'orange' }}
 ```
 
 ---
