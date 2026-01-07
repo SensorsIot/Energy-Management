@@ -21,6 +21,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 from src.forecast_reader import ForecastReader
 from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
+from src.appliance_signal import calculate_appliance_signal
 
 # Swiss timezone for display
 SWISS_TZ = ZoneInfo("Europe/Zurich")
@@ -114,6 +115,11 @@ class EnergyManager:
         self.discharge_control_entity = battery_opts.get(
             "discharge_control_entity", "number.battery_maximum_discharging_power"
         )
+
+        # Appliance signal config
+        appliance_opts = options.get("appliances", {})
+        self.appliance_power_w = appliance_opts.get("power_w", 2500)
+        self.appliance_energy_wh = appliance_opts.get("energy_wh", 1500)
 
         # Scheduler
         schedule_opts = options.get("schedule", {})
@@ -312,8 +318,58 @@ class EnergyManager:
             # Control battery
             self.control_battery(decision.discharge_allowed)
 
+            # Calculate appliance signal
+            self.calculate_appliance_signal(current_soc, forecast)
+
         except Exception as e:
             logger.error(f"Optimization failed: {e}", exc_info=True)
+
+    def calculate_appliance_signal(self, current_soc: float, forecast):
+        """Calculate and output appliance signal to Home Assistant."""
+        try:
+            # Get current PV and load from HA
+            current_pv = self.ha_client.get_sensor_value("sensor.solar_pv_total_ac_power") or 0
+            current_load = self.ha_client.get_sensor_value("sensor.load_power") or 0
+
+            # Calculate signal
+            signal = calculate_appliance_signal(
+                current_pv_w=current_pv,
+                current_load_w=current_load,
+                current_soc_percent=current_soc,
+                forecast=forecast,
+                capacity_wh=self.optimizer.capacity_wh,
+                appliance_power_w=self.appliance_power_w,
+                appliance_energy_wh=self.appliance_energy_wh,
+            )
+
+            logger.info(f"Appliance signal: {signal.signal} - {signal.reason}")
+
+            # Output to Home Assistant
+            self.ha_client.set_sensor_state(
+                "sensor.appliance_signal",
+                signal.signal,
+                attributes={
+                    "friendly_name": "Appliance Signal",
+                    "reason": signal.reason,
+                    "excess_power_w": signal.excess_power_w,
+                    "forecast_surplus_wh": signal.forecast_surplus_wh,
+                    "icon": "mdi:washing-machine",
+                },
+            )
+
+            # Write to InfluxDB
+            point = (
+                Point("appliance_signal")
+                .field("signal", signal.signal)
+                .field("reason", signal.reason)
+                .field("excess_power_w", float(signal.excess_power_w))
+                .field("forecast_surplus_wh", float(signal.forecast_surplus_wh))
+                .time(datetime.now(timezone.utc), WritePrecision.S)
+            )
+            self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=point)
+
+        except Exception as e:
+            logger.error(f"Failed to calculate appliance signal: {e}")
 
     def start(self):
         """Start the scheduler."""
