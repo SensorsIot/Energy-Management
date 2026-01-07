@@ -20,10 +20,12 @@ class HAClient:
         token: Optional[str] = None,
     ):
         self.url = url.rstrip("/")
-        # Use supervisor token if available, otherwise use provided token
-        self.token = token or os.environ.get("SUPERVISOR_TOKEN")
+        # Use provided token, or supervisor token from environment
+        self.token = token if token else os.environ.get("SUPERVISOR_TOKEN")
 
-        if not self.token:
+        if self.token:
+            logger.info(f"HA client initialized with token (len={len(self.token)})")
+        else:
             logger.warning("No HA token available - HA integration disabled")
 
     def _headers(self) -> dict:
