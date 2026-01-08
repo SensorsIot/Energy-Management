@@ -497,58 +497,21 @@ def deep_merge(base: dict, override: dict) -> dict:
 
 
 def load_options() -> dict:
-    """Load add-on options from user config file or HA options.
+    """Load add-on options from HA Supervisor.
 
-    Priority:
-    1. /config/energymanager.yaml (user config, survives updates)
-    2. /data/options.json (HA managed, may reset on updates)
-    3. testdata/options.json (local development)
-
-    User config is merged ON TOP of HA options, so user values always win.
+    Standard HA addon behavior:
+    - User configures via HA UI
+    - Options saved to /data/options.json by Supervisor
+    - Options are PRESERVED across addon updates
     """
-    import yaml
-
+    # Standard HA add-on options path
     options_path = Path("/data/options.json")
-    user_config = Path("/config/energymanager.yaml")
-
-    # Load base options from HA (may have empty defaults)
-    base_opts = {}
     if options_path.exists():
+        logger.info(f"Loading options from {options_path}")
         with open(options_path) as f:
-            base_opts = json.load(f)
-        logger.debug(f"Loaded base options from {options_path}")
+            return json.load(f)
 
-    # User config file takes priority - survives addon updates
-    if user_config.exists():
-        logger.info(f"Loading user config from {user_config}")
-        with open(user_config) as f:
-            user_opts = yaml.safe_load(f) or {}
-
-        # Merge user config on top of base (user values win)
-        merged = deep_merge(base_opts, user_opts)
-
-        # Warn if critical values are missing
-        influx_token = merged.get("influxdb", {}).get("token", "")
-        if not influx_token:
-            logger.warning("InfluxDB token is empty! Add it to /config/energymanager.yaml")
-
-        return merged
-    else:
-        logger.warning(
-            f"User config {user_config} not found. "
-            "Create it with your tokens to prevent loss during updates!"
-        )
-
-    # Fallback to HA options only
-    if base_opts:
-        influx_token = base_opts.get("influxdb", {}).get("token", "")
-        if not influx_token:
-            logger.error(
-                "InfluxDB token is empty! Create /config/energymanager.yaml with your tokens."
-            )
-        return base_opts
-
-    # Fallback for local testing
+    # Fallback for local development/testing
     test_options = Path(__file__).parent / "testdata" / "options.json"
     if test_options.exists():
         logger.info(f"Using test options from {test_options}")
