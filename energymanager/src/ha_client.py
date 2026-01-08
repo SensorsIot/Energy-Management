@@ -174,6 +174,42 @@ class HAClient:
             logger.debug(f"Battery SOC: {soc}%")
         return soc
 
+    def get_number_value(self, entity_id: str) -> Optional[float]:
+        """
+        Get numeric value from a number entity.
+
+        Args:
+            entity_id: The number entity to read
+
+        Returns:
+            float value or None on error
+        """
+        state = self.get_state(entity_id)
+        if not state:
+            return None
+
+        try:
+            value = float(state["state"])
+            return value
+        except (ValueError, KeyError) as e:
+            logger.error(f"Failed to parse number entity {entity_id}: {e}")
+            return None
+
+    def get_battery_discharge_power(self, entity_id: str) -> Optional[float]:
+        """
+        Get current maximum battery discharge power setting.
+
+        Args:
+            entity_id: The number entity to read
+
+        Returns:
+            Current power setting in watts, or None on error
+        """
+        value = self.get_number_value(entity_id)
+        if value is not None:
+            logger.debug(f"Current discharge power setting: {value}W")
+        return value
+
     def set_battery_discharge_power(
         self,
         entity_id: str,

@@ -256,30 +256,42 @@ class EnergyManager:
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=point)
 
     def control_battery(self, discharge_allowed: bool):
-        """Control battery discharge via Home Assistant - only on state change."""
-        # Only send signal if state has changed
-        if discharge_allowed == self.last_discharge_allowed:
-            logger.debug(f"Discharge state unchanged ({discharge_allowed}), no signal sent")
-            return
-
+        """Control battery discharge via Home Assistant - reads actual state and adjusts."""
         if not self.ha_client.token:
             logger.warning("No HA token, cannot control battery")
             return
 
-        # Set max discharge power: 5000W if allowed, 0W if blocked
-        value = 5000 if discharge_allowed else 0
+        # Determine target value: max_discharge_w if allowed, 0W if blocked
+        battery_opts = self.options.get("battery", {})
+        max_discharge_w = battery_opts.get("max_discharge_w", 5000)
+        target_value = max_discharge_w if discharge_allowed else 0
         action = "enable" if discharge_allowed else "block"
 
+        # Read current actual value from Home Assistant
+        current_value = self.ha_client.get_battery_discharge_power(
+            self.discharge_control_entity
+        )
+
+        if current_value is None:
+            logger.warning(f"Could not read current discharge power from {self.discharge_control_entity}")
+            # Continue anyway - we should try to set the value
+        else:
+            logger.info(f"Current discharge power: {current_value}W, target: {target_value}W")
+
+            # Check if already at target value (with small tolerance for float comparison)
+            if abs(current_value - target_value) < 1:
+                logger.debug(f"Discharge power already at target ({target_value}W), no change needed")
+                self.last_discharge_allowed = discharge_allowed
+                return
+
+        # Set the new value
         success, error_msg = self.ha_client.set_battery_discharge_power(
             self.discharge_control_entity,
-            value,
+            target_value,
             max_retries=5,
         )
 
-        if success:
-            self.last_discharge_allowed = discharge_allowed
-            logger.info(f"Battery control: {self.discharge_control_entity} = {value}W")
-        else:
+        if not success:
             # All retries failed - send Telegram notification
             logger.error(f"Failed to {action} battery discharge after 5 attempts")
             notify_error(
@@ -287,11 +299,38 @@ class EnergyManager:
                 message=(
                     f"Failed to {action} battery discharge after 5 attempts.\n\n"
                     f"Entity: {self.discharge_control_entity}\n"
-                    f"Target value: {value}W\n"
+                    f"Target value: {target_value}W\n"
                     f"Error: {error_msg}\n\n"
                     f"The battery may not be in the expected state!"
                 ),
             )
+            return
+
+        # Verify the change took effect
+        time.sleep(1)  # Give HA time to process
+        verified_value = self.ha_client.get_battery_discharge_power(
+            self.discharge_control_entity
+        )
+
+        if verified_value is not None and abs(verified_value - target_value) < 1:
+            self.last_discharge_allowed = discharge_allowed
+            logger.info(f"Battery control verified: {self.discharge_control_entity} = {verified_value}W")
+        elif verified_value is not None:
+            logger.warning(
+                f"Battery control verification mismatch: set {target_value}W but read {verified_value}W"
+            )
+            notify_error(
+                title="Battery Control Verification Failed",
+                message=(
+                    f"Set discharge power to {target_value}W but verification read {verified_value}W.\n\n"
+                    f"Entity: {self.discharge_control_entity}\n"
+                    f"The battery may not be in the expected state!"
+                ),
+            )
+        else:
+            # Could not verify but set succeeded
+            self.last_discharge_allowed = discharge_allowed
+            logger.info(f"Battery control set: {self.discharge_control_entity} = {target_value}W (unverified)")
 
     def run_optimization(self):
         """Run battery optimization cycle."""
