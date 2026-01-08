@@ -485,41 +485,69 @@ class EnergyManager:
         logger.info("Stopped")
 
 
-def load_config(config_path: str = None) -> dict:
-    """Load configuration from YAML file.
+def deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge override into base dict. Override values win."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
-    The config file is stored in /data/energymanager.yaml and persists
-    across add-on updates. On first run, the startup script copies a
-    template to /data/.
+
+def load_config(config_path: str = None) -> dict:
+    """Load configuration with defaults merge.
+
+    Strategy:
+    1. Load defaults from /usr/share/energymanager/config.yaml.example
+    2. Load user config from /data/energymanager.yaml
+    3. Deep-merge: defaults first, user values win
+    4. User file is never overwritten (source of truth)
 
     Args:
-        config_path: Path to config file (passed via --config argument)
+        config_path: Path to user config file (passed via --config argument)
 
     Returns:
-        Configuration dictionary
+        Merged configuration dictionary
     """
     import yaml
 
-    # Use provided path or default
+    defaults = {}
+    user_config = {}
+
+    # Load defaults from template (shipped in image)
+    defaults_path = Path("/usr/share/energymanager/config.yaml.example")
+    if defaults_path.exists():
+        logger.debug(f"Loading defaults from {defaults_path}")
+        with open(defaults_path) as f:
+            defaults = yaml.safe_load(f) or {}
+
+    # Load user config
     if config_path:
         path = Path(config_path)
         if path.exists():
-            logger.info(f"Loading config from {path}")
+            logger.info(f"Loading user config from {path}")
             with open(path) as f:
-                return yaml.safe_load(f) or {}
+                user_config = yaml.safe_load(f) or {}
         else:
-            logger.error(f"Config file not found: {path}")
-            return {}
+            logger.warning(f"User config not found: {path}, using defaults only")
+    else:
+        # Fallback for local development/testing
+        test_config = Path(__file__).parent / "testdata" / "options.json"
+        if test_config.exists():
+            logger.info(f"Using test config from {test_config}")
+            with open(test_config) as f:
+                return json.load(f)
 
-    # Fallback for local development/testing
-    test_config = Path(__file__).parent / "testdata" / "options.json"
-    if test_config.exists():
-        logger.info(f"Using test config from {test_config}")
-        with open(test_config) as f:
-            return json.load(f)
+    # Merge: defaults first, user wins
+    merged = deep_merge(defaults, user_config)
 
-    logger.warning("No config file found, using defaults")
-    return {}
+    # Log if critical values are missing
+    if not merged.get("influxdb", {}).get("token"):
+        logger.warning("InfluxDB token is empty - edit /data/energymanager.yaml")
+
+    return merged
 
 
 def main():
