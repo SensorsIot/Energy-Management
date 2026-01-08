@@ -46,54 +46,59 @@ def deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def load_options() -> dict:
-    """Load add-on options from user config file and/or HA options."""
-    # Default options
-    defaults = {
-        "influxdb": {
-            "host": "192.168.0.203",
-            "port": 8087,
-            "token": "",
-            "org": "energymanagement",
-            "source_bucket": "HomeAssistant",
-            "target_bucket": "load_forecast",
-        },
-        "load_sensor": {
-            "entity_id": "load_power",
-        },
-        "forecast": {
-            "history_days": 90,
-            "horizon_hours": 48,
-        },
-        "schedule": {
-            "cron": "15 * * * *",
-        },
-        "log_level": "info",
-    }
+def load_options(config_path: str = None) -> dict:
+    """Load configuration with secrets from environment.
 
-    # Load base options from HA Supervisor
-    options_path = Path("/data/options.json")
-    if options_path.exists():
-        logger.info("Loading base options from /data/options.json")
-        with open(options_path) as f:
-            options = deep_merge(defaults, json.load(f))
+    Strategy:
+    1. Load defaults from /usr/share/loadforecast/loadforecast.yaml.example
+    2. Load user config from /config/loadforecast.yaml (via --config)
+    3. Deep-merge: defaults first, user values win
+    4. Overlay secrets from environment variables (set by startup script from HA UI)
+    """
+    defaults = {}
+    user_config = {}
+
+    # Load defaults from template (shipped in image)
+    defaults_path = Path("/usr/share/loadforecast/loadforecast.yaml.example")
+    if defaults_path.exists():
+        logger.debug(f"Loading defaults from {defaults_path}")
+        with open(defaults_path) as f:
+            defaults = yaml.safe_load(f) or {}
+
+    # Load user config (non-secrets from /config/loadforecast.yaml)
+    if config_path:
+        path = Path(config_path)
+        if path.exists():
+            logger.info(f"Loading user config from {path}")
+            with open(path) as f:
+                user_config = yaml.safe_load(f) or {}
+        else:
+            logger.warning(f"User config not found: {path}, using defaults only")
     else:
-        logger.warning("No options.json found, using defaults")
-        options = defaults
+        # Fallback: try legacy paths for backwards compatibility
+        legacy_paths = [
+            Path("/config/loadforecast.yaml"),
+            Path("/share/loadforecast/config.yaml"),
+        ]
+        for legacy_path in legacy_paths:
+            if legacy_path.exists():
+                logger.info(f"Loading config from legacy path: {legacy_path}")
+                with open(legacy_path) as f:
+                    user_config = yaml.safe_load(f) or {}
+                break
 
-    # Load user config file (deep merge on top of base options)
-    yaml_paths = [
-        Path("/config/loadforecast.yaml"),
-        Path("/share/loadforecast/config.yaml"),
-    ]
+    # Merge: defaults first, user wins
+    options = deep_merge(defaults, user_config)
 
-    for yaml_path in yaml_paths:
-        if yaml_path.exists():
-            logger.info(f"Loading user config from {yaml_path}")
-            with open(yaml_path) as f:
-                yaml_config = yaml.safe_load(f) or {}
-            options = deep_merge(options, yaml_config)
-            break
+    # Overlay secrets from environment variables (set by HA Configuration UI)
+    influxdb_token = os.environ.get("INFLUXDB_TOKEN")
+    if influxdb_token:
+        if "influxdb" not in options:
+            options["influxdb"] = {}
+        options["influxdb"]["token"] = influxdb_token
+        logger.info("InfluxDB token loaded from environment")
+    else:
+        logger.warning("InfluxDB token not set - configure it in the add-on Configuration tab")
 
     return options
 
@@ -168,7 +173,17 @@ def run_forecast(options: dict) -> bool:
 
 def main():
     """Main entry point for HA add-on."""
-    options = load_options()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="LoadForecast Add-on")
+    parser.add_argument("--config", help="Path to config file")
+    args = parser.parse_args()
+
+    logger.info("=" * 60)
+    logger.info("LoadForecast Add-on v1.1.0")
+    logger.info("=" * 60)
+
+    options = load_options(args.config)
 
     # Set log level from options
     log_level = options.get("log_level", "info").upper()

@@ -1,0 +1,32 @@
+# LoadForecast Configuration
+# ==========================
+# This file contains non-secret configuration parameters.
+# Edit via File Editor or VS Code at: /addon_configs/loadforecast/
+#
+# SECRETS (tokens) are configured in the add-on Configuration tab, NOT in this file.
+#
+# After editing, restart the add-on to apply changes.
+
+# InfluxDB connection (token in Configuration tab, not here!)
+influxdb:
+  host: "192.168.0.203"
+  port: 8087
+  org: "energymanagement"
+  source_bucket: "HomeAssistant"
+  target_bucket: "load_forecast"
+
+# Load sensor settings
+load_sensor:
+  entity_id: "load_power"
+
+# Forecast settings
+forecast:
+  history_days: 90
+  horizon_hours: 48
+
+# Schedule settings (cron expression)
+schedule:
+  cron: "15 * * * *"
+
+# Logging level: debug, info, warning, error
+log_level: "info"

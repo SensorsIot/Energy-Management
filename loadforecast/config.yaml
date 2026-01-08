@@ -1,5 +1,5 @@
 name: "LoadForecast"
-version: "1.0.1"
+version: "1.1.0"
 slug: "loadforecast"
 description: "Statistical load forecast using historical consumption data"
 url: "https://github.com/SensorsIot/Energy-Management"
@@ -13,47 +13,13 @@ startup: services
 boot: auto
 timeout: 120
 
+# Storage mapping
 map:
-  - config:ro
+  - addon_config:rw    # User config at /config/loadforecast.yaml
 
+# Secrets entered via HA Configuration UI (not stored in YAML files)
 options:
-  influxdb:
-    host: "192.168.0.203"
-    port: 8087
-    token: ""
-    org: "energymanagement"
-    source_bucket: "HomeAssistant"
-    target_bucket: "load_forecast"
-
-  load_sensor:
-    entity_id: "load_power"
-
-  forecast:
-    history_days: 90
-    horizon_hours: 48
-
-  schedule:
-    cron: "15 * * * *"
-
-  log_level: "info"
+  influxdb_token: ""
 
 schema:
-  influxdb:
-    host: str
-    port: port
-    token: str
-    org: str
-    source_bucket: str
-    target_bucket: str
-
-  load_sensor:
-    entity_id: str
-
-  forecast:
-    history_days: int
-    horizon_hours: int
-
-  schedule:
-    cron: str
-
-  log_level: "list(debug|info|warning|error)"
+  influxdb_token: password

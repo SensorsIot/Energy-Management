@@ -24,6 +24,9 @@ COPY src/ /app/src/
 COPY run.py /app/
 COPY config_pv.yaml /app/
 
+# Copy s6-overlay service definition and template
+COPY rootfs /
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV ECCODES_DIR=/usr
@@ -34,7 +37,4 @@ LABEL \
     io.hass.description="Swiss PV forecast using MeteoSwiss ICON data" \
     io.hass.arch="aarch64|amd64|armv7" \
     io.hass.type="addon" \
-    io.hass.version="1.0.0"
-
-# Run the application
-CMD ["python3", "/app/run.py"]
+    io.hass.version="1.1.0"

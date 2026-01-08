@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.0
+**Version:** 2.1
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -55,7 +55,7 @@ The system consists of three Home Assistant add-ons that work together:
 |--------|---------|---------|------------------|
 | **SwissSolarForecast** | 1.0.2 | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
 | **LoadForecast** | 1.0.1 | Statistical load consumption forecasting | Every hour |
-| **EnergyManager** | 1.1.9 | Battery/EV/appliance optimization signals | Every 15 min |
+| **EnergyManager** | 1.4.0 | Battery/EV/appliance optimization signals | Every 15 min |
 
 ## 1.4 Data Flow
 
@@ -274,7 +274,7 @@ load = solar_pv_total_ac_power - power_meter_active_power + battery_charge_disch
 
 | Entity ID | Description | Unit | MPC Use |
 |-----------|-------------|------|---------|
-| `number.batteries_maximum_discharging_power` | Max discharge limit | W | **Night strategy control** |
+| `number.battery_maximum_discharging_power` | Max discharge limit | W | **Night strategy control** |
 | `number.battery_maximum_charging_power` | Max charge limit | W | Charge limiting |
 | `number.battery_end_of_discharge_soc` | Min SOC limit | % | SOC protection |
 | `number.battery_end_of_charge_soc` | Max SOC limit | % | SOC protection |
@@ -377,262 +377,351 @@ display_zero_lines:
 4. **Rolling Horizon** - Decisions recalculated every 5-15 minutes
 5. **Decoupled Components** - Each add-on operates independently with clear interfaces
 
-## 1.10 Unified Configuration
+## 1.10 Home Assistant Add-on Architecture
 
-All add-ons use a consistent two-layer configuration approach:
+This section describes the canonical Home Assistant add-on configuration architecture used by all add-ons in this project.
 
-### 1.10.1 Configuration Priority
+### 1.10.1 Configuration Philosophy
 
-1. **User config file** (`/config/<addon>.yaml`) - Editable by user, NOT managed by HA Supervisor
-2. **HA Supervisor options** (`/data/options.json`) - Managed by HA, provides defaults
+Home Assistant add-ons follow a specific pattern for configuration management:
 
-The user config is **deep merged** on top of the Supervisor defaults, allowing partial overrides.
-
-### 1.10.2 User Config Files
-
-| Add-on | User Config File |
-|--------|------------------|
-| SwissSolarForecast | `/config/swisssolarforecast.yaml` |
-| LoadForecast | `/config/loadforecast.yaml` |
-| EnergyManager | `/config/energymanager.yaml` |
-
-### 1.10.3 Required User Configuration
-
-Each add-on requires the InfluxDB token (secret) in the user config file:
-
-```yaml
-# /config/<addon>.yaml
-influxdb:
-  token: "your-influxdb-token"
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Configuration Architecture                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   SECRETS                              NON-SECRETS                          │
+│   (tokens, passwords)                  (settings, options)                  │
+│                                                                              │
+│   ┌─────────────────────┐              ┌─────────────────────────────────┐  │
+│   │  HA Configuration   │              │  /config/<addon>.yaml           │  │
+│   │       Tab           │              │  (Public Add-on Config)         │  │
+│   │                     │              │                                 │  │
+│   │  • Masked fields    │              │  • Editable via File Editor    │  │
+│   │  • Secure storage   │              │  • Editable via VS Code        │  │
+│   │  • Never in files   │              │  • Version controlled          │  │
+│   └──────────┬──────────┘              └───────────────┬─────────────────┘  │
+│              │                                         │                    │
+│              │ bashio::config                          │ YAML load          │
+│              │ → Environment vars                      │                    │
+│              ▼                                         ▼                    │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │                         Python Runtime                                │  │
+│   │                                                                       │  │
+│   │   config = load_yaml("/config/addon.yaml")                           │  │
+│   │   config["influxdb"]["token"] = os.environ["INFLUXDB_TOKEN"]         │  │
+│   │   config["telegram"]["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"] │  │
+│   │                                                                       │  │
+│   │   # Final merged config ready for use                                 │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 1.10.4 SwissSolarForecast User Config
+### 1.10.2 Secrets (HA Configuration UI)
 
-**File:** `/config/swisssolarforecast.yaml`
+Secrets are sensitive values that should **never** be stored in YAML files.
 
-**Required parameters** (must be in user config):
+**What qualifies as a secret:**
+- API tokens (InfluxDB, external services)
+- Passwords and credentials
+- Bot tokens (Telegram, Discord)
+- Private keys
+
+**How secrets are configured:**
+
+1. User opens **Settings → Add-ons → [Add-on] → Configuration**
+2. User enters secrets in masked password fields
+3. HA Supervisor stores secrets securely in `/data/options.json`
+4. Startup script reads via `bashio::config` and exports as environment variables
+5. Python reads from `os.environ`
+
+**Example `config.yaml` schema:**
 
 ```yaml
-influxdb:
-  token: "your-influxdb-token"
+options:
+  influxdb_token: ""
+  telegram_bot_token: ""
+  telegram_chat_id: ""
 
-location:
-  latitude: 47.475
-  longitude: 7.767
-  altitude: 330
-  timezone: "Europe/Zurich"
-
-panels:
-  - id: "AE455"
-    model: "AE Solar AC-455MH/144V"
-    pdc0: 455
-    gamma_pdc: -0.0035
-
-  - id: "Generic400"
-    model: "Generic 400W"
-    pdc0: 400
-    gamma_pdc: -0.0035
-
-plants:
-  - name: "House"
-    inverters:
-      - name: "EastWest"
-        max_power: 10000
-        efficiency: 0.82
-        strings:
-          - name: "East"
-            azimuth: 90
-            tilt: 15
-            panel: "AE455"
-            count: 8
-          - name: "West"
-            azimuth: 270
-            tilt: 15
-            panel: "AE455"
-            count: 9
-
-      - name: "South"
-        max_power: 1500
-        efficiency: 0.80
-        strings:
-          - name: "SouthFront"
-            azimuth: 180
-            tilt: 70
-            panel: "Generic400"
-            count: 3
-          - name: "SouthBack"
-            azimuth: 180
-            tilt: 60
-            panel: "Generic400"
-            count: 2
+schema:
+  influxdb_token: password
+  telegram_bot_token: password?
+  telegram_chat_id: str?
 ```
 
-### 1.10.5 LoadForecast User Config
+**Example startup script:**
 
-**File:** `/config/loadforecast.yaml`
+```bash
+#!/command/with-contenv bashio
 
-**Required parameters:**
+# Read secrets from HA Configuration UI
+if bashio::config.has_value 'influxdb_token'; then
+  export INFLUXDB_TOKEN="$(bashio::config 'influxdb_token')"
+fi
 
-```yaml
-influxdb:
-  token: "your-influxdb-token"
+if bashio::config.has_value 'telegram_bot_token'; then
+  export TELEGRAM_BOT_TOKEN="$(bashio::config 'telegram_bot_token')"
+fi
 
-load_sensor:
-  entity_id: "sensor.load_power"  # Your HA load sensor entity
+exec python3 /app/run.py --config "/config/addon.yaml"
 ```
 
-### 1.10.6 EnergyManager User Config
+### 1.10.3 Non-Secrets (Public Add-on Config)
 
-**File:** `/config/energymanager.yaml`
+All non-sensitive configuration is stored in user-editable YAML files.
 
-**Required parameters:**
+**Storage location:**
+
+| Context | Path |
+|---------|------|
+| Inside container | `/config/<addon>.yaml` |
+| HA File Editor / VS Code | `/addon_configs/<addon_slug>/<addon>.yaml` |
+| Host filesystem | `/usr/share/hassio/addon_configs/<addon_slug>/` |
+
+**Enable with `map` in `config.yaml`:**
 
 ```yaml
-influxdb:
-  token: "your-influxdb-token"
+map:
+  - addon_config:rw
 ```
 
-**Optional overrides** (defaults from HA UI):
+**What goes in YAML config:**
+- Connection settings (host, port, org - but NOT tokens)
+- Device settings (battery capacity, entity IDs)
+- Schedule settings (tariff times, intervals)
+- Feature flags and options
+- Logging level
+
+**Example user config (`/config/energymanager.yaml`):**
 
 ```yaml
+# InfluxDB connection (token in Configuration tab, not here!)
+influxdb:
+  host: "192.168.0.203"
+  port: 8087
+  org: "energymanagement"
+
+# Battery settings
 battery:
   capacity_kwh: 10.0
-  charge_efficiency: 0.95
-  discharge_efficiency: 0.95
+  discharge_control_entity: "number.battery_maximum_discharging_power"
 
+# Tariff schedule
 tariff:
   weekday_cheap_start: "21:00"
   weekday_cheap_end: "06:00"
-  weekend_all_day_cheap: true
-  holidays:
-    - "2026-01-01"
-    - "2026-12-25"
 ```
 
-### 1.10.7 Dependencies
+### 1.10.4 Templates and Defaults
 
-All add-ons require PyYAML for user config parsing:
+Each add-on ships with a template/example configuration.
 
-| Add-on | requirements.txt |
-|--------|-----------------|
-| SwissSolarForecast | `PyYAML>=6.0` |
-| LoadForecast | `PyYAML>=6.0` |
-| EnergyManager | `PyYAML>=6.0` |
+**Template location:** `/usr/share/<addon>/<addon>.yaml.example`
 
-### 1.10.8 Complete Parameter Reference
+**Behavior:**
 
-The following table lists ALL parameters used in code, indicating whether each is user-specific (must be configured) or a fixed default (can use as-is).
+| Event | Action |
+|-------|--------|
+| First run (no user config) | Copy template → `/config/<addon>.yaml` |
+| Every start | Copy template → `/config/<addon>.yaml.example` |
+| Update/upgrade | **Never** overwrite user config |
+| New options added | Handle via defaults in code, update `.example` |
 
-**Legend:**
-- **User**: Must be configured in user YAML file
-- **Default**: Sensible default, override only if needed
-- **Fixed**: System constant, do not change
+**Example startup script:**
 
-#### SwissSolarForecast Parameters
+```bash
+USER_CONFIG="/config/energymanager.yaml"
+TEMPLATE="/usr/share/energymanager/energymanager.yaml.example"
 
-| Parameter | Default | Type | Description |
-|-----------|---------|------|-------------|
-| `influxdb.host` | 192.168.0.203 | User | InfluxDB server IP/hostname |
-| `influxdb.port` | 8087 | User | InfluxDB HTTP port |
-| `influxdb.token` | (required) | User | InfluxDB API token (secret) |
-| `influxdb.org` | energymanagement | User | InfluxDB organization |
-| `influxdb.bucket` | pv_forecast | Default | Output bucket name |
-| `storage.data_path` | /share/swisssolarforecast | Fixed | GRIB data storage path |
-| `location.latitude` | 47.475 | User | PV installation latitude |
-| `location.longitude` | 7.767 | User | PV installation longitude |
-| `location.timezone` | Europe/Zurich | User | Local timezone |
-| `schedule.ch1_cron` | 30 2,5,8,11,14,17,20,23 * * * | Fixed | ICON-CH1 fetch schedule (UTC) |
-| `schedule.ch2_cron` | 45 2,8,14,20 * * * | Fixed | ICON-CH2 fetch schedule (UTC) |
-| `schedule.calculator_interval_minutes` | 15 | Fixed | Forecast recalculation interval |
+# First run: create user config from template
+if [ ! -f "$USER_CONFIG" ]; then
+  cp "$TEMPLATE" "$USER_CONFIG"
+  bashio::log.warning "Created $USER_CONFIG - please edit and restart"
+fi
 
-**PV System Configuration** (separate file: `config_pv.yaml`)
+# Always refresh the example (shows new options after updates)
+cp "$TEMPLATE" "/config/energymanager.yaml.example"
+```
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `panels[].id` | User | Panel identifier |
-| `panels[].model` | User | Panel model name |
-| `panels[].pdc0` | User | Panel DC power at STC (W) |
-| `panels[].gamma_pdc` | Default | Temperature coefficient (%/°C), default -0.0035 |
-| `plants[].name` | User | Plant name |
-| `plants[].location.latitude` | User | Plant latitude |
-| `plants[].location.longitude` | User | Plant longitude |
-| `plants[].location.altitude` | User | Altitude (m) |
-| `plants[].location.timezone` | User | Plant timezone |
-| `plants[].inverters[].name` | User | Inverter name |
-| `plants[].inverters[].max_power` | User | Max AC power (W) |
-| `plants[].inverters[].efficiency` | User | Inverter efficiency (0-1) |
-| `plants[].inverters[].strings[].name` | User | String name |
-| `plants[].inverters[].strings[].azimuth` | User | Azimuth angle (°, 180=South) |
-| `plants[].inverters[].strings[].tilt` | User | Tilt angle (°) |
-| `plants[].inverters[].strings[].panel` | User | Reference to panel id |
-| `plants[].inverters[].strings[].count` | User | Number of panels |
+### 1.10.5 Configuration Merge Order
 
-#### LoadForecast Parameters
+At runtime, configuration is assembled in this order:
 
-| Parameter | Default | Type | Description |
-|-----------|---------|------|-------------|
-| `influxdb.host` | 192.168.0.203 | User | InfluxDB server IP/hostname |
-| `influxdb.port` | 8087 | User | InfluxDB HTTP port |
-| `influxdb.token` | (required) | User | InfluxDB API token (secret) |
-| `influxdb.org` | energymanagement | User | InfluxDB organization |
-| `influxdb.source_bucket` | HomeAssistant | User | Bucket with historical load data |
-| `influxdb.target_bucket` | load_forecast | Default | Output bucket name |
-| `load_sensor.entity_id` | load_power | User | HA entity ID for load power |
-| `forecast.history_days` | 90 | Default | Days of history for profile |
-| `forecast.horizon_hours` | 48 | Default | Forecast horizon (hours) |
-| `schedule.cron` | 15 * * * * | Default | Cron schedule for forecast runs |
-| `log_level` | info | Default | Logging level |
+```
+1. Load defaults from template
+   └─► /usr/share/addon/addon.yaml.example
 
-#### EnergyManager Parameters
+2. Load user config (overrides defaults)
+   └─► /config/addon.yaml
 
-| Parameter | Default | Type | Description |
-|-----------|---------|------|-------------|
-| `influxdb.host` | 192.168.0.203 | User | InfluxDB server IP/hostname |
-| `influxdb.port` | 8087 | User | InfluxDB HTTP port |
-| `influxdb.token` | (required) | User | InfluxDB API token (secret) |
-| `influxdb.org` | energymanagement | User | InfluxDB organization |
-| `influxdb.pv_bucket` | pv_forecast | Default | PV forecast bucket |
-| `influxdb.load_bucket` | load_forecast | Default | Load forecast bucket |
-| `influxdb.output_bucket` | energy_manager | Default | Output bucket for decisions |
-| `influxdb.soc_bucket` | HuaweiNew | User | Bucket with actual SOC data |
-| `influxdb.soc_measurement` | Energy | User | Measurement name for SOC |
-| `influxdb.soc_field` | BATT_Level | User | Field name for SOC value |
-| `home_assistant.url` | http://supervisor/core | Fixed | HA API URL (via Supervisor) |
-| `home_assistant.token` | (auto) | Fixed | Uses SUPERVISOR_TOKEN env var |
-| `battery.capacity_kwh` | 10.0 | User | Usable battery capacity |
-| `battery.reserve_percent` | 10 | User | Minimum SOC reserve |
-| `battery.charge_efficiency` | 0.95 | Default | Charging efficiency (0-1) |
-| `battery.discharge_efficiency` | 0.95 | Default | Discharging efficiency (0-1) |
-| `battery.max_charge_w` | 5000 | User | Max charge power (W) |
-| `battery.max_discharge_w` | 5000 | User | Max discharge power (W) |
-| `battery.soc_entity` | sensor.battery_state_of_capacity | User | HA entity for current SOC |
-| `battery.discharge_control_entity` | number.batteries_maximum_discharging_power | User | HA entity for discharge control |
-| `tariff.weekday_cheap_start` | 21:00 | User | Low tariff start (HH:MM) |
-| `tariff.weekday_cheap_end` | 06:00 | User | Low tariff end (HH:MM) |
-| `tariff.weekend_all_day_cheap` | true | User | Weekend uses low tariff |
-| `tariff.holidays` | [] | User | Holiday dates (low tariff) |
-| `appliances.power_w` | 2500 | User | Deferrable appliance power |
-| `appliances.energy_wh` | 1500 | User | Appliance energy per cycle |
-| `ev_charging.min_power_w` | 4100 | User | Min EV charging power |
-| `ev_charging.max_power_w` | 11000 | User | Max EV charging power |
-| `schedule.update_interval_minutes` | 15 | Fixed | Optimization cycle interval |
-| `telegram.bot_token` | "" | User | Telegram bot token for error alerts |
-| `telegram.chat_id` | "" | User | Telegram chat ID for error alerts |
-| `log_level` | info | Default | Logging level |
+3. Overlay secrets from environment (overrides everything)
+   └─► INFLUXDB_TOKEN, TELEGRAM_BOT_TOKEN, etc.
 
-#### Parameter Summary by Category
+4. Apply code defaults for missing keys
+   └─► config.get("key", default_value)
 
-| Category | User-Specific | With Defaults | Fixed |
-|----------|---------------|---------------|-------|
-| **InfluxDB connection** | host, port, token, org | - | - |
-| **InfluxDB buckets** | soc_bucket (varies) | pv_forecast, load_forecast, energy_manager | - |
-| **Location/PV system** | All panel/plant/string config | gamma_pdc | - |
-| **Battery** | capacity, max_power, entities | charge/discharge_efficiency | - |
-| **Tariff** | All (depends on utility) | - | - |
-| **Appliances/EV** | power, energy values | - | - |
-| **Telegram** | bot_token, chat_id (optional) | - | - |
-| **Schedules** | - | cron expressions | MeteoSwiss fetch times |
-| **Forecast** | - | history_days, horizon_hours | update_interval |
+Final: Merged configuration ready for use
+```
+
+**Python implementation:**
+
+```python
+def load_config(config_path: str) -> dict:
+    # 1. Load defaults
+    defaults = yaml.safe_load(open("/usr/share/addon/addon.yaml.example"))
+
+    # 2. Load user config
+    user_config = yaml.safe_load(open(config_path))
+
+    # 3. Deep merge (user wins)
+    merged = deep_merge(defaults, user_config)
+
+    # 4. Overlay secrets from environment
+    if os.environ.get("INFLUXDB_TOKEN"):
+        merged["influxdb"]["token"] = os.environ["INFLUXDB_TOKEN"]
+
+    return merged
+```
+
+### 1.10.6 Add-on Configuration Files Summary
+
+| Add-on | Secrets (Config UI) | Non-Secrets (YAML) |
+|--------|--------------------|--------------------|
+| **EnergyManager** | `influxdb_token`, `telegram_bot_token`, `telegram_chat_id` | `/config/energymanager.yaml` |
+| **SwissSolarForecast** | `influxdb_token`, `telegram_bot_token`, `telegram_chat_id` | `/config/swisssolarforecast.yaml` |
+| **LoadForecast** | `influxdb_token` | `/config/loadforecast.yaml` |
+
+### 1.10.7 User Workflow
+
+**Initial Setup:**
+
+1. Install add-on from repository
+2. Go to **Configuration** tab → Enter secrets (tokens)
+3. Click **Save**
+4. Start add-on (creates default config file)
+5. Edit `/addon_configs/<slug>/<addon>.yaml` via File Editor
+6. Restart add-on
+
+**After Updates:**
+
+1. Add-on updates automatically (if enabled)
+2. User config is **never** modified
+3. Check `/config/<addon>.yaml.example` for new options
+4. Manually add desired new options to user config
+5. Restart add-on
+
+### 1.10.8 Best Practices Summary
+
+| Practice | Do | Don't |
+|----------|----|----- |
+| **Secrets** | Store in HA Configuration UI | Put in YAML files |
+| **User config** | Let user edit via File Editor | Auto-modify user files |
+| **Defaults** | Apply in code for missing keys | Require all keys in user config |
+| **Updates** | Refresh `.example` file | Overwrite user config |
+| **Logging** | Log "token loaded" (not the value) | Log secret values |
+
+---
+
+## 1.11 Complete Parameter Reference
+
+### 1.11.1 EnergyManager Parameters
+
+**Secrets (Configuration UI):**
+
+| Parameter | Schema Type | Description |
+|-----------|-------------|-------------|
+| `influxdb_token` | `password` | InfluxDB API token |
+| `telegram_bot_token` | `password?` | Telegram bot token (optional) |
+| `telegram_chat_id` | `str?` | Telegram chat ID (optional) |
+
+**Non-Secrets (`/config/energymanager.yaml`):**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `influxdb.host` | 192.168.0.203 | InfluxDB server IP/hostname |
+| `influxdb.port` | 8087 | InfluxDB HTTP port |
+| `influxdb.org` | energymanagement | InfluxDB organization |
+| `influxdb.pv_bucket` | pv_forecast | PV forecast bucket |
+| `influxdb.load_bucket` | load_forecast | Load forecast bucket |
+| `influxdb.output_bucket` | energy_manager | Output bucket for decisions |
+| `influxdb.soc_bucket` | HuaweiNew | Bucket with actual SOC data |
+| `influxdb.soc_measurement` | Energy | Measurement name for SOC |
+| `influxdb.soc_field` | BATT_Level | Field name for SOC value |
+| `battery.capacity_kwh` | 10.0 | Usable battery capacity |
+| `battery.reserve_percent` | 10 | Minimum SOC reserve |
+| `battery.charge_efficiency` | 0.95 | Charging efficiency (0-1) |
+| `battery.discharge_efficiency` | 0.95 | Discharging efficiency (0-1) |
+| `battery.max_charge_w` | 5000 | Max charge power (W) |
+| `battery.max_discharge_w` | 5000 | Max discharge power (W) |
+| `battery.soc_entity` | sensor.battery_state_of_capacity | HA entity for current SOC |
+| `battery.discharge_control_entity` | number.battery_maximum_discharging_power | HA entity for discharge control |
+| `tariff.weekday_cheap_start` | 21:00 | Low tariff start (HH:MM) |
+| `tariff.weekday_cheap_end` | 06:00 | Low tariff end (HH:MM) |
+| `tariff.weekend_all_day_cheap` | true | Weekend uses low tariff |
+| `tariff.holidays` | [] | Holiday dates (low tariff) |
+| `appliances.power_w` | 2500 | Deferrable appliance power |
+| `appliances.energy_wh` | 1500 | Appliance energy per cycle |
+| `ev_charging.min_power_w` | 4100 | Min EV charging power |
+| `ev_charging.max_power_w` | 11000 | Max EV charging power |
+| `schedule.update_interval_minutes` | 15 | Optimization cycle interval |
+| `log_level` | info | Logging level |
+
+**Fixed (not configurable):**
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `home_assistant.url` | http://supervisor/core | HA API URL (via Supervisor) |
+| `home_assistant.token` | SUPERVISOR_TOKEN env | Auto-provided by HA |
+
+### 1.11.2 SwissSolarForecast Parameters
+
+**Secrets (Configuration UI):**
+
+| Parameter | Schema Type | Description |
+|-----------|-------------|-------------|
+| `influxdb_token` | `password` | InfluxDB API token |
+| `telegram_bot_token` | `password?` | Telegram bot token (optional) |
+| `telegram_chat_id` | `str?` | Telegram chat ID (optional) |
+
+**Non-Secrets (`/config/swisssolarforecast.yaml`):**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `influxdb.host` | 192.168.0.203 | InfluxDB server IP/hostname |
+| `influxdb.port` | 8087 | InfluxDB HTTP port |
+| `influxdb.org` | energymanagement | InfluxDB organization |
+| `influxdb.bucket` | pv_forecast | Output bucket name |
+| `location.latitude` | 47.475 | PV installation latitude |
+| `location.longitude` | 7.767 | PV installation longitude |
+| `location.altitude` | 330 | Altitude (m) |
+| `location.timezone` | Europe/Zurich | Local timezone |
+| `panels[]` | - | Panel definitions (id, model, pdc0, gamma_pdc) |
+| `plants[]` | - | Plant definitions (inverters, strings) |
+| `log_level` | info | Logging level |
+
+### 1.11.3 LoadForecast Parameters
+
+**Secrets (Configuration UI):**
+
+| Parameter | Schema Type | Description |
+|-----------|-------------|-------------|
+| `influxdb_token` | `password` | InfluxDB API token |
+
+**Non-Secrets (`/config/loadforecast.yaml`):**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `influxdb.host` | 192.168.0.203 | InfluxDB server IP/hostname |
+| `influxdb.port` | 8087 | InfluxDB HTTP port |
+| `influxdb.org` | energymanagement | InfluxDB organization |
+| `influxdb.source_bucket` | HomeAssistant | Bucket with historical load data |
+| `influxdb.target_bucket` | load_forecast | Output bucket name |
+| `load_sensor.entity_id` | sensor.load_power | HA entity ID for load power |
+| `forecast.history_days` | 90 | Days of history for profile |
+| `forecast.horizon_hours` | 48 | Forecast horizon (hours) |
+| `schedule.cron` | 15 * * * * | Cron schedule for forecast runs |
+| `log_level` | info | Logging level |
 
 ---
 
@@ -868,13 +957,22 @@ plants:
             count: 2
 ```
 
-## 2.7 Configuration Options
+## 2.7 Configuration
+
+### Secrets (Configuration UI)
+
+Enter in **Settings → Add-ons → SwissSolarForecast → Configuration**:
+- `influxdb_token` (required)
+- `telegram_bot_token` (optional)
+- `telegram_chat_id` (optional)
+
+### Non-Secrets (`/config/swisssolarforecast.yaml`)
 
 ```yaml
+# NOTE: Token is configured in the Configuration tab, not here!
 influxdb:
   host: "192.168.0.203"
   port: 8087
-  token: "your-influxdb-token"
   org: "energymanagement"
   bucket: "pv_forecast"
 
@@ -893,11 +991,6 @@ storage:
   data_path: "/share/swisssolarforecast"
   max_storage_gb: 3.0
   cleanup_old_runs: true
-
-notifications:
-  telegram_enabled: false
-  telegram_bot_token: ""
-  telegram_chat_id: ""
 
 log_level: "info"
 ```
@@ -1101,13 +1194,20 @@ For each future timestamp in the 48-hour horizon:
 2. Look up P10/P50/P90 values from the profile
 3. Convert power (W) to per-period energy (Wh): `power × 0.25h`
 
-## 3.5 Configuration Options
+## 3.5 Configuration
+
+### Secrets (Configuration UI)
+
+Enter in **Settings → Add-ons → LoadForecast → Configuration**:
+- `influxdb_token` (required)
+
+### Non-Secrets (`/config/loadforecast.yaml`)
 
 ```yaml
+# NOTE: Token is configured in the Configuration tab, not here!
 influxdb:
   host: "192.168.0.203"
   port: 8087
-  token: "your-influxdb-token"
   org: "energymanagement"
   source_bucket: "HomeAssistant"    # Where to read historical data
   target_bucket: "load_forecast"     # Where to write forecasts
@@ -1407,7 +1507,7 @@ IF battery_flow < 0 AND time >= block_from AND time < block_until:
    soc_wh unchanged
 ```
 
-### 4.3.4 Output: number.batteries_maximum_discharging_power
+### 4.3.4 Output: number.battery_maximum_discharging_power
 
 Controls the battery discharge power in Home Assistant:
 
@@ -1419,7 +1519,7 @@ Controls the battery discharge power in Home Assistant:
 ```yaml
 service: number.set_value
 target:
-  entity_id: number.batteries_maximum_discharging_power
+  entity_id: number.battery_maximum_discharging_power
 data:
   value: "{{ 5000 if discharge_allowed else 0 }}"
 ```
@@ -1488,36 +1588,28 @@ ELSE:
 
 ## 4.6 Configuration
 
-### 4.6.1 User Config File
+See **Section 1.10** for the full configuration architecture.
 
-The add-on reads configuration from `/config/energymanager.yaml` (user-editable, not managed by HA Supervisor).
+### Secrets (Configuration UI)
 
-**Priority:**
-1. `/config/energymanager.yaml` - User config (merged on top of defaults)
-2. `/data/options.json` - HA Supervisor defaults (fallback)
+Enter in **Settings → Add-ons → EnergyManager → Configuration**:
+- `influxdb_token` (required)
+- `telegram_bot_token` (optional - for error alerts)
+- `telegram_chat_id` (optional - for error alerts)
 
-**Example:** Create `/config/energymanager.yaml` with only the values you want to override:
+### Non-Secrets (`/config/energymanager.yaml`)
 
-```yaml
-influxdb:
-  token: "your-influxdb-token"
-```
-
-### 4.6.2 Full Configuration Schema
+Editable via File Editor at `/addon_configs/energymanager/energymanager.yaml`:
 
 ```yaml
+# NOTE: Token is configured in the Configuration tab, not here!
 influxdb:
   host: "192.168.0.203"
   port: 8087
-  token: "your-token"
-  org: "spiessa"
+  org: "energymanagement"
   pv_bucket: "pv_forecast"
   load_bucket: "load_forecast"
   output_bucket: "energy_manager"
-
-home_assistant:
-  url: "http://supervisor/core"
-  token: ""  # Auto-provided by HA Supervisor
 
 battery:
   capacity_kwh: 10.0
@@ -1526,7 +1618,7 @@ battery:
   max_charge_w: 5000
   max_discharge_w: 5000
   soc_entity: "sensor.battery_state_of_capacity"
-  discharge_control_entity: "number.batteries_maximum_discharging_power"
+  discharge_control_entity: "number.battery_maximum_discharging_power"
 
 tariff:
   weekday_cheap_start: "21:00"
@@ -1650,7 +1742,7 @@ Error: Battery Control Failed
 
 Failed to [enable/block] battery discharge after 5 attempts.
 
-Entity: number.batteries_maximum_discharging_power
+Entity: number.battery_maximum_discharging_power
 Target value: [0/5000]W
 Error: [error details]
 

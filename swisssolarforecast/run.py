@@ -233,39 +233,90 @@ def deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def load_options() -> Dict:
-    """Load add-on options from user config file and/or HA options."""
-    # Load base options from HA Supervisor
-    options_path = Path("/data/options.json")
-    if options_path.exists():
-        logger.info("Loading base options from /data/options.json")
-        with open(options_path) as f:
-            options = json.load(f)
+def load_options(config_path: str = None) -> Dict:
+    """Load configuration with secrets from environment.
+
+    Strategy:
+    1. Load defaults from /usr/share/swisssolarforecast/swisssolarforecast.yaml.example
+    2. Load user config from /config/swisssolarforecast.yaml (via --config)
+    3. Deep-merge: defaults first, user values win
+    4. Overlay secrets from environment variables (set by startup script from HA UI)
+    5. User file is never overwritten (source of truth for non-secrets)
+    """
+    defaults = {}
+    user_config = {}
+
+    # Load defaults from template (shipped in image)
+    defaults_path = Path("/usr/share/swisssolarforecast/swisssolarforecast.yaml.example")
+    if defaults_path.exists():
+        logger.debug(f"Loading defaults from {defaults_path}")
+        with open(defaults_path) as f:
+            defaults = yaml.safe_load(f) or {}
+
+    # Load user config (non-secrets from /config/swisssolarforecast.yaml)
+    if config_path:
+        path = Path(config_path)
+        if path.exists():
+            logger.info(f"Loading user config from {path}")
+            with open(path) as f:
+                user_config = yaml.safe_load(f) or {}
+        else:
+            logger.warning(f"User config not found: {path}, using defaults only")
     else:
-        logger.warning("No options.json found, using defaults")
-        options = {}
+        # Fallback: try legacy paths for backwards compatibility
+        legacy_paths = [
+            Path("/config/swisssolarforecast.yaml"),
+            Path("/share/swisssolarforecast/config.yaml"),
+        ]
+        for legacy_path in legacy_paths:
+            if legacy_path.exists():
+                logger.info(f"Loading config from legacy path: {legacy_path}")
+                with open(legacy_path) as f:
+                    user_config = yaml.safe_load(f) or {}
+                break
 
-    # Load user config file (deep merge on top of base options)
-    yaml_paths = [
-        Path("/config/swisssolarforecast.yaml"),
-        Path("/share/swisssolarforecast/config.yaml"),
-    ]
+    # Merge: defaults first, user wins
+    options = deep_merge(defaults, user_config)
 
-    for yaml_path in yaml_paths:
-        if yaml_path.exists():
-            logger.info(f"Loading user config from {yaml_path}")
-            with open(yaml_path) as f:
-                yaml_config = yaml.safe_load(f) or {}
-            options = deep_merge(options, yaml_config)
-            break
+    # Overlay secrets from environment variables (set by HA Configuration UI)
+    influxdb_token = os.environ.get("INFLUXDB_TOKEN")
+    if influxdb_token:
+        if "influxdb" not in options:
+            options["influxdb"] = {}
+        options["influxdb"]["token"] = influxdb_token
+        logger.info("InfluxDB token loaded from environment")
+    else:
+        logger.warning("InfluxDB token not set - configure it in the add-on Configuration tab")
+
+    telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if telegram_bot_token or telegram_chat_id:
+        if "notifications" not in options:
+            options["notifications"] = {}
+        if telegram_bot_token:
+            options["notifications"]["telegram_bot_token"] = telegram_bot_token
+            options["notifications"]["telegram_enabled"] = True
+        if telegram_chat_id:
+            options["notifications"]["telegram_chat_id"] = telegram_chat_id
+        logger.info("Telegram credentials loaded from environment")
 
     return options
 
 
 def main():
     """Main entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SwissSolarForecast Add-on")
+    parser.add_argument("--config", help="Path to config file")
+    args = parser.parse_args()
+
+    logger.info("=" * 60)
+    logger.info("SwissSolarForecast Add-on v1.1.0")
+    logger.info("=" * 60)
+
     # Load options
-    options = load_options()
+    options = load_options(args.config)
 
     # Create application
     app = SwissSolarForecast(options)
