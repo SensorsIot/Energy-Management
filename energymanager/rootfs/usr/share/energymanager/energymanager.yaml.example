@@ -44,6 +44,12 @@ appliances:
   power_w: 2500
   energy_wh: 1500
 
+# Sensor entities for appliance signal calculation
+sensors:
+  pv_power: "sensor.solar_pv_total_ac_power"
+  load_power: "sensor.load_power"
+  appliance_signal: "sensor.appliance_signal"
+
 # EV charging settings (future use)
 ev_charging:
   min_power_w: 4100

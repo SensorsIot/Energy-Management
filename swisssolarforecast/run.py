@@ -38,6 +38,7 @@ from src.influxdb_writer import ForecastWriter
 from src.icon_fetcher import IconFetcher
 from src.grib_parser import load_hybrid_ensemble_forecast
 from src.pv_model import forecast_ensemble_plants
+from src.config import PVSystemConfig
 
 
 class SwissSolarForecast:
@@ -53,11 +54,14 @@ class SwissSolarForecast:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Data directory: {self.data_dir}")
 
-        # Location
-        self.location = options.get("location", {})
-        self.latitude = self.location.get("latitude", 47.475)
-        self.longitude = self.location.get("longitude", 7.767)
-        self.timezone = self.location.get("timezone", "Europe/Zurich")
+        # Initialize PV system config from user options
+        self.pv_config = PVSystemConfig.from_options(options)
+        logger.info(f"PV system: {self.pv_config.get_total_dc_power():.0f}W total DC power")
+
+        # Location (from PV config, which inherits from options)
+        self.latitude = self.pv_config.latitude
+        self.longitude = self.pv_config.longitude
+        self.timezone = self.pv_config.timezone
 
         # Initialize components
         self.influx_writer: Optional[ForecastWriter] = None
@@ -143,16 +147,23 @@ class SwissSolarForecast:
         logger.info("Calculating PV forecast...")
 
         try:
-            # Load ensemble weather data
-            ensemble_weather = load_hybrid_ensemble_forecast(self.data_dir)
+            # Load ensemble weather data using configured location
+            ensemble_weather = load_hybrid_ensemble_forecast(
+                self.data_dir,
+                lat=self.latitude,
+                lon=self.longitude,
+            )
             if not ensemble_weather:
                 logger.warning("No ensemble data available, skipping calculation")
                 return
 
             logger.info(f"Loaded {len(ensemble_weather)} ensemble members")
 
-            # Calculate PV forecast
-            pv_forecast = forecast_ensemble_plants(ensemble_weather)
+            # Calculate PV forecast using configured plants
+            pv_forecast = forecast_ensemble_plants(
+                ensemble_weather,
+                plants=self.pv_config.plants,
+            )
             logger.info(f"Generated PV forecast with {len(pv_forecast)} time steps")
 
             # Write PV forecast to InfluxDB (15-min intervals)
