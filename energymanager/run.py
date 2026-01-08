@@ -485,51 +485,57 @@ class EnergyManager:
         logger.info("Stopped")
 
 
-def deep_merge(base: dict, override: dict) -> dict:
-    """Deep merge override into base dict."""
-    result = base.copy()
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
+def load_config(config_path: str = None) -> dict:
+    """Load configuration from YAML file.
 
+    The config file is stored in /data/energymanager.yaml and persists
+    across add-on updates. On first run, the startup script copies a
+    template to /data/.
 
-def load_options() -> dict:
-    """Load add-on options from HA Supervisor.
+    Args:
+        config_path: Path to config file (passed via --config argument)
 
-    Standard HA addon behavior:
-    - User configures via HA UI
-    - Options saved to /data/options.json by Supervisor
-    - Options are PRESERVED across addon updates
+    Returns:
+        Configuration dictionary
     """
-    # Standard HA add-on options path
-    options_path = Path("/data/options.json")
-    if options_path.exists():
-        logger.info(f"Loading options from {options_path}")
-        with open(options_path) as f:
-            return json.load(f)
+    import yaml
+
+    # Use provided path or default
+    if config_path:
+        path = Path(config_path)
+        if path.exists():
+            logger.info(f"Loading config from {path}")
+            with open(path) as f:
+                return yaml.safe_load(f) or {}
+        else:
+            logger.error(f"Config file not found: {path}")
+            return {}
 
     # Fallback for local development/testing
-    test_options = Path(__file__).parent / "testdata" / "options.json"
-    if test_options.exists():
-        logger.info(f"Using test options from {test_options}")
-        with open(test_options) as f:
+    test_config = Path(__file__).parent / "testdata" / "options.json"
+    if test_config.exists():
+        logger.info(f"Using test config from {test_config}")
+        with open(test_config) as f:
             return json.load(f)
 
-    logger.warning("No options file found, using defaults")
+    logger.warning("No config file found, using defaults")
     return {}
 
 
 def main():
     """Main entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="EnergyManager Add-on")
+    parser.add_argument("--config", help="Path to config file")
+    args = parser.parse_args()
+
     logger.info("=" * 60)
-    logger.info("EnergyManager Add-on v1.0.0")
+    logger.info("EnergyManager Add-on v1.3.0")
     logger.info("=" * 60)
 
-    # Load options
-    options = load_options()
+    # Load config
+    options = load_config(args.config)
 
     # Set log level
     log_level = options.get("log_level", "info").upper()

@@ -1,0 +1,59 @@
+# EnergyManager Configuration
+# ==========================
+# This file is stored in /data/energymanager.yaml and persists across add-on updates.
+# Edit this file to configure your energy management settings.
+#
+# After editing, restart the add-on to apply changes.
+
+# InfluxDB connection for forecasts
+influxdb:
+  host: "192.168.0.203"
+  port: 8087
+  token: ""  # Your InfluxDB token here
+  org: "energymanagement"
+  pv_bucket: "pv_forecast"
+  load_bucket: "load_forecast"
+  output_bucket: "energy_manager"
+  soc_bucket: "HuaweiNew"
+  soc_measurement: "Energy"
+  soc_field: "BATT_Level"
+
+# Battery settings
+battery:
+  capacity_kwh: 10.0
+  reserve_percent: 10
+  charge_efficiency: 0.95
+  discharge_efficiency: 0.95
+  max_charge_w: 5000
+  max_discharge_w: 5000
+  soc_entity: "sensor.battery_state_of_capacity"
+  discharge_control_entity: "number.batteries_maximum_discharging_power"
+
+# Electricity tariff settings
+tariff:
+  weekday_cheap_start: "21:00"
+  weekday_cheap_end: "06:00"
+  weekend_all_day_cheap: true
+  holidays: []
+
+# Appliance control settings
+appliances:
+  power_w: 2500
+  energy_wh: 1500
+
+# EV charging settings
+ev_charging:
+  min_power_w: 4100
+  max_power_w: 11000
+
+# Schedule settings
+schedule:
+  update_interval_minutes: 15
+
+# Telegram notifications (optional)
+telegram:
+  bot_token: ""
+  chat_id: ""
+
+# Logging level: debug, info, warning, error
+log_level: "info"

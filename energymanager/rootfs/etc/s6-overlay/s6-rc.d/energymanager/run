@@ -3,6 +3,21 @@
 # ==============================================================================
 # Start EnergyManager service
 # ==============================================================================
-bashio::log.info "Starting EnergyManager..."
+set -euo pipefail
 
-exec python3 /app/run.py
+USER_CONFIG="/data/energymanager.yaml"
+TEMPLATE="/usr/share/energymanager/config.yaml.example"
+
+# First-run bootstrap: copy template if user config doesn't exist
+if [ ! -f "$USER_CONFIG" ]; then
+  bashio::log.info "No user config found. Creating $USER_CONFIG from template."
+  mkdir -p /data
+  cp "$TEMPLATE" "$USER_CONFIG"
+  chmod 600 "$USER_CONFIG" || true
+  bashio::log.warning "Please edit $USER_CONFIG with your settings and restart the add-on."
+else
+  bashio::log.info "Using existing config: $USER_CONFIG"
+fi
+
+bashio::log.info "Starting EnergyManager..."
+exec python3 /app/run.py --config "$USER_CONFIG"
