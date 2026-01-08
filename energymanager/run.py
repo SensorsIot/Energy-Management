@@ -497,33 +497,35 @@ def deep_merge(base: dict, override: dict) -> dict:
 
 
 def load_config(config_path: str = None) -> dict:
-    """Load configuration with defaults merge.
+    """Load configuration with secrets from environment.
 
     Strategy:
-    1. Load defaults from /usr/share/energymanager/config.yaml.example
-    2. Load user config from /data/energymanager.yaml
+    1. Load defaults from /usr/share/energymanager/energymanager.yaml.example
+    2. Load user config from /config/energymanager.yaml (via --config)
     3. Deep-merge: defaults first, user values win
-    4. User file is never overwritten (source of truth)
+    4. Overlay secrets from environment variables (set by startup script from HA UI)
+    5. User file is never overwritten (source of truth for non-secrets)
 
     Args:
         config_path: Path to user config file (passed via --config argument)
 
     Returns:
-        Merged configuration dictionary
+        Merged configuration dictionary with secrets
     """
     import yaml
+    import os
 
     defaults = {}
     user_config = {}
 
     # Load defaults from template (shipped in image)
-    defaults_path = Path("/usr/share/energymanager/config.yaml.example")
+    defaults_path = Path("/usr/share/energymanager/energymanager.yaml.example")
     if defaults_path.exists():
         logger.debug(f"Loading defaults from {defaults_path}")
         with open(defaults_path) as f:
             defaults = yaml.safe_load(f) or {}
 
-    # Load user config
+    # Load user config (non-secrets from /config/energymanager.yaml)
     if config_path:
         path = Path(config_path)
         if path.exists():
@@ -543,9 +545,26 @@ def load_config(config_path: str = None) -> dict:
     # Merge: defaults first, user wins
     merged = deep_merge(defaults, user_config)
 
-    # Log if critical values are missing
-    if not merged.get("influxdb", {}).get("token"):
-        logger.warning("InfluxDB token is empty - edit /data/energymanager.yaml")
+    # Overlay secrets from environment variables (set by HA Configuration UI)
+    influxdb_token = os.environ.get("INFLUXDB_TOKEN")
+    if influxdb_token:
+        if "influxdb" not in merged:
+            merged["influxdb"] = {}
+        merged["influxdb"]["token"] = influxdb_token
+        logger.info("InfluxDB token loaded from environment")
+    else:
+        logger.warning("InfluxDB token not set - configure it in the add-on Configuration tab")
+
+    telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if telegram_bot_token or telegram_chat_id:
+        if "telegram" not in merged:
+            merged["telegram"] = {}
+        if telegram_bot_token:
+            merged["telegram"]["bot_token"] = telegram_bot_token
+        if telegram_chat_id:
+            merged["telegram"]["chat_id"] = telegram_chat_id
+        logger.info("Telegram credentials loaded from environment")
 
     return merged
 
@@ -559,7 +578,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("EnergyManager Add-on v1.3.1")
+    logger.info("EnergyManager Add-on v1.4.0")
     logger.info("=" * 60)
 
     # Load config

@@ -1,15 +1,18 @@
 # EnergyManager Configuration
-# ==========================
-# This file is stored in /data/energymanager.yaml and persists across add-on updates.
-# Edit this file to configure your energy management settings.
+# ============================
+# This file contains non-secret configuration parameters.
+# Edit via File Editor or VS Code at: /addon_configs/energymanager/
+#
+# SECRETS (tokens, passwords) are configured in the add-on Configuration tab,
+# NOT in this file. They are securely managed by Home Assistant.
 #
 # After editing, restart the add-on to apply changes.
 
 # InfluxDB connection for forecasts
+# NOTE: The token is configured in the add-on Configuration tab (not here)
 influxdb:
   host: "192.168.0.203"
   port: 8087
-  token: ""  # Your InfluxDB token here
   org: "energymanagement"
   pv_bucket: "pv_forecast"
   load_bucket: "load_forecast"
@@ -41,7 +44,7 @@ appliances:
   power_w: 2500
   energy_wh: 1500
 
-# EV charging settings
+# EV charging settings (future use)
 ev_charging:
   min_power_w: 4100
   max_power_w: 11000
@@ -49,11 +52,6 @@ ev_charging:
 # Schedule settings
 schedule:
   update_interval_minutes: 15
-
-# Telegram notifications (optional)
-telegram:
-  bot_token: ""
-  chat_id: ""
 
 # Logging level: debug, info, warning, error
 log_level: "info"
