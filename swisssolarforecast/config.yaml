@@ -1,5 +1,5 @@
 name: "SwissSolarForecast"
-version: "1.0.2"
+version: "1.1.0"
 slug: "swisssolarforecast"
 description: "Swiss PV power forecast using MeteoSwiss ICON ensemble data with pvlib"
 url: "https://github.com/SensorsIot/Energy-Management"
@@ -17,90 +17,15 @@ timeout: 300
 # Storage mapping
 map:
   - share:rw           # Store GRIB data in /share/swisssolarforecast
-  - config:ro          # Read HA config for YAML-based PV system config
+  - addon_config:rw    # User config at /config/swisssolarforecast.yaml
 
-# Options with defaults
+# Secrets entered via HA Configuration UI (not stored in YAML files)
 options:
-  influxdb:
-    host: "192.168.0.203"
-    port: 8087
-    token: ""
-    org: "energymanagement"
-    bucket: "pv_forecast"
+  influxdb_token: ""
+  telegram_bot_token: ""
+  telegram_chat_id: ""
 
-  location:
-    latitude: 47.475
-    longitude: 7.767
-    altitude: 330
-    timezone: "Europe/Zurich"
-
-  panels: []
-  plants: []
-
-  schedule:
-    ch1_cron: "30 2,5,8,11,14,17,20,23 * * *"
-    ch2_cron: "45 2,8,14,20 * * *"
-    calculator_interval_minutes: 15
-
-  notifications:
-    telegram_enabled: false
-    telegram_bot_token: ""
-    telegram_chat_id: ""
-
-  storage:
-    data_path: "/share/swisssolarforecast"
-    max_storage_gb: 3.0
-    cleanup_old_runs: true
-
-  log_level: "info"
-
-# Schema validation
 schema:
-  influxdb:
-    host: str
-    port: port
-    token: str
-    org: str
-    bucket: str
-
-  location:
-    latitude: float
-    longitude: float
-    altitude: int
-    timezone: str
-
-  panels:
-    - id: str
-      model: str
-      pdc0: int
-      gamma_pdc: float?
-
-  plants:
-    - name: str
-      inverters:
-        - name: str
-          max_power: int
-          efficiency: float?
-          strings:
-            - name: str
-              azimuth: int
-              tilt: int
-              panel: str
-              count: int
-
-  schedule:
-    ch1_cron: str
-    ch2_cron: str
-    calculator_interval_minutes: int
-
-  notifications:
-    telegram_enabled: bool
-    telegram_bot_token: str?
-    telegram_chat_id: str?
-
-  storage:
-    data_path: str
-    max_storage_gb: float
-    cleanup_old_runs: bool
-
-  log_level: "list(debug|info|warning|error)"
+  influxdb_token: password
+  telegram_bot_token: password?
+  telegram_chat_id: str?
