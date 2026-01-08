@@ -274,7 +274,7 @@ load = solar_pv_total_ac_power - power_meter_active_power + battery_charge_disch
 
 | Entity ID | Description | Unit | MPC Use |
 |-----------|-------------|------|---------|
-| `number.battery_maximum_discharging_power` | Max discharge limit | W | **Night strategy control** |
+| `number.batteries_maximum_discharging_power` | Max discharge limit | W | **Night strategy control** |
 | `number.battery_maximum_charging_power` | Max charge limit | W | Charge limiting |
 | `number.battery_end_of_discharge_soc` | Min SOC limit | % | SOC protection |
 | `number.battery_end_of_charge_soc` | Max SOC limit | % | SOC protection |
@@ -606,7 +606,7 @@ The following table lists ALL parameters used in code, indicating whether each i
 | `battery.max_charge_w` | 5000 | User | Max charge power (W) |
 | `battery.max_discharge_w` | 5000 | User | Max discharge power (W) |
 | `battery.soc_entity` | sensor.battery_state_of_capacity | User | HA entity for current SOC |
-| `battery.discharge_control_entity` | number.battery_maximum_discharging_power | User | HA entity for discharge control |
+| `battery.discharge_control_entity` | number.batteries_maximum_discharging_power | User | HA entity for discharge control |
 | `tariff.weekday_cheap_start` | 21:00 | User | Low tariff start (HH:MM) |
 | `tariff.weekday_cheap_end` | 06:00 | User | Low tariff end (HH:MM) |
 | `tariff.weekend_all_day_cheap` | true | User | Weekend uses low tariff |
@@ -1407,7 +1407,7 @@ IF battery_flow < 0 AND time >= block_from AND time < block_until:
    soc_wh unchanged
 ```
 
-### 4.3.4 Output: number.battery_maximum_discharging_power
+### 4.3.4 Output: number.batteries_maximum_discharging_power
 
 Controls the battery discharge power in Home Assistant:
 
@@ -1419,7 +1419,7 @@ Controls the battery discharge power in Home Assistant:
 ```yaml
 service: number.set_value
 target:
-  entity_id: number.battery_maximum_discharging_power
+  entity_id: number.batteries_maximum_discharging_power
 data:
   value: "{{ 5000 if discharge_allowed else 0 }}"
 ```
@@ -1526,7 +1526,7 @@ battery:
   max_charge_w: 5000
   max_discharge_w: 5000
   soc_entity: "sensor.battery_state_of_capacity"
-  discharge_control_entity: "number.battery_maximum_discharging_power"
+  discharge_control_entity: "number.batteries_maximum_discharging_power"
 
 tariff:
   weekday_cheap_start: "21:00"
@@ -1650,7 +1650,7 @@ Error: Battery Control Failed
 
 Failed to [enable/block] battery discharge after 5 attempts.
 
-Entity: number.battery_maximum_discharging_power
+Entity: number.batteries_maximum_discharging_power
 Target value: [0/5000]W
 Error: [error details]
 

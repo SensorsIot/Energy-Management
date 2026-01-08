@@ -1,5 +1,5 @@
 name: "EnergyManager"
-version: "1.1.9"
+version: "1.2.0"
 slug: "energymanager"
 description: "Energy optimization using PV and load forecasts"
 url: "https://github.com/SensorsIot/Energy-Management"
@@ -46,7 +46,7 @@ options:
     max_charge_w: 5000
     max_discharge_w: 5000
     soc_entity: "sensor.battery_state_of_capacity"
-    discharge_control_entity: "number.battery_maximum_discharging_power"
+    discharge_control_entity: "number.batteries_maximum_discharging_power"
 
   tariff:
     weekday_cheap_start: "21:00"
