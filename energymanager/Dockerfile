@@ -33,4 +33,4 @@ LABEL \
     io.hass.description="Battery optimization using PV and load forecasts" \
     io.hass.arch="aarch64|amd64|armv7" \
     io.hass.type="addon" \
-    io.hass.version="1.3.1"
+    io.hass.version="1.3.2"
