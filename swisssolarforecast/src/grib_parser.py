@@ -1,6 +1,9 @@
 """
 GRIB file parser for MeteoSwiss ICON forecast data.
 Handles ICON's unstructured triangular grid for both CH1 and CH2 models.
+
+All functions that need location now require lat/lon as explicit parameters,
+allowing runtime configuration from user config files.
 """
 
 import eccodes
@@ -13,13 +16,10 @@ import requests
 import tempfile
 import re
 
-from .config import LATITUDE, LONGITUDE
 from .notifications import notify_warning
+from .icon_fetcher import STAC_API_URL
 
 logger = logging.getLogger(__name__)
-
-# STAC API for grid coordinates
-STAC_API_URL = "https://data.geo.admin.ch/api/stac/v1"
 
 # Caches
 _GRID_CACHE = {}  # Grid coordinates per model
@@ -183,8 +183,8 @@ def parse_filename(path: Path) -> dict:
 
 def read_grib_at_location(
     grib_path: Path,
-    lat: float = LATITUDE,
-    lon: float = LONGITUDE,
+    lat: float,
+    lon: float,
     model: str = None,
 ) -> dict:
     """
@@ -275,8 +275,8 @@ def read_grib_at_location(
 
 def read_grib_all_members(
     grib_path: Path,
-    lat: float = LATITUDE,
-    lon: float = LONGITUDE,
+    lat: float,
+    lon: float,
     model: str = None,
 ) -> list[dict]:
     """
@@ -375,8 +375,8 @@ def read_grib_all_members(
 
 def extract_pv_weather(
     grib_paths: list[Path],
-    lat: float = LATITUDE,
-    lon: float = LONGITUDE,
+    lat: float,
+    lon: float,
 ) -> pd.DataFrame:
     """
     Extract weather variables needed for PV modeling from multiple GRIB files.
@@ -448,9 +448,9 @@ def extract_pv_weather(
 
 def load_local_forecast(
     forecast_dir: Path,
+    lat: float,
+    lon: float,
     model: str = "ch2",
-    lat: float = LATITUDE,
-    lon: float = LONGITUDE,
 ) -> pd.DataFrame:
     """
     Load forecast data from local forecastData directory.
@@ -505,8 +505,8 @@ def deaccumulate_avg(values: np.ndarray, hours: np.ndarray) -> np.ndarray:
 
 def extract_ensemble_weather(
     grib_paths: list[Path],
-    lat: float = LATITUDE,
-    lon: float = LONGITUDE,
+    lat: float,
+    lon: float,
 ) -> dict[int, pd.DataFrame]:
     """
     Extract weather for all ensemble members from GRIB files.
@@ -693,9 +693,9 @@ def extract_ensemble_weather(
 
 def load_ensemble_forecast(
     forecast_dir: Path,
+    lat: float,
+    lon: float,
     model: str = "ch2",
-    lat: float = LATITUDE,
-    lon: float = LONGITUDE,
 ) -> dict[int, pd.DataFrame]:
     """
     Load ensemble forecast data from local forecastData directory.
@@ -747,8 +747,8 @@ def load_ensemble_forecast(
 
 def load_hybrid_ensemble_forecast(
     forecast_dir: Path,
-    lat: float = LATITUDE,
-    lon: float = LONGITUDE,
+    lat: float,
+    lon: float,
     ch1_hours: tuple[int, int] = (0, 33),
     ch2_hours: tuple[int, int] = (33, 48),
 ) -> dict[int, pd.DataFrame]:
@@ -775,7 +775,7 @@ def load_hybrid_ensemble_forecast(
 
     # Load CH1 ensemble
     try:
-        ch1_data = load_ensemble_forecast(forecast_dir, model="ch1", lat=lat, lon=lon)
+        ch1_data = load_ensemble_forecast(forecast_dir, lat, lon, model="ch1")
         logger.info(f"Loaded CH1 ensemble: {len(ch1_data)} members")
     except FileNotFoundError:
         msg = "No CH1 data available, using CH2 only"
@@ -785,7 +785,7 @@ def load_hybrid_ensemble_forecast(
 
     # Load CH2 ensemble (for hours beyond CH1)
     try:
-        ch2_data = load_ensemble_forecast(forecast_dir, model="ch2", lat=lat, lon=lon)
+        ch2_data = load_ensemble_forecast(forecast_dir, lat, lon, model="ch2")
         logger.info(f"Loaded CH2 ensemble: {len(ch2_data)} members")
     except FileNotFoundError:
         msg = "No CH2 data available"

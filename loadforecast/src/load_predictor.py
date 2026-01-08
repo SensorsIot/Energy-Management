@@ -3,6 +3,9 @@ Statistical load prediction using historical consumption data.
 
 Builds time-of-day profiles from historical data and generates
 P10/P50/P90 forecasts for energy consumption per 15-minute period.
+
+Time-of-day profiles are built using LOCAL time (configurable timezone),
+not UTC, so that "morning peak" patterns align with actual user behavior.
 """
 
 import logging
@@ -10,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
+import pytz
 from influxdb_client import InfluxDBClient
 
 logger = logging.getLogger(__name__)
@@ -27,6 +31,7 @@ class LoadPredictor:
         source_bucket: str = "HomeAssistant",
         load_entity: str = "load_power",
         history_days: int = 90,
+        local_timezone: str = "Europe/Zurich",
     ):
         self.host = host
         self.port = port
@@ -35,8 +40,11 @@ class LoadPredictor:
         self.source_bucket = source_bucket
         self.load_entity = load_entity
         self.history_days = history_days
+        self.local_timezone = local_timezone
+        self.tz = pytz.timezone(local_timezone)
         self.client: Optional[InfluxDBClient] = None
         self.profile: Optional[pd.DataFrame] = None
+        logger.info(f"Using timezone: {local_timezone} for time-of-day profiles")
 
     def connect(self):
         """Connect to InfluxDB."""
@@ -71,10 +79,17 @@ class LoadPredictor:
         df = result[["_time", "_value"]].copy()
         df.columns = ["time", "load_power"]
         df["time"] = pd.to_datetime(df["time"])
+
+        # Convert to local timezone for time-of-day profile building
+        # This ensures "7am" means local 7am, not UTC 7am
+        if df["time"].dt.tz is None:
+            df["time"] = df["time"].dt.tz_localize("UTC")
+        df["time"] = df["time"].dt.tz_convert(self.local_timezone)
+
         df = df.set_index("time")
         df = df.dropna()
 
-        logger.info(f"Loaded {len(df)} data points")
+        logger.info(f"Loaded {len(df)} data points (converted to {self.local_timezone})")
         return df
 
     def build_profile(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -121,11 +136,12 @@ class LoadPredictor:
         Returns:
             DataFrame with columns: energy_wh_p10, energy_wh_p50, energy_wh_p90
             Each value represents Wh consumed in that 15-min period.
+            Index is in UTC for consistency with InfluxDB storage.
         """
         if self.profile is None:
             raise ValueError("Profile not built. Call build_profile() first.")
 
-        # Align start time to 15-min boundary
+        # Align start time to 15-min boundary in UTC
         if start_time is None:
             start_time = datetime.now(timezone.utc)
         start_time = start_time.replace(
@@ -134,20 +150,24 @@ class LoadPredictor:
             microsecond=0,
         )
 
-        # Generate forecast timestamps (15-min intervals)
+        # Generate forecast timestamps in UTC (15-min intervals)
         n_slots = hours * 4
-        timestamps = pd.date_range(start=start_time, periods=n_slots, freq="15min")
+        timestamps_utc = pd.date_range(start=start_time, periods=n_slots, freq="15min", tz="UTC")
+
+        # Convert to local time for slot lookup
+        timestamps_local = timestamps_utc.tz_convert(self.local_timezone)
 
         # Build forecast
         forecast_data = []
-        for ts in timestamps:
-            slot = ts.hour * 4 + ts.minute // 15
+        for ts_utc, ts_local in zip(timestamps_utc, timestamps_local):
+            # Use LOCAL time for slot calculation (matches how profile was built)
+            slot = ts_local.hour * 4 + ts_local.minute // 15
 
             if slot in self.profile.index:
                 row = self.profile.loc[slot]
                 # Power (W) × 0.25h = Wh per 15-min period
                 forecast_data.append({
-                    "time": ts,
+                    "time": ts_utc,  # Store in UTC for InfluxDB
                     "energy_wh_p10": row["p10"] * 0.25,
                     "energy_wh_p50": row["p50"] * 0.25,
                     "energy_wh_p90": row["p90"] * 0.25,
@@ -158,7 +178,7 @@ class LoadPredictor:
                 median_p50 = self.profile["p50"].median() * 0.25
                 median_p90 = self.profile["p90"].median() * 0.25
                 forecast_data.append({
-                    "time": ts,
+                    "time": ts_utc,
                     "energy_wh_p10": median_p10,
                     "energy_wh_p50": median_p50,
                     "energy_wh_p90": median_p90,
@@ -167,7 +187,8 @@ class LoadPredictor:
         forecast = pd.DataFrame(forecast_data)
         forecast = forecast.set_index("time")
 
-        logger.info(f"Generated {len(forecast)} forecast points (15-min intervals)")
+        logger.info(f"Generated {len(forecast)} forecast points (15-min intervals, "
+                    f"slots based on {self.local_timezone})")
         return forecast
 
     def get_profile_summary(self) -> dict:

@@ -24,6 +24,10 @@ forecast:
   history_days: 90
   horizon_hours: 48
 
+# Timezone for time-of-day profiles
+# Profiles are built in local time so "7am peak" means local 7am
+timezone: "Europe/Zurich"
+
 # Schedule settings (cron expression)
 schedule:
   cron: "15 * * * *"

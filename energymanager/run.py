@@ -125,6 +125,12 @@ class EnergyManager:
         self.appliance_power_w = appliance_opts.get("power_w", 2500)
         self.appliance_energy_wh = appliance_opts.get("energy_wh", 1500)
 
+        # Sensor entities for appliance signal calculation
+        sensors_opts = options.get("sensors", {})
+        self.pv_power_entity = sensors_opts.get("pv_power", "sensor.solar_pv_total_ac_power")
+        self.load_power_entity = sensors_opts.get("load_power", "sensor.load_power")
+        self.appliance_signal_entity = sensors_opts.get("appliance_signal", "sensor.appliance_signal")
+
         # Scheduler
         schedule_opts = options.get("schedule", {})
         self.update_interval = schedule_opts.get("update_interval_minutes", 15)
@@ -408,9 +414,9 @@ class EnergyManager:
     def calculate_appliance_signal(self, current_soc: float, forecast):
         """Calculate and output appliance signal to Home Assistant."""
         try:
-            # Get current PV and load from HA
-            current_pv = self.ha_client.get_sensor_value("sensor.solar_pv_total_ac_power") or 0
-            current_load = self.ha_client.get_sensor_value("sensor.load_power") or 0
+            # Get current PV and load from HA (using configurable entities)
+            current_pv = self.ha_client.get_sensor_value(self.pv_power_entity) or 0
+            current_load = self.ha_client.get_sensor_value(self.load_power_entity) or 0
 
             # Calculate signal
             signal = calculate_appliance_signal(
@@ -425,9 +431,9 @@ class EnergyManager:
 
             logger.info(f"Appliance signal: {signal.signal} - {signal.reason}")
 
-            # Output to Home Assistant
+            # Output to Home Assistant (using configurable entity)
             self.ha_client.set_sensor_state(
-                "sensor.appliance_signal",
+                self.appliance_signal_entity,
                 signal.signal,
                 attributes={
                     "friendly_name": "Appliance Signal",

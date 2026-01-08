@@ -122,6 +122,7 @@ def run_forecast(options: dict) -> bool:
         source_bucket=influx_config.get("source_bucket", "HomeAssistant"),
         load_entity=sensor_config.get("entity_id", "load_power"),
         history_days=forecast_config.get("history_days", 90),
+        local_timezone=options.get("timezone", "Europe/Zurich"),
     )
 
     try:

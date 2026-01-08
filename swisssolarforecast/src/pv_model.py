@@ -1,14 +1,21 @@
 """
 PV power forecast model using pvlib.
 Supports hierarchical config: plants -> inverters -> strings -> panels
+
+All forecast functions accept plants as a parameter, allowing runtime
+configuration from user config files rather than import-time globals.
 """
 
 import pvlib
 import pandas as pd
 import numpy as np
 import logging
+from typing import List, Optional
 
-from .config import PLANTS, get_all_inverters
+from .config import PVSystemConfig
+
+# Legacy import for backwards compatibility (DEPRECATED)
+from .config import PLANTS as _LEGACY_PLANTS
 
 logger = logging.getLogger(__name__)
 
@@ -197,19 +204,33 @@ def forecast_plant_power(
 
 def forecast_all_plants(
     weather: pd.DataFrame,
+    plants: Optional[List[dict]] = None,
 ) -> pd.DataFrame:
     """
     Calculate power forecast for all plants.
+
+    Args:
+        weather: Weather DataFrame with ghi, temp_air, wind_speed
+        plants: List of plant dicts from PVSystemConfig.plants.
+                If None, uses legacy config_pv.yaml (DEPRECATED).
+
+    Returns:
+        DataFrame with power forecast for all plants
     """
+    # Use provided plants or fall back to legacy for backwards compatibility
+    if plants is None:
+        logger.debug("No plants provided, using legacy config (DEPRECATED)")
+        plants = _LEGACY_PLANTS
+
     results = {}
     first_result = None
 
-    for plant in PLANTS:
+    for plant in plants:
         logger.info(f"Calculating forecast for plant: {plant['name']}")
         plant_result = forecast_plant_power(weather, plant)
 
         # Prefix columns with plant name if multiple plants
-        if len(PLANTS) > 1:
+        if len(plants) > 1:
             for col in plant_result.columns:
                 results[f"{plant['name']}_{col}"] = plant_result[col]
         else:
@@ -230,7 +251,7 @@ def forecast_all_plants(
         output["temp_air"] = weather_aligned["temp_air"].values
 
     # Grand total if multiple plants
-    if len(PLANTS) > 1:
+    if len(plants) > 1:
         total_cols = [c for c in output.columns if c.endswith("_total_ac_power")]
         output["grand_total_ac_power"] = output[total_cols].sum(axis=1)
 
@@ -239,17 +260,25 @@ def forecast_all_plants(
 
 def forecast_ensemble_plants(
     ensemble_weather: dict[int, pd.DataFrame],
+    plants: Optional[List[dict]] = None,
 ) -> pd.DataFrame:
     """
     Calculate power forecast with uncertainty bands using ensemble weather data.
 
     Args:
         ensemble_weather: Dict mapping member number to weather DataFrame
+        plants: List of plant dicts from PVSystemConfig.plants.
+                If None, uses legacy config_pv.yaml (DEPRECATED).
 
     Returns:
         DataFrame with P10, P50, P90 columns for total AC power,
         plus per-inverter percentiles.
     """
+    # Use provided plants or fall back to legacy for backwards compatibility
+    if plants is None:
+        logger.debug("No plants provided, using legacy config (DEPRECATED)")
+        plants = _LEGACY_PLANTS
+
     if not ensemble_weather:
         raise ValueError("No ensemble weather data provided")
 
@@ -257,7 +286,7 @@ def forecast_ensemble_plants(
     member_forecasts = {}
     for member, weather in ensemble_weather.items():
         try:
-            forecast = forecast_all_plants(weather)
+            forecast = forecast_all_plants(weather, plants=plants)
             member_forecasts[member] = forecast
         except Exception as e:
             logger.warning(f"Failed to calculate forecast for member {member}: {e}")
@@ -304,7 +333,7 @@ def forecast_ensemble_plants(
 
     # Calculate percentiles for each inverter
     inverter_names = []
-    for plant in PLANTS:
+    for plant in plants:
         for inverter in plant["inverters"]:
             inverter_names.append(inverter["name"])
 
