@@ -44,3 +44,5 @@ grid_coords_*.npz
 .DS_Store
 Thumbs.db
 Documents/secrets.txt
+*.csv
+.Destination*
