@@ -5,19 +5,52 @@
 # ==============================================================================
 set -euo pipefail
 
-USER_CONFIG="/data/energymanager.yaml"
-TEMPLATE="/usr/share/energymanager/config.yaml.example"
+USER_CONFIG="/config/energymanager.yaml"
+TEMPLATE="/usr/share/energymanager/energymanager.yaml.example"
+EXAMPLE_DEST="/config/energymanager.yaml.example"
 
+# ==============================================================================
+# Read secrets from HA Configuration UI and export as environment variables
+# ==============================================================================
+if bashio::config.exists 'influxdb_token' && bashio::config.has_value 'influxdb_token'; then
+  export INFLUXDB_TOKEN="$(bashio::config 'influxdb_token')"
+  bashio::log.info "InfluxDB token loaded from configuration"
+else
+  bashio::log.warning "InfluxDB token not configured - set it in the Configuration tab"
+fi
+
+if bashio::config.exists 'telegram_bot_token' && bashio::config.has_value 'telegram_bot_token'; then
+  export TELEGRAM_BOT_TOKEN="$(bashio::config 'telegram_bot_token')"
+  bashio::log.info "Telegram bot token loaded from configuration"
+fi
+
+if bashio::config.exists 'telegram_chat_id' && bashio::config.has_value 'telegram_chat_id'; then
+  export TELEGRAM_CHAT_ID="$(bashio::config 'telegram_chat_id')"
+  bashio::log.info "Telegram chat ID loaded from configuration"
+fi
+
+# ==============================================================================
 # First-run bootstrap: copy template if user config doesn't exist
+# ==============================================================================
 if [ ! -f "$USER_CONFIG" ]; then
   bashio::log.info "No user config found. Creating $USER_CONFIG from template."
-  mkdir -p /data
+  mkdir -p /config
   cp "$TEMPLATE" "$USER_CONFIG"
-  chmod 600 "$USER_CONFIG" || true
+  chmod 644 "$USER_CONFIG" || true
   bashio::log.warning "Please edit $USER_CONFIG with your settings and restart the add-on."
+  bashio::log.warning "Edit via: File Editor or VS Code at /addon_configs/energymanager/"
 else
   bashio::log.info "Using existing config: $USER_CONFIG"
 fi
 
+# ==============================================================================
+# Always refresh the example file (so users see new options after updates)
+# ==============================================================================
+cp "$TEMPLATE" "$EXAMPLE_DEST"
+bashio::log.debug "Updated example config at $EXAMPLE_DEST"
+
+# ==============================================================================
+# Start EnergyManager
+# ==============================================================================
 bashio::log.info "Starting EnergyManager..."
 exec python3 /app/run.py --config "$USER_CONFIG"

@@ -1,5 +1,5 @@
 name: "EnergyManager"
-version: "1.3.2"
+version: "1.4.0"
 slug: "energymanager"
 description: "Energy optimization using PV and load forecasts"
 url: "https://github.com/SensorsIot/Energy-Management"
@@ -21,3 +21,14 @@ auth_api: true
 # Map config directory for user to access config file via File Editor/VSCode
 map:
   - addon_config:rw
+
+# Secrets entered via HA Configuration UI (not stored in YAML files)
+options:
+  influxdb_token: ""
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+
+schema:
+  influxdb_token: password
+  telegram_bot_token: password?
+  telegram_chat_id: str?
