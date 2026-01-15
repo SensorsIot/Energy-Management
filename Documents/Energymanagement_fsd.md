@@ -51,11 +51,11 @@ The system consists of three Home Assistant add-ons that work together:
 
 ## 1.3 Add-on Summary
 
-| Add-on | Version | Purpose | Update Frequency |
-|--------|---------|---------|------------------|
-| **SwissSolarForecast** | 1.1.1 | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
-| **LoadForecast** | 1.2.0 | Statistical load power forecasting | Every hour |
-| **EnergyManager** | 1.4.2 | Battery/EV/appliance optimization signals | Every 15 min |
+| Add-on | Purpose | Update Frequency |
+|--------|---------|------------------|
+| **SwissSolarForecast** | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
+| **LoadForecast** | Statistical load power forecasting | Every hour |
+| **EnergyManager** | Battery/EV/appliance optimization signals | Every 15 min |
 
 ## 1.4 Data Flow
 
@@ -79,7 +79,7 @@ MeteoSwiss STAC API                    InfluxDB (HomeAssistant bucket)
 │                            InfluxDB                                  │
 │                                                                      │
 │  pv_forecast bucket          load_forecast bucket                   │
-│  • power_w_p10/p50/p90       • energy_wh_p10/p50/p90               │
+│  • power_w_p10/p50/p90       • power_w_p10/p50/p90                 │
 │  • energy_wh_p10/p50/p90     • Per 15-min periods                  │
 │  • Per-inverter data         • 48h horizon                          │
 │  • 48h horizon                                                      │
@@ -783,7 +783,6 @@ SwissSolarForecast generates probabilistic PV power forecasts using MeteoSwiss I
 | Property | Value |
 |----------|-------|
 | Name | SwissSolarForecast |
-| Version | 1.1.1 |
 | Slug | `swisssolarforecast` |
 | Architectures | aarch64, amd64, armv7 |
 | Timeout | 300 seconds |
@@ -1071,7 +1070,7 @@ log_level: "info"
 | `energy_wh_p90` | Wh | Per-period energy (optimistic) |
 | `ghi` | W/m² | Global horizontal irradiance |
 | `temp_air` | °C | Air temperature |
-| `run_time` | ISO string | When forecast was calculated (v1.1.1+) |
+| `run_time` | ISO string | When forecast was calculated |
 
 ### Fields (inverter="EastWest" or "South")
 
@@ -1172,7 +1171,6 @@ LoadForecast generates statistical household load consumption forecasts using hi
 | Property | Value |
 |----------|-------|
 | Name | LoadForecast |
-| Version | 1.2.0 |
 | Slug | `loadforecast` |
 | Architectures | aarch64, amd64, armv7 |
 | Timeout | 120 seconds |
@@ -1969,9 +1967,9 @@ Normal: 100-200 goroutines. Problem: >1000 goroutines.
    ```
    Memory should drop to ~2GB.
 
-**Prevention (v1.1.1+):**
+**Prevention:**
 
-Starting with v1.1.1, all add-ons use `run_time` as a field instead of a tag. This allows points to overwrite on the same timestamp without needing delete operations. The delete API calls have been removed from the code.
+All add-ons use `run_time` as a field instead of a tag. This allows points to overwrite on the same timestamp without needing delete operations. The delete API calls have been removed from the code.
 
 **Technical Background:**
 
