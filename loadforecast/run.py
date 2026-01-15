@@ -181,7 +181,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("LoadForecast Add-on v1.2.0")
+    logger.info("LoadForecast Add-on v1.2.1")
     logger.info("=" * 60)
 
     options = load_options(args.config)
