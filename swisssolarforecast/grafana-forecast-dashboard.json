@@ -139,7 +139,7 @@
         "targets": [
           {
             "refId": "A",
-            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"energy_wh_p50\" or r._field == \"load_energy_wh\" or r._field == \"net_energy_wh_p50\")"
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"energy_wh_p50\" or r._field == \"load_energy_wh\" or r._field == \"net_energy_wh_p50\")\n  |> cumulativeSum()"
           }
         ]
       },
@@ -274,7 +274,7 @@
         "targets": [
           {
             "refId": "A",
-            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: today(), stop: tomorrow())\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"energy_wh_p50\")\n  |> last()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))"
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: today(), stop: tomorrow())\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r.inverter == \"total\")\n  |> filter(fn: (r) => r._field == \"energy_wh_p50\")\n  |> sum()\n  |> map(fn: (r) => ({r with _value: r._value / 1000.0}))"
           }
         ]
       },
