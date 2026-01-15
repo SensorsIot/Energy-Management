@@ -84,22 +84,6 @@ class ForecastWriter:
             }]
         )
 
-    def delete_future_forecasts(self, start_time: datetime):
-        """Delete existing forecasts from start_time onwards (before writing new)."""
-        delete_api = self.client.delete_api()
-
-        # Delete from start_time to far future
-        stop_time = datetime(2100, 1, 1, tzinfo=timezone.utc)
-
-        logger.info(f"Deleting existing forecasts from {start_time}")
-        delete_api.delete(
-            start=start_time,
-            stop=stop_time,
-            predicate='_measurement="pv_forecast"',
-            bucket=self.bucket,
-            org=self.org,
-        )
-
     def _resample_forecast(self, forecast: pd.DataFrame, minutes: int = 15) -> pd.DataFrame:
         """
         Resample forecast to specified minute intervals using interpolation.
@@ -170,11 +154,9 @@ class ForecastWriter:
             logger.warning("No PV forecast data to write")
             return
 
-        # Delete old forecasts before writing new ones to prevent duplicates
-        first_time = pv_forecast.index.min()
-        if hasattr(first_time, 'tzinfo') and first_time.tzinfo is None:
-            first_time = first_time.replace(tzinfo=timezone.utc)
-        self.delete_future_forecasts(first_time)
+        # No need to delete - points overwrite on same measurement+tags+timestamp
+        # when run_time is a field (not tag). This avoids InfluxDB delete API
+        # performance issues (see FSD C.4).
 
         # Time step for per-period energy (15 min = 0.25 h)
         time_diff = resample_minutes / 60.0

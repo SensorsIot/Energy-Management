@@ -44,23 +44,6 @@ class SimulationWriter:
         if self.client:
             self.client.close()
 
-    def delete_future_data(self, start: datetime):
-        """Delete existing future simulation data."""
-        delete_api = self.client.delete_api()
-        stop = datetime.now(timezone.utc).replace(year=2100)
-
-        try:
-            delete_api.delete(
-                start=start,
-                stop=stop,
-                predicate='_measurement="soc_forecast"',
-                bucket=self.bucket,
-                org=self.org,
-            )
-            logger.debug(f"Deleted existing simulation data from {start}")
-        except Exception as e:
-            logger.warning(f"Failed to delete old data: {e}")
-
     def write_soc_forecast(
         self,
         simulation: pd.DataFrame,
@@ -78,9 +61,8 @@ class SimulationWriter:
             logger.warning("Empty simulation, nothing to write")
             return
 
-        # Skip delete - points overwrite (no variable tags) and this avoids
-        # InfluxDB delete API performance issues
-        # self.delete_future_data(simulation.index.min())
+        # No need to delete - points overwrite on same measurement+tags+timestamp.
+        # This avoids InfluxDB delete API performance issues (see FSD C.4).
 
         points = []
 

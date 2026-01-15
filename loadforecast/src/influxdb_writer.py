@@ -72,20 +72,6 @@ class LoadForecastWriter:
             }]
         )
 
-    def delete_future_forecasts(self, start_time: datetime):
-        """Delete existing forecasts from start_time onwards."""
-        delete_api = self.client.delete_api()
-        stop_time = datetime(2100, 1, 1, tzinfo=timezone.utc)
-
-        logger.info(f"Deleting existing load forecasts from {start_time}")
-        delete_api.delete(
-            start=start_time,
-            stop=stop_time,
-            predicate='_measurement="load_forecast"',
-            bucket=self.bucket,
-            org=self.org,
-        )
-
     def write_forecast(
         self,
         forecast: pd.DataFrame,
@@ -107,11 +93,9 @@ class LoadForecastWriter:
 
         run_time_str = run_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Delete old forecasts before writing new ones to prevent duplicates
-        first_time = forecast.index.min()
-        if hasattr(first_time, "tzinfo") and first_time.tzinfo is None:
-            first_time = first_time.replace(tzinfo=timezone.utc)
-        self.delete_future_forecasts(first_time)
+        # No need to delete - points overwrite on same measurement+tags+timestamp
+        # when run_time is a field (not tag). This avoids InfluxDB delete API
+        # performance issues (see FSD C.4).
 
         points = []
         for timestamp, row in forecast.iterrows():
