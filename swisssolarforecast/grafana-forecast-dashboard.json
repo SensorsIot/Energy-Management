@@ -335,10 +335,11 @@
       },
       {
         "id": 11,
-        "title": "Battery SOC: Without vs With Strategy",
+        "title": "Battery SOC Forecast",
         "type": "timeseries",
         "gridPos": { "x": 0, "y": 28, "w": 24, "h": 8 },
         "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "description": "Predicted battery SOC based on current optimization decision",
         "fieldConfig": {
           "defaults": {
             "unit": "percent",
@@ -346,23 +347,16 @@
             "max": 100,
             "custom": {
               "fillOpacity": 10,
-              "lineWidth": 2
-            }
+              "lineWidth": 3,
+              "showPoints": "never"
+            },
+            "color": { "fixedColor": "#73BF69", "mode": "fixed" }
           },
           "overrides": [
             {
-              "matcher": { "id": "byName", "options": "no_strategy" },
+              "matcher": { "id": "byName", "options": "SOC %" },
               "properties": [
-                { "id": "displayName", "value": "Without Strategy" },
-                { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } },
-                { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } }
-              ]
-            },
-            {
-              "matcher": { "id": "byName", "options": "with_strategy" },
-              "properties": [
-                { "id": "displayName", "value": "With Strategy" },
-                { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }
+                { "id": "displayName", "value": "Battery SOC" }
               ]
             }
           ]
@@ -370,7 +364,7 @@
         "targets": [
           {
             "refId": "A",
-            "query": "from(bucket: \"energy_manager\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"soc_comparison\")\n  |> filter(fn: (r) => r._field == \"soc_percent\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"scenario\"], valueColumn: \"_value\")"
+            "query": "from(bucket: \"energy_manager\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"soc_forecast\")\n  |> filter(fn: (r) => r._field == \"soc_percent\")\n  |> map(fn: (r) => ({_time: r._time, _value: r._value, _field: \"SOC %\"}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])"
           }
         ]
       }

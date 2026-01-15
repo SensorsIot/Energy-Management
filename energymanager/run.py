@@ -196,42 +196,18 @@ class EnergyManager:
 
         return current_soc
 
-    def write_soc_comparison(self, sim_no_strategy, sim_with_strategy, forecast):
-        """Write both SOC scenarios and energy balance to InfluxDB for visualization.
-
-        Uses field overwrite pattern - points with same measurement+tags+timestamp overwrite.
-        No delete API needed since run_time is a field, not a tag.
+    def write_energy_balance(self, forecast):
+        """Write energy balance to InfluxDB for visualization.
 
         Args:
-            sim_no_strategy: DataFrame with SOC simulation (no battery blocking)
-            sim_with_strategy: DataFrame with SOC simulation (with battery blocking)
             forecast: DataFrame with pv_energy_wh, load_energy_wh, net_energy_wh columns
         """
-        if sim_no_strategy.empty or sim_with_strategy.empty:
+        if forecast.empty:
             return
-
-        # Write SOC comparison data
-        points = []
-        for t in sim_no_strategy.index:
-            ts = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
-
-            points.append(
-                Point("soc_comparison")
-                .tag("scenario", "no_strategy")
-                .field("soc_percent", float(sim_no_strategy.loc[t, "soc_percent"]))
-                .time(ts, WritePrecision.S)
-            )
-
-            if t in sim_with_strategy.index:
-                points.append(
-                    Point("soc_comparison")
-                    .tag("scenario", "with_strategy")
-                    .field("soc_percent", float(sim_with_strategy.loc[t, "soc_percent"]))
-                    .time(ts, WritePrecision.S)
-                )
 
         # Write energy balance data from forecast DataFrame
         # Calculate cumulative as running sum of net_energy_wh
+        points = []
         cumulative_wh = 0.0
         for t in forecast.index:
             ts = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
@@ -252,7 +228,7 @@ class EnergyManager:
             )
 
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=points)
-        logger.info(f"Written {len(points)} simulation points (SOC + energy balance)")
+        logger.info(f"Written {len(points)} energy balance points")
 
     def write_decision(self, decision, current_soc: float):
         """Write discharge decision to InfluxDB."""
@@ -408,10 +384,11 @@ class EnergyManager:
                 logger.info(f"Switch ON at: {swiss_datetime(decision.switch_on_time)}")
 
             # Write results to InfluxDB
-            # FSD 4.2.3: Write SOC forecast (baseline simulation)
-            self.simulation_writer.write_soc_forecast(sim_no_strategy)
-            # Additional: comparison for dashboard visualization
-            self.write_soc_comparison(sim_no_strategy, sim_with_strategy, forecast)
+            # Write the SELECTED simulation based on decision
+            selected_sim = sim_with_strategy if not decision.discharge_allowed else sim_no_strategy
+            self.simulation_writer.write_soc_forecast(selected_sim)
+            # Write energy balance for cumulative visualization
+            self.write_energy_balance(forecast)
             self.write_decision(decision, current_soc)
 
             # Control battery
@@ -596,7 +573,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("EnergyManager Add-on v1.4.9")
+    logger.info("EnergyManager Add-on v1.4.10")
     logger.info("=" * 60)
 
     # Load config
