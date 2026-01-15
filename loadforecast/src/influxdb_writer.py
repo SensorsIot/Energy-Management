@@ -107,8 +107,11 @@ class LoadForecastWriter:
 
         run_time_str = run_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Skip delete - points now overwrite because run_time is a field not a tag
-        # This avoids InfluxDB delete API performance issues
+        # Delete old forecasts before writing new ones to prevent duplicates
+        first_time = forecast.index.min()
+        if hasattr(first_time, "tzinfo") and first_time.tzinfo is None:
+            first_time = first_time.replace(tzinfo=timezone.utc)
+        self.delete_future_forecasts(first_time)
 
         points = []
         for timestamp, row in forecast.iterrows():

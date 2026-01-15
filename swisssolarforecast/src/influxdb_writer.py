@@ -170,12 +170,11 @@ class ForecastWriter:
             logger.warning("No PV forecast data to write")
             return
 
-        # Skip delete - points overwrite (run_time is now a field not tag)
-        # This avoids InfluxDB delete API performance issues
-        # first_time = pv_forecast.index.min()
-        # if hasattr(first_time, 'tzinfo') and first_time.tzinfo is None:
-        #     first_time = first_time.replace(tzinfo=timezone.utc)
-        # self.delete_future_forecasts(first_time)
+        # Delete old forecasts before writing new ones to prevent duplicates
+        first_time = pv_forecast.index.min()
+        if hasattr(first_time, 'tzinfo') and first_time.tzinfo is None:
+            first_time = first_time.replace(tzinfo=timezone.utc)
+        self.delete_future_forecasts(first_time)
 
         # Time step for per-period energy (15 min = 0.25 h)
         time_diff = resample_minutes / 60.0
