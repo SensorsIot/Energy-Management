@@ -384,9 +384,9 @@ class EnergyManager:
                 logger.info(f"Switch ON at: {swiss_datetime(decision.switch_on_time)}")
 
             # Write results to InfluxDB
-            # Write the SELECTED simulation based on decision
-            selected_sim = sim_with_strategy if not decision.discharge_allowed else sim_no_strategy
-            self.simulation_writer.write_soc_forecast(selected_sim)
+            # Always write with_strategy - shows what optimizer will actually do
+            # (blocks discharge during cheap hours 21:00-06:00)
+            self.simulation_writer.write_soc_forecast(sim_with_strategy)
             # Write energy balance for cumulative visualization
             self.write_energy_balance(forecast)
             self.write_decision(decision, current_soc)
@@ -573,7 +573,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("EnergyManager Add-on v1.4.11")
+    logger.info("EnergyManager Add-on v1.4.12")
     logger.info("=" * 60)
 
     # Load config
