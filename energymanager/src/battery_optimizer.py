@@ -334,43 +334,20 @@ class BatteryOptimizer:
         logger.info(f"SOC at target (unclamped): {soc_at_target:.0f} Wh, "
                    f"deficit: {deficit_wh:.0f} Wh")
 
-        # Step 3: Always simulate with_strategy for visualization comparison
-        # Even if no deficit, simulate blocking during cheap hours to show the difference
-        sim_full_with_strategy = self.simulate_soc(
-            soc_percent,
-            forecast,
-            block_from=tariff.cheap_start,
-            block_until=tariff.cheap_end  # Block entire cheap period for comparison
-        )
-
-        # If no deficit, still block during cheap hours to allow grid charging
+        # Step 3: If no deficit (SOC > 0 at 21:00), allow discharge even at night
         if deficit_wh <= 0:
-            # During cheap tariff: block discharge to allow grid charging
-            # During expensive tariff: allow discharge
-            if tariff.is_cheap_now:
-                return (
-                    DischargeDecision(
-                        discharge_allowed=False,
-                        switch_on_time=tariff.cheap_end,
-                        reason=f"Cheap tariff - blocking to charge (SOC: {soc_percent:.0f}%)",
-                        deficit_wh=0,
-                        saved_wh=0,
-                    ),
-                    sim_full_no_strategy,
-                    sim_full_with_strategy,
-                )
-            else:
-                return (
-                    DischargeDecision(
-                        discharge_allowed=True,
-                        switch_on_time=None,
-                        reason=f"No deficit - SOC at target: {soc_at_target/self.capacity_wh*100:.0f}%",
-                        deficit_wh=0,
-                        saved_wh=0,
-                    ),
-                    sim_full_no_strategy,
-                    sim_full_with_strategy,
-                )
+            # No blocking needed - battery will have enough charge at target
+            return (
+                DischargeDecision(
+                    discharge_allowed=True,
+                    switch_on_time=None,
+                    reason=f"No deficit - SOC at target: {soc_at_target/self.capacity_wh*100:.0f}%",
+                    deficit_wh=0,
+                    saved_wh=0,
+                ),
+                sim_full_no_strategy,
+                sim_full_no_strategy,  # Same simulation - no blocking
+            )
 
         # Step 4: Calculate when to switch ON by accumulating savings during cheap period
         forecast_cheap = sim_full_no_strategy[
