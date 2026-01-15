@@ -54,6 +54,7 @@ class BatteryOptimizer:
     def __init__(
         self,
         capacity_wh: float = 10000,
+        min_soc_percent: float = 10,
         charge_efficiency: float = 0.95,
         discharge_efficiency: float = 0.95,
         max_charge_w: float = 5000,
@@ -64,6 +65,8 @@ class BatteryOptimizer:
         holidays: List[str] = None,
     ):
         self.capacity_wh = capacity_wh
+        self.min_soc_percent = min_soc_percent
+        self.min_soc_wh = capacity_wh * min_soc_percent / 100
         self.charge_efficiency = charge_efficiency
         self.discharge_efficiency = discharge_efficiency
         self.max_charge_wh_per_15min = max_charge_w * 0.25
@@ -328,20 +331,22 @@ class BatteryOptimizer:
         logger.info(f"SOC at cheap start ({swiss_time(tariff.cheap_start)}): {soc_at_cheap_start:.1f}%")
 
         # Step 2: Get unclamped SOC at target time (tomorrow 21:00)
+        # Check against min_soc_wh (configurable reserve), not 0
         soc_at_target = sim_full_no_strategy["soc_wh_unclamped"].iloc[-1]
-        deficit_wh = max(0, -soc_at_target)
+        deficit_wh = max(0, self.min_soc_wh - soc_at_target)
 
         logger.info(f"SOC at target (unclamped): {soc_at_target:.0f} Wh, "
+                   f"min_soc: {self.min_soc_wh:.0f} Wh ({self.min_soc_percent:.0f}%), "
                    f"deficit: {deficit_wh:.0f} Wh")
 
-        # Step 3: If no deficit (SOC > 0 at 21:00), allow discharge even at night
+        # Step 3: If no deficit (SOC >= min_soc at 21:00), allow discharge even at night
         if deficit_wh <= 0:
             # No blocking needed - battery will have enough charge at target
             return (
                 DischargeDecision(
                     discharge_allowed=True,
                     switch_on_time=None,
-                    reason=f"No deficit - SOC at target: {soc_at_target/self.capacity_wh*100:.0f}%",
+                    reason=f"No deficit - SOC at target: {soc_at_target/self.capacity_wh*100:.0f}% (min: {self.min_soc_percent:.0f}%)",
                     deficit_wh=0,
                     saved_wh=0,
                 ),
