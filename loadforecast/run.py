@@ -145,9 +145,9 @@ def run_forecast(options: dict) -> bool:
         )
 
         logger.info(f"Forecast range: {forecast.index.min()} to {forecast.index.max()}")
-        logger.info(f"  P10: {forecast['energy_wh_p10'].min():.0f} - {forecast['energy_wh_p10'].max():.0f} Wh/15min")
-        logger.info(f"  P50: {forecast['energy_wh_p50'].min():.0f} - {forecast['energy_wh_p50'].max():.0f} Wh/15min")
-        logger.info(f"  P90: {forecast['energy_wh_p90'].min():.0f} - {forecast['energy_wh_p90'].max():.0f} Wh/15min")
+        logger.info(f"  P10: {forecast['power_w_p10'].min():.0f} - {forecast['power_w_p10'].max():.0f} W")
+        logger.info(f"  P50: {forecast['power_w_p50'].min():.0f} - {forecast['power_w_p50'].max():.0f} W")
+        logger.info(f"  P90: {forecast['power_w_p90'].min():.0f} - {forecast['power_w_p90'].max():.0f} W")
 
         # Write to InfluxDB
         writer = LoadForecastWriter(
@@ -181,7 +181,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("LoadForecast Add-on v1.1.0")
+    logger.info("LoadForecast Add-on v1.2.0")
     logger.info("=" * 60)
 
     options = load_options(args.config)
