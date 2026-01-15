@@ -104,11 +104,16 @@ class BatteryOptimizer:
         Returns:
             TariffPeriod with cheap_start, cheap_end, target, is_cheap_now
         """
-        # Normalize to start of current 15-min period
-        now = now.replace(second=0, microsecond=0)
-        now = now.replace(minute=(now.minute // 15) * 15)
+        # Convert to Swiss time for tariff comparison
+        # Tariff hours (21:00-06:00) are defined in Swiss time
+        now_swiss = now.astimezone(SWISS_TZ)
 
-        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Normalize to start of current 15-min period
+        now_swiss = now_swiss.replace(second=0, microsecond=0)
+        now_swiss = now_swiss.replace(minute=(now_swiss.minute // 15) * 15)
+
+        today = now_swiss.replace(hour=0, minute=0, second=0, microsecond=0)
+        now = now_swiss  # Use Swiss time for all comparisons
 
         # Check if today is a cheap day (weekend/holiday)
         if self.is_cheap_day(now):
