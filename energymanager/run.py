@@ -197,14 +197,14 @@ class EnergyManager:
         return current_soc
 
     def write_soc_comparison(self, sim_no_strategy, sim_with_strategy):
-        """Write both SOC scenarios to InfluxDB for visualization."""
+        """Write both SOC scenarios and energy balance to InfluxDB for visualization."""
         if sim_no_strategy.empty or sim_with_strategy.empty:
             return
 
         # Skip delete - points overwrite on same timestamp+scenario tag
         # This avoids InfluxDB delete API performance issues
 
-        # Write new data
+        # Write SOC comparison data
         points = []
         for t in sim_no_strategy.index:
             ts = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
@@ -224,8 +224,22 @@ class EnergyManager:
                     .time(ts, WritePrecision.S)
                 )
 
+        # Write energy balance data (from no_strategy simulation which has full forecast)
+        for t in sim_no_strategy.index:
+            ts = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+            row = sim_no_strategy.loc[t]
+
+            points.append(
+                Point("energy_balance")
+                .field("pv_wh", float(row["pv_wh"]))
+                .field("load_wh", float(row["load_wh"]))
+                .field("net_wh", float(row["net_wh"]))
+                .field("cumulative_wh", float(row["cumulative_wh"]))
+                .time(ts, WritePrecision.S)
+            )
+
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=points)
-        logger.info(f"Written {len(points)} SOC comparison points")
+        logger.info(f"Written {len(points)} simulation points (SOC + energy balance)")
 
     def write_decision(self, decision, current_soc: float):
         """Write discharge decision to InfluxDB."""
@@ -569,7 +583,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("EnergyManager Add-on v1.4.3")
+    logger.info("EnergyManager Add-on v1.4.4")
     logger.info("=" * 60)
 
     # Load config

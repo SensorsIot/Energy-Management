@@ -130,6 +130,9 @@ class SocSimulator:
         df = pd.DataFrame(results)
         df = df.set_index('time')
 
+        # Add cumulative energy balance (Wh)
+        df['cumulative_wh'] = df['net_wh'].cumsum()
+
         logger.info(
             f"SOC simulation: {starting_soc_percent:.0f}% → {soc_percent:.0f}%, "
             f"min={df['soc_percent'].min():.0f}%, max={df['soc_percent'].max():.0f}%"
