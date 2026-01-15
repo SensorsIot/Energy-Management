@@ -3,11 +3,16 @@ Read PV and Load forecasts from InfluxDB.
 """
 
 import logging
+import warnings
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import pandas as pd
 from influxdb_client import InfluxDBClient
+from influxdb_client.client.warnings import MissingPivotFunction
+
+# Suppress InfluxDB pivot warning - we handle the data format ourselves
+warnings.filterwarnings("ignore", category=MissingPivotFunction)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +87,9 @@ class ForecastReader:
         result = result.set_index("_time")
         result.index = pd.to_datetime(result.index, utc=True)
 
+        # Remove duplicate timestamps (keep last value)
+        result = result[~result.index.duplicated(keep='last')]
+
         return result["_value"].rename("pv_energy_wh")
 
     def get_load_forecast(
@@ -121,6 +129,9 @@ class ForecastReader:
 
         result = result.set_index("_time")
         result.index = pd.to_datetime(result.index, utc=True)
+
+        # Remove duplicate timestamps (keep last value)
+        result = result[~result.index.duplicated(keep='last')]
 
         return result["_value"].rename("load_energy_wh")
 
