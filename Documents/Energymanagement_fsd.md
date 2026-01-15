@@ -854,7 +854,7 @@ SwissSolarForecast generates probabilistic PV power forecasts using MeteoSwiss I
 **Model Selection Strategy:**
 - **Today's forecast:** Use ICON-CH1-EPS (higher resolution, sufficient horizon)
 - **Tomorrow's forecast:** Use ICON-CH2-EPS (longer horizon needed)
-- **Hybrid mode:** CH1 for hours 0-33, CH2 for hours 33-48
+- **Hybrid mode:** CH1 for hours 0-33, CH2 for hours 33-60
 
 ## 2.5 STAC API Integration
 
@@ -927,8 +927,10 @@ ICON uses an unstructured triangular grid, not a regular lat/lon grid:
 | Model | Hours | Files | Approx. Size |
 |-------|-------|-------|--------------|
 | ICON-CH1-EPS | 0-33 | 2 vars × 34 hours × 2 files = 136 files | ~1.6 GB |
-| ICON-CH2-EPS | 33-48 | 2 vars × 16 hours × 2 files = 64 files | ~0.5 GB |
-| **Total** | 0-48 | 200 files | **~2.1 GB** |
+| ICON-CH2-EPS | 33-60 | 2 vars × 28 hours × 2 files = 112 files | ~0.9 GB |
+| **Total** | 0-60 | 248 files | **~2.5 GB** |
+
+**Note:** CH2 extends to hour 60 (not 48) to ensure 48h forecast coverage despite CH1/CH2 run time offsets (CH1 runs every 3h, CH2 every 6h).
 
 **Storage Policy:** Only the latest run is kept; older runs are automatically deleted before downloading.
 
@@ -1429,6 +1431,8 @@ The current SOC is **always read live** at the start of each simulation cycle. T
 | **Expensive** | 06:00 - 21:00 | - |
 
 Holidays: Read from calendar integration (future: HA calendar entity).
+
+**Why 48h forecast horizon:** The MPC must always see until the next 21:00 cheap tariff start. In the worst case (just after 21:00), that's ~24h away. The 48h horizon ensures visibility of TWO consecutive 21:00 boundaries, allowing the optimization to plan across a full expensive→cheap→expensive cycle.
 
 ---
 
