@@ -201,8 +201,24 @@ class EnergyManager:
         if sim_no_strategy.empty or sim_with_strategy.empty:
             return
 
-        # Skip delete - points overwrite on same timestamp+scenario tag
-        # This avoids InfluxDB delete API performance issues
+        # Delete old forecast data (future timestamps) before writing new
+        # This ensures clean overwrite without accumulating duplicates
+        try:
+            delete_api = self.influx_client.delete_api()
+            now = datetime.now(timezone.utc)
+            far_future = now + timedelta(days=7)
+
+            # Delete future soc_comparison and energy_balance data
+            delete_api.delete(
+                start=now,
+                stop=far_future,
+                predicate='_measurement="soc_comparison" OR _measurement="energy_balance"',
+                bucket=self.output_bucket,
+                org=self.influx_org,
+            )
+            logger.info("Deleted old forecast data from energy_manager bucket")
+        except Exception as e:
+            logger.warning(f"Could not delete old data: {e}")
 
         # Write SOC comparison data
         points = []
