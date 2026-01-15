@@ -209,7 +209,7 @@
         "targets": [
           {
             "refId": "A",
-            "query": "from(bucket: \"load_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"load_forecast\")\n  |> filter(fn: (r) => r._field == \"energy_wh_p50\")\n  |> aggregateWindow(every: 1h, fn: sum, createEmpty: false)"
+            "query": "from(bucket: \"load_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"load_forecast\")\n  |> filter(fn: (r) => r._field == \"energy_wh_p50\")\n  |> map(fn: (r) => ({r with _value: r._value * 4.0}))"
           }
         ]
       },
