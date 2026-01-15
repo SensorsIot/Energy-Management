@@ -10,9 +10,9 @@ Home Assistant add-ons for energy forecasting and optimization.
 
 | Add-on | Description | Status |
 |--------|-------------|--------|
-| [SwissSolarForecast](swisssolarforecast/) | PV power forecast using MeteoSwiss ICON data | ![Version](https://img.shields.io/badge/v1.0.2-stable-green) |
-| [LoadForecast](loadforecast/) | Statistical load prediction from historical data | ![Version](https://img.shields.io/badge/v1.0.1-stable-green) |
-| [EnergyManager](energymanager/) | Battery/EV/appliance optimization using forecasts | ![Version](https://img.shields.io/badge/v1.1.9-stable-green) |
+| [SwissSolarForecast](swisssolarforecast/) | PV power forecast using MeteoSwiss ICON data | ![Version](https://img.shields.io/badge/v1.1.1-stable-green) |
+| [LoadForecast](loadforecast/) | Statistical load prediction from historical data | ![Version](https://img.shields.io/badge/v1.1.1-stable-green) |
+| [EnergyManager](energymanager/) | Battery/EV/appliance optimization using forecasts | ![Version](https://img.shields.io/badge/v1.4.1-stable-green) |
 
 ## Architecture
 

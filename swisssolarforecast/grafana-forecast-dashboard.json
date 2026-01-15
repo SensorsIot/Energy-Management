@@ -192,13 +192,13 @@
       },
       {
         "id": 6,
-        "title": "Load Power",
+        "title": "Load Forecast (Wh/h)",
         "type": "timeseries",
         "gridPos": { "x": 0, "y": 19, "w": 12, "h": 5 },
         "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
         "fieldConfig": {
           "defaults": {
-            "unit": "watt",
+            "unit": "watth",
             "custom": {
               "fillOpacity": 30,
               "lineWidth": 2
@@ -209,7 +209,7 @@
         "targets": [
           {
             "refId": "A",
-            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"load_power_w\")"
+            "query": "from(bucket: \"load_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"load_forecast\")\n  |> filter(fn: (r) => r._field == \"energy_wh_p50\")\n  |> aggregateWindow(every: 1h, fn: sum, createEmpty: false)"
           }
         ]
       },

@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.1
+**Version:** 2.3
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -53,9 +53,9 @@ The system consists of three Home Assistant add-ons that work together:
 
 | Add-on | Version | Purpose | Update Frequency |
 |--------|---------|---------|------------------|
-| **SwissSolarForecast** | 1.0.2 | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
-| **LoadForecast** | 1.0.1 | Statistical load consumption forecasting | Every hour |
-| **EnergyManager** | 1.4.0 | Battery/EV/appliance optimization signals | Every 15 min |
+| **SwissSolarForecast** | 1.1.1 | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
+| **LoadForecast** | 1.1.1 | Statistical load consumption forecasting | Every hour |
+| **EnergyManager** | 1.4.1 | Battery/EV/appliance optimization signals | Every 15 min |
 
 ## 1.4 Data Flow
 
@@ -734,7 +734,7 @@ SwissSolarForecast generates probabilistic PV power forecasts using MeteoSwiss I
 | Property | Value |
 |----------|-------|
 | Name | SwissSolarForecast |
-| Version | 1.0.2 |
+| Version | 1.1.1 |
 | Slug | `swisssolarforecast` |
 | Architectures | aarch64, amd64, armv7 |
 | Timeout | 300 seconds |
@@ -1007,7 +1007,6 @@ log_level: "info"
 |-----|--------|-------------|
 | `inverter` | `total`, `EastWest`, `South` | Inverter identifier |
 | `model` | `ch1`, `ch2`, `hybrid` | ICON model used |
-| `run_time` | ISO timestamp | When forecast was calculated |
 
 ### Fields (inverter="total")
 
@@ -1021,6 +1020,7 @@ log_level: "info"
 | `energy_wh_p90` | Wh | Per-period energy (optimistic) |
 | `ghi` | W/m² | Global horizontal irradiance |
 | `temp_air` | °C | Air temperature |
+| `run_time` | ISO string | When forecast was calculated (v1.1.1+) |
 
 ### Fields (inverter="EastWest" or "South")
 
@@ -1121,7 +1121,7 @@ LoadForecast generates statistical household load consumption forecasts using hi
 | Property | Value |
 |----------|-------|
 | Name | LoadForecast |
-| Version | 1.0.2 |
+| Version | 1.1.1 |
 | Slug | `loadforecast` |
 | Architectures | aarch64, amd64, armv7 |
 | Timeout | 120 seconds |
@@ -1236,7 +1236,6 @@ log_level: "info"
 | Tag | Values | Description |
 |-----|--------|-------------|
 | `model` | `statistical` | Forecast model type |
-| `run_time` | ISO timestamp | When forecast was generated |
 
 ### Fields
 
@@ -1245,6 +1244,7 @@ log_level: "info"
 | `energy_wh_p10` | Wh | Per-period energy (low, 90% chance to exceed) |
 | `energy_wh_p50` | Wh | Per-period energy (median/typical) |
 | `energy_wh_p90` | Wh | Per-period energy (high, 10% chance to exceed) |
+| `run_time` | ISO string | When forecast was calculated (v1.1.1+) |
 
 **Note:** Values represent energy per 15-minute period, not instantaneous power.
 
@@ -1886,8 +1886,51 @@ from(bucket: "HomeAssistant")
 
 **Verify entity_id matches your sensor.**
 
+## C.4 InfluxDB Delete API Performance Issues
+
+**Symptoms:**
+- Add-ons hang at "Deleting future forecasts" step
+- InfluxDB container using excessive memory (>5GB)
+- High CPU usage on InfluxDB server
+- Timeout errors in add-on logs
+
+**Diagnosis:**
+
+Check InfluxDB goroutine count:
+```bash
+curl http://192.168.0.203:8087/debug/pprof/goroutine?debug=1 | head -1
+```
+
+Normal: 100-200 goroutines. Problem: >1000 goroutines.
+
+**Solution:**
+
+1. **Restart InfluxDB container:**
+   ```bash
+   docker restart influxdb2
+   ```
+
+2. **Verify recovery:**
+   ```bash
+   docker stats influxdb2 --no-stream
+   ```
+   Memory should drop to ~2GB.
+
+**Prevention (v1.1.1+):**
+
+Starting with v1.1.1, all add-ons use `run_time` as a field instead of a tag. This allows points to overwrite on the same timestamp without needing delete operations. The delete API calls have been removed from the code.
+
+**Technical Background:**
+
+InfluxDB 2.x points are uniquely identified by: `measurement + tags + timestamp`
+
+- If `run_time` is a **tag**: Each forecast run creates NEW points (duplicates accumulate)
+- If `run_time` is a **field**: Points OVERWRITE on same timestamp+tags (no duplicates)
+
+The delete API in InfluxDB 2.x can be slow with large datasets and may cause goroutine deadlocks under certain conditions.
+
 ---
 
 **End of Document**
 
-*Version 2.2 - January 2026*
+*Version 2.3 - January 2026*
