@@ -54,7 +54,7 @@ The system consists of three Home Assistant add-ons that work together:
 | Add-on | Version | Purpose | Update Frequency |
 |--------|---------|---------|------------------|
 | **SwissSolarForecast** | 1.1.1 | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
-| **LoadForecast** | 1.1.1 | Statistical load consumption forecasting | Every hour |
+| **LoadForecast** | 1.2.0 | Statistical load power forecasting | Every hour |
 | **EnergyManager** | 1.4.1 | Battery/EV/appliance optimization signals | Every 15 min |
 
 ## 1.4 Data Flow
@@ -376,12 +376,61 @@ display_zero_lines:
 3. **InfluxDB as Single Source of Truth** - All data stored as time series
 4. **Rolling Horizon** - Decisions recalculated every 5-15 minutes
 5. **Decoupled Components** - Each add-on operates independently with clear interfaces
+6. **Power for Storage, Energy for Calculations** - Forecasts stored as Power (W), converted to Energy (Wh) only when needed
 
-## 1.10 Home Assistant Add-on Architecture
+## 1.10 Data Units and Flow
+
+All forecasts are stored and displayed in **Power (W)**. Energy (Wh) is calculated internally when needed for simulations.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  FORECASTS (stored in InfluxDB & displayed in Grafana)      │
+│                                                             │
+│    pv_forecast:   power_w_p10, power_w_p50, power_w_p90    │
+│    load_forecast: power_w_p10, power_w_p50, power_w_p90    │
+│                                                             │
+│    Unit: Watts (W)                                          │
+│    Meaning: Instantaneous power at each 15-min timestamp    │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            │  × 0.25h (per 15-min step)
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  CALCULATIONS (internal to EnergyManager)                   │
+│                                                             │
+│    pv_energy_wh   = pv_power_w × 0.25                      │
+│    load_energy_wh = load_power_w × 0.25                    │
+│    net_wh         = pv_energy_wh - load_energy_wh          │
+│                                                             │
+│    Unit: Watt-hours (Wh)                                    │
+│    Meaning: Energy transferred per 15-min period            │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            │  accumulate over time
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  SIMULATION OUTPUTS (stored in InfluxDB)                    │
+│                                                             │
+│    soc_forecast:  soc_percent at each timestamp            │
+│    Energy Balance: cumulative Wh over forecast horizon     │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Why Power (W) for storage:**
+- Directly comparable to sensor readings
+- No ambiguity about time periods
+- Human intuition: "PV producing 5000W" is clearer than "1250Wh per 15-min"
+
+**Why Energy (Wh) for calculations:**
+- SOC changes require energy: `SOC += Wh × efficiency`
+- Cost calculations: `cost = kWh × price`
+
+## 1.11 Home Assistant Add-on Architecture
 
 This section describes the canonical Home Assistant add-on configuration architecture used by all add-ons in this project.
 
-### 1.10.1 Configuration Philosophy
+### 1.11.1 Configuration Philosophy
 
 Home Assistant add-ons follow a specific pattern for configuration management:
 
@@ -418,7 +467,7 @@ Home Assistant add-ons follow a specific pattern for configuration management:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 1.10.2 Secrets (HA Configuration UI)
+### 1.11.2 Secrets (HA Configuration UI)
 
 Secrets are sensitive values that should **never** be stored in YAML files.
 
@@ -467,7 +516,7 @@ fi
 exec python3 /app/run.py --config "/config/addon.yaml"
 ```
 
-### 1.10.3 Non-Secrets (Public Add-on Config)
+### 1.11.3 Non-Secrets (Public Add-on Config)
 
 All non-sensitive configuration is stored in user-editable YAML files.
 
@@ -513,7 +562,7 @@ tariff:
   weekday_cheap_end: "06:00"
 ```
 
-### 1.10.4 Templates and Defaults
+### 1.11.4 Templates and Defaults
 
 Each add-on ships with a template/example configuration.
 
@@ -544,7 +593,7 @@ fi
 cp "$TEMPLATE" "/config/energymanager.yaml.example"
 ```
 
-### 1.10.5 Configuration Merge Order
+### 1.11.5 Configuration Merge Order
 
 At runtime, configuration is assembled in this order:
 
@@ -584,7 +633,7 @@ def load_config(config_path: str) -> dict:
     return merged
 ```
 
-### 1.10.6 Add-on Configuration Files Summary
+### 1.11.6 Add-on Configuration Files Summary
 
 | Add-on | Secrets (Config UI) | Non-Secrets (YAML) |
 |--------|--------------------|--------------------|
@@ -592,7 +641,7 @@ def load_config(config_path: str) -> dict:
 | **SwissSolarForecast** | `influxdb_token`, `telegram_bot_token`, `telegram_chat_id` | `/config/swisssolarforecast.yaml` |
 | **LoadForecast** | `influxdb_token` | `/config/loadforecast.yaml` |
 
-### 1.10.7 User Workflow
+### 1.11.7 User Workflow
 
 **Initial Setup:**
 
@@ -611,7 +660,7 @@ def load_config(config_path: str) -> dict:
 4. Manually add desired new options to user config
 5. Restart add-on
 
-### 1.10.8 Best Practices Summary
+### 1.11.8 Best Practices Summary
 
 | Practice | Do | Don't |
 |----------|----|----- |
@@ -623,9 +672,9 @@ def load_config(config_path: str) -> dict:
 
 ---
 
-## 1.11 Complete Parameter Reference
+## 1.12 Complete Parameter Reference
 
-### 1.11.1 EnergyManager Parameters
+### 1.12.1 EnergyManager Parameters
 
 **Secrets (Configuration UI):**
 
@@ -674,7 +723,7 @@ def load_config(config_path: str) -> dict:
 | `home_assistant.url` | http://supervisor/core | HA API URL (via Supervisor) |
 | `home_assistant.token` | SUPERVISOR_TOKEN env | Auto-provided by HA |
 
-### 1.11.2 SwissSolarForecast Parameters
+### 1.12.2 SwissSolarForecast Parameters
 
 **Secrets (Configuration UI):**
 
@@ -700,7 +749,7 @@ def load_config(config_path: str) -> dict:
 | `plants[]` | - | Plant definitions (inverters, strings) |
 | `log_level` | info | Logging level |
 
-### 1.11.3 LoadForecast Parameters
+### 1.12.3 LoadForecast Parameters
 
 **Secrets (Configuration UI):**
 
@@ -1121,7 +1170,7 @@ LoadForecast generates statistical household load consumption forecasts using hi
 | Property | Value |
 |----------|-------|
 | Name | LoadForecast |
-| Version | 1.1.1 |
+| Version | 1.2.0 |
 | Slug | `loadforecast` |
 | Architectures | aarch64, amd64, armv7 |
 | Timeout | 120 seconds |
@@ -1241,12 +1290,12 @@ log_level: "info"
 
 | Field | Unit | Description |
 |-------|------|-------------|
-| `energy_wh_p10` | Wh | Per-period energy (low, 90% chance to exceed) |
-| `energy_wh_p50` | Wh | Per-period energy (median/typical) |
-| `energy_wh_p90` | Wh | Per-period energy (high, 10% chance to exceed) |
-| `run_time` | ISO string | When forecast was calculated (v1.1.1+) |
+| `power_w_p10` | W | Load power (low, 90% chance to exceed) |
+| `power_w_p50` | W | Load power (median/typical) |
+| `power_w_p90` | W | Load power (high, 10% chance to exceed) |
+| `run_time` | ISO string | When forecast was calculated |
 
-**Note:** Values represent energy per 15-minute period, not instantaneous power.
+**Note:** Values represent instantaneous power (W). To calculate energy per period: `energy_wh = power_w × 0.25` (for 15-min intervals).
 
 ## 3.7 Data Source
 
@@ -1291,9 +1340,9 @@ croniter>=1.3.0            # Cron expression parsing
 from(bucket: "load_forecast")
   |> range(start: now(), stop: 48h)
   |> filter(fn: (r) => r._measurement == "load_forecast")
-  |> filter(fn: (r) => r._field == "energy_wh_p10" or
-                       r._field == "energy_wh_p50" or
-                       r._field == "energy_wh_p90")
+  |> filter(fn: (r) => r._field == "power_w_p10" or
+                       r._field == "power_w_p50" or
+                       r._field == "power_w_p90")
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
 ```
 
@@ -1301,7 +1350,7 @@ from(bucket: "load_forecast")
 ```flux
 forecast = from(bucket: "load_forecast")
   |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r._field == "energy_wh_p50")
+  |> filter(fn: (r) => r._field == "power_w_p50")
 
 actual = from(bucket: "HomeAssistant")
   |> range(start: -24h, stop: now())

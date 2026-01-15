@@ -2,7 +2,7 @@
 Statistical load prediction using historical consumption data.
 
 Builds time-of-day profiles from historical data and generates
-P10/P50/P90 forecasts for energy consumption per 15-minute period.
+P10/P50/P90 power forecasts (W) at 15-minute intervals.
 
 Time-of-day profiles are built using LOCAL time (configurable timezone),
 not UTC, so that "morning peak" patterns align with actual user behavior.
@@ -134,8 +134,8 @@ class LoadPredictor:
             hours: Forecast horizon in hours
 
         Returns:
-            DataFrame with columns: energy_wh_p10, energy_wh_p50, energy_wh_p90
-            Each value represents Wh consumed in that 15-min period.
+            DataFrame with columns: power_w_p10, power_w_p50, power_w_p90
+            Each value represents instantaneous power (W) at that timestamp.
             Index is in UTC for consistency with InfluxDB storage.
         """
         if self.profile is None:
@@ -165,23 +165,20 @@ class LoadPredictor:
 
             if slot in self.profile.index:
                 row = self.profile.loc[slot]
-                # Power (W) × 0.25h = Wh per 15-min period
+                # Store power directly (W) - energy calculated when needed
                 forecast_data.append({
                     "time": ts_utc,  # Store in UTC for InfluxDB
-                    "energy_wh_p10": row["p10"] * 0.25,
-                    "energy_wh_p50": row["p50"] * 0.25,
-                    "energy_wh_p90": row["p90"] * 0.25,
+                    "power_w_p10": row["p10"],
+                    "power_w_p50": row["p50"],
+                    "power_w_p90": row["p90"],
                 })
             else:
                 # Fallback (shouldn't happen with complete data)
-                median_p10 = self.profile["p10"].median() * 0.25
-                median_p50 = self.profile["p50"].median() * 0.25
-                median_p90 = self.profile["p90"].median() * 0.25
                 forecast_data.append({
                     "time": ts_utc,
-                    "energy_wh_p10": median_p10,
-                    "energy_wh_p50": median_p50,
-                    "energy_wh_p90": median_p90,
+                    "power_w_p10": self.profile["p10"].median(),
+                    "power_w_p50": self.profile["p50"].median(),
+                    "power_w_p90": self.profile["p90"].median(),
                 })
 
         forecast = pd.DataFrame(forecast_data)

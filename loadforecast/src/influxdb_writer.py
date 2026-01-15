@@ -1,7 +1,7 @@
 """
 InfluxDB writer for load forecast data.
 
-Writes P10/P50/P90 energy forecasts per 15-minute period.
+Writes P10/P50/P90 power forecasts (W) at 15-minute intervals.
 """
 
 import logging
@@ -96,8 +96,8 @@ class LoadForecastWriter:
         Write load forecast to InfluxDB.
 
         Args:
-            forecast: DataFrame with energy_wh_p10, energy_wh_p50, energy_wh_p90 columns
-                     Each value = Wh consumed in that 15-min period
+            forecast: DataFrame with power_w_p10, power_w_p50, power_w_p90 columns
+                     Each value = instantaneous power (W) at that timestamp
                      Index must be datetime (future timestamps)
             model: Model identifier
             run_time: When this forecast was calculated
@@ -109,11 +109,6 @@ class LoadForecastWriter:
 
         # Skip delete - points now overwrite because run_time is a field not a tag
         # This avoids InfluxDB delete API performance issues
-        # if len(forecast) > 0:
-        #     first_time = forecast.index.min()
-        #     if hasattr(first_time, "tzinfo") and first_time.tzinfo is None:
-        #         first_time = first_time.replace(tzinfo=timezone.utc)
-        #     self.delete_future_forecasts(first_time)
 
         points = []
         for timestamp, row in forecast.iterrows():
@@ -126,9 +121,9 @@ class LoadForecastWriter:
             point = (
                 Point("load_forecast")
                 .tag("model", model)
-                .field("energy_wh_p10", float(row["energy_wh_p10"]))
-                .field("energy_wh_p50", float(row["energy_wh_p50"]))
-                .field("energy_wh_p90", float(row["energy_wh_p90"]))
+                .field("power_w_p10", float(row["power_w_p10"]))
+                .field("power_w_p50", float(row["power_w_p50"]))
+                .field("power_w_p90", float(row["power_w_p90"]))
                 .field("run_time", run_time_str)
                 .time(timestamp, WritePrecision.S)
             )
