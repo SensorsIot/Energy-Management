@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.3
+**Version:** 2.4
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -1506,45 +1506,72 @@ from(bucket: "energy_manager")
 
 ### 4.3.1 Problem
 
-During cheap tariff (night), we want to preserve battery energy for the expensive period (day). Goal: SOC = 0% at next 21:00.
+The battery must maintain a minimum State of Charge (min_soc, default 10%) during expensive tariff hours (06:00-21:00) to ensure:
+1. Reserve capacity for unexpected consumption spikes
+2. Protection against forecast errors
+
+During cheap tariff (night), SOC can drop to any level since grid electricity is inexpensive.
 
 ### 4.3.2 Algorithm
 
 ```
 Every 15 minutes:
 
-1. RUN SOC SIMULATION (§4.2) until next 21:00
-   → Get soc_at_target (can be negative = deficit)
+1. SIMULATE SOC from NOW until next 21:00
+   - Assume free discharge (no blocking)
+   - Use current SOC as starting point
+   - Apply PV and load forecasts
 
-2. CALCULATE DEFICIT
-   IF soc_at_target >= 0%:
-      → Battery ON, no blocking needed
+2. CHECK: Does SOC drop below min_soc during EXPENSIVE hours?
+   - Only check periods from 06:00-21:00 (Swiss time)
+   - Ignore SOC during cheap hours (21:00-06:00)
+
+   IF min_soc_in_expensive_hours >= min_soc:
+      → No deficit, discharge allowed
    ELSE:
-      deficit_wh = |soc_at_target|/100 × capacity
+      deficit_wh = min_soc_wh - min_soc_in_expensive_hours
 
-3. FIND SWITCH-ON TIME (only during cheap tariff)
+3. FIND SWITCH-ON TIME (only if deficit exists, only during cheap tariff)
    saved_wh = 0
    FOR each 15-min period during cheap tariff:
-       IF net_wh < 0:
-           saved_wh += |net_wh| ÷ discharge_efficiency
+       IF discharge_would_occur:
+           saved_wh += discharge_wh
        IF saved_wh >= deficit_wh:
            switch_on_time = current_period
            BREAK
 
 4. DETERMINE DISCHARGE STATE
    IF expensive tariff (06:00-21:00):
-      → Battery always ON
-   ELSE IF cheap tariff AND now < switch_on_time:
+      → Battery always ON (allow discharge)
+   ELSE IF cheap tariff AND deficit_wh > 0 AND now < switch_on_time:
       → Battery OFF (block discharge)
    ELSE:
-      → Battery ON
+      → Battery ON (allow discharge)
 
-5. RUN SOC SIMULATION WITH BLOCKING
-   → Simulate with block_discharge_from=cheap_start, block_discharge_until=switch_on_time
-   → Store both curves (with/without blocking) for dashboard visualization
+5. SEND CONTROL SIGNAL (only when decision changes)
+   IF discharge_allowed != last_discharge_allowed:
+      → Set number.battery_maximum_discharging_power
+      → Log state change
 ```
 
-### 4.3.3 Blocking Mode in SocSimulator
+### 4.3.3 Key Design Decisions
+
+**Why only check expensive hours:**
+- During cheap tariff (21:00-06:00), low SOC is acceptable—grid electricity is inexpensive
+- During expensive tariff (06:00-21:00), battery should cover consumption to avoid expensive grid import
+- The min_soc reserve ensures capacity for forecast errors and unexpected loads
+
+**Why block during cheap hours:**
+- If simulation shows SOC would drop below min_soc during tomorrow's expensive hours
+- Block discharge during cheap hours to preserve energy
+- This shifts grid import from expensive hours to cheap hours
+
+**Signal hysteresis:**
+- Control signal only sent when decision changes (not every 15 minutes)
+- Reduces unnecessary Modbus communication with inverter
+- Prevents rapid on/off cycling
+
+### 4.3.4 Blocking Mode in SocSimulator
 
 The SocSimulator accepts blocking parameters to simulate the effect of discharge blocking:
 
@@ -1558,7 +1585,7 @@ IF battery_flow < 0 AND time >= block_from AND time < block_until:
    soc_wh unchanged
 ```
 
-### 4.3.4 Output: number.battery_maximum_discharging_power
+### 4.3.5 Output: number.battery_maximum_discharging_power
 
 Controls the battery discharge power in Home Assistant:
 
@@ -1701,8 +1728,8 @@ log_level: "info"
 
 | Measurement | Purpose | Fields |
 |-------------|---------|--------|
-| `soc_forecast` | SOC trajectory from §4.2 | `soc_percent` |
-| `soc_comparison` | With/without strategy curves | `soc_percent` (tag: `scenario`) |
+| `soc_forecast` | SOC trajectory based on current strategy decision | `soc_percent` |
+| `energy_balance` | Energy flow per timestep | `pv_wh`, `load_wh`, `net_wh`, `cumulative_wh` |
 | `discharge_decision` | Battery control decisions | `allowed`, `reason`, `deficit_wh`, `saved_wh`, `current_soc`, `switch_on_time` |
 | `appliance_signal` | Appliance signal output | `signal`, `reason`, `excess_power_w`, `forecast_surplus_wh` |
 
@@ -1714,11 +1741,11 @@ from(bucket: "energy_manager")
   |> range(start: -1h, stop: 48h)
   |> filter(fn: (r) => r._measurement == "soc_forecast")
 
-# Compare with/without strategy
+# Energy balance with cumulative
 from(bucket: "energy_manager")
   |> range(start: -1h, stop: 48h)
-  |> filter(fn: (r) => r._measurement == "soc_comparison")
-  |> filter(fn: (r) => r.scenario == "no_strategy" or r.scenario == "with_strategy")
+  |> filter(fn: (r) => r._measurement == "energy_balance")
+  |> filter(fn: (r) => r._field == "cumulative_wh")
 ```
 
 ---
@@ -1984,4 +2011,4 @@ The delete API in InfluxDB 2.x can be slow with large datasets and may cause gor
 
 **End of Document**
 
-*Version 2.3 - January 2026*
+*Version 2.4 - January 2026*
