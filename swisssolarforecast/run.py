@@ -131,7 +131,7 @@ class SwissSolarForecast:
             variables=["ASOB_S", "T_2M"],
             output_dir=self.data_dir / "icon-ch2",
             hour_start=33,  # Start after CH1 horizon to avoid overlap
-            hour_end=48,
+            hour_end=60,    # Must reach next 21:00 cheap tariff (~48h worst case)
         )
 
         try:
