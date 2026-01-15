@@ -196,29 +196,19 @@ class EnergyManager:
 
         return current_soc
 
-    def write_soc_comparison(self, sim_no_strategy, sim_with_strategy):
-        """Write both SOC scenarios and energy balance to InfluxDB for visualization."""
+    def write_soc_comparison(self, sim_no_strategy, sim_with_strategy, forecast):
+        """Write both SOC scenarios and energy balance to InfluxDB for visualization.
+
+        Uses field overwrite pattern - points with same measurement+tags+timestamp overwrite.
+        No delete API needed since run_time is a field, not a tag.
+
+        Args:
+            sim_no_strategy: DataFrame with SOC simulation (no battery blocking)
+            sim_with_strategy: DataFrame with SOC simulation (with battery blocking)
+            forecast: DataFrame with pv_energy_wh, load_energy_wh, net_energy_wh columns
+        """
         if sim_no_strategy.empty or sim_with_strategy.empty:
             return
-
-        # Delete old forecast data (future timestamps) before writing new
-        # This ensures clean overwrite without accumulating duplicates
-        try:
-            delete_api = self.influx_client.delete_api()
-            now = datetime.now(timezone.utc)
-            far_future = now + timedelta(days=7)
-
-            # Delete future soc_comparison and energy_balance data
-            delete_api.delete(
-                start=now,
-                stop=far_future,
-                predicate='_measurement="soc_comparison" OR _measurement="energy_balance"',
-                bucket=self.output_bucket,
-                org=self.influx_org,
-            )
-            logger.info("Deleted old forecast data from energy_manager bucket")
-        except Exception as e:
-            logger.warning(f"Could not delete old data: {e}")
 
         # Write SOC comparison data
         points = []
@@ -240,17 +230,24 @@ class EnergyManager:
                     .time(ts, WritePrecision.S)
                 )
 
-        # Write energy balance data (from no_strategy simulation which has full forecast)
-        for t in sim_no_strategy.index:
+        # Write energy balance data from forecast DataFrame
+        # Calculate cumulative as running sum of net_energy_wh
+        cumulative_wh = 0.0
+        for t in forecast.index:
             ts = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
-            row = sim_no_strategy.loc[t]
+            row = forecast.loc[t]
+
+            pv_wh = float(row.get("pv_energy_wh", 0))
+            load_wh = float(row.get("load_energy_wh", 0))
+            net_wh = float(row.get("net_energy_wh", 0))
+            cumulative_wh += net_wh
 
             points.append(
                 Point("energy_balance")
-                .field("pv_wh", float(row["pv_wh"]))
-                .field("load_wh", float(row["load_wh"]))
-                .field("net_wh", float(row["net_wh"]))
-                .field("cumulative_wh", float(row["cumulative_wh"]))
+                .field("pv_wh", pv_wh)
+                .field("load_wh", load_wh)
+                .field("net_wh", net_wh)
+                .field("cumulative_wh", cumulative_wh)
                 .time(ts, WritePrecision.S)
             )
 
@@ -414,7 +411,7 @@ class EnergyManager:
             # FSD 4.2.3: Write SOC forecast (baseline simulation)
             self.simulation_writer.write_soc_forecast(sim_no_strategy)
             # Additional: comparison for dashboard visualization
-            self.write_soc_comparison(sim_no_strategy, sim_with_strategy)
+            self.write_soc_comparison(sim_no_strategy, sim_with_strategy, forecast)
             self.write_decision(decision, current_soc)
 
             # Control battery
@@ -599,7 +596,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("EnergyManager Add-on v1.4.4")
+    logger.info("EnergyManager Add-on v1.4.8")
     logger.info("=" * 60)
 
     # Load config

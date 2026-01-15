@@ -64,6 +64,7 @@
         "type": "timeseries",
         "gridPos": { "x": 0, "y": 8, "w": 12, "h": 6 },
         "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "description": "Positive = surplus (PV > Load), Negative = deficit (PV < Load)",
         "fieldConfig": {
           "defaults": {
             "unit": "watt",
@@ -84,9 +85,10 @@
           },
           "overrides": [
             {
-              "matcher": { "id": "byName", "options": "net_power_w_p50" },
+              "matcher": { "id": "byName", "options": "Net P50" },
               "properties": [
-                { "id": "displayName", "value": "Net P50 (Surplus/Deficit)" }
+                { "id": "color", "value": { "fixedColor": "#5794F2", "mode": "fixed" } },
+                { "id": "custom.lineWidth", "value": 3 }
               ]
             }
           ]
@@ -94,44 +96,32 @@
         "targets": [
           {
             "refId": "A",
-            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"net_power_w_p10\" or r._field == \"net_power_w_p50\" or r._field == \"net_power_w_p90\")"
+            "query": "pv = from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\" and r.inverter == \"total\")\n  |> filter(fn: (r) => r._field == \"power_w_p50\")\n\nload = from(bucket: \"load_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"load_forecast\")\n  |> filter(fn: (r) => r._field == \"power_w_p50\")\n\njoin(tables: {pv: pv, load: load}, on: [\"_time\"])\n  |> map(fn: (r) => ({_time: r._time, _value: r._value_pv - r._value_load, _field: \"Net P50\"}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])"
           }
         ]
       },
       {
         "id": 3,
-        "title": "Cumulative Energy",
+        "title": "Cumulative Energy Balance (Wh)",
         "type": "timeseries",
         "gridPos": { "x": 12, "y": 8, "w": 12, "h": 6 },
         "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "description": "Running total of net energy (PV - Load). Pre-calculated by EnergyManager.",
         "fieldConfig": {
           "defaults": {
             "unit": "watth",
             "custom": {
               "fillOpacity": 5,
-              "lineWidth": 2
+              "lineWidth": 2,
+              "showPoints": "never"
             }
           },
           "overrides": [
             {
-              "matcher": { "id": "byName", "options": "energy_wh_p50" },
+              "matcher": { "id": "byName", "options": "Cumulative Wh" },
               "properties": [
-                { "id": "displayName", "value": "PV Energy (P50)" },
-                { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }
-              ]
-            },
-            {
-              "matcher": { "id": "byName", "options": "load_energy_wh" },
-              "properties": [
-                { "id": "displayName", "value": "Load Energy" },
-                { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }
-              ]
-            },
-            {
-              "matcher": { "id": "byName", "options": "net_energy_wh_p50" },
-              "properties": [
-                { "id": "displayName", "value": "Net Energy (P50)" },
-                { "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }
+                { "id": "color", "value": { "fixedColor": "#B877D9", "mode": "fixed" } },
+                { "id": "custom.lineWidth", "value": 3 }
               ]
             }
           ]
@@ -139,7 +129,7 @@
         "targets": [
           {
             "refId": "A",
-            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"energy_wh_p50\" or r._field == \"load_energy_wh\" or r._field == \"net_energy_wh_p50\")\n  |> cumulativeSum()"
+            "query": "from(bucket: \"energy_manager\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"energy_balance\")\n  |> filter(fn: (r) => r._field == \"cumulative_wh\")\n  |> map(fn: (r) => ({_time: r._time, _value: r._value, _field: \"Cumulative Wh\"}))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])"
           }
         ]
       },
@@ -215,7 +205,7 @@
       },
       {
         "id": 7,
-        "title": "All Values Table",
+        "title": "PV Forecast Values",
         "type": "table",
         "gridPos": { "x": 12, "y": 19, "w": 12, "h": 5 },
         "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
@@ -241,7 +231,7 @@
         "targets": [
           {
             "refId": "A",
-            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"power_w_p10\", \"power_w_p50\", \"power_w_p90\", \"load_power_w\", \"net_power_w_p50\", \"ghi\", \"temp_air\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 20)"
+            "query": "from(bucket: \"pv_forecast\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\" and r.inverter == \"total\")\n  |> pivot(rowKey:[\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"power_w_p10\", \"power_w_p50\", \"power_w_p90\", \"ghi\", \"temp_air\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 20)"
           }
         ]
       },
