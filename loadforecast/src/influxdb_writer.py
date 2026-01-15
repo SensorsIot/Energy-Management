@@ -107,12 +107,13 @@ class LoadForecastWriter:
 
         run_time_str = run_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Delete existing forecasts
-        if len(forecast) > 0:
-            first_time = forecast.index.min()
-            if hasattr(first_time, "tzinfo") and first_time.tzinfo is None:
-                first_time = first_time.replace(tzinfo=timezone.utc)
-            self.delete_future_forecasts(first_time)
+        # Skip delete - points now overwrite because run_time is a field not a tag
+        # This avoids InfluxDB delete API performance issues
+        # if len(forecast) > 0:
+        #     first_time = forecast.index.min()
+        #     if hasattr(first_time, "tzinfo") and first_time.tzinfo is None:
+        #         first_time = first_time.replace(tzinfo=timezone.utc)
+        #     self.delete_future_forecasts(first_time)
 
         points = []
         for timestamp, row in forecast.iterrows():
@@ -121,13 +122,14 @@ class LoadForecastWriter:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
 
             # Single point per timestamp with all percentile fields
+            # Note: run_time is a field (not tag) so points overwrite on same timestamp+model
             point = (
                 Point("load_forecast")
                 .tag("model", model)
-                .tag("run_time", run_time_str)
                 .field("energy_wh_p10", float(row["energy_wh_p10"]))
                 .field("energy_wh_p50", float(row["energy_wh_p50"]))
                 .field("energy_wh_p90", float(row["energy_wh_p90"]))
+                .field("run_time", run_time_str)
                 .time(timestamp, WritePrecision.S)
             )
             points.append(point)

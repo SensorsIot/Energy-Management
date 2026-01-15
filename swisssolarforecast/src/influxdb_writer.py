@@ -170,11 +170,12 @@ class ForecastWriter:
             logger.warning("No PV forecast data to write")
             return
 
-        # Delete existing forecasts
-        first_time = pv_forecast.index.min()
-        if hasattr(first_time, 'tzinfo') and first_time.tzinfo is None:
-            first_time = first_time.replace(tzinfo=timezone.utc)
-        self.delete_future_forecasts(first_time)
+        # Skip delete - points overwrite (run_time is now a field not tag)
+        # This avoids InfluxDB delete API performance issues
+        # first_time = pv_forecast.index.min()
+        # if hasattr(first_time, 'tzinfo') and first_time.tzinfo is None:
+        #     first_time = first_time.replace(tzinfo=timezone.utc)
+        # self.delete_future_forecasts(first_time)
 
         # Time step for per-period energy (15 min = 0.25 h)
         time_diff = resample_minutes / 60.0
@@ -190,11 +191,11 @@ class ForecastWriter:
 
             # Single point per timestamp with ALL percentile values
             # This guarantees exact same timestamp for P10/P50/P90
+            # Note: run_time is a field (not tag) so points overwrite on same timestamp+inverter+model
             point = (
                 Point("pv_forecast")
                 .tag("inverter", "total")
                 .tag("model", model)
-                .tag("run_time", run_time_str)
             )
 
             # Add P10/P50/P90 values as separate fields
@@ -217,6 +218,8 @@ class ForecastWriter:
             if "temp_air" in row and pd.notna(row["temp_air"]):
                 point = point.field("temp_air", float(row["temp_air"]))
 
+            # Add run_time as field (not tag) so points overwrite
+            point = point.field("run_time", run_time_str)
             point = point.time(timestamp, WritePrecision.S)
             points.append(point)
 
@@ -232,7 +235,6 @@ class ForecastWriter:
                     Point("pv_forecast")
                     .tag("inverter", inv_name)
                     .tag("model", model)
-                    .tag("run_time", run_time_str)
                 )
 
                 # Add P10/P50/P90 power and energy values for this inverter
@@ -244,6 +246,8 @@ class ForecastWriter:
                         inv_point = inv_point.field(f"power_w_{percentile}", inv_power)
                         inv_point = inv_point.field(f"energy_wh_{percentile}", inv_energy)
 
+                # Add run_time as field (not tag) so points overwrite
+                inv_point = inv_point.field("run_time", run_time_str)
                 inv_point = inv_point.time(timestamp, WritePrecision.S)
                 points.append(inv_point)
 

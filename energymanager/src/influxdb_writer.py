@@ -78,8 +78,9 @@ class SimulationWriter:
             logger.warning("Empty simulation, nothing to write")
             return
 
-        # Delete existing future data before writing new forecast
-        self.delete_future_data(simulation.index.min())
+        # Skip delete - points overwrite (no variable tags) and this avoids
+        # InfluxDB delete API performance issues
+        # self.delete_future_data(simulation.index.min())
 
         points = []
 
