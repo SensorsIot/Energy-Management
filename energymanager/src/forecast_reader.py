@@ -101,11 +101,13 @@ class ForecastReader:
         """
         query_api = self.client.query_api()
 
+        # LoadForecast v1.2.0+ stores power_w, convert to energy_wh
         query = f'''
         from(bucket: "{self.load_bucket}")
           |> range(start: {start.isoformat()}, stop: {end.isoformat()})
           |> filter(fn: (r) => r._measurement == "load_forecast")
-          |> filter(fn: (r) => r._field == "energy_wh_{percentile}")
+          |> filter(fn: (r) => r._field == "power_w_{percentile}")
+          |> map(fn: (r) => ({{r with _value: r._value * 0.25}}))
           |> keep(columns: ["_time", "_value"])
         '''
 

@@ -55,7 +55,7 @@ The system consists of three Home Assistant add-ons that work together:
 |--------|---------|---------|------------------|
 | **SwissSolarForecast** | 1.1.1 | PV power forecasting using MeteoSwiss ICON ensemble data | Every 15 min (calculator) |
 | **LoadForecast** | 1.2.0 | Statistical load power forecasting | Every hour |
-| **EnergyManager** | 1.4.1 | Battery/EV/appliance optimization signals | Every 15 min |
+| **EnergyManager** | 1.4.2 | Battery/EV/appliance optimization signals | Every 15 min |
 
 ## 1.4 Data Flow
 

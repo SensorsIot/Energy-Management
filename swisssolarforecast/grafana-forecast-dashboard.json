@@ -342,6 +342,47 @@
             "query": "from(bucket: \"pv_forecast\")\n  |> range(start: -1h, stop: 1h)\n  |> filter(fn: (r) => r._measurement == \"pv_forecast\")\n  |> filter(fn: (r) => r._field == \"temp_air\")\n  |> last()"
           }
         ]
+      },
+      {
+        "id": 11,
+        "title": "Battery SOC: Without vs With Strategy",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 28, "w": 24, "h": 8 },
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "custom": {
+              "fillOpacity": 10,
+              "lineWidth": 2
+            }
+          },
+          "overrides": [
+            {
+              "matcher": { "id": "byName", "options": "no_strategy" },
+              "properties": [
+                { "id": "displayName", "value": "Without Strategy" },
+                { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } },
+                { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } }
+              ]
+            },
+            {
+              "matcher": { "id": "byName", "options": "with_strategy" },
+              "properties": [
+                { "id": "displayName", "value": "With Strategy" },
+                { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }
+              ]
+            }
+          ]
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "query": "from(bucket: \"energy_manager\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"soc_comparison\")\n  |> filter(fn: (r) => r._field == \"soc_percent\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"scenario\"], valueColumn: \"_value\")"
+          }
+        ]
       }
     ],
     "templating": {

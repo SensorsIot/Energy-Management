@@ -201,23 +201,8 @@ class EnergyManager:
         if sim_no_strategy.empty or sim_with_strategy.empty:
             return
 
-        # Delete ALL comparison data from simulation start onwards
-        # This ensures old stale data doesn't interfere
-        delete_api = self.influx_client.delete_api()
-        sim_start = sim_no_strategy.index.min()
-        # Also delete from 1 hour before to catch any stale data
-        delete_start = sim_start - timedelta(hours=1)
-        try:
-            delete_api.delete(
-                start=delete_start,
-                stop=datetime.now(timezone.utc).replace(year=2100),
-                predicate='_measurement="soc_comparison"',
-                bucket=self.output_bucket,
-                org=self.influx_org,
-            )
-            logger.info(f"DEBUG: Deleted soc_comparison data from {delete_start} onwards")
-        except Exception as e:
-            logger.warning(f"Failed to delete old comparison data: {e}")
+        # Skip delete - points overwrite on same timestamp+scenario tag
+        # This avoids InfluxDB delete API performance issues
 
         # Write new data
         points = []
