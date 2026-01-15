@@ -1432,7 +1432,7 @@ The current SOC is **always read live** at the start of each simulation cycle. T
 
 Holidays: Read from calendar integration (future: HA calendar entity).
 
-**Why 48h forecast horizon:** The MPC must always see until the next 21:00 cheap tariff start. In the worst case (just after 21:00), that's ~24h away. The 48h horizon ensures visibility of TWO consecutive 21:00 boundaries, allowing the optimization to plan across a full expensive→cheap→expensive cycle.
+**Why 48h forecast horizon:** The MPC must always see until tomorrow's 21:00 cheap tariff start. Worst case: at 06:00 (expensive tariff starts), we need to see until 21:00 the next day = 39 hours. The 48h horizon provides buffer for forecast update delays and ensures visibility across a full expensive→cheap→expensive cycle.
 
 ---
 
