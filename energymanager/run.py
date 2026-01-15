@@ -574,7 +574,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("EnergyManager Add-on v1.4.14")
+    logger.info("EnergyManager Add-on v1.4.15")
     logger.info("=" * 60)
 
     # Load config

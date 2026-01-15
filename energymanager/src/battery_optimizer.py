@@ -330,23 +330,37 @@ class BatteryOptimizer:
 
         logger.info(f"SOC at cheap start ({swiss_time(tariff.cheap_start)}): {soc_at_cheap_start:.1f}%")
 
-        # Step 2: Get unclamped SOC at target time (tomorrow 21:00)
-        # Check against min_soc_wh (configurable reserve), not 0
-        soc_at_target = sim_full_no_strategy["soc_wh_unclamped"].iloc[-1]
-        deficit_wh = max(0, self.min_soc_wh - soc_at_target)
+        # Step 2: Check if SOC drops below min_soc during EXPENSIVE hours only
+        # During cheap hours (21:00-06:00), low SOC is fine - electricity is cheap
+        # During expensive hours (06:00-21:00), SOC must stay >= min_soc
+        # Convert simulation index to Swiss time for tariff comparison
+        sim_swiss_hours = sim_full_no_strategy.index.tz_convert(SWISS_TZ).hour
+        expensive_mask = (sim_swiss_hours >= self.cheap_end_hour) & (sim_swiss_hours < self.cheap_start_hour)
+        expensive_periods = sim_full_no_strategy[expensive_mask]
 
-        logger.info(f"SOC at target (unclamped): {soc_at_target:.0f} Wh, "
+        if expensive_periods.empty:
+            # No expensive periods in simulation (e.g., running late at night)
+            min_soc_in_expensive = self.capacity_wh  # No constraint
+            min_soc_time = sim_full_no_strategy.index[0]
+        else:
+            min_soc_in_expensive = expensive_periods["soc_wh"].min()
+            min_soc_time = expensive_periods["soc_wh"].idxmin()
+
+        deficit_wh = max(0, self.min_soc_wh - min_soc_in_expensive)
+
+        logger.info(f"Min SOC during expensive hours: {min_soc_in_expensive:.0f} Wh "
+                   f"({min_soc_in_expensive/self.capacity_wh*100:.0f}%) at {swiss_time(min_soc_time)}, "
                    f"min_soc: {self.min_soc_wh:.0f} Wh ({self.min_soc_percent:.0f}%), "
                    f"deficit: {deficit_wh:.0f} Wh")
 
-        # Step 3: If no deficit (SOC >= min_soc at 21:00), allow discharge even at night
+        # Step 3: If SOC stays >= min_soc during expensive hours, allow discharge
         if deficit_wh <= 0:
-            # No blocking needed - battery will have enough charge at target
+            # No blocking needed - battery stays above minimum during expensive hours
             return (
                 DischargeDecision(
                     discharge_allowed=True,
                     switch_on_time=None,
-                    reason=f"No deficit - SOC at target: {soc_at_target/self.capacity_wh*100:.0f}% (min: {self.min_soc_percent:.0f}%)",
+                    reason=f"SOC >= {self.min_soc_percent:.0f}% during expensive hours (min: {min_soc_in_expensive/self.capacity_wh*100:.0f}% at {swiss_time(min_soc_time)})",
                     deficit_wh=0,
                     saved_wh=0,
                 ),
