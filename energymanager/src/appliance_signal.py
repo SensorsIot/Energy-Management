@@ -3,13 +3,14 @@ Appliance signal calculation for washing machine / dishwasher.
 
 Signal logic:
 - GREEN: Current PV excess > appliance power (can run directly from solar)
-- ORANGE: Base simulation shows enough surplus at tomorrow 21:00 (>= appliance energy)
+- ORANGE: Simulation shows final SOC >= appliance energy (battery can absorb the load)
 - RED: Otherwise (would require grid import)
+
+The simulation passed to this module already accounts for battery efficiency.
 """
 
 import logging
 from dataclasses import dataclass
-from typing import Tuple
 
 import pandas as pd
 
@@ -22,29 +23,25 @@ class ApplianceSignal:
     signal: str  # "green", "orange", or "red"
     reason: str
     excess_power_w: float
-    forecast_surplus_wh: float
+    final_soc_wh: float
 
 
 def calculate_appliance_signal(
     current_pv_w: float,
     current_load_w: float,
-    current_soc_percent: float,
-    forecast: pd.DataFrame,
-    capacity_wh: float,
+    simulation: pd.DataFrame,
     appliance_power_w: float = 2500,
     appliance_energy_wh: float = 1500,
 ) -> ApplianceSignal:
     """
-    Calculate appliance signal based on current state and forecast.
+    Calculate appliance signal based on current state and simulation.
 
     Args:
         current_pv_w: Current PV power in watts
         current_load_w: Current load power in watts
-        current_soc_percent: Current battery SOC (0-100)
-        forecast: DataFrame with net_energy_wh column (PV - Load per period)
-        capacity_wh: Battery capacity in Wh
+        simulation: DataFrame with soc_wh column (from BatteryOptimizer.simulate_soc)
         appliance_power_w: Power needed for green signal (default 2500W)
-        appliance_energy_wh: Energy per cycle for orange threshold (default 1500Wh)
+        appliance_energy_wh: Energy threshold for orange signal (default 1500Wh)
 
     Returns:
         ApplianceSignal with signal, reason, and details
@@ -55,67 +52,56 @@ def calculate_appliance_signal(
     if excess_power > appliance_power_w:
         return ApplianceSignal(
             signal="green",
-            reason=f"PV Überschuss {int(excess_power)}W",
+            reason=f"PV excess {int(excess_power)}W > {int(appliance_power_w)}W",
             excess_power_w=excess_power,
-            forecast_surplus_wh=0,
+            final_soc_wh=0,
         )
 
-    # Calculate forecast surplus using base simulation (no optimization)
-    forecast_surplus_wh = calculate_forecast_surplus(
-        current_soc_percent=current_soc_percent,
-        forecast=forecast,
-        capacity_wh=capacity_wh,
-    )
+    # Get final SOC from simulation (efficiency already applied)
+    final_soc_wh = get_final_soc_wh(simulation)
 
-    # ORANGE: Forecast shows enough surplus
-    if forecast_surplus_wh >= appliance_energy_wh:
+    # ORANGE: Final SOC >= appliance energy threshold
+    # This means the battery has enough reserve to absorb the appliance load
+    if final_soc_wh >= appliance_energy_wh:
         return ApplianceSignal(
             signal="orange",
-            reason=f"Prognose +{int(forecast_surplus_wh)}Wh",
+            reason=f"Final SOC {int(final_soc_wh)}Wh >= {int(appliance_energy_wh)}Wh",
             excess_power_w=excess_power,
-            forecast_surplus_wh=forecast_surplus_wh,
+            final_soc_wh=final_soc_wh,
         )
 
     # RED: Otherwise
     return ApplianceSignal(
         signal="red",
-        reason="Kein Überschuss",
+        reason=f"Final SOC {int(final_soc_wh)}Wh < {int(appliance_energy_wh)}Wh",
         excess_power_w=excess_power,
-        forecast_surplus_wh=forecast_surplus_wh,
+        final_soc_wh=final_soc_wh,
     )
 
 
-def calculate_forecast_surplus(
-    current_soc_percent: float,
-    forecast: pd.DataFrame,
-    capacity_wh: float,
-) -> float:
+def get_final_soc_wh(simulation: pd.DataFrame) -> float:
     """
-    Run base simulation (battery always ON) until end of forecast.
+    Get final SOC in Wh from simulation.
 
-    Returns unclamped SOC in Wh at end of forecast.
-    Positive = surplus, Negative = deficit.
+    The simulation DataFrame comes from BatteryOptimizer.simulate_soc and
+    already accounts for charge/discharge efficiency.
+
+    Args:
+        simulation: DataFrame with soc_wh column
+
+    Returns:
+        Final SOC in Wh, or 0 if simulation is empty
     """
-    if forecast.empty:
-        logger.warning("No forecast data for appliance signal")
+    if simulation.empty:
+        logger.warning("No simulation data for appliance signal")
         return 0
 
-    # Start with current SOC
-    soc_wh = current_soc_percent / 100 * capacity_wh
-
-    # Simple energy balance: sum all net energy
-    # net_energy_wh = PV - Load (positive = surplus)
-    if "net_energy_wh" in forecast.columns:
-        total_net_energy = forecast["net_energy_wh"].sum()
-    else:
-        logger.warning("No net_energy_wh in forecast")
+    if "soc_wh" not in simulation.columns:
+        logger.warning("No soc_wh column in simulation")
         return 0
 
-    # Unclamped SOC at end = current SOC + net energy
-    unclamped_soc = soc_wh + total_net_energy
+    final_soc_wh = float(simulation["soc_wh"].iloc[-1])
 
-    logger.debug(f"Appliance signal: SOC={current_soc_percent:.1f}%, "
-                 f"net_energy={total_net_energy:.0f}Wh, "
-                 f"unclamped_soc={unclamped_soc:.0f}Wh")
+    logger.debug(f"Appliance signal: final_soc_wh={final_soc_wh:.0f}Wh")
 
-    return unclamped_soc
+    return final_soc_wh

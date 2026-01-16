@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -221,9 +222,6 @@ class EnergyManager:
 
             points.append(
                 Point("energy_balance")
-                .field("pv_wh", pv_wh)
-                .field("load_wh", load_wh)
-                .field("net_wh", net_wh)
                 .field("cumulative_wh", cumulative_wh)
                 .time(ts, WritePrecision.S)
             )
@@ -395,26 +393,33 @@ class EnergyManager:
             # Control battery
             self.control_battery(decision.discharge_allowed)
 
-            # Calculate appliance signal
-            self.calculate_appliance_signal(current_soc, forecast)
+            # Calculate appliance signal (pass simulation for efficiency-aware final SOC)
+            self.calculate_appliance_signal(current_soc, sim_no_strategy)
 
         except Exception as e:
             logger.error(f"Optimization failed: {e}", exc_info=True)
 
-    def calculate_appliance_signal(self, current_soc: float, forecast):
+    def calculate_appliance_signal(self, current_soc: float, simulation: pd.DataFrame):
         """Calculate and output appliance signal to Home Assistant."""
         try:
-            # Get current PV and load from HA (using configurable entities)
-            current_pv = self.ha_client.get_sensor_value(self.pv_power_entity) or 0
-            current_load = self.ha_client.get_sensor_value(self.load_power_entity) or 0
+            # Get current PV and load from HA
+            current_pv = self.ha_client.get_sensor_value(self.pv_power_entity)
+            current_load = self.ha_client.get_sensor_value(self.load_power_entity)
 
-            # Calculate signal
+            # Log sensor values for debugging
+            logger.debug(f"Appliance signal sensors: PV={current_pv}W, Load={current_load}W")
+
+            if current_pv is None or current_load is None:
+                logger.warning(f"Sensor read failed: PV={self.pv_power_entity}={current_pv}, "
+                              f"Load={self.load_power_entity}={current_load}")
+                current_pv = current_pv or 0
+                current_load = current_load or 0
+
+            # Calculate signal using simulation (which has efficiency applied)
             signal = calculate_appliance_signal(
                 current_pv_w=current_pv,
                 current_load_w=current_load,
-                current_soc_percent=current_soc,
-                forecast=forecast,
-                capacity_wh=self.optimizer.capacity_wh,
+                simulation=simulation,
                 appliance_power_w=self.appliance_power_w,
                 appliance_energy_wh=self.appliance_energy_wh,
             )
@@ -429,7 +434,7 @@ class EnergyManager:
                     "friendly_name": "Appliance Signal",
                     "reason": signal.reason,
                     "excess_power_w": signal.excess_power_w,
-                    "forecast_surplus_wh": signal.forecast_surplus_wh,
+                    "final_soc_wh": signal.final_soc_wh,
                     "icon": "mdi:washing-machine",
                 },
             )
@@ -440,7 +445,7 @@ class EnergyManager:
                 .field("signal", signal.signal)
                 .field("reason", signal.reason)
                 .field("excess_power_w", float(signal.excess_power_w))
-                .field("forecast_surplus_wh", float(signal.forecast_surplus_wh))
+                .field("final_soc_wh", float(signal.final_soc_wh))
                 .time(datetime.now(timezone.utc), WritePrecision.S)
             )
             self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=point)

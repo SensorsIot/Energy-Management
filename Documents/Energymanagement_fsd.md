@@ -1612,27 +1612,38 @@ High-power appliances (washing machine 2.5 kW) should run when there's sufficien
 
 ### 4.4.2 Algorithm
 
+The appliance signal uses the SOC simulation from the battery optimizer, which already accounts for charge/discharge efficiency (95% each way).
+
 ```
 Every 15 minutes:
 
-1. GREEN: Current excess > 2500W
+1. GREEN: Current PV excess > appliance_power (2500W)
    → Run now with pure solar
+   → excess = current_pv - current_load
 
-2. ORANGE: Run SOC simulation
-   IF soc_at_target >= appliance_consumption (1500 Wh):
-   → Safe to run, battery will recover
+2. ORANGE: Final SOC from simulation >= appliance_energy (1500 Wh)
+   → Battery has enough reserve to absorb the appliance load
+   → Uses efficiency-aware simulation (same as discharge strategy)
 
 3. RED: Otherwise
-   → Would require grid import
+   → Final SOC too low, would require grid import
 ```
 
 ### 4.4.3 Output: sensor.appliance_signal
 
 | State | Meaning |
 |-------|---------|
-| `green` | Pure solar available now |
-| `orange` | Safe to run, will recover |
-| `red` | Insufficient surplus |
+| `green` | Pure solar available now (excess > 2500W) |
+| `orange` | Safe to run, final SOC >= 1500Wh |
+| `red` | Insufficient surplus (final SOC < 1500Wh) |
+
+### 4.4.4 Sensor Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `reason` | Human-readable explanation of the signal |
+| `excess_power_w` | Current PV excess (pv - load) in watts |
+| `final_soc_wh` | Projected final SOC from simulation in Wh |
 
 ---
 
