@@ -35,6 +35,7 @@ class ForecastScheduler:
         ch2_cron: str = "45 2,8,14,20 * * *",
         calculator_interval_minutes: int = 15,
         timezone: str = "UTC",
+        local_timezone: str = "Europe/Zurich",
     ):
         """
         Initialize scheduler.
@@ -44,13 +45,15 @@ class ForecastScheduler:
             ch1_cron: Cron expression for CH1 fetch (default: 2.5h after model runs)
             ch2_cron: Cron expression for CH2 fetch (default: 2.75h after model runs)
             calculator_interval_minutes: How often to run calculator
-            timezone: Timezone for cron schedules
+            timezone: Timezone for cron schedules (weather fetching, UTC)
+            local_timezone: Local timezone for accuracy tracking (decision time)
         """
         self.data_dir = Path(data_dir)
         self.ch1_cron = ch1_cron
         self.ch2_cron = ch2_cron
         self.calculator_interval = calculator_interval_minutes
         self.timezone = timezone
+        self.local_timezone = local_timezone
 
         self.scheduler = BackgroundScheduler(timezone=timezone)
 
@@ -58,22 +61,26 @@ class ForecastScheduler:
         self.fetch_ch1_callback: Optional[Callable] = None
         self.fetch_ch2_callback: Optional[Callable] = None
         self.calculate_callback: Optional[Callable] = None
+        self.snapshot_callback: Optional[Callable] = None
 
         # Status tracking
         self.last_fetch_ch1: Optional[datetime] = None
         self.last_fetch_ch2: Optional[datetime] = None
         self.last_calculation: Optional[datetime] = None
+        self.last_snapshot: Optional[datetime] = None
 
     def set_callbacks(
         self,
         fetch_ch1: Callable,
         fetch_ch2: Callable,
         calculate: Callable,
+        snapshot: Optional[Callable] = None,
     ):
         """Set callback functions for scheduled tasks."""
         self.fetch_ch1_callback = fetch_ch1
         self.fetch_ch2_callback = fetch_ch2
         self.calculate_callback = calculate
+        self.snapshot_callback = snapshot
 
     def _fetch_ch1_job(self):
         """Job wrapper for CH1 fetch."""
@@ -114,6 +121,19 @@ class ForecastScheduler:
         except Exception as e:
             logger.error(f"Calculation failed: {e}", exc_info=True)
 
+    def _snapshot_job(self):
+        """Job wrapper for forecast snapshot (21:00 daily)."""
+        logger.info("Scheduled forecast snapshot starting...")
+        try:
+            if self.snapshot_callback:
+                self.snapshot_callback()
+                self.last_snapshot = datetime.now()
+                logger.info("Forecast snapshot completed")
+            else:
+                logger.warning("No snapshot callback registered")
+        except Exception as e:
+            logger.error(f"Forecast snapshot failed: {e}", exc_info=True)
+
     def setup_jobs(self):
         """Configure scheduled jobs."""
         # CH1 fetch job
@@ -151,6 +171,19 @@ class ForecastScheduler:
             max_instances=1,
             coalesce=True,
         )
+
+        # Accuracy tracking: 21:00 snapshot in LOCAL time (decision time)
+        if self.snapshot_callback:
+            logger.info(f"Setting up accuracy snapshot: 21:00 {self.local_timezone} daily")
+            self.scheduler.add_job(
+                self._snapshot_job,
+                CronTrigger.from_crontab("0 21 * * *", timezone=self.local_timezone),
+                id="accuracy_snapshot",
+                name="Snapshot forecast for accuracy",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
 
     def start(self):
         """Start the scheduler."""
@@ -199,4 +232,5 @@ class ForecastScheduler:
             "last_fetch_ch1": str(self.last_fetch_ch1) if self.last_fetch_ch1 else None,
             "last_fetch_ch2": str(self.last_fetch_ch2) if self.last_fetch_ch2 else None,
             "last_calculation": str(self.last_calculation) if self.last_calculation else None,
+            "last_snapshot": str(self.last_snapshot) if self.last_snapshot else None,
         }

@@ -39,6 +39,7 @@ from src.icon_fetcher import IconFetcher
 from src.grib_parser import load_hybrid_ensemble_forecast
 from src.pv_model import forecast_ensemble_plants
 from src.config import PVSystemConfig
+from src.accuracy_tracker import AccuracyTracker, create_accuracy_tracker
 
 
 class SwissSolarForecast:
@@ -66,6 +67,7 @@ class SwissSolarForecast:
         # Initialize components
         self.influx_writer: Optional[ForecastWriter] = None
         self.scheduler: Optional[ForecastScheduler] = None
+        self.accuracy_tracker: Optional[AccuracyTracker] = None
 
     def init_influxdb(self):
         """Initialize InfluxDB connection."""
@@ -81,6 +83,18 @@ class SwissSolarForecast:
         self.influx_writer.connect()
         self.influx_writer.ensure_bucket(retention_days=30)
 
+    def init_accuracy_tracker(self):
+        """Initialize forecast accuracy tracker."""
+        accuracy_config = self.options.get("accuracy_tracker", {})
+
+        if not accuracy_config.get("enabled", True):
+            logger.info("Accuracy tracking disabled")
+            return
+
+        self.accuracy_tracker = create_accuracy_tracker(self.options)
+        self.accuracy_tracker.connect()
+        logger.info("Accuracy tracker initialized")
+
     def init_scheduler(self):
         """Initialize scheduler with callbacks."""
         schedule_config = self.options.get("schedule", {})
@@ -90,14 +104,16 @@ class SwissSolarForecast:
             ch1_cron=schedule_config.get("ch1_cron", "30 2,5,8,11,14,17,20,23 * * *"),
             ch2_cron=schedule_config.get("ch2_cron", "45 2,8,14,20 * * *"),
             calculator_interval_minutes=schedule_config.get("calculator_interval_minutes", 15),
-            timezone="UTC",  # Cron schedules are in UTC
+            timezone="UTC",  # Weather fetch cron schedules are in UTC
+            local_timezone=self.timezone,  # Accuracy tracking uses local time (21:00 decision)
         )
 
-        # Set callbacks
+        # Set callbacks (including accuracy tracking if enabled)
         self.scheduler.set_callbacks(
             fetch_ch1=self.fetch_ch1,
             fetch_ch2=self.fetch_ch2,
             calculate=self.calculate_forecast,
+            snapshot=self.snapshot_forecast if self.accuracy_tracker else None,
         )
 
     def fetch_ch1(self):
@@ -183,12 +199,28 @@ class SwissSolarForecast:
             logger.error(f"Forecast calculation failed: {e}", exc_info=True)
             raise
 
+    def snapshot_forecast(self):
+        """Snapshot current forecast for accuracy tracking (21:00 daily)."""
+        if not self.accuracy_tracker:
+            return
+
+        logger.info("Snapshotting forecast for accuracy tracking...")
+        try:
+            success = self.accuracy_tracker.snapshot_forecast()
+            if success:
+                logger.info("Forecast snapshot completed")
+            else:
+                logger.warning("Forecast snapshot failed")
+        except Exception as e:
+            logger.error(f"Forecast snapshot failed: {e}", exc_info=True)
+
     def start(self):
         """Start the add-on."""
         logger.info("Starting SwissSolarForecast add-on...")
 
         # Initialize components
         self.init_influxdb()
+        self.init_accuracy_tracker()  # Must be before scheduler
         self.init_scheduler()
 
         # Start scheduler
@@ -226,6 +258,9 @@ class SwissSolarForecast:
 
         if self.scheduler:
             self.scheduler.stop()
+
+        if self.accuracy_tracker:
+            self.accuracy_tracker.close()
 
         if self.influx_writer:
             self.influx_writer.close()

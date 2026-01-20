@@ -1871,6 +1871,310 @@ Each layer has its own error handling:
 
 ---
 
+# Chapter 5: Forecast Accuracy Tracking
+
+## 5.1 Purpose
+
+Forecast accuracy tracking serves to **improve decision-making quality** for energy optimization. The system makes critical decisions based on forecasted values, and understanding forecast accuracy allows us to:
+
+1. Validate that forecasts are reliable enough for automated decisions
+2. Identify systematic biases (over/under-forecasting)
+3. Tune optimization parameters based on observed accuracy
+4. Build confidence in the system's recommendations
+
+## 5.2 Optimization Decisions Dependent on Forecasts
+
+| Decision | Timing | Forecast Dependency | Impact of Error |
+|----------|--------|---------------------|-----------------|
+| **Battery discharge blocking** | 21:00 daily | PV forecast for next day | Grid import during expensive hours |
+| **Appliance signal** (washer) | Real-time | PV surplus forecast | Suboptimal timing, grid usage |
+| **EV charging power** (future) | Real-time | PV surplus forecast | Missed solar charging opportunity |
+
+Each optimization decision requires a specific accuracy metric to validate forecast quality.
+
+## 5.3 Forecast Accuracy #1: Battery Discharge Optimization
+
+### 5.3.1 Decision Context
+
+At **21:00** each evening, the system decides whether to block battery discharge during cheap tariff hours (21:00-06:00). This decision depends on:
+
+- **Current SOC** at 21:00
+- **PV forecast** for the next day (06:00-21:00)
+- **Load forecast** for the next day
+
+The goal: Preserve battery energy during cheap hours so it's available during expensive hours (06:00-21:00) when PV production may be insufficient.
+
+### 5.3.2 Accuracy Measurement Approach
+
+**Snapshot at 21:00:**
+
+At 21:00 each day, capture and store:
+- PV forecast (P10/P50/P90) for the next 24 hours until 21:00, at **15-minute resolution**
+- The specific `run_time` of the forecast being used
+- Current SOC at decision time
+
+**Compare with Actuals:**
+
+After the forecast period completes (next day 21:00), compare:
+- Forecasted PV energy (Wh) vs actual PV energy produced
+- Per 15-minute period comparison
+- Total daily comparison
+
+**Note:** The full 21:00-21:00 period is stored. For accuracy calculations, periods where both forecast and actual PV = 0 (nighttime) can be excluded from error metrics.
+
+### 5.3.3 InfluxDB Storage Schema
+
+**Bucket:** `pv_forecast`
+
+Accuracy data is stored in the same bucket as the forecasts for easy comparison in Grafana.
+
+> **TODO:** Define overall bucket strategy for this project.
+
+**Measurement:** `pv_forecast_snapshot`
+
+This stores the "frozen" forecast at decision time, at 15-minute resolution, **per string**:
+
+| Tag | Description |
+|-----|-------------|
+| `snapshot_type` | `battery_21h` (identifies this as the 21:00 battery decision snapshot) |
+| `snapshot_id` | Date of decision in `YYYY-MM-DD` format (e.g., `2026-01-20`) |
+| `inverter` | `EastWest`, `South`, or `total` |
+| `string` | `East`, `West`, `SouthFront`, `SouthBack`, or `total` |
+| `forecast_run_time` | Original forecast run timestamp |
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `forecast_wh_p10` | Wh | Forecasted PV energy for this 15-min period (pessimistic) |
+| `forecast_wh_p50` | Wh | Forecasted PV energy for this 15-min period (expected) |
+| `forecast_wh_p90` | Wh | Forecasted PV energy for this 15-min period (optimistic) |
+
+**Timestamps:** Every 15 minutes from 21:00 to next day 21:00 (96 points per string)
+
+**Strings tracked:**
+
+| String | Inverter | Orientation | Panels |
+|--------|----------|-------------|--------|
+| `East` | EastWest | Azimuth 90°, Tilt 15° | 8× AE455 |
+| `West` | EastWest | Azimuth 270°, Tilt 15° | 9× AE455 |
+| `SouthFront` | South | Azimuth 180°, Tilt 70° | 3× Generic400 |
+| `SouthBack` | South | Azimuth 180°, Tilt 60° | 2× Generic400 |
+| `total` | - | - | All 22 panels |
+
+**Measurement:** `pv_forecast_snapshot_meta`
+
+Stores metadata about each snapshot (one record per decision):
+
+| Tag | Description |
+|-----|-------------|
+| `snapshot_type` | `battery_21h` |
+| `snapshot_id` | Date of decision in `YYYY-MM-DD` format |
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `soc_at_decision` | % | Battery SOC when decision was made |
+| `decision_discharge_blocked` | bool | Whether discharge was blocked |
+| `forecast_run_time` | string | Which forecast run was used |
+
+**Timestamp:** 21:00 on decision day
+
+**Measurement:** `pv_accuracy`
+
+After actuals are available, store the comparison at 15-minute resolution, **per string**:
+
+| Tag | Description |
+|-----|-------------|
+| `snapshot_type` | `battery_21h` |
+| `snapshot_id` | Date of original decision |
+| `inverter` | `EastWest`, `South`, or `total` |
+| `string` | `East`, `West`, `SouthFront`, `SouthBack`, or `total` |
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `forecast_wh_p10` | Wh | What was forecasted (pessimistic) |
+| `forecast_wh_p50` | Wh | What was forecasted (expected) |
+| `forecast_wh_p90` | Wh | What was forecasted (optimistic) |
+| `actual_wh` | Wh | What was actually produced |
+| `error_wh` | Wh | forecast_p50 - actual (positive = over-forecast) |
+
+**Timestamps:** Every 15 minutes matching the snapshot period
+
+**Note on Actuals per String:**
+- `EastWest` inverter: Actual power available from `sensor.inverter_active_power`
+- `South` inverter: Actual power available from `sensor.enphase_energy_power`
+- Individual strings (`East`, `West`): No individual actuals available (only combined EastWest)
+- For string-level analysis, compare forecast ratios vs actual inverter totals
+
+### 5.3.4 Data Storage Summary
+
+**Three measurements stored in InfluxDB:**
+
+| Measurement | Purpose | Retention |
+|-------------|---------|-----------|
+| `pv_forecast_snapshot` | "What did we predict?" - Frozen forecast at decision time | Long-term |
+| `pv_forecast_snapshot_meta` | "What did we decide, and why?" - Decision context | Long-term |
+| `pv_accuracy` | "Where did we go wrong?" - Comparison with actuals | Long-term |
+
+**Key benefit of storing snapshots:** Enables historical comparison of forecast vs actual curves for any past date. Even months later, we can visualize exactly what was predicted vs what happened.
+
+### 5.3.5 Visualization (Grafana)
+
+**Core concept:** Simple curve-over-time visualization. Select a date, see forecast curve (P10/P50/P90) overlaid with actual production curve.
+
+**Dashboard Variables:**
+- `$snapshot_id`: Date picker (e.g., `2026-01-20`) - selects which day's forecast to view
+- `$inverter`: `EastWest`, `South`, `total`
+
+**Panel 1: Forecast vs Actual Curve (Main Panel)**
+
+Shows forecast P10/P50/P90 bands with actual production overlaid for selected date:
+
+```flux
+// Forecast snapshot for selected date
+forecast = from(bucket: "pv_forecast")
+  |> range(start: -365d)
+  |> filter(fn: (r) => r._measurement == "pv_forecast_snapshot")
+  |> filter(fn: (r) => r.snapshot_id == "${snapshot_id}")
+  |> filter(fn: (r) => r.inverter == "${inverter}")
+
+// Actual production from pv_accuracy (already matched to snapshot)
+actual = from(bucket: "pv_forecast")
+  |> range(start: -365d)
+  |> filter(fn: (r) => r._measurement == "pv_accuracy")
+  |> filter(fn: (r) => r.snapshot_id == "${snapshot_id}")
+  |> filter(fn: (r) => r.inverter == "${inverter}")
+  |> filter(fn: (r) => r._field == "actual_wh")
+
+union(tables: [forecast, actual])
+```
+
+**Visualization:** Time series with:
+- P10/P90 as shaded band (uncertainty range)
+- P50 as solid line (expected)
+- Actual as distinct colored line
+
+**Panel 2: Decision Context (Stat/Table)**
+
+Shows metadata for selected date:
+
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: -365d)
+  |> filter(fn: (r) => r._measurement == "pv_forecast_snapshot_meta")
+  |> filter(fn: (r) => r.snapshot_id == "${snapshot_id}")
+```
+
+Displays:
+- SOC at decision time
+- Was discharge blocked?
+- Which forecast run was used
+
+**Panel 3: Historical Date Picker (Table)**
+
+List of available snapshot dates to select:
+
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: -90d)
+  |> filter(fn: (r) => r._measurement == "pv_forecast_snapshot_meta")
+  |> distinct(column: "snapshot_id")
+```
+
+### 5.3.6 Derived Metrics (Calculated in Grafana)
+
+Daily summary metrics are **calculated on-the-fly** in Grafana from the stored data, not stored separately:
+
+| Metric | Calculation |
+|--------|-------------|
+| Total forecast energy | `sum(forecast_wh_p50)` from `pv_accuracy` |
+| Total actual energy | `sum(actual_wh)` from `pv_accuracy` |
+| Error (Wh) | `forecast_total - actual_total` |
+| Error (%) | `error / actual_total × 100` |
+| MAPE | `mean(abs(forecast - actual) / actual)` for non-zero periods |
+| Within P10-P90 | `actual_total >= sum(p10) AND actual_total <= sum(p90)` |
+| Percentile calibration | `count(actual < p10) / total_days` → should be ~10% |
+
+**Panel 4: Calibration Check (Stat)**
+
+Validates percentile accuracy over time:
+
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: -90d)
+  |> filter(fn: (r) => r._measurement == "pv_accuracy")
+  |> filter(fn: (r) => r.inverter == "total")
+  |> group(columns: ["snapshot_id"])
+  |> reduce(
+      fn: (r, accumulator) => ({
+        sum_actual: accumulator.sum_actual + r.actual_wh,
+        sum_p10: accumulator.sum_p10 + r.forecast_wh_p10,
+        sum_p50: accumulator.sum_p50 + r.forecast_wh_p50,
+        sum_p90: accumulator.sum_p90 + r.forecast_wh_p90
+      }),
+      identity: {sum_actual: 0.0, sum_p10: 0.0, sum_p50: 0.0, sum_p90: 0.0}
+  )
+  // Then calculate: actual < p10, actual < p50, actual < p90 rates
+```
+
+### 5.3.7 Implementation Location
+
+This accuracy tracking is implemented in the **SwissSolarForecast** add-on since it:
+- Already writes to `pv_forecast` bucket
+- Owns the forecast data and knows the `run_time` metadata
+- Can query actuals from `HomeAssistant` bucket via InfluxDB
+
+**New module:** `src/accuracy_tracker.py`
+
+**Schedule:**
+- **21:00 daily (local time)**: Snapshot current forecast for next 24h, per string
+- **21:15 daily**: Evaluate previous day's forecast vs actuals *(postponed)*
+
+**Timezone:** Uses the `location.timezone` setting from the PV system configuration (e.g., `Europe/Zurich`).
+
+**Data flow (Phase 1 - Snapshot only):**
+
+```
+SwissSolarForecast Add-on
+│
+├── Existing: Calculator (every 15 min)
+│   └── Writes forecast to pv_forecast bucket
+│
+└── New: Accuracy Tracker (21:00 local time daily)
+    └── 21:00: Read latest forecast → Write pv_forecast_snapshot
+```
+
+**Phase 2 (future):** Add 21:15 evaluation job to compare snapshots with actuals and write to `pv_accuracy` measurement.
+
+### 5.3.8 Success Criteria
+
+| Metric | Target | Acceptable |
+|--------|--------|------------|
+| Mean Absolute Percentage Error (MAPE) | < 15% | < 25% |
+| P10-P90 coverage | 75-85% | 65-90% |
+| Bias (mean error) | ±5% | ±10% |
+
+If metrics fall outside acceptable ranges, investigate:
+- Weather model accuracy issues
+- PV system configuration errors
+- Seasonal calibration needs
+
+---
+
+## 5.4 Forecast Accuracy #2: Appliance Signal (Future)
+
+> **Status:** To be defined after Accuracy #1 is implemented and validated.
+
+Will track accuracy of real-time PV surplus forecasts used for appliance start recommendations.
+
+---
+
+## 5.5 Forecast Accuracy #3: EV Charging (Future)
+
+> **Status:** To be defined when EV charging optimization is implemented.
+
+Will track accuracy of multi-hour PV surplus forecasts used for charging session planning.
+
+---
+
 # Appendix A: Installation Guide
 
 ## A.1 Prerequisites
@@ -2023,3 +2327,6 @@ The delete API in InfluxDB 2.x can be slow with large datasets and may cause gor
 **End of Document**
 
 *Version 2.4 - January 2026*
+
+**Changelog:**
+- v2.4: Added Chapter 5 - Forecast Accuracy Tracking (Accuracy #1: Battery Discharge Optimization)

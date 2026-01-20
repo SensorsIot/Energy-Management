@@ -79,5 +79,13 @@ storage:
   max_storage_gb: 3.0
   cleanup_old_runs: true
 
+# Forecast accuracy tracking (FSD Chapter 5.3)
+# Phase 1: Snapshots forecast at 21:00 local time with decision context
+accuracy_tracker:
+  enabled: true
+  ha_url: "http://supervisor/core"  # Home Assistant API URL
+  soc_entity: "sensor.battery_state_of_capacity"
+  discharge_control_entity: "number.battery_maximum_discharging_power"
+
 # Logging level: debug, info, warning, error
 log_level: "info"
