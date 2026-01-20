@@ -129,6 +129,8 @@ class ForecastWriter:
         model: str = "hybrid",
         run_time: Optional[datetime] = None,
         resample_minutes: int = 15,
+        battery_soc: Optional[float] = None,
+        discharge_power_limit: Optional[float] = None,
     ):
         """
         Write PV forecast to InfluxDB with aligned timestamps.
@@ -141,6 +143,8 @@ class ForecastWriter:
             model: Model identifier
             run_time: Forecast calculation time
             resample_minutes: Time resolution (default 15 min)
+            battery_soc: Current battery state of charge (%) - for decision context
+            discharge_power_limit: Max discharge power setting (W) - 0 means blocked
         """
         if run_time is None:
             run_time = datetime.now(timezone.utc)
@@ -201,6 +205,13 @@ class ForecastWriter:
 
             # Add run_time as field (not tag) so points overwrite
             point = point.field("run_time", run_time_str)
+
+            # Add decision context (battery state) if available
+            if battery_soc is not None:
+                point = point.field("battery_soc", battery_soc)
+            if discharge_power_limit is not None:
+                point = point.field("discharge_power_limit", discharge_power_limit)
+
             point = point.time(timestamp, WritePrecision.S)
             points.append(point)
 

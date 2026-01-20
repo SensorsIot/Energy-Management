@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
+import requests
 import yaml
 
 # Configure logging
@@ -64,10 +65,41 @@ class SwissSolarForecast:
         self.longitude = self.pv_config.longitude
         self.timezone = self.pv_config.timezone
 
+        # Home Assistant configuration for decision context
+        accuracy_config = options.get("accuracy_tracker", {})
+        self.ha_url = accuracy_config.get("ha_url", "http://supervisor/core").rstrip("/")
+        self.soc_entity = accuracy_config.get("soc_entity", "sensor.battery_state_of_capacity")
+        self.discharge_entity = accuracy_config.get("discharge_control_entity", "number.battery_maximum_discharging_power")
+
+        # Get HA token from environment
+        self._ha_token = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
+        if not self._ha_token:
+            try:
+                with open("/run/secrets/supervisor_token", "r") as f:
+                    self._ha_token = f.read().strip()
+            except FileNotFoundError:
+                pass
+
         # Initialize components
         self.influx_writer: Optional[ForecastWriter] = None
         self.scheduler: Optional[ForecastScheduler] = None
         self.accuracy_tracker: Optional[AccuracyTracker] = None
+
+    def _get_ha_value(self, entity_id: str) -> Optional[float]:
+        """Fetch numeric value from Home Assistant entity."""
+        if not self._ha_token:
+            return None
+        try:
+            response = requests.get(
+                f"{self.ha_url}/api/states/{entity_id}",
+                headers={"Authorization": f"Bearer {self._ha_token}"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            return float(response.json().get("state", 0))
+        except Exception as e:
+            logger.debug(f"Could not fetch {entity_id}: {e}")
+            return None
 
     def init_influxdb(self):
         """Initialize InfluxDB connection."""
@@ -185,11 +217,18 @@ class SwissSolarForecast:
             # Write PV forecast to InfluxDB (15-min intervals)
             if self.influx_writer:
                 run_time = datetime.now(timezone.utc)
+
+                # Fetch current battery state from HA for decision context
+                battery_soc = self._get_ha_value(self.soc_entity)
+                discharge_power = self._get_ha_value(self.discharge_entity)
+
                 self.influx_writer.write_pv_forecast(
                     pv_forecast=pv_forecast,
                     model="hybrid",
                     run_time=run_time,
                     resample_minutes=15,
+                    battery_soc=battery_soc,
+                    discharge_power_limit=discharge_power,
                 )
                 logger.info("PV forecast written to InfluxDB")
 

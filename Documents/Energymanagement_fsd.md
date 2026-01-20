@@ -1071,6 +1071,8 @@ log_level: "info"
 | `ghi` | W/m² | Global horizontal irradiance |
 | `temp_air` | °C | Air temperature |
 | `run_time` | ISO string | When forecast was calculated |
+| `battery_soc` | % | Battery state of charge at forecast time |
+| `discharge_power_limit` | W | Max discharge power setting (0 = blocked) |
 
 ### Fields (inverter="EastWest" or "South")
 
