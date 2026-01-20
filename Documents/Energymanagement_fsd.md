@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.4
+**Version:** 2.5
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -1015,6 +1015,24 @@ Enter in **Settings → Add-ons → SwissSolarForecast → Configuration**:
 - `influxdb_token` (required)
 - `telegram_bot_token` (optional)
 - `telegram_chat_id` (optional)
+
+### Home Assistant API Access
+
+The add-on requires access to Home Assistant entities to record battery state with each forecast.
+
+**Required in `config.yaml`:**
+```yaml
+homeassistant_api: true
+```
+
+**Entities Read:**
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| `sensor.battery_state_of_capacity` | sensor | Battery SOC (%) |
+| `number.battery_maximum_discharging_power` | number | Max discharge power setting (W), 0 = blocked |
+
+These values are fetched via the Supervisor REST API (`http://supervisor/core/api/states/`) and recorded with every forecast write (every 15 minutes) to provide continuous battery state tracking.
 
 ### Non-Secrets (`/config/swisssolarforecast.yaml`)
 
@@ -2328,7 +2346,8 @@ The delete API in InfluxDB 2.x can be slow with large datasets and may cause gor
 
 **End of Document**
 
-*Version 2.4 - January 2026*
+*Version 2.5 - January 2026*
 
 **Changelog:**
+- v2.5: Added Home Assistant API access documentation (homeassistant_api: true, battery entity reading)
 - v2.4: Added Chapter 5 - Forecast Accuracy Tracking (Accuracy #1: Battery Discharge Optimization)
