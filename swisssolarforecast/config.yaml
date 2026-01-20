@@ -1,5 +1,5 @@
 name: "SwissSolarForecast"
-version: "1.1.5"
+version: "1.1.6"
 slug: "swisssolarforecast"
 description: "Swiss PV power forecast using MeteoSwiss ICON ensemble data with pvlib"
 url: "https://github.com/SensorsIot/Energy-Management"
@@ -8,6 +8,9 @@ arch:
   - amd64
   - armv7
 init: false
+
+# Home Assistant API access (required for battery state reading)
+homeassistant_api: true
 
 # Startup configuration
 startup: services

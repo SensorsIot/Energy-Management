@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.6] - 2026-01-21
+
+### Fixed
+- Add `homeassistant_api: true` to enable HA entity state access for battery monitoring
+
 ## [1.1.5] - 2026-01-21
 
 ### Added

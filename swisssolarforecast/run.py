@@ -397,7 +397,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("SwissSolarForecast Add-on v1.1.5")
+    logger.info("SwissSolarForecast Add-on v1.1.6")
     logger.info("=" * 60)
 
     # Load options
