@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.1.5] - 2026-01-21
+
+### Added
+- Forecast accuracy tracking Phase 1 (FSD 5.3)
+- 21:00 daily snapshot of forecast for next 24h period
+- Continuous battery state recording with every forecast write
+  - battery_soc: Current battery state of charge (%)
+  - discharge_power_limit: Max discharge power setting (W)
+- Home Assistant API integration for battery entity readings
+- AccuracyTracker class with snapshot functionality
+- Configurable local timezone for decision time scheduling
+
+### Changed
+- Scheduler now supports local timezone for accuracy snapshot job
+- InfluxDB writer includes battery state fields in pv_forecast measurement
+
 ## [1.0.0] - 2026-01-06
 
 ### Added

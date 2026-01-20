@@ -37,4 +37,4 @@ LABEL \
     io.hass.description="Swiss PV forecast using MeteoSwiss ICON data" \
     io.hass.arch="aarch64|amd64|armv7" \
     io.hass.type="addon" \
-    io.hass.version="1.1.0"
+    io.hass.version="1.1.5"
