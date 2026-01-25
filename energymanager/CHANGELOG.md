@@ -1,5 +1,11 @@
 # EnergyManager Changelog
 
+## [1.5.5] - 2026-01-25
+
+### Changed
+- Version now uses `__version__` constant in run.py (baked at build time)
+- Removed runtime config.yaml reading for version display
+
 ## [1.5.4] - 2026-01-25
 
 ### Fixed

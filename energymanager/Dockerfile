@@ -20,7 +20,6 @@ RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 # Copy source code
 COPY src/ /app/src/
 COPY run.py /app/
-COPY config.yaml /app/
 
 # Copy s6-overlay service definition
 COPY rootfs /
