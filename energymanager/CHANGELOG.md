@@ -1,5 +1,13 @@
 # EnergyManager Changelog
 
+## [1.5.10] - 2026-01-25
+
+### Fixed
+- Proper expensive hours boundary using hours AND minutes
+  - Include: 06:15, 06:30, ..., 20:45, 21:00
+  - Exclude: 06:00 (result of cheap), 21:15+ (cheap time)
+  - Previous fix using only hours incorrectly included 21:15, 21:30, 21:45
+
 ## [1.5.9] - 2026-01-25
 
 ### Fixed
