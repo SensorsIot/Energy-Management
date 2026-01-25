@@ -1,5 +1,10 @@
 # EnergyManager Changelog
 
+## [1.5.3] - 2026-01-25
+
+### Fixed
+- Version in log banner now reads from config.yaml (was hardcoded)
+
 ## [1.5.2] - 2026-01-25
 
 ### Fixed

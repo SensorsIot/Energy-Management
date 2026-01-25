@@ -579,8 +579,16 @@ def main():
     parser.add_argument("--config", help="Path to config file")
     args = parser.parse_args()
 
+    # Read version from config.yaml (add-on metadata)
+    version = "unknown"
+    config_yaml_path = Path(__file__).parent / "config.yaml"
+    if config_yaml_path.exists():
+        with open(config_yaml_path) as f:
+            addon_config = yaml.safe_load(f)
+            version = addon_config.get("version", "unknown")
+
     logger.info("=" * 60)
-    logger.info("EnergyManager Add-on v1.5.1")
+    logger.info(f"EnergyManager Add-on v{version}")
     logger.info("=" * 60)
 
     # Load config
