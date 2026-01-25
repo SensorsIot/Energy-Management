@@ -17,7 +17,7 @@ influxdb:
   pv_bucket: "pv_forecast"
   load_bucket: "load_forecast"
   output_bucket: "energy_manager"
-  soc_bucket: "HuaweiNew"
+  soc_bucket: "HomeData"
   soc_measurement: "Energy"
   soc_field: "BATT_Level"
 
