@@ -1,0 +1,45 @@
+name: "OCPP Server"
+version: "0.1.0"
+slug: "ocpp-server"
+description: "OCPP 1.6j server for EV wallbox control"
+url: "https://github.com/SensorsIot/Energy-Management"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+
+startup: services
+boot: auto
+timeout: 120
+
+# WebSocket port for OCPP connection from wallbox
+# Default 8887 matches evcc for drop-in replacement
+ports:
+  8887/tcp: 8887
+ports_description:
+  8887/tcp: "OCPP WebSocket server"
+
+# Home Assistant API for publishing entities
+homeassistant_api: true
+
+# MQTT for communication with EnergyManager
+services:
+  - mqtt:need
+
+map:
+  - addon_config:rw
+
+options:
+  mqtt_topic_prefix: "ocpp"
+  wallbox_id: "AcTec001"
+  ws_port: 8887
+  min_current_a: 6
+  max_current_a: 16
+
+schema:
+  mqtt_topic_prefix: str
+  wallbox_id: str
+  ws_port: int
+  min_current_a: int
+  max_current_a: int
