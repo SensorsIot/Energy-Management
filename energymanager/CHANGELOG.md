@@ -1,5 +1,12 @@
 # EnergyManager Changelog
 
+## [1.5.9] - 2026-01-25
+
+### Fixed
+- Correct expensive hours boundary: `hour > 6 AND hour <= 21`
+  - 06:00 SOC = state AFTER cheap period → exclude (>)
+  - 21:00 SOC = state AFTER expensive period → include (<=)
+
 ## [1.5.8] - 2026-01-25
 
 ### Fixed
