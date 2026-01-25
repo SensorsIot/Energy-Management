@@ -1,5 +1,13 @@
 # EnergyManager Changelog
 
+## [1.5.7] - 2026-01-25
+
+### Added
+- Forecast snapshot for accuracy tracking (`soc_forecast_snapshot` measurement)
+  - Accumulates over time: each run overwrites from NOW onwards
+  - Earlier predictions preserved for comparison with actual SOC
+  - Enables retrospective analysis of forecast accuracy
+
 ## [1.5.6] - 2026-01-25
 
 ### Added

@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.5.6"
+__version__ = "1.5.7"
 
 import json
 import logging
@@ -389,6 +389,9 @@ class EnergyManager:
             # - without_strategy: what would happen without blocking (shows why we block)
             self.simulation_writer.write_soc_forecast(sim_with_strategy, scenario="with_strategy")
             self.simulation_writer.write_soc_forecast(sim_no_strategy, scenario="without_strategy")
+            # Write forecast snapshot for accuracy tracking
+            # Only overwrites from NOW onwards - earlier points preserved for comparison with actual SOC
+            self.simulation_writer.write_forecast_snapshot(sim_with_strategy)
             # Write energy balance for cumulative visualization
             self.write_energy_balance(forecast)
             self.write_decision(decision, current_soc)

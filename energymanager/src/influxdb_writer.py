@@ -118,3 +118,41 @@ class SimulationWriter:
 
         self.write_api.write(bucket=self.bucket, org=self.org, record=point)
         logger.info(f"Decision logged: discharge_allowed={discharge_allowed}")
+
+    def write_forecast_snapshot(
+        self,
+        simulation: pd.DataFrame,
+    ):
+        """
+        Write forecast snapshot for accuracy tracking.
+
+        This creates a persistent record of what was forecasted at decision time.
+        Only writes points from NOW onwards - earlier points remain from previous
+        snapshots. This allows comparing forecasted vs actual SOC.
+
+        Uses measurement 'soc_forecast_snapshot' (no tags - single series).
+
+        Args:
+            simulation: DataFrame with 'soc_percent' column, indexed by time
+        """
+        if simulation.empty:
+            logger.warning("Empty simulation, no snapshot to write")
+            return
+
+        points = []
+
+        for timestamp, row in simulation.iterrows():
+            # Ensure timestamp is timezone-aware
+            if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+
+            point = (
+                Point("soc_forecast_snapshot")
+                .field("soc_percent", float(row["soc_percent"]))
+                .time(timestamp, WritePrecision.S)
+            )
+            points.append(point)
+
+        logger.info(f"Writing {len(points)} forecast snapshot points to InfluxDB")
+        self.write_api.write(bucket=self.bucket, org=self.org, record=points)
+        logger.info("Forecast snapshot written successfully")
