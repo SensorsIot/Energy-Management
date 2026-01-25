@@ -45,5 +45,12 @@ grid_coords_*.npz
 Thumbs.db
 Documents/secrets.txt
 Documents/re-202307068.pdf
+Documents/Home-Installation-fsd.md
+Documents/EnergyV1_Migration_Map.xlsx
+Documents/MigrationScript.json
+Documents/MigrationScript.txt
+Documents/huawei_dashboard_backup_*.json
+Documents/huawei_dashboard_updated.json
+scripts/
 *.csv
 .Destination*
