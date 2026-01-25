@@ -1,5 +1,10 @@
 # EnergyManager Changelog
 
+## [1.5.4] - 2026-01-25
+
+### Fixed
+- Include config.yaml in Docker container so version can be read at runtime
+
 ## [1.5.3] - 2026-01-25
 
 ### Fixed
