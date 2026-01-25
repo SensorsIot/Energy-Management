@@ -694,7 +694,7 @@ def load_config(config_path: str) -> dict:
 | `influxdb.pv_bucket` | pv_forecast | PV forecast bucket |
 | `influxdb.load_bucket` | load_forecast | Load forecast bucket |
 | `influxdb.output_bucket` | energy_manager | Output bucket for decisions |
-| `influxdb.soc_bucket` | HuaweiNew | Bucket with actual SOC data |
+| `influxdb.soc_bucket` | HomeData | Bucket with actual SOC data |
 | `influxdb.soc_measurement` | Energy | Measurement name for SOC |
 | `influxdb.soc_field` | BATT_Level | Field name for SOC value |
 | `battery.capacity_kwh` | 10.0 | Usable battery capacity |
@@ -2208,7 +2208,7 @@ The `soc_forecast_snapshot` measurement provides persistent forecast storage:
 - **Written every 15 minutes** with the current "with_strategy" forecast
 - **Only overwrites from NOW onwards** - earlier points remain from previous writes
 - **Accumulates over time** - creates continuous forecast history
-- **Compare with actual SOC** from `HuaweiNew` bucket to evaluate forecast accuracy
+- **Compare with actual SOC** from `HomeData` bucket to evaluate forecast accuracy
 
 Example: At 21:00, forecast is written for 21:00→21:00 next day. At 23:00, only 23:00→21:00 is overwritten, preserving the 21:00→23:00 portion.
 
@@ -2233,7 +2233,7 @@ from(bucket: "energy_manager")
   |> filter(fn: (r) => r._measurement == "soc_forecast_snapshot")
 
 # Actual SOC (for comparison with forecast)
-from(bucket: "HuaweiNew")
+from(bucket: "HomeData")
   |> range(start: -24h, stop: now())
   |> filter(fn: (r) => r._measurement == "Energy")
   |> filter(fn: (r) => r._field == "BATT_Level")
