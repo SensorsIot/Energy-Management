@@ -47,6 +47,7 @@ class SimulationWriter:
     def write_soc_forecast(
         self,
         simulation: pd.DataFrame,
+        scenario: str = "with_strategy",
     ):
         """
         Write SOC forecast to InfluxDB.
@@ -56,6 +57,7 @@ class SimulationWriter:
 
         Args:
             simulation: DataFrame with 'soc_percent' column, indexed by time
+            scenario: Tag to identify the scenario ("with_strategy" or "without_strategy")
         """
         if simulation.empty:
             logger.warning("Empty simulation, nothing to write")
@@ -73,15 +75,16 @@ class SimulationWriter:
 
             point = (
                 Point("soc_forecast")
+                .tag("scenario", scenario)
                 .field("soc_percent", float(row["soc_percent"]))
                 .time(timestamp, WritePrecision.S)
             )
             points.append(point)
 
         # Write all points
-        logger.info(f"Writing {len(points)} SOC forecast points to InfluxDB")
+        logger.info(f"Writing {len(points)} SOC forecast points ({scenario}) to InfluxDB")
         self.write_api.write(bucket=self.bucket, org=self.org, record=points)
-        logger.info("SOC forecast written successfully")
+        logger.info(f"SOC forecast ({scenario}) written successfully")
 
     def write_decision(
         self,

@@ -1,5 +1,13 @@
 # EnergyManager Changelog
 
+## [1.5.6] - 2026-01-25
+
+### Added
+- Write both SOC forecast scenarios to InfluxDB:
+  - `with_strategy`: What will happen (with discharge blocking)
+  - `without_strategy`: What would happen without blocking
+- Use `scenario` tag in InfluxDB to differentiate curves
+
 ## [1.5.5] - 2026-01-25
 
 ### Changed

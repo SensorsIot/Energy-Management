@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.5.5"
+__version__ = "1.5.6"
 
 import json
 import logging
@@ -384,9 +384,11 @@ class EnergyManager:
             logger.info(f"Reason: {decision.reason}")
 
             # Write results to InfluxDB
-            # Always write with_strategy - shows what optimizer will actually do
-            # (blocks discharge during cheap hours 21:00-06:00)
-            self.simulation_writer.write_soc_forecast(sim_with_strategy)
+            # Write both scenarios for visualization:
+            # - with_strategy: what will happen (discharge blocked during cheap hours)
+            # - without_strategy: what would happen without blocking (shows why we block)
+            self.simulation_writer.write_soc_forecast(sim_with_strategy, scenario="with_strategy")
+            self.simulation_writer.write_soc_forecast(sim_no_strategy, scenario="without_strategy")
             # Write energy balance for cumulative visualization
             self.write_energy_balance(forecast)
             self.write_decision(decision, current_soc)
