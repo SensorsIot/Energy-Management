@@ -127,6 +127,10 @@ class EnergyManager:
         self.appliance_power_w = appliance_opts.get("power_w", 2500)
         self.appliance_energy_wh = appliance_opts.get("energy_wh", 1500)
 
+        # Battery parameters for appliance signal
+        self.capacity_wh = battery_opts.get("capacity_kwh", 10.0) * 1000
+        self.reserve_percent = battery_opts.get("reserve_percent", 10)
+
         # Sensor entities for appliance signal calculation
         sensors_opts = options.get("sensors", {})
         self.pv_power_entity = sensors_opts.get("pv_power", "sensor.solar_pv_total_ac_power")
@@ -237,14 +241,10 @@ class EnergyManager:
             Point("discharge_decision")
             .field("allowed", decision.discharge_allowed)
             .field("reason", decision.reason)
-            .field("deficit_wh", float(decision.deficit_wh))
-            .field("saved_wh", float(decision.saved_wh))
+            .field("min_soc_percent", float(decision.min_soc_percent))
             .field("current_soc", float(current_soc))
             .time(now, WritePrecision.S)
         )
-
-        if decision.switch_on_time:
-            point = point.field("switch_on_time", decision.switch_on_time.isoformat())
 
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=point)
 
@@ -377,10 +377,9 @@ class EnergyManager:
                 logger.info(f"DEBUG: Simulation first SOC: {sim_no_strategy['soc_percent'].iloc[0]:.1f}%")
 
             # Log decision
-            logger.info(f"Decision: discharge_allowed={decision.discharge_allowed}")
+            logger.info(f"Decision: discharge_allowed={decision.discharge_allowed}, "
+                       f"min_soc={decision.min_soc_percent:.0f}%")
             logger.info(f"Reason: {decision.reason}")
-            if decision.switch_on_time:
-                logger.info(f"Switch ON at: {swiss_datetime(decision.switch_on_time)}")
 
             # Write results to InfluxDB
             # Always write with_strategy - shows what optimizer will actually do
@@ -422,6 +421,8 @@ class EnergyManager:
                 simulation=simulation,
                 appliance_power_w=self.appliance_power_w,
                 appliance_energy_wh=self.appliance_energy_wh,
+                capacity_wh=self.capacity_wh,
+                reserve_percent=self.reserve_percent,
             )
 
             logger.info(f"Appliance signal: {signal.signal} - {signal.reason}")
@@ -434,7 +435,7 @@ class EnergyManager:
                     "friendly_name": "Appliance Signal",
                     "reason": signal.reason,
                     "excess_power_w": signal.excess_power_w,
-                    "final_soc_wh": signal.final_soc_wh,
+                    "final_soc_percent": signal.final_soc_percent,
                     "icon": "mdi:washing-machine",
                 },
             )
@@ -579,7 +580,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("EnergyManager Add-on v1.4.15")
+    logger.info("EnergyManager Add-on v1.5.1")
     logger.info("=" * 60)
 
     # Load config

@@ -1,11 +1,13 @@
 """
 Battery discharge optimization based on energy balance.
 
-Algorithm:
-1. Simulate with battery always ON until target (next 21:00)
-2. Calculate deficit at target
-3. If deficit > 0: block discharge during cheap tariff to save energy
-4. Switch ON when saved >= deficit or cheap tariff ends
+Simplified Algorithm (FSD v2.6):
+1. If expensive tariff (06:00-21:00): always allow discharge
+2. If cheap tariff: simulate SOC from NOW until end of next expensive period
+3. Check if min SOC stays >= min_soc during ALL expensive hours
+   - If yes: allow discharge
+   - If no: block discharge
+4. Re-check every 15 minutes (self-correcting based on actual conditions)
 """
 
 import logging
@@ -42,10 +44,8 @@ class TariffPeriod:
 class DischargeDecision:
     """Battery discharge decision."""
     discharge_allowed: bool
-    switch_on_time: Optional[datetime]
     reason: str
-    deficit_wh: float
-    saved_wh: float
+    min_soc_percent: float  # Minimum SOC during expensive hours (for logging)
 
 
 class BatteryOptimizer:
@@ -288,6 +288,14 @@ class BatteryOptimizer:
         """
         Calculate battery discharge decision.
 
+        Simplified Algorithm (FSD v2.6):
+        1. Always simulate SOC trajectory for visualization
+        2. If expensive tariff: always allow discharge (we're in the protected period)
+        3. If cheap tariff: check if min SOC stays >= min_soc during expensive hours
+           - If yes: allow discharge
+           - If no: block discharge
+        4. Re-check every 15 minutes (self-correcting)
+
         Args:
             soc_percent: Current SOC (0-100)
             forecast: DataFrame with pv_energy_wh, load_energy_wh, net_energy_wh
@@ -306,123 +314,75 @@ class BatteryOptimizer:
             return (
                 DischargeDecision(
                     discharge_allowed=True,
-                    switch_on_time=None,
                     reason="No forecast data",
-                    deficit_wh=0,
-                    saved_wh=0,
+                    min_soc_percent=100.0,
                 ),
                 pd.DataFrame(),
                 pd.DataFrame(),
             )
 
-        # Step 1: Simulate full trajectory from NOW to target (tomorrow 21:00)
+        # Step 1: Always simulate full trajectory from NOW to target
         # This gives us the complete picture for visualization
-        sim_full_no_strategy = self.simulate_soc(soc_percent, forecast)
+        sim_full = self.simulate_soc(soc_percent, forecast)
 
-        # Get SOC at cheap_start (21:00 tonight) for decision calculations
-        forecast_until_cheap = forecast[forecast.index < tariff.cheap_start]
-        if not forecast_until_cheap.empty:
-            soc_at_cheap_start = sim_full_no_strategy.loc[
-                sim_full_no_strategy.index < tariff.cheap_start, "soc_percent"
-            ].iloc[-1]
-        else:
-            soc_at_cheap_start = soc_percent
-
-        logger.info(f"SOC at cheap start ({swiss_time(tariff.cheap_start)}): {soc_at_cheap_start:.1f}%")
-
-        # Step 2: Check if SOC drops below min_soc during EXPENSIVE hours only
+        # Step 2: Find minimum SOC during EXPENSIVE hours only
         # During cheap hours (21:00-06:00), low SOC is fine - electricity is cheap
         # During expensive hours (06:00-21:00), SOC must stay >= min_soc
-        # Convert simulation index to Swiss time for tariff comparison
-        sim_swiss_hours = sim_full_no_strategy.index.tz_convert(SWISS_TZ).hour
+        sim_swiss_hours = sim_full.index.tz_convert(SWISS_TZ).hour
         expensive_mask = (sim_swiss_hours >= self.cheap_end_hour) & (sim_swiss_hours < self.cheap_start_hour)
-        expensive_periods = sim_full_no_strategy[expensive_mask]
+        expensive_periods = sim_full[expensive_mask]
 
         if expensive_periods.empty:
-            # No expensive periods in simulation (e.g., running late at night)
-            min_soc_in_expensive = self.capacity_wh  # No constraint
-            min_soc_time = sim_full_no_strategy.index[0]
+            # No expensive periods in simulation
+            min_soc_percent = 100.0
+            min_soc_time = sim_full.index[0]
         else:
-            min_soc_in_expensive = expensive_periods["soc_wh"].min()
+            min_soc_wh = expensive_periods["soc_wh"].min()
+            min_soc_percent = min_soc_wh / self.capacity_wh * 100
             min_soc_time = expensive_periods["soc_wh"].idxmin()
 
-        deficit_wh = max(0, self.min_soc_wh - min_soc_in_expensive)
+        # Simple yes/no: does SOC stay above threshold?
+        soc_ok = min_soc_percent >= self.min_soc_percent
 
-        logger.info(f"Min SOC during expensive hours: {min_soc_in_expensive:.0f} Wh "
-                   f"({min_soc_in_expensive/self.capacity_wh*100:.0f}%) at {swiss_time(min_soc_time)}, "
-                   f"min_soc: {self.min_soc_wh:.0f} Wh ({self.min_soc_percent:.0f}%), "
-                   f"deficit: {deficit_wh:.0f} Wh")
+        logger.info(f"Min SOC during expensive hours: {min_soc_percent:.0f}% at {swiss_time(min_soc_time)}, "
+                   f"threshold: {self.min_soc_percent:.0f}%, OK: {soc_ok}")
 
-        # Step 3: If SOC stays >= min_soc during expensive hours, allow discharge
-        if deficit_wh <= 0:
-            # No blocking needed - battery stays above minimum during expensive hours
-            return (
-                DischargeDecision(
-                    discharge_allowed=True,
-                    switch_on_time=None,
-                    reason=f"SOC >= {self.min_soc_percent:.0f}% during expensive hours (min: {min_soc_in_expensive/self.capacity_wh*100:.0f}% at {swiss_time(min_soc_time)})",
-                    deficit_wh=0,
-                    saved_wh=0,
-                ),
-                sim_full_no_strategy,
-                sim_full_no_strategy,  # Same simulation - no blocking
-            )
-
-        # Step 4: Calculate when to switch ON by accumulating savings during cheap period
-        forecast_cheap = sim_full_no_strategy[
-            (sim_full_no_strategy.index >= tariff.cheap_start) &
-            (sim_full_no_strategy.index < tariff.cheap_end)
-        ]
-
-        saved_wh = 0
-        switch_on_time = tariff.cheap_end  # Default: end of cheap period
-
-        for t, row in forecast_cheap.iterrows():
-            if row["discharge_wh"] > 0:
-                saved_wh += row["discharge_wh"]
-
-            if saved_wh >= deficit_wh:
-                switch_on_time = t
-                break
-
-        logger.info(f"Saved {saved_wh:.0f} Wh, switch ON at {swiss_time(switch_on_time)}")
-
-        # Step 5: Simulate with strategy - full trajectory from NOW
-        # Blocking only applies during cheap tariff (21:00 to switch_on_time)
-        sim_full_with_strategy = self.simulate_soc(
-            soc_percent,
-            forecast,
-            block_from=tariff.cheap_start,
-            block_until=switch_on_time
-        )
-
-        # Determine if discharge is currently allowed
-        # During expensive tariff: always allow
-        # During cheap tariff: only allow after switch_on_time
+        # Step 3: Decision logic - simple yes/no
         if not tariff.is_cheap_now:
+            # EXPENSIVE TARIFF (06:00-21:00): Always allow discharge
+            # We're in the period we were protecting - use the battery now
             discharge_allowed = True
-            reason = (f"Expensive tariff - tonight block until {swiss_time(switch_on_time)} "
-                     f"(deficit {deficit_wh:.0f} Wh)")
-        elif now >= switch_on_time:
+            reason = f"Expensive tariff - allow discharge (min SOC {min_soc_percent:.0f}%)"
+
+        elif soc_ok:
+            # CHEAP TARIFF + SOC OK: Allow discharge
             discharge_allowed = True
-            reason = f"Cheap tariff - discharge enabled (saved {saved_wh:.0f} Wh)"
+            reason = f"SOC stays >= {self.min_soc_percent:.0f}% (min: {min_soc_percent:.0f}% at {swiss_time(min_soc_time)})"
+
         else:
+            # CHEAP TARIFF + SOC NOT OK: Block discharge
             discharge_allowed = False
-            if saved_wh < deficit_wh:
-                reason = (f"Block discharge until {swiss_time(switch_on_time)} - "
-                         f"saved {saved_wh:.0f}/{deficit_wh:.0f} Wh (shortfall)")
-            else:
-                reason = (f"Block discharge until {swiss_time(switch_on_time)} - "
-                         f"saved {saved_wh:.0f} Wh")
+            reason = f"Block - SOC would drop to {min_soc_percent:.0f}% at {swiss_time(min_soc_time)} (need {self.min_soc_percent:.0f}%)"
+
+        logger.info(f"Decision: discharge_allowed={discharge_allowed}")
+
+        # For visualization: if blocking, show what would happen with full block until cheap_end
+        if not discharge_allowed:
+            sim_with_strategy = self.simulate_soc(
+                soc_percent,
+                forecast,
+                block_from=now,
+                block_until=tariff.cheap_end
+            )
+        else:
+            sim_with_strategy = sim_full
 
         return (
             DischargeDecision(
                 discharge_allowed=discharge_allowed,
-                switch_on_time=switch_on_time,
                 reason=reason,
-                deficit_wh=deficit_wh,
-                saved_wh=saved_wh,
+                min_soc_percent=min_soc_percent,
             ),
-            sim_full_no_strategy,
-            sim_full_with_strategy,
+            sim_full,
+            sim_with_strategy,
         )

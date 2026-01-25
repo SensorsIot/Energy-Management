@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.5
+**Version:** 2.7
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -1537,38 +1537,27 @@ During cheap tariff (night), SOC can drop to any level since grid electricity is
 ```
 Every 15 minutes:
 
-1. SIMULATE SOC from NOW until next 21:00
+1. CHECK CURRENT TARIFF
+   IF expensive tariff (06:00-21:00):
+      → Discharge ALLOWED (we're in the period we're protecting)
+      → Skip to step 4
+
+2. SIMULATE SOC (only during cheap tariff 21:00-06:00)
+   - Simulate from NOW until end of next expensive period (21:00)
    - Assume free discharge (no blocking)
    - Use current SOC as starting point
    - Apply PV and load forecasts
 
-2. CHECK: Does SOC drop below min_soc during EXPENSIVE hours?
-   - Only check periods from 06:00-21:00 (Swiss time)
-   - Ignore SOC during cheap hours (21:00-06:00)
+3. CHECK: Does SOC stay >= min_soc during ALL expensive hours?
+   - Extract minimum SOC from all 06:00-21:00 periods in simulation
+   - Ignore SOC values during cheap hours (21:00-06:00)
 
-   IF min_soc_in_expensive_hours >= min_soc:
-      → No deficit, discharge allowed
+   IF min_soc_in_expensive_hours >= min_soc (10%):
+      → Discharge ALLOWED (safe to use battery now)
    ELSE:
-      deficit_wh = min_soc_wh - min_soc_in_expensive_hours
+      → Discharge BLOCKED (preserve energy for expensive hours)
 
-3. FIND SWITCH-ON TIME (only if deficit exists, only during cheap tariff)
-   saved_wh = 0
-   FOR each 15-min period during cheap tariff:
-       IF discharge_would_occur:
-           saved_wh += discharge_wh
-       IF saved_wh >= deficit_wh:
-           switch_on_time = current_period
-           BREAK
-
-4. DETERMINE DISCHARGE STATE
-   IF expensive tariff (06:00-21:00):
-      → Battery always ON (allow discharge)
-   ELSE IF cheap tariff AND deficit_wh > 0 AND now < switch_on_time:
-      → Battery OFF (block discharge)
-   ELSE:
-      → Battery ON (allow discharge)
-
-5. SEND CONTROL SIGNAL (only when decision changes)
+4. SEND CONTROL SIGNAL (only when decision changes)
    IF discharge_allowed != last_discharge_allowed:
       → Set number.battery_maximum_discharging_power
       → Log state change
@@ -1576,34 +1565,39 @@ Every 15 minutes:
 
 ### 4.3.3 Key Design Decisions
 
-**Why only check expensive hours:**
-- During cheap tariff (21:00-06:00), low SOC is acceptable—grid electricity is inexpensive
-- During expensive tariff (06:00-21:00), battery should cover consumption to avoid expensive grid import
-- The min_soc reserve ensures capacity for forecast errors and unexpected loads
+**Why always allow during expensive hours:**
+- During expensive tariff (06:00-21:00), we're in the period we were protecting
+- Battery should discharge to avoid expensive grid import
+- No reason to block—this is exactly when we want battery power
 
-**Why block during cheap hours:**
-- If simulation shows SOC would drop below min_soc during tomorrow's expensive hours
-- Block discharge during cheap hours to preserve energy
-- This shifts grid import from expensive hours to cheap hours
+**Why re-check every 15 minutes during cheap hours:**
+- Forecasts may have errors; actual conditions may differ
+- If load was lower than forecast, SOC will be higher than predicted
+- If PV was higher than forecast, battery may have extra charge
+- Re-simulation with current SOC naturally adapts to reality
+- No need to pre-calculate a "switch-on time"—just ask "is it safe now?"
+
+**Why only check expensive hours in simulation:**
+- During cheap tariff (21:00-06:00), low SOC is acceptable—grid electricity is inexpensive
+- The min_soc reserve (10%) ensures capacity for forecast errors and unexpected loads
 
 **Signal hysteresis:**
 - Control signal only sent when decision changes (not every 15 minutes)
 - Reduces unnecessary Modbus communication with inverter
 - Prevents rapid on/off cycling
 
-### 4.3.4 Blocking Mode in SocSimulator
+### 4.3.4 Self-Correcting Behavior
 
-The SocSimulator accepts blocking parameters to simulate the effect of discharge blocking:
+The rolling 15-minute check makes the system self-correcting:
 
-```
-Parameters:
-  block_discharge_from: datetime
-  block_discharge_until: datetime
+| Scenario | Effect |
+|----------|--------|
+| Load lower than forecast | SOC stays higher → allows discharge earlier |
+| PV higher than forecast | More energy available → allows discharge earlier |
+| Unexpected high load | SOC drops → may block discharge to protect reserve |
+| Battery started fuller | More headroom → may allow discharge immediately |
 
-IF battery_flow < 0 AND time >= block_from AND time < block_until:
-   battery_flow = 0  (discharge blocked, load served by grid)
-   soc_wh unchanged
-```
+This eliminates the complexity of pre-calculating switch-on times while naturally adapting to real-world conditions.
 
 ### 4.3.5 Output: number.battery_maximum_discharging_power
 
@@ -1622,6 +1616,61 @@ data:
   value: "{{ 5000 if discharge_allowed else 0 }}"
 ```
 
+### 4.3.6 Test Cases
+
+Test file: `energymanager/tests/test_battery_optimizer.py`
+
+#### Expensive Tariff (06:00-21:00) → Always ALLOW
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_expensive_tariff_allows_discharge` | At 12:00 (expensive), discharge should be allowed regardless of SOC forecast | Time: Monday 11:00, PV: 0W, Load: 2000W, SOC: 50% | `discharge_allowed=True`, reason contains "Expensive tariff" |
+| `test_expensive_tariff_low_soc_still_allows` | Even with low SOC during expensive tariff, discharge is allowed | Time: Monday 14:00, PV: 0W, Load: 5000W, SOC: 15% | `discharge_allowed=True` |
+
+#### Cheap Tariff + SOC OK → ALLOW
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_cheap_tariff_high_pv_allows_discharge` | At 22:00 (cheap), with good PV forecast, discharge should be allowed | Time: Monday 21:30, PV: 4000W during day, Load: 500W, SOC: 80% | `discharge_allowed=True`, reason contains "SOC stays >=" |
+| `test_cheap_tariff_full_battery_allows_discharge` | With 100% SOC and good PV, should allow discharge | Time: Monday 22:00, PV: 5000W during day, Load: 400W, SOC: 100% | `discharge_allowed=True` |
+
+#### Cheap Tariff + SOC NOT OK → BLOCK
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_cheap_tariff_low_pv_blocks_discharge` | At 22:00 (cheap), with poor PV forecast, discharge should be blocked | Time: Monday 21:30, PV: 500W (cloudy), Load: 1500W, SOC: 50% | `discharge_allowed=False`, reason contains "Block" |
+| `test_cheap_tariff_low_soc_blocks_discharge` | At 22:00 (cheap), with low starting SOC, discharge should be blocked | Time: Monday 22:00, PV: 2000W, Load: 1000W, SOC: 20% | `discharge_allowed=False` |
+| `test_min_soc_threshold_respected` | Custom threshold (20%) is respected | Time: Monday 22:00, threshold: 20%, SOC: 40% | If `min_soc_percent < 20%` then `discharge_allowed=False` |
+
+#### Self-Correcting Behavior
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_block_then_allow_as_conditions_improve` | If initially blocked, later check with better SOC should allow | Same forecast, First: SOC 30%, Second: SOC 90% | `decision2.min_soc_percent > decision1.min_soc_percent`, `decision2.discharge_allowed=True` |
+
+#### Edge Cases
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_no_forecast_data_allows_discharge` | With no forecast data, default to allowing discharge | Empty forecast DataFrame | `discharge_allowed=True`, reason: "No forecast data" |
+| `test_weekend_all_day_cheap` | Weekend is all-day cheap tariff | Saturday 12:00 | `tariff.is_cheap_now=True` |
+| `test_weekday_morning_is_expensive` | Weekday 08:00 should be expensive tariff | Monday 08:00 | `tariff.is_cheap_now=False` |
+| `test_weekday_night_is_cheap` | Weekday 23:00 should be cheap tariff | Monday 23:00 | `tariff.is_cheap_now=True` |
+| `test_holiday_is_cheap` | Configured holidays should be all-day cheap | 2026-01-01 12:00, holidays=["2026-01-01"] | `is_holiday=True`, `is_cheap_day=True` |
+
+#### Dataclass Validation
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_decision_has_required_fields` | DischargeDecision has all required fields | Create DischargeDecision | Has `discharge_allowed`, `reason`, `min_soc_percent` fields |
+
+**Run tests:**
+```bash
+cd energymanager && python -m pytest tests/test_battery_optimizer.py -v
+```
+
+**All 14 tests passing** (as of v1.5.0)
+
 ---
 
 ## 4.4 Appliance Signal
@@ -1632,7 +1681,7 @@ High-power appliances (washing machine 2.5 kW) should run when there's sufficien
 
 ### 4.4.2 Algorithm
 
-The appliance signal uses the SOC simulation from the battery optimizer, which already accounts for charge/discharge efficiency (95% each way).
+The appliance signal uses the SOC simulation from the battery optimizer (same simulation stored in InfluxDB), which already accounts for charge/discharge efficiency (95% each way).
 
 ```
 Every 15 minutes:
@@ -1641,21 +1690,45 @@ Every 15 minutes:
    → Run now with pure solar
    → excess = current_pv - current_load
 
-2. ORANGE: Final SOC from simulation >= appliance_energy (1500 Wh)
-   → Battery has enough reserve to absorb the appliance load
-   → Uses efficiency-aware simulation (same as discharge strategy)
+2. ORANGE: Final SOC% >= reserve% + appliance%
+   → Battery has enough reserve ABOVE the minimum to absorb the appliance load
+   → Uses same simulation as battery optimizer
 
 3. RED: Otherwise
-   → Final SOC too low, would require grid import
+   → Final SOC too low, would require grid import or violate battery reserve
 ```
+
+### 4.4.2.1 ORANGE Threshold Calculation
+
+All values in SOC% for consistency with simulation:
+
+```
+appliance% = appliance_energy_wh / capacity_wh × 100
+           = 1500Wh / 10000Wh × 100 = 15%
+
+ORANGE threshold = reserve% + appliance%
+                 = 10% + 15% = 25%
+```
+
+**Example with default config:**
+
+| Parameter | Value |
+|-----------|-------|
+| `battery.capacity_kwh` | 10 kWh |
+| `battery.reserve_percent` | 10% |
+| `appliances.energy_wh` | 1500 Wh |
+| `appliance%` | 15% |
+| **ORANGE threshold** | 25% |
+
+This ensures running the appliance won't push SOC below the configured `reserve_percent`.
 
 ### 4.4.3 Output: sensor.appliance_signal
 
 | State | Meaning |
 |-------|---------|
 | `green` | Pure solar available now (excess > 2500W) |
-| `orange` | Safe to run, final SOC >= 1500Wh |
-| `red` | Insufficient surplus (final SOC < 1500Wh) |
+| `orange` | Safe to run, final SOC% >= reserve% + appliance% |
+| `red` | Insufficient surplus, would violate battery reserve |
 
 ### 4.4.4 Sensor Attributes
 
@@ -1663,35 +1736,389 @@ Every 15 minutes:
 |-----------|-------------|
 | `reason` | Human-readable explanation of the signal |
 | `excess_power_w` | Current PV excess (pv - load) in watts |
-| `final_soc_wh` | Projected final SOC from simulation in Wh |
+| `final_soc_percent` | Projected final SOC from simulation in % |
+
+### 4.4.5 Test Cases
+
+Test file: `energymanager/tests/test_appliance_signal.py`
+
+#### GREEN Signal: PV excess > appliance power
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_green_when_pv_excess_above_threshold` | PV excess 3000W > 2500W appliance power | PV: 4000W, Load: 1000W, appliance_power: 2500W | `signal="green"`, excess_power=3000W |
+| `test_green_ignores_soc_when_pv_sufficient` | Even with low SOC, GREEN if PV excess sufficient | PV: 5000W, Load: 2000W, SOC: 5% | `signal="green"` |
+| `test_not_green_when_pv_excess_exactly_equals_threshold` | PV excess exactly 2500W (need >) | PV: 3500W, Load: 1000W | `signal != "green"` |
+
+#### ORANGE Signal: Final SOC% >= reserve% + appliance%
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_orange_when_soc_above_threshold` | Final SOC 30% >= 25% threshold | Final SOC: 30%, reserve: 10%, appliance: 15% | `signal="orange"` |
+| `test_orange_exactly_at_threshold` | Final SOC exactly at threshold (25%) | Final SOC: 25%, reserve: 10%, appliance: 15% | `signal="orange"` |
+| `test_orange_threshold_calculation` | Different parameters: 20% reserve + 20% appliance = 40% | Final SOC: 45%, reserve: 20%, appliance: 2000Wh/10000Wh=20% | `signal="orange"` |
+| `test_orange_with_different_battery_capacity` | 15kWh battery: 1500Wh = 10% appliance | Capacity: 15kWh, Final SOC: 25%, threshold: 20% | `signal="orange"` |
+
+#### RED Signal: Final SOC% < threshold
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_red_when_soc_below_threshold` | Final SOC 20% < 25% threshold | Final SOC: 20%, reserve: 10%, appliance: 15% | `signal="red"` |
+| `test_red_with_zero_pv` | No PV and low SOC | PV: 0W, Final SOC: 15% | `signal="red"` |
+| `test_red_just_below_threshold` | Final SOC 24% just below 25% | Final SOC: 24%, threshold: 25% | `signal="red"` |
+
+#### Edge Cases
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_empty_simulation_returns_red` | Empty simulation DataFrame | Empty DataFrame | `signal="red"` (safe default) |
+| `test_simulation_without_soc_column` | Missing soc_percent column | DataFrame without soc_percent | `signal="red"` |
+| `test_negative_pv_excess` | Load > PV (deficit) | PV: 500W, Load: 2000W, Final SOC: 30% | `signal="orange"` (checks SOC threshold) |
+| `test_zero_reserve_percent` | Zero reserve, only need appliance% | reserve: 0%, appliance: 15%, Final SOC: 16% | `signal="orange"` |
+| `test_high_reserve_percent` | High reserve (30%) changes threshold | reserve: 30%, appliance: 15%, Final SOC: 40% | `signal="red"` (threshold=45%) |
+
+#### Helper Functions
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_returns_last_value` | get_final_soc_percent returns last value | Simulation ending at 42% | Returns 42% |
+| `test_empty_dataframe_returns_zero` | Empty DataFrame returns 0 | Empty DataFrame | Returns 0% |
+| `test_missing_column_returns_zero` | Missing column returns 0 | DataFrame without soc_percent | Returns 0% |
+
+#### Dataclass Validation
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_dataclass_fields` | ApplianceSignal has all required fields | Create ApplianceSignal | Has `signal`, `reason`, `excess_power_w`, `final_soc_percent` |
+
+**Run tests:**
+```bash
+cd energymanager && python -m pytest tests/test_appliance_signal.py -v
+```
+
+**All 19 tests passing** (as of v1.5.0)
 
 ---
 
-## 4.5 EV Charging Signal
+## 4.5 EV Charging Optimization
 
 > **Status: NOT YET IMPLEMENTED** - This section describes planned functionality.
 
-### 4.5.1 Problem
+### 4.5.1 Overview
 
-EV charging requires minimum 4.1 kW. Should only charge with excess PV via EVCC.
+EV charging optimization maximizes solar self-consumption while ensuring charging goals are met. The system acts as an OCPP 1.6j server that controls the wallbox via charging profiles.
 
-### 4.5.2 Algorithm
+**Key Features:**
+- OCPP 1.6j server as Home Assistant add-on
+- Phase switching (1-phase / 3-phase) for wider power range
+- Opportunistic solar charging (default)
+- Goal-based charging with cheap tariff guarantee
+- Real-time power adjustment every minute
+- Forecast-based optimization decisions
+
+### 4.5.2 Architecture
 
 ```
-excess_w = pv_power - load_power
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Home Assistant                                  │
+│                                                                             │
+│  ┌─────────────────────┐      ┌─────────────────────────────────────────┐  │
+│  │   EnergyManager     │      │         OCPP Server Add-on              │  │
+│  │                     │      │                                         │  │
+│  │  • Forecast-based   │      │  • OCPP 1.6j compliant                 │  │
+│  │    optimization     │─────▶│  • Charging profile management         │  │
+│  │  • Real-time power  │      │  • Phase switching commands            │  │
+│  │    decisions (1min) │      │  • Transaction management              │  │
+│  │  • Goal management  │      │                                         │  │
+│  └─────────────────────┘      └──────────────────┬──────────────────────┘  │
+│                                                   │                         │
+└───────────────────────────────────────────────────│─────────────────────────┘
+                                                    │ OCPP 1.6j
+                                                    │ (WebSocket)
+                                                    ▼
+                                          ┌─────────────────┐
+                                          │    Wallbox      │
+                                          │                 │
+                                          │  • 1/3 phase    │
+                                          │  • 6-16A        │
+                                          │  • OCPP client  │
+                                          └────────┬────────┘
+                                                   │
+                                                   ▼
+                                          ┌─────────────────┐
+                                          │   Electric      │
+                                          │   Vehicle       │
+                                          └─────────────────┘
+```
 
-IF excess_w >= 4100:
-   charging_power = min(excess_w, 11000)
+### 4.5.3 Power Ranges
+
+The wallbox supports phase switching for a wider usable power range:
+
+| Mode | Voltage | Current | Power Range |
+|------|---------|---------|-------------|
+| **1-phase** | 230V | 6-16A | 1.4 - 3.7 kW |
+| **3-phase** | 400V | 6-16A | 4.1 - 11.0 kW |
+
+**Gap:** 3.7 - 4.1 kW is not achievable (hardware limitation)
+
+**Minimum charging power:** 1.4 kW (1-phase, 6A)
+
+### 4.5.4 Operating Modes
+
+#### 4.5.4.1 Opportunistic Solar Mode (Default)
+
+Charges only when sufficient PV excess is available. No grid import for charging.
+
+**Priority:** EV charging is second priority after battery charging.
+
+```
+Every minute:
+
+1. Calculate available excess
+   excess_w = current_pv - current_load - battery_charge_power
+
+2. Determine charging power
+   IF excess_w >= 4100:
+      → 3-phase charging at min(excess_w, 11000)W
+   ELSE IF excess_w >= 1400:
+      → 1-phase charging at min(excess_w, 3700)W
+   ELSE:
+      → No charging (or use battery buffer, see 4.5.6)
+
+3. Send OCPP charging profile to wallbox
+```
+
+#### 4.5.4.2 Goal Mode (Override)
+
+Ensures car reaches target SOC by specified time, using cheap tariff grid energy.
+
+**Example goal:** "Car at 80% SOC by 07:00"
+
+```
+Goal parameters:
+  target_soc: 80%
+  deadline: 07:00
+  current_soc: 30% (from car)
+
+Energy needed:
+  energy_kwh = (target_soc - current_soc) / 100 × battery_capacity_kwh
+             = (80 - 30) / 100 × 60 kWh = 30 kWh
+
+Charging strategy:
+  1. Calculate required charging time at max power (11kW)
+     time_hours = 30 kWh / 11 kW = 2.7 hours
+
+  2. Schedule charging during cheap tariff (21:00-06:00)
+     - Latest start: 07:00 - 2.7h = 04:18
+     - Preferred: Start at 21:00, charge with solar first, top up with grid
+
+  3. During day: Use opportunistic solar mode
+
+  4. If goal not reachable with cheap energy alone:
+     → Alert user, suggest earlier deadline or lower target
+```
+
+**Grid usage for goals:** Only during cheap tariff (21:00-06:00). Never buy expensive energy for EV.
+
+### 4.5.5 Decision Layers
+
+Two decision frequencies work together:
+
+| Layer | Frequency | Purpose |
+|-------|-----------|---------|
+| **Forecast Optimization** | Every 15 min | Plan charging windows, check goal feasibility |
+| **Real-time Control** | Every 1 min | Adjust charging power to actual PV excess |
+
+#### Forecast Optimization (15 min)
+
+Uses PV and load forecasts to:
+- Determine if goal is achievable
+- Plan optimal charging windows
+- Coordinate with battery strategy
+
+#### Real-time Control (1 min)
+
+Reacts to actual conditions:
+- Current PV production
+- Current household load
+- Battery state
+- Adjusts charging power via OCPP profile
+
+### 4.5.6 Battery Buffer for Solar Fluctuations
+
+During daytime solar charging, short-term battery discharge is allowed to smooth PV fluctuations (clouds).
+
+```
+IF charging AND solar_drops_suddenly:
+   Allow battery discharge for up to X minutes
+   to maintain charging session
+   (avoids frequent start/stop of charging)
+```
+
+**Rationale:** Starting/stopping EV charging frequently is inefficient and may stress the car's BMS. Short battery buffer keeps charging stable.
+
+**Limit:** Maximum buffer duration and energy TBD.
+
+### 4.5.7 OCPP 1.6j Integration
+
+#### Messages Used
+
+| Message | Direction | Purpose |
+|---------|-----------|---------|
+| `BootNotification` | Wallbox → Server | Wallbox registration |
+| `Heartbeat` | Wallbox → Server | Connection keepalive |
+| `StatusNotification` | Wallbox → Server | Connector status changes |
+| `StartTransaction` | Wallbox → Server | Charging session start |
+| `StopTransaction` | Wallbox → Server | Charging session end |
+| `MeterValues` | Wallbox → Server | Energy consumption data |
+| `SetChargingProfile` | Server → Wallbox | Set power limit/schedule |
+| `ChangeConfiguration` | Server → Wallbox | Phase switching (if supported) |
+| `RemoteStartTransaction` | Server → Wallbox | Start charging remotely |
+| `RemoteStopTransaction` | Server → Wallbox | Stop charging remotely |
+
+#### Charging Profile Structure
+
+OCPP uses charging profiles to control power:
+
+```json
+{
+  "chargingProfileId": 1,
+  "stackLevel": 0,
+  "chargingProfilePurpose": "TxProfile",
+  "chargingProfileKind": "Relative",
+  "chargingSchedule": {
+    "chargingRateUnit": "W",
+    "chargingSchedulePeriod": [
+      {
+        "startPeriod": 0,
+        "limit": 7400,
+        "numberPhases": 3
+      }
+    ]
+  }
+}
+```
+
+### 4.5.8 Phase Switching
+
+Phase switching is controlled via OCPP `ChangeConfiguration` or `SetChargingProfile` with `numberPhases` parameter.
+
+```
+Decision logic:
+
+IF target_power >= 4100:
+   → 3-phase mode
+   → Set limit: 4100 - 11000 W
+ELSE IF target_power >= 1400:
+   → 1-phase mode
+   → Set limit: 1400 - 3700 W
 ELSE:
-   charging_power = 0
+   → Stop charging
 ```
 
-### 4.5.3 Output: sensor.ev_charging_power
+**Switching delay:** Allow settling time when switching phases (TBD, typically 5-30 seconds).
 
-| Value | Meaning |
-|-------|---------|
-| `0` | No charging |
-| `4100-11000` | Charging power for EVCC (W) |
+### 4.5.9 Home Assistant Entities
+
+#### Inputs (from HA/OCPP)
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| `sensor.ev_soc` | sensor | Car battery SOC (%) |
+| `sensor.wallbox_status` | sensor | Available/Charging/Faulted |
+| `sensor.wallbox_power` | sensor | Current charging power (W) |
+| `sensor.wallbox_energy` | sensor | Session energy (kWh) |
+| `binary_sensor.ev_connected` | binary | Car plugged in |
+
+#### Outputs (from EnergyManager)
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| `sensor.ev_charging_signal` | sensor | opportunistic/goal/off |
+| `sensor.ev_target_power` | sensor | Target charging power (W) |
+| `number.ev_target_soc` | number | Goal: target SOC (%) |
+| `input_datetime.ev_deadline` | datetime | Goal: charge by time |
+| `switch.ev_goal_mode` | switch | Enable/disable goal mode |
+
+### 4.5.10 Configuration
+
+```yaml
+ev_charging:
+  # Power limits
+  min_power_1phase_w: 1400      # 230V × 6A
+  max_power_1phase_w: 3700      # 230V × 16A
+  min_power_3phase_w: 4100      # 400V × 6A
+  max_power_3phase_w: 11000     # 400V × 16A
+
+  # Phase switching
+  phase_switch_delay_s: 10      # Settling time after switch
+
+  # Battery buffer for solar fluctuations
+  buffer_enabled: true
+  buffer_max_minutes: 5
+  buffer_max_wh: 500
+
+  # Goal mode
+  default_target_soc: 80
+
+  # OCPP connection
+  ocpp_port: 9000
+  ocpp_path: "/ocpp"
+
+  # Update intervals
+  forecast_interval_minutes: 15
+  realtime_interval_seconds: 60
+```
+
+### 4.5.11 Algorithm Summary
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    EV Charging Decision Flow                     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Every 15 minutes (Forecast Optimization):                       │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │ 1. Check if goal mode active                               │  │
+│  │ 2. If goal: Calculate energy needed, plan charging windows │  │
+│  │ 3. Check goal feasibility with cheap tariff                │  │
+│  │ 4. Coordinate with battery charging strategy               │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  Every 1 minute (Real-time Control):                             │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │ 1. Read current PV, load, battery state                    │  │
+│  │ 2. Calculate available excess for EV                       │  │
+│  │ 3. Determine target power and phase mode                   │  │
+│  │ 4. Apply battery buffer if solar fluctuating               │  │
+│  │ 5. Send OCPP charging profile                              │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  Goal Mode Check (if active):                                    │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │ IF in cheap tariff AND goal not reached:                   │  │
+│  │    → Charge at max power from grid                         │  │
+│  │ ELSE:                                                      │  │
+│  │    → Use opportunistic solar mode                          │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 4.5.12 Open Questions
+
+| # | Question | Status |
+|---|----------|--------|
+| 1 | OCPP server HA addon - build custom or use existing? | Open |
+| 2 | Battery buffer limits (duration, energy) | TBD |
+| 3 | Phase switching settling time | TBD |
+| 4 | Car SOC source (OBD, car API, manual input?) | Open |
+| 5 | Multiple EVs support needed? | Open |
+
+### 4.5.13 Test Cases
+
+> To be defined after implementation.
 
 ---
 
@@ -2346,8 +2773,10 @@ The delete API in InfluxDB 2.x can be slow with large datasets and may cause gor
 
 **End of Document**
 
-*Version 2.5 - January 2026*
+*Version 2.7 - January 2026*
 
 **Changelog:**
+- v2.7: Comprehensive EV Charging Optimization specification (Section 4.5) - OCPP 1.6j, phase switching, goal mode
+- v2.6: Simplified battery discharge algorithm - rolling 15-minute threshold check; added test cases (Section 4.3.6); appliance signal test cases (Section 4.4.5)
 - v2.5: Added Home Assistant API access documentation (homeassistant_api: true, battery entity reading)
 - v2.4: Added Chapter 5 - Forecast Accuracy Tracking (Accuracy #1: Battery Discharge Optimization)
