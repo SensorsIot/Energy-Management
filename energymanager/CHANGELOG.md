@@ -1,5 +1,10 @@
 # EnergyManager Changelog
 
+## [1.5.2] - 2026-01-25
+
+### Fixed
+- Fixed InfluxDB field name: `final_soc_wh` → `final_soc_percent` (matching dataclass change)
+
 ## [1.5.1] - 2026-01-25
 
 ### Changed

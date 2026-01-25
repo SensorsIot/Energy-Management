@@ -446,7 +446,7 @@ class EnergyManager:
                 .field("signal", signal.signal)
                 .field("reason", signal.reason)
                 .field("excess_power_w", float(signal.excess_power_w))
-                .field("final_soc_wh", float(signal.final_soc_wh))
+                .field("final_soc_percent", float(signal.final_soc_percent))
                 .time(datetime.now(timezone.utc), WritePrecision.S)
             )
             self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=point)
