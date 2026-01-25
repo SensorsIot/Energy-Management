@@ -1,5 +1,12 @@
 # EnergyManager Changelog
 
+## [1.5.8] - 2026-01-25
+
+### Fixed
+- Include 21:00 in expensive hours check (hour <= 21 instead of hour < 21)
+  - The SOC at 21:00 represents state AFTER last expensive period discharged
+  - This fixes off-by-one error where min SOC check missed the boundary
+
 ## [1.5.7] - 2026-01-25
 
 ### Added

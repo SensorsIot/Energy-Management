@@ -328,8 +328,10 @@ class BatteryOptimizer:
         # Step 2: Find minimum SOC during EXPENSIVE hours only
         # During cheap hours (21:00-06:00), low SOC is fine - electricity is cheap
         # During expensive hours (06:00-21:00), SOC must stay >= min_soc
+        # Note: Include 21:00 because the SOC recorded at 21:00 is the state AFTER
+        # the last expensive period discharged (simulation records SOC at START of period)
         sim_swiss_hours = sim_full.index.tz_convert(SWISS_TZ).hour
-        expensive_mask = (sim_swiss_hours >= self.cheap_end_hour) & (sim_swiss_hours < self.cheap_start_hour)
+        expensive_mask = (sim_swiss_hours >= self.cheap_end_hour) & (sim_swiss_hours <= self.cheap_start_hour)
         expensive_periods = sim_full[expensive_mask]
 
         if expensive_periods.empty:
