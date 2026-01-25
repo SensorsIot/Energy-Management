@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.7
+**Version:** 2.8
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -2184,20 +2184,59 @@ log_level: "info"
 
 **Measurements:**
 
-| Measurement | Purpose | Fields |
-|-------------|---------|--------|
-| `soc_forecast` | SOC trajectory based on current strategy decision | `soc_percent` |
-| `energy_balance` | Energy flow per timestep | `pv_wh`, `load_wh`, `net_wh`, `cumulative_wh` |
-| `discharge_decision` | Battery control decisions | `allowed`, `reason`, `deficit_wh`, `saved_wh`, `current_soc`, `switch_on_time` |
-| `appliance_signal` | Appliance signal output | `signal`, `reason`, `excess_power_w`, `forecast_surplus_wh` |
+| Measurement | Purpose | Tags | Fields |
+|-------------|---------|------|--------|
+| `soc_forecast` | Rolling SOC trajectory (overwritten every 15 min) | `scenario` | `soc_percent` |
+| `soc_forecast_snapshot` | Persistent forecast for accuracy tracking | (none) | `soc_percent` |
+| `energy_balance` | Energy flow per timestep | (none) | `pv_wh`, `load_wh`, `net_wh`, `cumulative_wh` |
+| `discharge_decision` | Battery control decisions | (none) | `allowed`, `reason`, `min_soc_percent`, `min_soc_time`, `current_soc` |
+| `appliance_signal` | Appliance signal output | (none) | `signal`, `reason`, `excess_power_w`, `final_soc_percent` |
+
+### 4.7.1 SOC Forecast Scenarios
+
+The `soc_forecast` measurement uses a `scenario` tag to store two curves:
+
+| Scenario | Description | Color in Grafana |
+|----------|-------------|------------------|
+| `with_strategy` | What will happen with discharge blocking applied | Green (solid) |
+| `without_strategy` | What would happen without any blocking | Orange (dashed) |
+
+### 4.7.2 Forecast Snapshot for Accuracy Tracking
+
+The `soc_forecast_snapshot` measurement provides persistent forecast storage:
+
+- **Written every 15 minutes** with the current "with_strategy" forecast
+- **Only overwrites from NOW onwards** - earlier points remain from previous writes
+- **Accumulates over time** - creates continuous forecast history
+- **Compare with actual SOC** from `HuaweiNew` bucket to evaluate forecast accuracy
+
+Example: At 21:00, forecast is written for 21:00→21:00 next day. At 23:00, only 23:00→21:00 is overwritten, preserving the 21:00→23:00 portion.
 
 **Query examples:**
 
 ```flux
-# SOC forecast curve
+# SOC forecast - with strategy (what will happen)
 from(bucket: "energy_manager")
   |> range(start: -1h, stop: 48h)
   |> filter(fn: (r) => r._measurement == "soc_forecast")
+  |> filter(fn: (r) => r.scenario == "with_strategy")
+
+# SOC forecast - without strategy (why we block)
+from(bucket: "energy_manager")
+  |> range(start: -1h, stop: 48h)
+  |> filter(fn: (r) => r._measurement == "soc_forecast")
+  |> filter(fn: (r) => r.scenario == "without_strategy")
+
+# Forecast snapshot (for accuracy comparison)
+from(bucket: "energy_manager")
+  |> range(start: -24h, stop: now())
+  |> filter(fn: (r) => r._measurement == "soc_forecast_snapshot")
+
+# Actual SOC (for comparison with forecast)
+from(bucket: "HuaweiNew")
+  |> range(start: -24h, stop: now())
+  |> filter(fn: (r) => r._measurement == "Energy")
+  |> filter(fn: (r) => r._field == "BATT_Level")
 
 # Energy balance with cumulative
 from(bucket: "energy_manager")
@@ -2773,9 +2812,10 @@ The delete API in InfluxDB 2.x can be slow with large datasets and may cause gor
 
 **End of Document**
 
-*Version 2.7 - January 2026*
+*Version 2.8 - January 2026*
 
 **Changelog:**
+- v2.8: Dual SOC forecast scenarios (with/without strategy); forecast snapshot for accuracy tracking; updated InfluxDB storage schema (Section 4.7)
 - v2.7: Comprehensive EV Charging Optimization specification (Section 4.5) - OCPP 1.6j, phase switching, goal mode
 - v2.6: Simplified battery discharge algorithm - rolling 15-minute threshold check; added test cases (Section 4.3.6); appliance signal test cases (Section 4.4.5)
 - v2.5: Added Home Assistant API access documentation (homeassistant_api: true, battery entity reading)
