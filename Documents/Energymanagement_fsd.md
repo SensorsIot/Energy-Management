@@ -1551,6 +1551,7 @@ Every 15 minutes:
 3. CHECK: Does SOC stay >= min_soc during ALL expensive hours?
    - Extract minimum SOC from all 06:00-21:00 periods in simulation
    - Ignore SOC values during cheap hours (21:00-06:00)
+   - Ignore weekend/holiday days entirely (all-day cheap → no expensive hours)
 
    IF min_soc_in_expensive_hours >= min_soc (10%):
       → Discharge ALLOWED (safe to use battery now)
@@ -1577,8 +1578,10 @@ Every 15 minutes:
 - Re-simulation with current SOC naturally adapts to reality
 - No need to pre-calculate a "switch-on time"—just ask "is it safe now?"
 
-**Why only check expensive hours in simulation:**
+**Why only check expensive hours on weekdays:**
 - During cheap tariff (21:00-06:00), low SOC is acceptable—grid electricity is inexpensive
+- On weekends/holidays, the entire day is cheap—no expensive hours exist
+- Weekend SOC dips are irrelevant: only the next weekday's expensive hours matter
 - The min_soc reserve (10%) ensures capacity for forecast errors and unexpected loads
 
 **Signal hysteresis:**
@@ -2822,9 +2825,10 @@ The delete API in InfluxDB 2.x can be slow with large datasets and may cause gor
 
 **End of Document**
 
-*Version 2.9 - January 2026*
+*Version 2.10 - January 2026*
 
 **Changelog:**
+- v2.10: Expensive hours check now excludes weekend/holiday days (Section 4.3.2, 4.3.3); fixes incorrect discharge blocking on Friday nights
 - v2.9: Appliance signal uses min SOC instead of final SOC for ORANGE check (Section 4.4); ensures SOC never dips below threshold at any point in simulation
 - v2.8: Dual SOC forecast scenarios (with/without strategy); forecast snapshot for accuracy tracking; updated InfluxDB storage schema (Section 4.7)
 - v2.7: Comprehensive EV Charging Optimization specification (Section 4.5) - OCPP 1.6j, phase switching, goal mode

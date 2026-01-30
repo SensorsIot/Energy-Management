@@ -339,6 +339,35 @@ class TestEdgeCases:
 
         assert tariff.is_cheap_now is True
 
+    def test_weekend_allows_discharge_despite_low_soc(self):
+        """On weekends, daytime SOC dips should not block discharge (all-day cheap)."""
+        optimizer = BatteryOptimizer(
+            capacity_wh=10000,
+            min_soc_percent=10,
+            weekend_all_day_cheap=True,
+        )
+
+        # Friday night 23:00 → weekend ahead
+        now = datetime(2026, 1, 30, 23, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+
+        # No PV, moderate load → SOC will drop to 0% on Saturday
+        # But Saturday is cheap, so it shouldn't matter
+        forecast = make_forecast(
+            start=now,
+            hours=48,
+            pv_pattern=[0],  # No PV at all (worst case)
+            load_pattern=[500],  # 500W constant
+        )
+
+        decision, _, _ = optimizer.calculate_decision(
+            soc_percent=10,
+            forecast=forecast,
+            now=now,
+        )
+
+        # Weekend days have no expensive hours → discharge should be allowed
+        assert decision.discharge_allowed is True
+
     def test_weekday_morning_is_expensive(self):
         """Weekday 08:00 should be expensive tariff."""
         optimizer = BatteryOptimizer()

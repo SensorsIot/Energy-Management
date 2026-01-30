@@ -1,5 +1,13 @@
 # EnergyManager Changelog
 
+## [1.5.13] - 2026-01-30
+
+### Fixed
+- Weekend/holiday daytime no longer treated as expensive hours
+  - The expensive hours mask only checked time-of-day (06:15-21:00), not day type
+  - Saturday/Sunday SOC dips were incorrectly blocking discharge on Friday night
+  - Now skips weekend/holiday days when checking min SOC during expensive hours
+
 ## [1.5.12] - 2026-01-30
 
 ### Changed

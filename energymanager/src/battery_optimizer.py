@@ -344,7 +344,12 @@ class BatteryOptimizer:
         at_or_before_cheap_start = (sim_swiss_hours < self.cheap_start_hour) | (
             (sim_swiss_hours == self.cheap_start_hour) & (sim_swiss_minutes == 0)
         )
-        expensive_mask = after_cheap_end & at_or_before_cheap_start
+        # Only weekdays (not weekends/holidays) have expensive hours
+        is_expensive_day = pd.Series(
+            [not self.is_cheap_day(t) for t in sim_swiss],
+            index=sim_full.index,
+        )
+        expensive_mask = after_cheap_end & at_or_before_cheap_start & is_expensive_day
         expensive_periods = sim_full[expensive_mask]
 
         if expensive_periods.empty:
