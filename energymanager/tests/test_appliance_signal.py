@@ -3,8 +3,8 @@ Tests for appliance signal calculation (FSD v2.6).
 
 Test cases:
 1. GREEN: PV excess > appliance power
-2. ORANGE: Final SOC% >= reserve% + appliance%
-3. RED: Final SOC% < threshold
+2. ORANGE: Min SOC% >= reserve% + appliance%
+3. RED: Min SOC% < threshold
 4. Edge cases (no simulation, low PV, etc.)
 """
 
@@ -99,7 +99,7 @@ class TestGreenSignal:
 
 
 class TestOrangeSignal:
-    """ORANGE: Final SOC% >= reserve% + appliance%."""
+    """ORANGE: Min SOC% >= reserve% + appliance%."""
 
     def test_orange_when_soc_above_threshold(self):
         """Final SOC 30% >= 25% (10% reserve + 15% appliance) → ORANGE."""
@@ -169,7 +169,7 @@ class TestOrangeSignal:
 
 
 class TestRedSignal:
-    """RED: Final SOC% < reserve% + appliance%."""
+    """RED: Min SOC% < reserve% + appliance%."""
 
     def test_red_when_soc_below_threshold(self):
         """Final SOC 20% < 25% threshold → RED."""
@@ -184,7 +184,7 @@ class TestRedSignal:
         )
 
         assert signal.signal == "red"
-        assert "Min SOC" in signal.reason or "Final SOC" in signal.reason
+        assert "Min SOC" in signal.reason
 
     def test_red_with_zero_pv(self):
         """No PV and low SOC → RED."""

@@ -1690,12 +1690,12 @@ Every 15 minutes:
    → Run now with pure solar
    → excess = current_pv - current_load
 
-2. ORANGE: Final SOC% >= reserve% + appliance%
-   → Battery has enough reserve ABOVE the minimum to absorb the appliance load
+2. ORANGE: Min SOC% >= reserve% + appliance%
+   → SOC never drops below threshold at any point in the simulation
    → Uses same simulation as battery optimizer
 
 3. RED: Otherwise
-   → Final SOC too low, would require grid import or violate battery reserve
+   → SOC drops below threshold, would require grid import or violate battery reserve
 ```
 
 ### 4.4.2.1 ORANGE Threshold Calculation
@@ -1720,14 +1720,14 @@ ORANGE threshold = reserve% + appliance%
 | `appliance%` | 15% |
 | **ORANGE threshold** | 25% |
 
-This ensures running the appliance won't push SOC below the configured `reserve_percent`.
+The ORANGE check uses the **minimum** SOC across the entire simulation, not just the final value. This ensures the SOC never drops below the threshold at any point, even if it recovers later.
 
 ### 4.4.3 Output: sensor.appliance_signal
 
 | State | Meaning |
 |-------|---------|
 | `green` | Pure solar available now (excess > 2500W) |
-| `orange` | Safe to run, final SOC% >= reserve% + appliance% |
+| `orange` | Safe to run, min SOC% >= reserve% + appliance% |
 | `red` | Insufficient surplus, would violate battery reserve |
 
 ### 4.4.4 Sensor Attributes
@@ -1736,7 +1736,7 @@ This ensures running the appliance won't push SOC below the configured `reserve_
 |-----------|-------------|
 | `reason` | Human-readable explanation of the signal |
 | `excess_power_w` | Current PV excess (pv - load) in watts |
-| `final_soc_percent` | Projected final SOC from simulation in % |
+| `final_soc_percent` | Minimum projected SOC from simulation in % |
 
 ### 4.4.5 Test Cases
 
@@ -1750,22 +1750,31 @@ Test file: `energymanager/tests/test_appliance_signal.py`
 | `test_green_ignores_soc_when_pv_sufficient` | Even with low SOC, GREEN if PV excess sufficient | PV: 5000W, Load: 2000W, SOC: 5% | `signal="green"` |
 | `test_not_green_when_pv_excess_exactly_equals_threshold` | PV excess exactly 2500W (need >) | PV: 3500W, Load: 1000W | `signal != "green"` |
 
-#### ORANGE Signal: Final SOC% >= reserve% + appliance%
+#### ORANGE Signal: Min SOC% >= reserve% + appliance%
 
 | Test | Description | Conditions | Expected Result |
 |------|-------------|------------|-----------------|
-| `test_orange_when_soc_above_threshold` | Final SOC 30% >= 25% threshold | Final SOC: 30%, reserve: 10%, appliance: 15% | `signal="orange"` |
-| `test_orange_exactly_at_threshold` | Final SOC exactly at threshold (25%) | Final SOC: 25%, reserve: 10%, appliance: 15% | `signal="orange"` |
-| `test_orange_threshold_calculation` | Different parameters: 20% reserve + 20% appliance = 40% | Final SOC: 45%, reserve: 20%, appliance: 2000Wh/10000Wh=20% | `signal="orange"` |
-| `test_orange_with_different_battery_capacity` | 15kWh battery: 1500Wh = 10% appliance | Capacity: 15kWh, Final SOC: 25%, threshold: 20% | `signal="orange"` |
+| `test_orange_when_soc_above_threshold` | Min SOC 30% >= 25% threshold | Min SOC: 30%, reserve: 10%, appliance: 15% | `signal="orange"` |
+| `test_orange_exactly_at_threshold` | Min SOC exactly at threshold (25%) | Min SOC: 25%, reserve: 10%, appliance: 15% | `signal="orange"` |
+| `test_orange_threshold_calculation` | Different parameters: 20% reserve + 20% appliance = 40% | Min SOC: 45%, reserve: 20%, appliance: 2000Wh/10000Wh=20% | `signal="orange"` |
+| `test_orange_with_different_battery_capacity` | 15kWh battery: 1500Wh = 10% appliance | Capacity: 15kWh, Min SOC: 25%, threshold: 20% | `signal="orange"` |
 
-#### RED Signal: Final SOC% < threshold
+#### RED Signal: Min SOC% < threshold
 
 | Test | Description | Conditions | Expected Result |
 |------|-------------|------------|-----------------|
-| `test_red_when_soc_below_threshold` | Final SOC 20% < 25% threshold | Final SOC: 20%, reserve: 10%, appliance: 15% | `signal="red"` |
-| `test_red_with_zero_pv` | No PV and low SOC | PV: 0W, Final SOC: 15% | `signal="red"` |
-| `test_red_just_below_threshold` | Final SOC 24% just below 25% | Final SOC: 24%, threshold: 25% | `signal="red"` |
+| `test_red_when_soc_below_threshold` | Min SOC 20% < 25% threshold | Min SOC: 20%, reserve: 10%, appliance: 15% | `signal="red"` |
+| `test_red_with_zero_pv` | No PV and low SOC | PV: 0W, Min SOC: 15% | `signal="red"` |
+| `test_red_just_below_threshold` | Min SOC 24% just below 25% | Min SOC: 24%, threshold: 25% | `signal="red"` |
+
+#### Min SOC Check (dip and recover scenarios)
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_red_when_soc_dips_below_reserve` | SOC dips to 0% but recovers to 48% | Min SOC: 0%, Final SOC: 48% | `signal="red"` |
+| `test_red_when_soc_dips_just_below_threshold` | SOC dips to 24% (just below 25%) | Min SOC: 24%, Final SOC: 48% | `signal="red"` |
+| `test_orange_when_soc_stays_above_threshold` | SOC stays above 25% threshold | Min SOC: 30%, Final SOC: 30% | `signal="orange"` |
+| `test_orange_when_min_soc_exactly_at_threshold` | SOC dips to exactly 25% | Min SOC: 25%, Final SOC: 30% | `signal="orange"` |
 
 #### Edge Cases
 
@@ -1773,15 +1782,16 @@ Test file: `energymanager/tests/test_appliance_signal.py`
 |------|-------------|------------|-----------------|
 | `test_empty_simulation_returns_red` | Empty simulation DataFrame | Empty DataFrame | `signal="red"` (safe default) |
 | `test_simulation_without_soc_column` | Missing soc_percent column | DataFrame without soc_percent | `signal="red"` |
-| `test_negative_pv_excess` | Load > PV (deficit) | PV: 500W, Load: 2000W, Final SOC: 30% | `signal="orange"` (checks SOC threshold) |
-| `test_zero_reserve_percent` | Zero reserve, only need appliance% | reserve: 0%, appliance: 15%, Final SOC: 16% | `signal="orange"` |
-| `test_high_reserve_percent` | High reserve (30%) changes threshold | reserve: 30%, appliance: 15%, Final SOC: 40% | `signal="red"` (threshold=45%) |
+| `test_negative_pv_excess` | Load > PV (deficit) | PV: 500W, Load: 2000W, Min SOC: 30% | `signal="orange"` (checks SOC threshold) |
+| `test_zero_reserve_percent` | Zero reserve, only need appliance% | reserve: 0%, appliance: 15%, Min SOC: 16% | `signal="orange"` |
+| `test_high_reserve_percent` | High reserve (30%) changes threshold | reserve: 30%, appliance: 15%, Min SOC: 40% | `signal="red"` (threshold=45%) |
 
 #### Helper Functions
 
 | Test | Description | Conditions | Expected Result |
 |------|-------------|------------|-----------------|
 | `test_returns_last_value` | get_final_soc_percent returns last value | Simulation ending at 42% | Returns 42% |
+| `test_returns_minimum_value` | get_min_soc_percent returns min value | Simulation dipping to 5% | Returns 5% |
 | `test_empty_dataframe_returns_zero` | Empty DataFrame returns 0 | Empty DataFrame | Returns 0% |
 | `test_missing_column_returns_zero` | Missing column returns 0 | DataFrame without soc_percent | Returns 0% |
 
@@ -1796,7 +1806,7 @@ Test file: `energymanager/tests/test_appliance_signal.py`
 cd energymanager && python -m pytest tests/test_appliance_signal.py -v
 ```
 
-**All 19 tests passing** (as of v1.5.0)
+**All 26 tests passing** (as of v1.5.12)
 
 ---
 
@@ -2812,9 +2822,10 @@ The delete API in InfluxDB 2.x can be slow with large datasets and may cause gor
 
 **End of Document**
 
-*Version 2.8 - January 2026*
+*Version 2.9 - January 2026*
 
 **Changelog:**
+- v2.9: Appliance signal uses min SOC instead of final SOC for ORANGE check (Section 4.4); ensures SOC never dips below threshold at any point in simulation
 - v2.8: Dual SOC forecast scenarios (with/without strategy); forecast snapshot for accuracy tracking; updated InfluxDB storage schema (Section 4.7)
 - v2.7: Comprehensive EV Charging Optimization specification (Section 4.5) - OCPP 1.6j, phase switching, goal mode
 - v2.6: Simplified battery discharge algorithm - rolling 15-minute threshold check; added test cases (Section 4.3.6); appliance signal test cases (Section 4.4.5)
