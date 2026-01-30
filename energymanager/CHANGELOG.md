@@ -1,5 +1,12 @@
 # EnergyManager Changelog
 
+## [1.5.11] - 2026-01-30
+
+### Fixed
+- Appliance signal ORANGE now checks min SOC against full threshold (reserve% + appliance%)
+  - Previously only final SOC was checked, allowing orange when SOC dipped to 0% mid-day
+  - Rule: min SOC >= 25% AND final SOC >= 25% (for 10% reserve + 15% appliance)
+
 ## [1.5.10] - 2026-01-25
 
 ### Fixed
