@@ -12,7 +12,7 @@ import pytest
 import pandas as pd
 from datetime import datetime, timezone
 
-from src.appliance_signal import calculate_appliance_signal, ApplianceSignal, get_final_soc_percent
+from src.appliance_signal import calculate_appliance_signal, ApplianceSignal, get_final_soc_percent, get_min_soc_percent
 
 
 def make_simulation(final_soc_percent: float) -> pd.DataFrame:
@@ -27,6 +27,25 @@ def make_simulation(final_soc_percent: float) -> pd.DataFrame:
     return pd.DataFrame({
         "soc_percent": soc_values,
         "soc_wh": [s * 100 for s in soc_values],  # For 10kWh battery
+    }, index=times)
+
+
+def make_simulation_with_dip(final_soc_percent: float, min_soc_percent: float) -> pd.DataFrame:
+    """Create a simulation that dips to min_soc_percent then recovers to final_soc_percent.
+
+    All intermediate values stay >= min_soc_percent so min() returns the expected value.
+    """
+    times = pd.date_range(
+        start=datetime.now(timezone.utc),
+        periods=5,
+        freq="15min"
+    )
+    start = max(final_soc_percent, min_soc_percent + 10)
+    mid = min_soc_percent + (start - min_soc_percent) / 2
+    soc_values = [start, mid, min_soc_percent, mid, final_soc_percent]
+    return pd.DataFrame({
+        "soc_percent": soc_values,
+        "soc_wh": [s * 100 for s in soc_values],
     }, index=times)
 
 
@@ -165,7 +184,7 @@ class TestRedSignal:
         )
 
         assert signal.signal == "red"
-        assert "need reserve" in signal.reason
+        assert "Min SOC" in signal.reason or "Final SOC" in signal.reason
 
     def test_red_with_zero_pv(self):
         """No PV and low SOC → RED."""
@@ -194,6 +213,67 @@ class TestRedSignal:
         )
 
         assert signal.signal == "red"
+
+
+class TestMinSocCheck:
+    """RED when SOC dips below reserve, even if final SOC is high enough."""
+
+    def test_red_when_soc_dips_below_reserve(self):
+        """SOC dips to 0% but recovers to 48% → RED (not orange)."""
+        signal = calculate_appliance_signal(
+            current_pv_w=1000,
+            current_load_w=800,
+            simulation=make_simulation_with_dip(final_soc_percent=48, min_soc_percent=0),
+            appliance_power_w=2500,
+            appliance_energy_wh=1500,
+            capacity_wh=10000,
+            reserve_percent=10,
+        )
+
+        assert signal.signal == "red"
+        assert "Min SOC" in signal.reason
+
+    def test_red_when_soc_dips_just_below_threshold(self):
+        """SOC dips to 24% (just below 25% threshold) → RED."""
+        signal = calculate_appliance_signal(
+            current_pv_w=1000,
+            current_load_w=800,
+            simulation=make_simulation_with_dip(final_soc_percent=48, min_soc_percent=24),
+            appliance_power_w=2500,
+            appliance_energy_wh=1500,
+            capacity_wh=10000,
+            reserve_percent=10,
+        )
+
+        assert signal.signal == "red"
+
+    def test_orange_when_soc_stays_above_threshold(self):
+        """SOC dips to 30% but stays above 25% threshold, final 30% → ORANGE."""
+        signal = calculate_appliance_signal(
+            current_pv_w=1000,
+            current_load_w=800,
+            simulation=make_simulation_with_dip(final_soc_percent=30, min_soc_percent=30),
+            appliance_power_w=2500,
+            appliance_energy_wh=1500,
+            capacity_wh=10000,
+            reserve_percent=10,
+        )
+
+        assert signal.signal == "orange"
+
+    def test_orange_when_min_soc_exactly_at_threshold(self):
+        """SOC dips to exactly 25% threshold → ORANGE (>= check)."""
+        signal = calculate_appliance_signal(
+            current_pv_w=1000,
+            current_load_w=800,
+            simulation=make_simulation_with_dip(final_soc_percent=30, min_soc_percent=25),
+            appliance_power_w=2500,
+            appliance_energy_wh=1500,
+            capacity_wh=10000,
+            reserve_percent=10,
+        )
+
+        assert signal.signal == "orange"
 
 
 class TestEdgeCases:
@@ -298,6 +378,25 @@ class TestGetFinalSocPercent:
         """Missing soc_percent column returns 0."""
         bad_df = pd.DataFrame({"other": [1, 2, 3]})
         result = get_final_soc_percent(bad_df)
+        assert result == 0
+
+
+class TestGetMinSocPercent:
+    """Test the get_min_soc_percent helper function."""
+
+    def test_returns_minimum_value(self):
+        """Should return the minimum soc_percent value."""
+        sim = make_simulation_with_dip(final_soc_percent=48, min_soc_percent=5)
+        result = get_min_soc_percent(sim)
+        assert abs(result - 5) < 0.1
+
+    def test_empty_dataframe_returns_zero(self):
+        result = get_min_soc_percent(pd.DataFrame())
+        assert result == 0
+
+    def test_missing_column_returns_zero(self):
+        bad_df = pd.DataFrame({"other": [1, 2, 3]})
+        result = get_min_soc_percent(bad_df)
         assert result == 0
 
 

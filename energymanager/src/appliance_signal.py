@@ -3,8 +3,8 @@ Appliance signal calculation for washing machine / dishwasher.
 
 Signal logic:
 - GREEN: Current PV excess > appliance power (can run directly from solar)
-- ORANGE: Final SOC% >= reserve% + appliance% (battery can absorb the load)
-- RED: Otherwise (would require grid import)
+- ORANGE: Min SOC% >= reserve% + appliance% AND final SOC% >= reserve% + appliance%
+- RED: Otherwise
 
 The simulation passed to this module already accounts for battery efficiency.
 """
@@ -61,31 +61,55 @@ def calculate_appliance_signal(
             final_soc_percent=0,
         )
 
-    # Get final SOC% from simulation (efficiency already applied)
+    # Get final and minimum SOC% from simulation (efficiency already applied)
     final_soc_percent = get_final_soc_percent(simulation)
+    min_soc_percent = get_min_soc_percent(simulation)
 
     # Calculate appliance energy as percentage of battery capacity
     appliance_percent = appliance_energy_wh / capacity_wh * 100
 
-    # ORANGE: Final SOC% >= reserve% + appliance%
-    # The appliance energy must be ADDITIONAL to the reserve
+    # ORANGE: Both min and final SOC >= reserve% + appliance%
     orange_threshold_percent = reserve_percent + appliance_percent
 
-    if final_soc_percent >= orange_threshold_percent:
+    if min_soc_percent >= orange_threshold_percent and final_soc_percent >= orange_threshold_percent:
         return ApplianceSignal(
             signal="orange",
-            reason=f"Final SOC {final_soc_percent:.0f}% >= {orange_threshold_percent:.0f}% (reserve {reserve_percent:.0f}% + appliance {appliance_percent:.0f}%)",
+            reason=f"SOC stays above {orange_threshold_percent:.0f}% (reserve {reserve_percent:.0f}% + appliance {appliance_percent:.0f}%), min {min_soc_percent:.0f}%, final {final_soc_percent:.0f}%",
             excess_power_w=excess_power,
             final_soc_percent=final_soc_percent,
         )
 
-    # RED: Otherwise
+    # RED: Min or final SOC drops below threshold
+    if min_soc_percent < orange_threshold_percent:
+        reason = f"Min SOC {min_soc_percent:.0f}% < {orange_threshold_percent:.0f}% (reserve {reserve_percent:.0f}% + appliance {appliance_percent:.0f}%)"
+    else:
+        reason = f"Final SOC {final_soc_percent:.0f}% < {orange_threshold_percent:.0f}% (reserve {reserve_percent:.0f}% + appliance {appliance_percent:.0f}%)"
+
     return ApplianceSignal(
         signal="red",
-        reason=f"Final SOC {final_soc_percent:.0f}% < {orange_threshold_percent:.0f}% (need reserve {reserve_percent:.0f}% + appliance {appliance_percent:.0f}%)",
+        reason=reason,
         excess_power_w=excess_power,
         final_soc_percent=final_soc_percent,
     )
+
+
+def get_min_soc_percent(simulation: pd.DataFrame) -> float:
+    """
+    Get minimum SOC in percent from simulation.
+
+    Args:
+        simulation: DataFrame with soc_percent column
+
+    Returns:
+        Minimum SOC in %, or 0 if simulation is empty
+    """
+    if simulation.empty:
+        return 0
+
+    if "soc_percent" not in simulation.columns:
+        return 0
+
+    return float(simulation["soc_percent"].min())
 
 
 def get_final_soc_percent(simulation: pd.DataFrame) -> float:
