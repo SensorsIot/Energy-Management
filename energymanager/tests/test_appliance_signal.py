@@ -291,8 +291,7 @@ class TestEdgeCases:
             reserve_percent=10,
         )
 
-        # final_soc_percent = 0 when no simulation
-        # 0% < 25% threshold → RED
+        # No simulation data → can't confirm enough energy → RED
         assert signal.signal == "red"
 
     def test_simulation_without_soc_column(self):

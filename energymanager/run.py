@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.5.13"
+__version__ = "1.5.14"
 
 import json
 import logging
@@ -399,7 +399,8 @@ class EnergyManager:
             # Control battery
             self.control_battery(decision.discharge_allowed)
 
-            # Calculate appliance signal (pass simulation for efficiency-aware final SOC)
+            # Calculate appliance signal using full simulation
+            # (checks if battery has enough energy to run appliance without grid import)
             self.calculate_appliance_signal(current_soc, sim_no_strategy)
 
         except Exception as e:

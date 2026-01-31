@@ -1,5 +1,13 @@
 # EnergyManager Changelog
 
+## [1.5.14] - 2026-01-31
+
+### Fixed
+- Appliance signal uses full simulation (not filtered to expensive periods)
+  - ORANGE means enough battery energy to avoid grid import, regardless of tariff
+  - Weekend filtering only applies to battery discharge decision, not appliance signal
+- Refactored `filter_expensive_periods()` method in BatteryOptimizer (DRY)
+
 ## [1.5.13] - 2026-01-30
 
 ### Fixed

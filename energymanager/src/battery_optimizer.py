@@ -100,6 +100,30 @@ class BatteryOptimizer:
         """Check if entire day is cheap (weekend or holiday)."""
         return (self.weekend_all_day_cheap and self.is_weekend(dt)) or self.is_holiday(dt)
 
+    def filter_expensive_periods(self, simulation: pd.DataFrame) -> pd.DataFrame:
+        """Filter simulation to only include expensive weekday periods (06:15-21:00).
+
+        Excludes weekend/holiday days entirely since they are all-day cheap.
+        """
+        if simulation.empty:
+            return simulation
+
+        sim_swiss = simulation.index.tz_convert(SWISS_TZ)
+        hours = sim_swiss.hour
+        minutes = sim_swiss.minute
+
+        after_cheap_end = (hours > self.cheap_end_hour) | (
+            (hours == self.cheap_end_hour) & (minutes > 0)
+        )
+        at_or_before_cheap_start = (hours < self.cheap_start_hour) | (
+            (hours == self.cheap_start_hour) & (minutes == 0)
+        )
+        is_expensive_day = pd.Series(
+            [not self.is_cheap_day(t) for t in sim_swiss],
+            index=simulation.index,
+        )
+        return simulation[after_cheap_end & at_or_before_cheap_start & is_expensive_day]
+
     def get_tariff_periods(self, now: datetime) -> TariffPeriod:
         """
         Calculate tariff periods based on current time.
@@ -327,30 +351,9 @@ class BatteryOptimizer:
 
         # Step 2: Find minimum SOC during EXPENSIVE hours only
         # During cheap hours (21:00-06:00), low SOC is fine - electricity is cheap
-        # During expensive hours (06:00-21:00), SOC must stay >= min_soc
-        # Note: Simulation records SOC at START of each period, so:
-        # - 06:00 SOC = state AFTER cheap period (05:45-06:00) → exclude
-        # - 06:15+ SOC = state AFTER expensive period → include
-        # - 21:00 SOC = state AFTER expensive period (20:45-21:00) → include
-        # - 21:15+ SOC = state AFTER cheap period → exclude
-        sim_swiss = sim_full.index.tz_convert(SWISS_TZ)
-        sim_swiss_hours = sim_swiss.hour
-        sim_swiss_minutes = sim_swiss.minute
-        # After 06:00 (not at 06:00 exactly)
-        after_cheap_end = (sim_swiss_hours > self.cheap_end_hour) | (
-            (sim_swiss_hours == self.cheap_end_hour) & (sim_swiss_minutes > 0)
-        )
-        # At or before 21:00 (include 21:00 exactly, exclude 21:15+)
-        at_or_before_cheap_start = (sim_swiss_hours < self.cheap_start_hour) | (
-            (sim_swiss_hours == self.cheap_start_hour) & (sim_swiss_minutes == 0)
-        )
-        # Only weekdays (not weekends/holidays) have expensive hours
-        is_expensive_day = pd.Series(
-            [not self.is_cheap_day(t) for t in sim_swiss],
-            index=sim_full.index,
-        )
-        expensive_mask = after_cheap_end & at_or_before_cheap_start & is_expensive_day
-        expensive_periods = sim_full[expensive_mask]
+        # During expensive hours (06:15-21:00 on weekdays), SOC must stay >= min_soc
+        # Weekend/holiday days are excluded entirely (all-day cheap)
+        expensive_periods = self.filter_expensive_periods(sim_full)
 
         if expensive_periods.empty:
             # No expensive periods in simulation
