@@ -30,7 +30,8 @@
         },
         "ghcr.io/devcontainers/features/git:1": {},
         "ghcr.io/devcontainers/features/node:1": {
-            "version": "lts"
+            "version": "lts",
+            "installYarnUsingApt": false
         },
         "ghcr.io/devcontainers/features/sshd:1": {
             "version": "latest"
@@ -44,7 +45,7 @@
         "source=${localEnv:HOME}/.ssh/id_ed25519,target=/home/dev/.ssh/id_ed25519,type=bind,readonly",
         "source=${localEnv:HOME}/.git-credentials,target=/home/dev/.git-credentials,type=bind,readonly",
         "source=${localEnv:HOME}/.secrets,target=/home/dev/.secrets,type=bind,readonly",
-        "source=${localEnv:HOME}/.claude,target=/home/dev/.claude,type=bind"
+        "source=${localEnv:HOME}/.claude-containers/${localWorkspaceFolderBasename},target=/home/dev/.claude,type=bind"
     ],
     "containerEnv": {
         "INFLUXDB_TOKEN": "${localEnv:INFLUXDB_TOKEN}",

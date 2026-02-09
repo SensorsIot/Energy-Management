@@ -1,7 +1,9 @@
+.claude/*
+!.claude/skills/
+!.claude/commands/
 # AI agent files
 claude.md
 AGENTS.md
-.claude/
 .cursor/
 .aider/
 copilot.md
