@@ -31,7 +31,14 @@ Forecasts are stored in InfluxDB for use by:
 │                                      ▼                               │
 │  CALCULATOR (scheduled: every 15 min)                                │
 │  ┌──────────────────────────────────────────────────────────────┐   │
-│  │ GRIB files ───▶ pvlib ───▶ P10/P50/P90 forecast ───▶ InfluxDB│   │
+│  │ GRIB files ───▶ pvlib ───▶ shading ───▶ P10/P50/P90 ───▶ DB  │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                      ▲                               │
+│                                      │ (shading_factors.yaml)        │
+│  SHADING TRACKER (scheduled: 21:15 daily)                            │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │ Actual vs Forecast ───▶ shading_observations ───▶ YAML       │   │
+│  │                         (InfluxDB - all days)     (sunny only)│   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
@@ -99,6 +106,36 @@ schedule:
   calculator_interval_minutes: 15
 ```
 
+### Shading Correction
+
+The add-on learns site-specific shading patterns by comparing actual production with model predictions on sunny days. Factors are stored in `shading_factors.yaml`:
+
+```yaml
+shading_correction:
+  description: Shading factors by hour (local time). Updated automatically.
+  last_updated: '2025-02-09T00:00:00+01:00'
+  num_sunny_days: 10
+  factors:
+    East:
+      6: 0.20    # Heavy morning shading (trees/buildings to east)
+      7: 0.25
+      8: 0.55
+      # ... factors for hours 6-18
+    West:
+      6: 0.65
+      # ... factors for hours 6-18
+    South:
+      6: 0.45
+      # ... factors for hours 6-18
+```
+
+**How it works:**
+1. At 21:15 daily, compares yesterday's forecast with actual production
+2. Stores ratio (actual/forecast) and weather_factor to InfluxDB for ALL days
+3. If weather_factor >= 0.90 (sunny day), recalculates factors from last 10 sunny days
+4. Writes updated factors to `shading_factors.yaml`
+5. Calculator loads factors and applies per-string, per-hour corrections
+
 ## InfluxDB Schema
 
 **Measurement:** `pv_forecast`
@@ -133,6 +170,25 @@ schedule:
 | `temp_air` | °C | Air temperature |
 
 **Note:** All values share the exact same timestamp, ensuring perfect alignment for MPC calculations.
+
+---
+
+**Measurement:** `shading_observations`
+
+Stores raw shading ratios for analysis and factor calculation.
+
+| Tag | Values |
+|-----|--------|
+| `snapshot_id` | Date string (YYYY-MM-DD) |
+| `string` | East, West, South |
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `hour` | int | Local hour (0-23) |
+| `ratio` | ratio | Actual/forecast ratio (clamped 0.1-1.5) |
+| `weather_factor` | ratio | Day's weather factor (actual/clear-sky) |
+
+**Note:** Observations are stored for ALL days. Only days with `weather_factor >= 0.90` are used for factor calculation.
 
 ## Grafana Query Examples
 
@@ -192,6 +248,19 @@ actual = from(bucket: "HomeAssistant")
   |> filter(fn: (r) => r.entity_id == "sensor.solar_pv_total_ac_power")
 
 union(tables: [forecast, actual])
+```
+
+### Shading Observations by String
+
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: -30d)
+  |> filter(fn: (r) => r._measurement == "shading_observations")
+  |> filter(fn: (r) => r._field == "ratio" or r._field == "hour" or r._field == "weather_factor")
+  |> pivot(rowKey: ["_time", "string", "snapshot_id"], columnKey: ["_field"], valueColumn: "_value")
+  |> filter(fn: (r) => r.weather_factor >= 0.90)  // Sunny days only
+  |> group(columns: ["string", "hour"])
+  |> mean(column: "ratio")
 ```
 
 ## Storage

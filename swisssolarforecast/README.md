@@ -1,6 +1,6 @@
 # SwissSolarForecast
 
-![Version](https://img.shields.io/badge/version-1.0.2-blue)
+![Version](https://img.shields.io/badge/version-1.2.4-blue)
 ![Supports aarch64](https://img.shields.io/badge/aarch64-yes-green)
 ![Supports amd64](https://img.shields.io/badge/amd64-yes-green)
 ![Supports armv7](https://img.shields.io/badge/armv7-yes-green)
@@ -14,6 +14,7 @@ Swiss PV power forecast using MeteoSwiss ICON ensemble data with pvlib.
 - **P10/P50/P90 Percentiles**: Provides pessimistic, median, and optimistic power forecasts
 - **Hybrid Model**: Combines ICON-CH1 (1km, 33h) and ICON-CH2 (2.1km, 48h) for optimal accuracy
 - **Per-Inverter Forecasts**: Supports multiple plants, inverters, and string configurations
+- **Adaptive Shading Correction**: Learns per-string shading patterns from sunny day observations
 - **15-Minute Resolution**: Aligned timestamps for MPC/optimization integration
 - **InfluxDB Output**: Writes forecasts to InfluxDB for visualization and further processing
 

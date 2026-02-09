@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.2.4] - 2026-02-09
+
+### Added
+- Adaptive shading correction for PV forecast
+  - Learns shading patterns from actual vs forecast ratios on sunny days
+  - Per-string (East, West, South), per-hour correction factors
+  - Stores all observations to InfluxDB `shading_observations` measurement
+  - Only recalculates factors from days with weather_factor >= 0.90
+  - Rolling average of last 10 sunny days for stable corrections
+- `shading_tracker.py` module for shading observation and factor calculation
+- `shading_factors.yaml` for storing calculated correction factors
+- Shading update callback in scheduler (runs after accuracy evaluation)
+
+### Changed
+- Huawei inverter efficiency: 0.82 → 0.95 (measured actual efficiency)
+
 ## [1.2.3] - 2026-02-09
 
 ### Fixed
