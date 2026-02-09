@@ -42,27 +42,27 @@ plants:
         efficiency: 0.82
         strings:
           - name: "East"
-            azimuth: 90
+            azimuth: 103.3
             tilt: 15
             panel: "AE455"
             count: 8
           - name: "West"
-            azimuth: 270
+            azimuth: 283.3
             tilt: 15
             panel: "AE455"
             count: 9
 
       - name: "South"
         max_power: 1500
-        efficiency: 0.80
+        efficiency: 0.96
         strings:
           - name: "SouthFront"
-            azimuth: 180
+            azimuth: 193.3
             tilt: 70
             panel: "Generic400"
             count: 3
           - name: "SouthBack"
-            azimuth: 180
+            azimuth: 193.3
             tilt: 60
             panel: "Generic400"
             count: 2
