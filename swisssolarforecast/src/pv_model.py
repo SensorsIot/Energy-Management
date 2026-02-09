@@ -36,6 +36,7 @@ def forecast_string_dc_power(
     longitude: float,
     altitude: float,
     timezone: str,
+    shading_factors: Optional[dict] = None,
 ) -> pd.Series:
     """Calculate DC power forecast for a single string."""
     
@@ -116,13 +117,27 @@ def forecast_string_dc_power(
         gamma_pdc=gamma_pdc,
         temp_ref=25,
     )
-    
-    return pd.Series(np.asarray(dc_power), index=times, name=string["name"])
+
+    result = pd.Series(np.asarray(dc_power), index=times, name=string["name"])
+
+    # Apply shading correction if provided
+    if shading_factors:
+        string_name = string["name"]
+        if string_name in shading_factors:
+            hourly_factors = shading_factors[string_name]
+            for idx in result.index:
+                local_hour = idx.hour  # Already in local timezone
+                factor = hourly_factors.get(local_hour, 1.0)
+                result[idx] = result[idx] * factor
+            logger.debug(f"Applied shading correction to {string_name}")
+
+    return result
 
 
 def forecast_inverter_power(
     weather: pd.DataFrame,
     inverter: dict,
+    shading_factors: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
     Calculate power forecast for an inverter and all its strings.
@@ -143,7 +158,7 @@ def forecast_inverter_power(
     
     # Calculate DC power for each string
     for string in inverter["strings"]:
-        dc_power = forecast_string_dc_power(weather, string, lat, lon, alt, tz)
+        dc_power = forecast_string_dc_power(weather, string, lat, lon, alt, tz, shading_factors)
         results[f"{string['name']}_dc"] = dc_power
     
     # Get index from first result
@@ -165,6 +180,7 @@ def forecast_inverter_power(
 def forecast_plant_power(
     weather: pd.DataFrame,
     plant: dict,
+    shading_factors: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
     Calculate power forecast for a plant and all its inverters.
@@ -172,7 +188,7 @@ def forecast_plant_power(
     loc = plant["location"]
     results = {}
     first_index = None
-    
+
     for inverter in plant["inverters"]:
         # Add location to inverter for processing
         inv_with_loc = {
@@ -182,9 +198,9 @@ def forecast_plant_power(
             "altitude": loc["altitude"],
             "timezone": loc["timezone"],
         }
-        
+
         logger.info(f"Calculating forecast for inverter: {inverter['name']}")
-        inv_result = forecast_inverter_power(weather, inv_with_loc)
+        inv_result = forecast_inverter_power(weather, inv_with_loc, shading_factors)
         
         # Store inverter AC power
         results[f"{inverter['name']}_ac_power"] = inv_result["ac_power"]
@@ -205,6 +221,7 @@ def forecast_plant_power(
 def forecast_all_plants(
     weather: pd.DataFrame,
     plants: Optional[List[dict]] = None,
+    shading_factors: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
     Calculate power forecast for all plants.
@@ -213,6 +230,7 @@ def forecast_all_plants(
         weather: Weather DataFrame with ghi, temp_air, wind_speed
         plants: List of plant dicts from PVSystemConfig.plants.
                 If None, uses legacy config_pv.yaml (DEPRECATED).
+        shading_factors: Optional dict mapping string name -> hour -> factor.
 
     Returns:
         DataFrame with power forecast for all plants
@@ -227,7 +245,7 @@ def forecast_all_plants(
 
     for plant in plants:
         logger.info(f"Calculating forecast for plant: {plant['name']}")
-        plant_result = forecast_plant_power(weather, plant)
+        plant_result = forecast_plant_power(weather, plant, shading_factors)
 
         # Prefix columns with plant name if multiple plants
         if len(plants) > 1:
@@ -261,6 +279,7 @@ def forecast_all_plants(
 def forecast_ensemble_plants(
     ensemble_weather: dict[int, pd.DataFrame],
     plants: Optional[List[dict]] = None,
+    shading_factors: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
     Calculate power forecast with uncertainty bands using ensemble weather data.
@@ -269,6 +288,7 @@ def forecast_ensemble_plants(
         ensemble_weather: Dict mapping member number to weather DataFrame
         plants: List of plant dicts from PVSystemConfig.plants.
                 If None, uses legacy config_pv.yaml (DEPRECATED).
+        shading_factors: Optional dict mapping string name -> hour -> factor.
 
     Returns:
         DataFrame with P10, P50, P90 columns for total AC power,
@@ -286,7 +306,7 @@ def forecast_ensemble_plants(
     member_forecasts = {}
     for member, weather in ensemble_weather.items():
         try:
-            forecast = forecast_all_plants(weather, plants=plants)
+            forecast = forecast_all_plants(weather, plants=plants, shading_factors=shading_factors)
             member_forecasts[member] = forecast
         except Exception as e:
             logger.warning(f"Failed to calculate forecast for member {member}: {e}")

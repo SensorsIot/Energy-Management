@@ -41,6 +41,7 @@ from src.grib_parser import load_hybrid_ensemble_forecast
 from src.pv_model import forecast_ensemble_plants
 from src.config import PVSystemConfig
 from src.accuracy_tracker import AccuracyTracker, create_accuracy_tracker
+from src.shading_tracker import ShadingTracker, create_shading_tracker
 
 
 class SwissSolarForecast:
@@ -84,6 +85,7 @@ class SwissSolarForecast:
         self.influx_writer: Optional[ForecastWriter] = None
         self.scheduler: Optional[ForecastScheduler] = None
         self.accuracy_tracker: Optional[AccuracyTracker] = None
+        self.shading_tracker: Optional[ShadingTracker] = None
 
     def _get_ha_value(self, entity_id: str) -> Optional[float]:
         """Fetch numeric value from Home Assistant entity."""
@@ -127,6 +129,12 @@ class SwissSolarForecast:
         self.accuracy_tracker.connect()
         logger.info("Accuracy tracker initialized")
 
+    def init_shading_tracker(self):
+        """Initialize shading correction tracker."""
+        self.shading_tracker = create_shading_tracker(self.options)
+        self.shading_tracker.connect()
+        logger.info("Shading tracker initialized")
+
     def init_scheduler(self):
         """Initialize scheduler with callbacks."""
         schedule_config = self.options.get("schedule", {})
@@ -147,6 +155,7 @@ class SwissSolarForecast:
             calculate=self.calculate_forecast,
             snapshot=self.snapshot_forecast if self.accuracy_tracker else None,
             evaluate=self.evaluate_forecast if self.accuracy_tracker else None,
+            shading_update=self.update_shading_factors if self.shading_tracker else None,
         )
 
     def fetch_ch1(self):
@@ -208,10 +217,18 @@ class SwissSolarForecast:
 
             logger.info(f"Loaded {len(ensemble_weather)} ensemble members")
 
+            # Load shading factors if available
+            shading_factors = None
+            if self.shading_tracker:
+                shading_factors = self.shading_tracker.load_shading_factors()
+                if shading_factors:
+                    logger.info(f"Applying shading correction for: {list(shading_factors.keys())}")
+
             # Calculate PV forecast using configured plants
             pv_forecast = forecast_ensemble_plants(
                 ensemble_weather,
                 plants=self.pv_config.plants,
+                shading_factors=shading_factors,
             )
             logger.info(f"Generated PV forecast with {len(pv_forecast)} time steps")
 
@@ -269,6 +286,31 @@ class SwissSolarForecast:
         except Exception as e:
             logger.error(f"Forecast evaluation failed: {e}", exc_info=True)
 
+    def update_shading_factors(self):
+        """Update shading factors from recent accuracy data."""
+        if not self.shading_tracker:
+            return
+
+        logger.info("Updating shading factors...")
+        try:
+            # Get yesterday's snapshot_id
+            from datetime import timedelta
+            from zoneinfo import ZoneInfo
+
+            local_tz = ZoneInfo(self.timezone)
+            yesterday = datetime.now(local_tz) - timedelta(days=1)
+            snapshot_id = yesterday.strftime("%Y-%m-%d")
+
+            # Process accuracy data and store shading observations
+            if self.shading_tracker.process_accuracy_data(snapshot_id):
+                # Update the YAML with recalculated factors
+                self.shading_tracker.update_shading_yaml()
+                logger.info("Shading factors updated")
+            else:
+                logger.info("No shading update (not a sunny day)")
+        except Exception as e:
+            logger.error(f"Shading factors update failed: {e}", exc_info=True)
+
     def start(self):
         """Start the add-on."""
         logger.info("Starting SwissSolarForecast add-on...")
@@ -276,6 +318,7 @@ class SwissSolarForecast:
         # Initialize components
         self.init_influxdb()
         self.init_accuracy_tracker()  # Must be before scheduler
+        self.init_shading_tracker()   # Must be before scheduler
         self.init_scheduler()
 
         # Start scheduler
@@ -316,6 +359,9 @@ class SwissSolarForecast:
 
         if self.accuracy_tracker:
             self.accuracy_tracker.close()
+
+        if self.shading_tracker:
+            self.shading_tracker.close()
 
         if self.influx_writer:
             self.influx_writer.close()

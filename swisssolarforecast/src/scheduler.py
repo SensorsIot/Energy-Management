@@ -63,6 +63,7 @@ class ForecastScheduler:
         self.calculate_callback: Optional[Callable] = None
         self.snapshot_callback: Optional[Callable] = None
         self.evaluate_callback: Optional[Callable] = None
+        self.shading_update_callback: Optional[Callable] = None
 
         # Status tracking
         self.last_fetch_ch1: Optional[datetime] = None
@@ -78,6 +79,7 @@ class ForecastScheduler:
         calculate: Callable,
         snapshot: Optional[Callable] = None,
         evaluate: Optional[Callable] = None,
+        shading_update: Optional[Callable] = None,
     ):
         """Set callback functions for scheduled tasks."""
         self.fetch_ch1_callback = fetch_ch1
@@ -85,6 +87,7 @@ class ForecastScheduler:
         self.calculate_callback = calculate
         self.snapshot_callback = snapshot
         self.evaluate_callback = evaluate
+        self.shading_update_callback = shading_update
 
     def _fetch_ch1_job(self):
         """Job wrapper for CH1 fetch."""
@@ -146,6 +149,12 @@ class ForecastScheduler:
                 self.evaluate_callback()
                 self.last_evaluation = datetime.now()
                 logger.info("Forecast evaluation completed")
+
+                # Update shading factors after evaluation
+                if self.shading_update_callback:
+                    logger.info("Updating shading factors...")
+                    self.shading_update_callback()
+                    logger.info("Shading factors update completed")
             else:
                 logger.warning("No evaluate callback registered")
         except Exception as e:

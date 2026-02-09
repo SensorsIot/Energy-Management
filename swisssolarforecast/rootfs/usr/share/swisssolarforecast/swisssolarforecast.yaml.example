@@ -39,7 +39,7 @@ plants:
     inverters:
       - name: "EastWest"
         max_power: 10000
-        efficiency: 0.82
+        efficiency: 0.95
         strings:
           - name: "East"
             azimuth: 103.3
