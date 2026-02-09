@@ -1,5 +1,18 @@
 # EnergyManager Changelog
 
+## [1.5.15] - 2026-02-09
+
+### Added
+- New ORANGE condition for appliance signal: grid export before evening >= 1.5kWh
+  - If we're going to export energy to the grid anyway, might as well use it
+  - Checks if battery is full (SOC >= 99.9%) AND has excess PV before 18:00
+  - Uses `appliance_energy_wh` (default 1500Wh) as threshold
+- Added `evening_hour` and `local_timezone` parameters to `calculate_appliance_signal()`
+- Added `calculate_grid_export_before_evening()` helper function
+
+### Changed
+- Appliance signal now shows export amount in RED reason when below threshold
+
 ## [1.5.14] - 2026-01-31
 
 ### Fixed

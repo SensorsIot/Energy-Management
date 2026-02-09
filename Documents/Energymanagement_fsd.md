@@ -1693,15 +1693,18 @@ Every 15 minutes:
    → Run now with pure solar
    → excess = current_pv - current_load
 
-2. ORANGE: Min SOC% >= reserve% + appliance%
-   → SOC never drops below threshold at any point in the simulation
-   → Uses same simulation as battery optimizer
+2. ORANGE: Either condition met:
+   a) Min SOC% >= reserve% + appliance%
+      → SOC never drops below threshold at any point in the simulation
+   b) Grid export before evening >= appliance_energy (1500Wh)
+      → If we're exporting energy anyway, might as well use it
+      → Export = sum of net_wh when SOC >= 99.9% and before 18:00
 
-3. RED: Otherwise
-   → SOC drops below threshold, would require grid import or violate battery reserve
+3. RED: Neither ORANGE condition met
+   → SOC drops below threshold AND not enough grid export
 ```
 
-### 4.4.2.1 ORANGE Threshold Calculation
+### 4.4.2.1 ORANGE Threshold Calculation (Condition 2a)
 
 All values in SOC% for consistency with simulation:
 
@@ -1725,13 +1728,29 @@ ORANGE threshold = reserve% + appliance%
 
 The ORANGE check uses the **minimum** SOC across the entire simulation, not just the final value. This ensures the SOC never drops below the threshold at any point, even if it recovers later.
 
+### 4.4.2.2 ORANGE Grid Export Condition (Condition 2b)
+
+If the SOC threshold is not met, check if we'll export enough energy to the grid before evening:
+
+```
+grid_export_wh = sum of net_wh where:
+  - SOC >= 99.9% (battery full)
+  - AND net_wh > 0 (excess PV)
+  - AND time < 18:00 local
+
+If grid_export_wh >= appliance_energy_wh (1500Wh):
+  → ORANGE: Better to use the energy than export it
+```
+
+**Rationale:** If the battery is full and we're exporting energy to the grid anyway, it makes more sense to use that energy for the washing machine than to sell it at a low feed-in tariff.
+
 ### 4.4.3 Output: sensor.appliance_signal
 
 | State | Meaning |
 |-------|---------|
 | `green` | Pure solar available now (excess > 2500W) |
-| `orange` | Safe to run, min SOC% >= reserve% + appliance% |
-| `red` | Insufficient surplus, would violate battery reserve |
+| `orange` | Safe to run: min SOC% >= threshold OR grid export >= 1.5kWh |
+| `red` | Insufficient surplus and not enough export |
 
 ### 4.4.4 Sensor Attributes
 
@@ -1762,7 +1781,16 @@ Test file: `energymanager/tests/test_appliance_signal.py`
 | `test_orange_threshold_calculation` | Different parameters: 20% reserve + 20% appliance = 40% | Min SOC: 45%, reserve: 20%, appliance: 2000Wh/10000Wh=20% | `signal="orange"` |
 | `test_orange_with_different_battery_capacity` | 15kWh battery: 1500Wh = 10% appliance | Capacity: 15kWh, Min SOC: 25%, threshold: 20% | `signal="orange"` |
 
-#### RED Signal: Min SOC% < threshold
+#### ORANGE Signal: Grid export >= appliance energy
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_orange_when_exporting_enough_energy` | Export 2000Wh >= 1500Wh threshold | Min SOC: 10%, Export: 2000Wh | `signal="orange"` |
+| `test_orange_when_export_exactly_equals_threshold` | Export exactly 1500Wh | Min SOC: 10%, Export: 1500Wh | `signal="orange"` |
+| `test_red_when_export_below_threshold` | Export 1000Wh < 1500Wh | Min SOC: 10%, Export: 1000Wh | `signal="red"` |
+| `test_soc_check_takes_priority_over_export` | SOC check before export check | Min SOC: 30% (above threshold) | `signal="orange"` with SOC reason |
+
+#### RED Signal: Min SOC% < threshold AND export < appliance
 
 | Test | Description | Conditions | Expected Result |
 |------|-------------|------------|-----------------|
@@ -2828,6 +2856,7 @@ The delete API in InfluxDB 2.x can be slow with large datasets and may cause gor
 *Version 2.10 - January 2026*
 
 **Changelog:**
+- v2.11: Appliance signal ORANGE now also triggers on grid export >= 1.5kWh before evening (Section 4.4.2.2)
 - v2.10: Expensive hours check now excludes weekend/holiday days (Section 4.3.2, 4.3.3); fixes incorrect discharge blocking on Friday nights
 - v2.9: Appliance signal uses min SOC instead of final SOC for ORANGE check (Section 4.4); ensures SOC never dips below threshold at any point in simulation
 - v2.8: Dual SOC forecast scenarios (with/without strategy); forecast snapshot for accuracy tracking; updated InfluxDB storage schema (Section 4.7)

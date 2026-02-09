@@ -146,6 +146,7 @@ class SwissSolarForecast:
             fetch_ch2=self.fetch_ch2,
             calculate=self.calculate_forecast,
             snapshot=self.snapshot_forecast if self.accuracy_tracker else None,
+            evaluate=self.evaluate_forecast if self.accuracy_tracker else None,
         )
 
     def fetch_ch1(self):
@@ -252,6 +253,21 @@ class SwissSolarForecast:
                 logger.warning("Forecast snapshot failed")
         except Exception as e:
             logger.error(f"Forecast snapshot failed: {e}", exc_info=True)
+
+    def evaluate_forecast(self):
+        """Evaluate forecast accuracy against actuals (21:15 daily)."""
+        if not self.accuracy_tracker:
+            return
+
+        logger.info("Evaluating forecast accuracy...")
+        try:
+            success = self.accuracy_tracker.evaluate_forecast()
+            if success:
+                logger.info("Forecast evaluation completed")
+            else:
+                logger.warning("Forecast evaluation returned no data")
+        except Exception as e:
+            logger.error(f"Forecast evaluation failed: {e}", exc_info=True)
 
     def start(self):
         """Start the add-on."""
@@ -397,7 +413,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("SwissSolarForecast Add-on v1.1.6")
+    logger.info("SwissSolarForecast Add-on v1.2.1")
     logger.info("=" * 60)
 
     # Load options

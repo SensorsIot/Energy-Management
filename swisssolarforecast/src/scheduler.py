@@ -62,12 +62,14 @@ class ForecastScheduler:
         self.fetch_ch2_callback: Optional[Callable] = None
         self.calculate_callback: Optional[Callable] = None
         self.snapshot_callback: Optional[Callable] = None
+        self.evaluate_callback: Optional[Callable] = None
 
         # Status tracking
         self.last_fetch_ch1: Optional[datetime] = None
         self.last_fetch_ch2: Optional[datetime] = None
         self.last_calculation: Optional[datetime] = None
         self.last_snapshot: Optional[datetime] = None
+        self.last_evaluation: Optional[datetime] = None
 
     def set_callbacks(
         self,
@@ -75,12 +77,14 @@ class ForecastScheduler:
         fetch_ch2: Callable,
         calculate: Callable,
         snapshot: Optional[Callable] = None,
+        evaluate: Optional[Callable] = None,
     ):
         """Set callback functions for scheduled tasks."""
         self.fetch_ch1_callback = fetch_ch1
         self.fetch_ch2_callback = fetch_ch2
         self.calculate_callback = calculate
         self.snapshot_callback = snapshot
+        self.evaluate_callback = evaluate
 
     def _fetch_ch1_job(self):
         """Job wrapper for CH1 fetch."""
@@ -134,6 +138,19 @@ class ForecastScheduler:
         except Exception as e:
             logger.error(f"Forecast snapshot failed: {e}", exc_info=True)
 
+    def _evaluate_job(self):
+        """Job wrapper for forecast evaluation (21:15 daily)."""
+        logger.info("Scheduled forecast evaluation starting...")
+        try:
+            if self.evaluate_callback:
+                self.evaluate_callback()
+                self.last_evaluation = datetime.now()
+                logger.info("Forecast evaluation completed")
+            else:
+                logger.warning("No evaluate callback registered")
+        except Exception as e:
+            logger.error(f"Forecast evaluation failed: {e}", exc_info=True)
+
     def setup_jobs(self):
         """Configure scheduled jobs."""
         # CH1 fetch job
@@ -180,6 +197,19 @@ class ForecastScheduler:
                 CronTrigger.from_crontab("0 21 * * *", timezone=self.local_timezone),
                 id="accuracy_snapshot",
                 name="Snapshot forecast for accuracy",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+
+        # Accuracy evaluation: 21:15 in LOCAL time (compare snapshot with actuals)
+        if self.evaluate_callback:
+            logger.info(f"Setting up accuracy evaluation: 21:15 {self.local_timezone} daily")
+            self.scheduler.add_job(
+                self._evaluate_job,
+                CronTrigger.from_crontab("15 21 * * *", timezone=self.local_timezone),
+                id="accuracy_evaluate",
+                name="Evaluate forecast accuracy",
                 replace_existing=True,
                 max_instances=1,
                 coalesce=True,
@@ -233,4 +263,5 @@ class ForecastScheduler:
             "last_fetch_ch2": str(self.last_fetch_ch2) if self.last_fetch_ch2 else None,
             "last_calculation": str(self.last_calculation) if self.last_calculation else None,
             "last_snapshot": str(self.last_snapshot) if self.last_snapshot else None,
+            "last_evaluation": str(self.last_evaluation) if self.last_evaluation else None,
         }

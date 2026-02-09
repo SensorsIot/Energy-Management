@@ -3,7 +3,9 @@ Appliance signal calculation for washing machine / dishwasher.
 
 Signal logic:
 - GREEN: Current PV excess > appliance power (can run directly from solar)
-- ORANGE: Min SOC% >= reserve% + appliance% (SOC never drops below threshold)
+- ORANGE: One of:
+  - Min SOC% >= reserve% + appliance% (SOC never drops below threshold)
+  - Grid export before evening > appliance energy (we'd waste the energy anyway)
 - RED: Otherwise
 
 The simulation passed to this module already accounts for battery efficiency.
@@ -11,6 +13,8 @@ The simulation passed to this module already accounts for battery efficiency.
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -34,6 +38,8 @@ def calculate_appliance_signal(
     appliance_energy_wh: float = 1500,
     capacity_wh: float = 10000,
     reserve_percent: float = 10,
+    evening_hour: int = 18,
+    local_timezone: str = "Europe/Zurich",
 ) -> ApplianceSignal:
     """
     Calculate appliance signal based on current state and simulation.
@@ -46,6 +52,8 @@ def calculate_appliance_signal(
         appliance_energy_wh: Energy needed by appliance (default 1500Wh)
         capacity_wh: Battery capacity in Wh (default 10000Wh)
         reserve_percent: Minimum SOC reserve in % (default 10%)
+        evening_hour: Hour considered "evening" for export calculation (default 18:00)
+        local_timezone: Timezone for evening calculation (default Europe/Zurich)
 
     Returns:
         ApplianceSignal with signal, reason, and details
@@ -67,7 +75,7 @@ def calculate_appliance_signal(
     # Calculate appliance energy as percentage of battery capacity
     appliance_percent = appliance_energy_wh / capacity_wh * 100
 
-    # ORANGE: Min SOC >= reserve% + appliance% (SOC never drops below threshold)
+    # ORANGE condition 1: Min SOC >= reserve% + appliance%
     orange_threshold_percent = reserve_percent + appliance_percent
 
     if min_soc_percent >= orange_threshold_percent:
@@ -78,13 +86,79 @@ def calculate_appliance_signal(
             final_soc_percent=min_soc_percent,
         )
 
-    # RED: SOC drops below threshold at some point
+    # ORANGE condition 2: Grid export before evening > appliance energy
+    # If we're going to export energy anyway, might as well use it
+    export_wh = calculate_grid_export_before_evening(
+        simulation, evening_hour, local_timezone
+    )
+
+    if export_wh >= appliance_energy_wh:
+        return ApplianceSignal(
+            signal="orange",
+            reason=f"Grid export {export_wh:.0f}Wh >= {appliance_energy_wh:.0f}Wh before {evening_hour}:00",
+            excess_power_w=excess_power,
+            final_soc_percent=min_soc_percent,
+        )
+
+    # RED: SOC drops below threshold and not enough export
     return ApplianceSignal(
         signal="red",
-        reason=f"Min SOC {min_soc_percent:.0f}% < {orange_threshold_percent:.0f}% (reserve {reserve_percent:.0f}% + appliance {appliance_percent:.0f}%)",
+        reason=f"Min SOC {min_soc_percent:.0f}% < {orange_threshold_percent:.0f}%, export {export_wh:.0f}Wh < {appliance_energy_wh:.0f}Wh",
         excess_power_w=excess_power,
         final_soc_percent=min_soc_percent,
     )
+
+
+def calculate_grid_export_before_evening(
+    simulation: pd.DataFrame,
+    evening_hour: int = 18,
+    local_timezone: str = "Europe/Zurich",
+) -> float:
+    """
+    Calculate total grid export (Wh) before evening.
+
+    Grid export occurs when:
+    - Battery is full (SOC >= 99.9%)
+    - AND net energy is positive (PV > Load)
+
+    Args:
+        simulation: DataFrame with soc_percent, net_wh columns
+        evening_hour: Hour considered "evening" (default 18:00)
+        local_timezone: Timezone for evening calculation
+
+    Returns:
+        Total grid export in Wh before evening
+    """
+    if simulation.empty:
+        return 0.0
+
+    if "soc_percent" not in simulation.columns or "net_wh" not in simulation.columns:
+        logger.warning("Simulation missing required columns for export calculation")
+        return 0.0
+
+    local_tz = ZoneInfo(local_timezone)
+    total_export = 0.0
+
+    for t, row in simulation.iterrows():
+        # Convert timestamp to local time to check if before evening
+        if hasattr(t, 'astimezone'):
+            local_time = t.astimezone(local_tz)
+        else:
+            # Handle naive timestamps
+            local_time = t
+
+        if local_time.hour >= evening_hour:
+            continue  # Past evening, stop counting
+
+        # Export occurs when battery is full and we have excess PV
+        soc = row["soc_percent"]
+        net = row["net_wh"]
+
+        if soc >= 99.9 and net > 0:
+            total_export += net
+
+    logger.debug(f"Grid export before {evening_hour}:00: {total_export:.0f}Wh")
+    return total_export
 
 
 def get_min_soc_percent(simulation: pd.DataFrame) -> float:

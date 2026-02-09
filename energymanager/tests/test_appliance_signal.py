@@ -4,15 +4,22 @@ Tests for appliance signal calculation (FSD v2.6).
 Test cases:
 1. GREEN: PV excess > appliance power
 2. ORANGE: Min SOC% >= reserve% + appliance%
-3. RED: Min SOC% < threshold
-4. Edge cases (no simulation, low PV, etc.)
+3. ORANGE: Grid export before evening >= appliance energy
+4. RED: Min SOC% < threshold AND not enough export
+5. Edge cases (no simulation, low PV, etc.)
 """
 
 import pytest
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-from src.appliance_signal import calculate_appliance_signal, ApplianceSignal, get_final_soc_percent, get_min_soc_percent
+from src.appliance_signal import (
+    calculate_appliance_signal,
+    calculate_grid_export_before_evening,
+    ApplianceSignal,
+    get_final_soc_percent,
+    get_min_soc_percent,
+)
 
 
 def make_simulation(final_soc_percent: float) -> pd.DataFrame:
@@ -27,6 +34,7 @@ def make_simulation(final_soc_percent: float) -> pd.DataFrame:
     return pd.DataFrame({
         "soc_percent": soc_values,
         "soc_wh": [s * 100 for s in soc_values],  # For 10kWh battery
+        "net_wh": [0] * 10,  # No net energy flow
     }, index=times)
 
 
@@ -46,6 +54,50 @@ def make_simulation_with_dip(final_soc_percent: float, min_soc_percent: float) -
     return pd.DataFrame({
         "soc_percent": soc_values,
         "soc_wh": [s * 100 for s in soc_values],
+        "net_wh": [0] * 5,
+    }, index=times)
+
+
+def make_simulation_with_export(
+    min_soc_percent: float,
+    export_wh_per_period: float,
+    export_periods: int,
+    start_hour: int = 10,
+) -> pd.DataFrame:
+    """Create a simulation with battery full and grid export.
+
+    Args:
+        min_soc_percent: Minimum SOC (to trigger RED without export rule)
+        export_wh_per_period: Export per 15-min period when battery is full
+        export_periods: Number of periods with export
+        start_hour: Starting hour in UTC (default 10 = 11:00 CET in winter)
+    """
+    # Create timestamps starting at start_hour UTC (before evening)
+    base_time = datetime.now(timezone.utc).replace(
+        hour=start_hour, minute=0, second=0, microsecond=0
+    )
+    times = pd.date_range(start=base_time, periods=export_periods + 4, freq="15min")
+
+    soc_values = []
+    net_wh_values = []
+
+    for i in range(len(times)):
+        if i < 2:
+            # Start with low SOC (to make min_soc low)
+            soc_values.append(min_soc_percent)
+            net_wh_values.append(100)  # Charging
+        elif i < 2 + export_periods:
+            # Battery full, exporting
+            soc_values.append(100)
+            net_wh_values.append(export_wh_per_period)
+        else:
+            # Evening, no more export
+            soc_values.append(100)
+            net_wh_values.append(-50)  # Small discharge
+
+    return pd.DataFrame({
+        "soc_percent": soc_values,
+        "net_wh": net_wh_values,
     }, index=times)
 
 
@@ -213,6 +265,170 @@ class TestRedSignal:
         )
 
         assert signal.signal == "red"
+
+
+class TestOrangeExportCondition:
+    """ORANGE: Grid export before evening >= appliance energy (1500Wh)."""
+
+    def test_orange_when_exporting_enough_energy(self):
+        """Export 2000Wh before evening (>= 1500Wh) → ORANGE despite low SOC."""
+        # 8 periods × 250Wh = 2000Wh export
+        simulation = make_simulation_with_export(
+            min_soc_percent=10,  # Below 25% threshold
+            export_wh_per_period=250,
+            export_periods=8,
+            start_hour=10,  # 11:00 CET, before evening
+        )
+
+        signal = calculate_appliance_signal(
+            current_pv_w=500,
+            current_load_w=800,
+            simulation=simulation,
+            appliance_power_w=2500,
+            appliance_energy_wh=1500,
+            capacity_wh=10000,
+            reserve_percent=10,
+            evening_hour=18,
+        )
+
+        assert signal.signal == "orange"
+        assert "export" in signal.reason.lower()
+        assert "1500Wh" in signal.reason
+
+    def test_orange_when_export_exactly_equals_threshold(self):
+        """Export exactly 1500Wh = threshold → ORANGE."""
+        # 6 periods × 250Wh = 1500Wh export
+        simulation = make_simulation_with_export(
+            min_soc_percent=10,
+            export_wh_per_period=250,
+            export_periods=6,
+            start_hour=10,
+        )
+
+        signal = calculate_appliance_signal(
+            current_pv_w=500,
+            current_load_w=800,
+            simulation=simulation,
+            appliance_power_w=2500,
+            appliance_energy_wh=1500,
+            capacity_wh=10000,
+            reserve_percent=10,
+            evening_hour=18,
+        )
+
+        assert signal.signal == "orange"
+
+    def test_red_when_export_below_threshold(self):
+        """Export 1000Wh < 1500Wh threshold → RED."""
+        # 4 periods × 250Wh = 1000Wh export (not enough)
+        simulation = make_simulation_with_export(
+            min_soc_percent=10,
+            export_wh_per_period=250,
+            export_periods=4,
+            start_hour=10,
+        )
+
+        signal = calculate_appliance_signal(
+            current_pv_w=500,
+            current_load_w=800,
+            simulation=simulation,
+            appliance_power_w=2500,
+            appliance_energy_wh=1500,
+            capacity_wh=10000,
+            reserve_percent=10,
+            evening_hour=18,
+        )
+
+        assert signal.signal == "red"
+        assert "export" in signal.reason.lower()
+
+    def test_soc_check_takes_priority_over_export(self):
+        """If SOC >= threshold, return ORANGE based on SOC (not export)."""
+        simulation = make_simulation_with_export(
+            min_soc_percent=30,  # Above 25% threshold
+            export_wh_per_period=500,  # Also has export
+            export_periods=10,
+            start_hour=10,
+        )
+
+        signal = calculate_appliance_signal(
+            current_pv_w=500,
+            current_load_w=800,
+            simulation=simulation,
+            appliance_power_w=2500,
+            appliance_energy_wh=1500,
+            capacity_wh=10000,
+            reserve_percent=10,
+            evening_hour=18,
+        )
+
+        assert signal.signal == "orange"
+        # Should be SOC-based reason, not export-based
+        assert "Min SOC" in signal.reason
+
+
+class TestCalculateGridExport:
+    """Test the grid export calculation helper."""
+
+    def test_export_counted_when_battery_full(self):
+        """Export only counted when SOC >= 99.9%."""
+        simulation = make_simulation_with_export(
+            min_soc_percent=10,
+            export_wh_per_period=100,
+            export_periods=10,
+            start_hour=10,
+        )
+
+        export = calculate_grid_export_before_evening(
+            simulation, evening_hour=18, local_timezone="Europe/Zurich"
+        )
+
+        assert export == 1000  # 10 × 100Wh
+
+    def test_no_export_when_battery_not_full(self):
+        """No export counted when SOC < 99.9%."""
+        times = pd.date_range(
+            start=datetime.now(timezone.utc).replace(hour=10),
+            periods=5,
+            freq="15min"
+        )
+        simulation = pd.DataFrame({
+            "soc_percent": [50, 60, 70, 80, 90],  # Never full
+            "net_wh": [100, 100, 100, 100, 100],  # Positive net
+        }, index=times)
+
+        export = calculate_grid_export_before_evening(
+            simulation, evening_hour=18, local_timezone="Europe/Zurich"
+        )
+
+        assert export == 0
+
+    def test_export_not_counted_after_evening(self):
+        """Export after evening hour not counted."""
+        # Start at 17:00 UTC = 18:00 CET (evening)
+        times = pd.date_range(
+            start=datetime.now(timezone.utc).replace(hour=17),
+            periods=5,
+            freq="15min"
+        )
+        simulation = pd.DataFrame({
+            "soc_percent": [100, 100, 100, 100, 100],
+            "net_wh": [200, 200, 200, 200, 200],
+        }, index=times)
+
+        export = calculate_grid_export_before_evening(
+            simulation, evening_hour=18, local_timezone="Europe/Zurich"
+        )
+
+        assert export == 0  # All periods are after 18:00 CET
+
+    def test_empty_simulation_returns_zero(self):
+        """Empty simulation returns 0 export."""
+        export = calculate_grid_export_before_evening(
+            pd.DataFrame(), evening_hour=18, local_timezone="Europe/Zurich"
+        )
+
+        assert export == 0
 
 
 class TestMinSocCheck:
