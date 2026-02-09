@@ -242,23 +242,24 @@ class BatteryOptimizer:
             block_until: Block discharge until this time (None = no blocking)
 
         Returns:
-            DataFrame with soc_percent, soc_wh, soc_wh_unclamped columns
+            DataFrame with soc_percent, soc_wh, soc_wh_unclamped, net_wh, discharge_wh columns
         """
         e_bat = soc_percent / 100 * self.capacity_wh
         e_bat_unclamped = e_bat
         results = []
 
         for t, row in forecast.iterrows():
+            net_wh = row["net_energy_wh"]
+
             # Record SOC at START of this period (before energy changes)
             results.append({
                 "time": t,
                 "soc_percent": e_bat / self.capacity_wh * 100,
                 "soc_wh": e_bat,
                 "soc_wh_unclamped": e_bat_unclamped,
+                "net_wh": net_wh,  # For grid export calculation
                 "discharge_wh": 0,  # Will be updated below
             })
-
-            net_wh = row["net_energy_wh"]
             # Block only in the specified time window
             in_block_window = (
                 block_until and

@@ -1,5 +1,12 @@
 # EnergyManager Changelog
 
+## [1.5.16] - 2026-02-09
+
+### Fixed
+- Added `net_wh` column to simulation DataFrame output
+  - Required for grid export calculation in appliance signal
+  - Export check was returning 0Wh because simulation was missing this column
+
 ## [1.5.15] - 2026-02-09
 
 ### Added
