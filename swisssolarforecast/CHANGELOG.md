@@ -3,10 +3,10 @@
 ## [1.2.3] - 2026-02-09
 
 ### Fixed
-- Removed redundant "EastWest" combined entry from accuracy tracking
-  - Was comparing DC forecast to AC actual (inverter_active_power)
-  - Now uses per-string East/West with DC measurements (inverter_pv_1_power, inverter_pv_2_power)
-  - More accurate comparison: DC forecast vs DC actual
+- Removed "EastWest" combined and "total" from accuracy tracking
+  - EastWest was comparing DC forecast to AC actual - now uses per-string East/West (DC)
+  - Total mixed AC/DC measurements - removed entirely
+  - Now tracks: East (DC), West (DC), South (AC from Enphase)
 
 ## [1.2.2] - 2026-02-09
 

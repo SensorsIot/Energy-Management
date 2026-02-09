@@ -44,10 +44,9 @@ class AccuracyTracker:
     ]
 
     # Map inverter names to HA entity IDs for actual PV power
-    # Note: EastWest removed - use per-string East/West instead (DC power, more accurate)
+    # Note: Use DC for Huawei (East/West), AC for Enphase (South) - don't mix in "total"
     ACTUAL_ENTITIES = {
-        "total": "solar_pv_total_ac_power",
-        "South": "enphase_energy_power",
+        "South": "enphase_energy_power",  # Enphase only provides AC
     }
 
     # Map individual strings to HA entity IDs for per-string actuals
