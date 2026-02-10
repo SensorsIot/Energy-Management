@@ -358,7 +358,7 @@ entities:
   home:
     entity: sensor.load_power
   individual:
-    - entity: sensor.evcc_actec_charge_power
+    - entity: sensor.wallbox_power
       name: EV
       icon: mdi:car-electric
     - entity: sensor.enphase_energy_power
