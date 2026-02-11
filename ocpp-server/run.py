@@ -282,10 +282,12 @@ class OCPPServer:
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")
 
-    async def handle_websocket(self, websocket, path):
+    async def handle_websocket(self, websocket):
         """Handle incoming WebSocket connection from wallbox."""
         # Extract charge point ID from path (e.g., /AcTec001)
-        cp_id = path.strip("/").split("/")[-1] if "/" in path else self.wallbox_id
+        # websockets v11+: path is on the request object
+        path = websocket.request.path if hasattr(websocket, 'request') else "/"
+        cp_id = path.strip("/").split("/")[-1] if path.strip("/") else self.wallbox_id
         logger.info(f"Wallbox connecting: id={cp_id}, path={path}")
 
         # Create charge point handler

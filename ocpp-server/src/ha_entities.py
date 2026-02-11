@@ -78,12 +78,14 @@ CONTROLS = {
         "name": "Wallbox Start Charging",
         "unique_id": "ocpp_wallbox_start_charging",
         "icon": "mdi:play",
+        "initial_state": "unknown",
         # Triggers: RemoteStartTransaction
     },
     "button.wallbox_stop_charging": {
         "name": "Wallbox Stop Charging",
         "unique_id": "ocpp_wallbox_stop_charging",
         "icon": "mdi:stop",
+        "initial_state": "unknown",
         # Triggers: RemoteStopTransaction
     },
 }
