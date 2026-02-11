@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 import asyncio
 import json
@@ -266,6 +266,38 @@ class OCPPServer:
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")
 
+    async def _post_connect_setup(self):
+        """Setup after wallbox connects: ensure transaction exists and is paused.
+
+        Waits for BootNotification and StatusNotification, then starts a
+        transaction if none is active and immediately pauses it (0A profile).
+        This puts the wallbox in a "ready but paused" state so the
+        EnergyManager can instantly ramp up charging by setting a power limit.
+        """
+        # Wait for BootNotification + StatusNotification to arrive
+        await asyncio.sleep(5)
+
+        if not self.charge_point:
+            return
+
+        logger.info(
+            f"Post-connect setup: status={self.charge_point.current_status}, "
+            f"transaction_id={self.charge_point.transaction_id}"
+        )
+
+        # Start a transaction if none is active
+        if self.charge_point.transaction_id is None:
+            logger.info("No active transaction, sending RemoteStartTransaction")
+            ok = await self.charge_point.remote_start()
+            if ok:
+                await asyncio.sleep(2)  # Wait for StartTransaction from wallbox
+            else:
+                logger.warning("RemoteStartTransaction not accepted")
+
+        # Pause charging (0A profile) so wallbox is ready but not drawing power
+        await self.charge_point.set_charging_power(0, num_phases=self._current_phases)
+        logger.info("Post-connect setup complete: transaction active, charging paused")
+
     async def handle_websocket(self, websocket):
         """Handle incoming WebSocket connection from wallbox."""
         # Extract charge point ID from path (e.g., /AcTec001)
@@ -285,11 +317,15 @@ class OCPPServer:
         self._on_status_change("connected", True)
         self._on_status_change("wallbox_id", cp_id)
 
+        setup_task = None
         try:
+            setup_task = asyncio.create_task(self._post_connect_setup())
             await self.charge_point.start()
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"Wallbox disconnected: {cp_id}")
         finally:
+            if setup_task and not setup_task.done():
+                setup_task.cancel()
             # Reset sensor entities on disconnect
             self._on_status_change("connected", False)
             self._on_status_change("power_w", 0)

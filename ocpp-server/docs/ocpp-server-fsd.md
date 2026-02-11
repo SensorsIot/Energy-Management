@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 1.7 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 1.8 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -233,7 +233,8 @@ Current implementation: accept all tags. Future: configurable whitelist.
 
 Transactions are managed automatically by the OCPP server — no external start/stop commands needed. EnergyManager only sets `number.wallbox_power_limit`.
 
-- **Auto-start:** When power limit changes from 0 to >0 and no transaction is active, the server sends `RemoteStartTransaction`
+- **Post-connect setup:** When the wallbox connects (after BootNotification + StatusNotification), the server automatically starts a transaction via `RemoteStartTransaction` and immediately pauses it with a 0A charging profile. This puts the wallbox in a "ready but paused" state so charging can begin instantly when the EnergyManager sets a power limit.
+- **Auto-start fallback:** When power limit changes from 0 to >0 and no transaction is active (e.g., after a transaction ended), the server sends `RemoteStartTransaction`
 - **Pause (not stop):** When power limit changes to 0, the server sends `SetChargingProfile` with 0A limit — the transaction stays alive so charging can resume instantly when power becomes available again
 - **Transaction end:** Transactions end only when the wallbox initiates `StopTransaction` (e.g., plug removed) or on WebSocket disconnect
 - Server assigns incrementing transaction IDs (starting from 1, not persisted across restarts)
@@ -255,7 +256,8 @@ Transactions are managed automatically by the OCPP server — no external start/
 | ID | Test | Expected |
 |----|------|----------|
 | TC-01 | Wallbox connects via WebSocket | BootNotification accepted, `wallbox_connected` = on |
-| TC-02 | Power limit 0 → >0 (no transaction) | Auto `RemoteStartTransaction`, then `SetChargingProfile` |
+| TC-02a | Wallbox connects (car plugged in) | Post-connect setup: `RemoteStartTransaction` + `SetChargingProfile` 0A (paused) |
+| TC-02b | Power limit 0 → >0 (no transaction) | Fallback auto `RemoteStartTransaction`, then `SetChargingProfile` |
 | TC-03 | Power limit >0 → 0 (active transaction) | `SetChargingProfile` 0A sent, transaction stays alive (no RemoteStopTransaction) |
 | TC-04 | Power limit change (transaction active) | `SetChargingProfile` sent, no start/stop |
 | TC-05 | MeterValues received | `sensor.wallbox_power` and `sensor.wallbox_energy` update |
@@ -337,3 +339,4 @@ ocpp-server/
 | 1.5 | 2026-02-11 | Fix: 0W pauses charging (0A profile) instead of stopping transaction. Tested with real AcTec wallbox. |
 | 1.6 | 2026-02-11 | Added calibration data (Section 7): 16A–6A sweep with wallbox and grid meter comparison. Documented EBL M-Bus grid power data path. |
 | 1.7 | 2026-02-11 | Calibrated power-to-current conversion: linear interpolation on 3-phase calibration table replaces naive formula. |
+| 1.8 | 2026-02-11 | Post-connect setup: auto-start transaction and pause (0A) on wallbox connection so charging is instantly available. |
