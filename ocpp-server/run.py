@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.7.6"
+__version__ = "0.7.7"
 
 import asyncio
 import json
@@ -128,22 +128,32 @@ class HAEntityManager:
             return False
 
     async def register_entities(self):
-        """Set initial states for all entities from ha_entities.py."""
+        """Register HA entity attributes; only set defaults for connectivity and controls.
+
+        Sensor states (status, power, energy, transaction, phases) are NOT
+        reset — the wallbox is the source of truth and will populate them
+        via StatusNotification / MeterValues after it connects.
+        """
+        # Sensors: register attributes only, preserve existing state
         for entity_id, defn in SENSORS.items():
             attrs = {k: v for k, v in defn.items() if k not in ("initial_state",)}
-            await self.set_state(entity_id, defn["initial_state"], attrs)
-
-        for entity_id, defn in BINARY_SENSORS.items():
-            state = "on" if defn["initial_state"] else "off"
-            attrs = {k: v for k, v in defn.items() if k not in ("initial_state",)}
+            existing = await self.get_state(entity_id)
+            state = existing if existing is not None else defn["initial_state"]
             await self.set_state(entity_id, state, attrs)
 
-        for entity_id, defn in CONTROLS.items():
-            if "initial_state" in defn:
-                attrs = {k: v for k, v in defn.items() if k not in ("initial_state",)}
-                await self.set_state(entity_id, defn["initial_state"], attrs)
+        # Binary sensors: wallbox_connected = off (server just started, no WS yet)
+        for entity_id, defn in BINARY_SENSORS.items():
+            attrs = {k: v for k, v in defn.items() if k not in ("initial_state",)}
+            await self.set_state(entity_id, "off", attrs)
 
-        logger.info("Registered all HA entities with initial states")
+        # Controls: preserve existing value (EnergyManager may have set it)
+        for entity_id, defn in CONTROLS.items():
+            attrs = {k: v for k, v in defn.items() if k not in ("initial_state",)}
+            existing = await self.get_state(entity_id)
+            state = existing if existing is not None else defn.get("initial_state", 0)
+            await self.set_state(entity_id, state, attrs)
+
+        logger.info("Registered HA entities (preserved existing sensor states)")
 
 
 class OCPPServer:
@@ -312,10 +322,12 @@ class OCPPServer:
         ws = self.charge_point.current_status
         logger.info(f"Post-connect: status={ws}")
 
-        # Step 2: Already charging → transaction exists, recover and pause
+        # Always request MeterValues to sync power/energy/transaction_id
+        await self.charge_point.trigger_meter_values()
+
+        # Step 2: Already charging → transaction exists, just pause
         if ws in ALREADY_ACTIVE:
-            logger.info(f"Wallbox already active ({ws}), requesting MeterValues to recover transaction_id")
-            await self.charge_point.trigger_meter_values()
+            logger.info(f"Wallbox already active ({ws}), pausing")
             await self.charge_point.set_charging_power(0, num_phases=self._current_phases)
             logger.info("Post-connect setup complete: existing transaction, paused")
             return
