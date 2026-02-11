@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 1.3 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 1.4 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -47,8 +47,7 @@ Home Assistant add-on providing an OCPP 1.6J Central System that bridges EV char
 │  • sensor.wallbox_phases (1 or 3)              │            │
 │  • binary_sensor.wallbox_connected             │            │
 │  • number.wallbox_power_limit (W)              │            │
-│  • button.wallbox_start_charging               │            │
-│  • button.wallbox_stop_charging                │            │
+│  • sensor.wallbox_transaction                  │            │
 └────────────┼───────────────────────────────────┼────────────┘
              │ L1/L2/L3 switching                │ OCPP 1.6J
              │                                   │ WebSocket
@@ -76,7 +75,7 @@ This add-on is part of the Energy-Management project alongside:
 
 | Add-on | Role in EV Charging |
 |--------|---------------------|
-| **EnergyManager** (v1.5.11) | Reads wallbox sensors, sets `number.wallbox_power_limit`, presses start/stop buttons. See [Energymanagement_fsd.md Section 4.5](../../Documents/Energymanagement_fsd.md) |
+| **EnergyManager** (v1.5.11) | Reads wallbox sensors, sets `number.wallbox_power_limit`. See [Energymanagement_fsd.md Section 4.5](../../Documents/Energymanagement_fsd.md) |
 | **SwissSolarForecast** (v1.2.4) | Provides PV forecast used by EnergyManager to plan charging windows |
 | **LoadForecast** (v1.2.3) | Provides load forecast used by EnergyManager to calculate excess power |
 
@@ -85,10 +84,11 @@ This add-on is part of the Energy-Management project alongside:
 ```
 EnergyManager reads:                    EnergyManager writes:
   sensor.wallbox_power          →         number.wallbox_power_limit
-  sensor.wallbox_energy                   button.wallbox_start_charging
-  sensor.wallbox_status                   button.wallbox_stop_charging
+  sensor.wallbox_energy
+  sensor.wallbox_status
   binary_sensor.wallbox_connected
   sensor.wallbox_transaction
+  sensor.wallbox_phases
 ```
 
 The EnergyManager decides charging power every minute based on:
@@ -144,8 +144,8 @@ The server extracts the chargepoint ID from the WebSocket connection path.
 | Message | Trigger |
 |---------|---------|
 | `SetChargingProfile` | `number.wallbox_power_limit` changed |
-| `RemoteStartTransaction` | `button.wallbox_start_charging` pressed |
-| `RemoteStopTransaction` | `button.wallbox_stop_charging` pressed |
+| `RemoteStartTransaction` | Auto: power limit changes from 0 to >0 (no active transaction) |
+| `RemoteStopTransaction` | Auto: power limit changes to 0 (active transaction exists) |
 | `TriggerMessage` (MeterValues) | Periodic or on demand |
 
 ### 4.3 HA Entity Interface
@@ -167,23 +167,24 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 
 | Entity | Type | Description |
 |--------|------|-------------|
-| `number.wallbox_power_limit` | number | Target power in W (min/max from config). Changing this sends `SetChargingProfile` to wallbox. |
-| `button.wallbox_start_charging` | button | Sends `RemoteStartTransaction` |
-| `button.wallbox_stop_charging` | button | Sends `RemoteStopTransaction` |
+| `number.wallbox_power_limit` | number | Target power in W (min/max from config). The OCPP server auto-manages transactions: setting power >0 starts a transaction if none is active; setting power to 0 stops the active transaction. |
 
 #### 4.3.3 SetChargingProfile and Phase Switching
 
 When `number.wallbox_power_limit` changes:
-1. Determine target phases (if `phase_switch_entity` configured):
+1. **Auto-transaction management:**
+   - Power 0 → >0 (no active transaction): send `RemoteStartTransaction`
+   - Power >0 → 0 (active transaction): send `RemoteStopTransaction`
+2. Determine target phases (if `phase_switch_entity` configured):
    - 0 W → keep current phases (pause only)
    - 1–4139 W → 1-phase (relay OFF)
    - ≥ 4140 W → 3-phase (relay ON)
    - Threshold = `min_current_a × 230 × 3` (default 6 × 230 × 3 = 4140 W)
-2. If phase change needed, execute safety sequence (see below)
-3. Convert power to current: `current_a = power_w / (230 × num_phases)`
-4. Clamp to `[min_current_a, max_current_a]` (from config)
-5. If power_w = 0: send profile with limit = 0 (pause charging)
-6. Send `SetChargingProfile` with `TxDefaultProfile`, `Absolute`, rate unit `Amps`
+3. If phase change needed, execute safety sequence (see below)
+4. Convert power to current: `current_a = power_w / (230 × num_phases)`
+5. Clamp to `[min_current_a, max_current_a]` (from config)
+6. If power_w = 0: send profile with limit = 0 (pause charging)
+7. Send `SetChargingProfile` with `TxDefaultProfile`, `Absolute`, rate unit `Amps`
 
 **Phase switching safety sequence** (EARU latching relay via ESPHome):
 
@@ -227,9 +228,12 @@ Current implementation: accept all tags. Future: configurable whitelist.
 
 ### 4.5 Transaction Management
 
+Transactions are managed automatically by the OCPP server — no external start/stop commands needed. EnergyManager only sets `number.wallbox_power_limit`.
+
+- **Auto-start:** When power limit changes from 0 to >0 and no transaction is active, the server sends `RemoteStartTransaction`
+- **Auto-stop:** When power limit changes to 0 and a transaction is active, the server sends `RemoteStopTransaction`
 - Server assigns incrementing transaction IDs (starting from 1, not persisted across restarts)
 - Only one transaction at a time
-- `RemoteStopTransaction` rejected if no active transaction
 - On wallbox disconnect: transaction state cleared, entities updated
 
 ## 5. Non-Functional Requirements
@@ -247,12 +251,12 @@ Current implementation: accept all tags. Future: configurable whitelist.
 | ID | Test | Expected |
 |----|------|----------|
 | TC-01 | Wallbox connects via WebSocket | BootNotification accepted, `wallbox_connected` = on |
-| TC-02 | Start charging via HA | Press `button.wallbox_start_charging` → wallbox starts |
-| TC-03 | Stop charging via HA | Press `button.wallbox_stop_charging` → wallbox stops |
-| TC-04 | Set power limit via HA | Set `number.wallbox_power_limit` → SetChargingProfile sent |
+| TC-02 | Power limit 0 → >0 (no transaction) | Auto `RemoteStartTransaction`, then `SetChargingProfile` |
+| TC-03 | Power limit >0 → 0 (active transaction) | Auto `RemoteStopTransaction`, profile set to 0A |
+| TC-04 | Power limit change (transaction active) | `SetChargingProfile` sent, no start/stop |
 | TC-05 | MeterValues received | `sensor.wallbox_power` and `sensor.wallbox_energy` update |
-| TC-06 | Wallbox disconnect | `wallbox_connected` = off, controls rejected |
-| TC-07 | Power limit = 0 | Charging paused (profile limit = 0A) |
+| TC-06 | Wallbox disconnect | `wallbox_connected` = off, transaction cleared |
+| TC-07 | Power limit = 0 (no transaction) | Profile set to 0A, no `RemoteStopTransaction` |
 | TC-08 | Invalid power limit | Clamped to min/max, no crash |
 | TC-09 | Multiple wallbox connect attempts | Only one connection active |
 | TC-10 | Power limit < 4140 W with phase_switch_entity set | Relay OFF, 1-phase charging, `sensor.wallbox_phases` = 1 |
@@ -285,9 +289,10 @@ ocpp-server/
 |-----------|--------|-------|
 | WebSocket server | ✅ Done | Port 8887, ocpp1.6 subprotocol |
 | OCPP message handling | ✅ Done | 7 incoming + 4 outgoing |
-| HA entity integration | ❌ TODO | Replace MQTT with HA Supervisor API entities |
-| Unit tests | ✅ Done | 9 tests (need update for HA entities) |
-| HA add-on deployment | ❌ TODO | Not yet tested on real HA instance |
+| HA entity integration | ✅ Done | Supervisor REST API, auto-transaction management |
+| Phase switching | ✅ Done | EARU relay via ESPHome, auto based on power limit |
+| Unit tests | ✅ Done | 9 tests |
+| HA add-on deployment | ✅ Done | Tested on HA instance, s6-overlay service starts |
 | Wallbox integration test | ❌ TODO | Not tested with real AcTec wallbox |
 
 ## 9. Revision History
@@ -298,3 +303,4 @@ ocpp-server/
 | 1.1 | 2026-02-10 | Replaced MQTT interface with native HA entities and services |
 | 1.2 | 2026-02-10 | Added Section 2.2: integration with EnergyManager, SwissSolarForecast, LoadForecast |
 | 1.3 | 2026-02-10 | Added phase switching via EARU breaker: config, sensor, safety sequence, test cases |
+| 1.4 | 2026-02-11 | Removed button entities, auto-transaction management (start/stop driven by power limit) |

@@ -167,8 +167,6 @@ class OCPPServer:
 
         # Track last-seen control states for change detection
         self._last_power_limit: Optional[str] = None
-        self._last_start_ts: Optional[str] = None
-        self._last_stop_ts: Optional[str] = None
 
     def _on_status_change(self, key: str, value):
         """Callback when wallbox status changes — update HA entity."""
@@ -240,7 +238,15 @@ class OCPPServer:
                             power_w = float(power_state)
                             logger.info(f"Power limit changed to {power_w}W")
                             if self.charge_point:
-                                # Determine target phases
+                                # Auto-transaction management
+                                if power_w > 0 and self.charge_point.transaction_id is None:
+                                    logger.info("Power requested, starting transaction")
+                                    await self.charge_point.remote_start()
+                                elif power_w == 0 and self.charge_point.transaction_id is not None:
+                                    logger.info("Power zero, stopping transaction")
+                                    await self.charge_point.remote_stop()
+
+                                # Phase switching
                                 if power_w > 0 and self.phase_switch_entity:
                                     if power_w < self._phase_threshold_w:
                                         target_phases = 1
@@ -248,6 +254,7 @@ class OCPPServer:
                                         target_phases = 3
                                     await self._switch_phases(target_phases)
 
+                                # Set charging profile
                                 await self.charge_point.set_charging_power(
                                     power_w, num_phases=self._current_phases
                                 )
@@ -256,28 +263,6 @@ class OCPPServer:
                         except ValueError:
                             logger.warning(f"Invalid power limit value: {power_state}")
                     self._last_power_limit = power_state
-
-                # Start button (detect timestamp change)
-                start_state = await self.ha.get_state("button.wallbox_start_charging")
-                if start_state is not None and start_state != self._last_start_ts:
-                    if self._last_start_ts is not None:
-                        logger.info("Start charging button pressed")
-                        if self.charge_point:
-                            await self.charge_point.remote_start()
-                        else:
-                            logger.warning("No wallbox connected, ignoring start")
-                    self._last_start_ts = start_state
-
-                # Stop button (detect timestamp change)
-                stop_state = await self.ha.get_state("button.wallbox_stop_charging")
-                if stop_state is not None and stop_state != self._last_stop_ts:
-                    if self._last_stop_ts is not None:
-                        logger.info("Stop charging button pressed")
-                        if self.charge_point:
-                            await self.charge_point.remote_stop()
-                        else:
-                            logger.warning("No wallbox connected, ignoring stop")
-                    self._last_stop_ts = stop_state
 
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")
