@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.7.9"
+__version__ = "0.8.0"
 
 import asyncio
 import json
@@ -255,7 +255,10 @@ class OCPPServer:
                                 if power_w > 0 and self.charge_point.transaction_id is None:
                                     logger.info("No active transaction, starting one first")
                                     self.charge_point.transaction_started_event.clear()
-                                    ok = await self.charge_point.remote_start()
+                                    ok = await self.charge_point.remote_start(
+                                        current_a=float(self.min_current_a),
+                                        num_phases=self._current_phases,
+                                    )
                                     if ok:
                                         try:
                                             await asyncio.wait_for(
@@ -357,15 +360,14 @@ class OCPPServer:
             logger.warning(f"Wallbox not startable ({getattr(self.charge_point, 'current_status', '?')})")
             return
 
-        # Step 4: Set TxDefaultProfile with min current BEFORE RemoteStart.
-        # The wallbox needs a non-zero profile to energize the pilot signal;
-        # without it the car won't close its relay and StartTransaction never arrives.
-        min_power_w = self.min_current_a * 230 * self._current_phases
-        await self.charge_point.set_charging_power(min_power_w, num_phases=self._current_phases)
-
+        # Step 4: RemoteStart with embedded charging profile at min current.
+        # Including the profile in the request itself ensures the wallbox
+        # energizes the pilot signal as part of the start sequence.
         self.charge_point.transaction_started_event.clear()
-        logger.info("Sending RemoteStartTransaction")
-        ok = await self.charge_point.remote_start()
+        ok = await self.charge_point.remote_start(
+            current_a=float(self.min_current_a),
+            num_phases=self._current_phases,
+        )
         if not ok:
             logger.warning("RemoteStartTransaction not accepted")
             return
