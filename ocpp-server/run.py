@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 import asyncio
 import json
@@ -255,10 +255,7 @@ class OCPPServer:
                                 if power_w > 0 and self.charge_point.transaction_id is None:
                                     logger.info("No active transaction, starting one first")
                                     self.charge_point.transaction_started_event.clear()
-                                    ok = await self.charge_point.remote_start(
-                                        current_a=float(self.min_current_a),
-                                        num_phases=self._current_phases,
-                                    )
+                                    ok = await self.charge_point.remote_start()
                                     if ok:
                                         try:
                                             await asyncio.wait_for(
@@ -292,20 +289,18 @@ class OCPPServer:
                 logger.error(f"Control watcher error: {e}")
 
     async def _post_connect_setup(self):
-        """Setup after wallbox connects: ensure transaction exists and is paused.
+        """Sync state after wallbox connects.
 
-        Fully event-driven. Sequence:
-        1. Wait for first wallbox message (Boot or Status)
-        2. If already charging → just set 0A to pause (transaction exists)
-        3. If startable → RemoteStart with min current, wait for StartTransaction, then pause
+        Only syncs — does NOT start a transaction.  Transaction start is
+        handled by _watch_controls when the EnergyManager requests power
+        (exactly like v0.5.0 which worked reliably).
         """
-        STARTABLE = {"Available", "Preparing"}
         ALREADY_ACTIVE = {"Charging", "SuspendedEV", "SuspendedEVSE"}
 
         if not self.charge_point:
             return
 
-        # Step 1: Wait for first message from wallbox (Boot or Status)
+        # Wait for first message from wallbox (Boot or Status)
         boot = asyncio.create_task(self.charge_point.boot_event.wait())
         status = asyncio.create_task(self.charge_point.status_event.wait())
         done, pending = await asyncio.wait(
@@ -325,66 +320,13 @@ class OCPPServer:
         ws = self.charge_point.current_status
         logger.info(f"Post-connect: status={ws}")
 
-        # Always request MeterValues to sync power/energy/transaction_id
+        # Request MeterValues to sync power/energy/transaction_id
         await self.charge_point.trigger_meter_values()
 
-        # Step 2: Already charging → transaction exists, just pause
         if ws in ALREADY_ACTIVE:
-            logger.info(f"Wallbox already active ({ws}), pausing")
-            await self.charge_point.set_charging_power(0, num_phases=self._current_phases)
-            logger.info("Post-connect setup complete: existing transaction, paused")
-            return
-
-        # Step 3: Wait for startable state if needed (e.g. Finishing)
-        deadline = asyncio.get_event_loop().time() + 60
-        while (
-            self.charge_point
-            and self.charge_point.current_status not in STARTABLE
-        ):
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                logger.warning(
-                    f"Wallbox not startable after 60s ({self.charge_point.current_status})"
-                )
-                return
-            logger.info(f"Post-connect: waiting for startable state ({self.charge_point.current_status})")
-            self.charge_point.status_event.clear()
-            try:
-                await asyncio.wait_for(
-                    self.charge_point.status_event.wait(), timeout=remaining
-                )
-            except asyncio.TimeoutError:
-                break
-
-        if not self.charge_point or self.charge_point.current_status not in STARTABLE:
-            logger.warning(f"Wallbox not startable ({getattr(self.charge_point, 'current_status', '?')})")
-            return
-
-        # Step 4: RemoteStart with embedded charging profile at min current.
-        # Including the profile in the request itself ensures the wallbox
-        # energizes the pilot signal as part of the start sequence.
-        self.charge_point.transaction_started_event.clear()
-        ok = await self.charge_point.remote_start(
-            current_a=float(self.min_current_a),
-            num_phases=self._current_phases,
-        )
-        if not ok:
-            logger.warning("RemoteStartTransaction not accepted")
-            return
-
-        # Step 5: Wait for StartTransaction confirmation
-        try:
-            await asyncio.wait_for(
-                self.charge_point.transaction_started_event.wait(), timeout=30
-            )
-            logger.info(f"Transaction confirmed: id={self.charge_point.transaction_id}")
-        except asyncio.TimeoutError:
-            logger.warning("StartTransaction not received after 30s")
-            return
-
-        # Step 6: Pause charging (0A) — ready for EnergyManager commands
-        await self.charge_point.set_charging_power(0, num_phases=self._current_phases)
-        logger.info("Post-connect setup complete: transaction active, charging paused")
+            logger.info(f"Wallbox already active ({ws}), recovering transaction state")
+        else:
+            logger.info(f"Post-connect: idle ({ws}), waiting for EnergyManager power request")
 
     async def handle_websocket(self, websocket):
         """Handle incoming WebSocket connection from wallbox."""

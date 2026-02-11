@@ -248,40 +248,13 @@ class ChargePointHandler(CP):
         logger.info(f"ChargePointMaxProfile response: {response.status}")
         return response.status == "Accepted"
 
-    async def remote_start(self, id_tag: str = "EnergyManager",
-                           current_a: float = 0, num_phases: int = 3):
-        """Start charging remotely.
-
-        If current_a > 0, include a TxProfile in the request so the
-        wallbox knows the initial charging current immediately.
-        """
-        kwargs = {
-            "id_tag": id_tag,
-            "connector_id": self.connector_id,
-        }
-        if current_a > 0:
-            current_a = round(current_a, 1)
-            kwargs["charging_profile"] = {
-                "charging_profile_id": 1,
-                "stack_level": 0,
-                "charging_profile_purpose": ChargingProfilePurposeType.tx_default_profile,
-                "charging_profile_kind": ChargingProfileKindType.absolute,
-                "charging_schedule": {
-                    "charging_rate_unit": ChargingRateUnitType.amps,
-                    "charging_schedule_period": [
-                        {
-                            "start_period": 0,
-                            "limit": current_a,
-                            "number_phases": num_phases,
-                        }
-                    ],
-                },
-            }
-            logger.info(f"Sending RemoteStartTransaction with {current_a:.1f}A profile")
-        else:
-            logger.info("Sending RemoteStartTransaction")
-
-        request = call.RemoteStartTransaction(**kwargs)
+    async def remote_start(self, id_tag: str = "EnergyManager"):
+        """Start charging remotely."""
+        logger.info("Sending RemoteStartTransaction")
+        request = call.RemoteStartTransaction(
+            id_tag=id_tag,
+            connector_id=self.connector_id,
+        )
         response = await self.call(request)
         logger.info(f"RemoteStartTransaction response: {response.status}")
         return response.status == "Accepted"
