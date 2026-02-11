@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 import asyncio
 import json
@@ -325,6 +325,12 @@ class OCPPServer:
 
         if ws in ALREADY_ACTIVE:
             logger.info(f"Wallbox already active ({ws}), recovering transaction state")
+        elif not self.charge_point.boot_event.is_set():
+            # No BootNotification → this is a WebSocket reconnect, not a fresh boot.
+            # Reset the wallbox to get a clean boot with proper pilot signal init.
+            logger.info(f"No BootNotification received, sending Reset to reinitialize")
+            await self.charge_point.reset()
+            # Wallbox will disconnect and reconnect with BootNotification
         else:
             logger.info(f"Post-connect: idle ({ws}), waiting for EnergyManager power request")
 
