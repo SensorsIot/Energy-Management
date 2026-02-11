@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.7.3"
+__version__ = "0.7.4"
 
 import asyncio
 import json
@@ -282,7 +282,7 @@ class OCPPServer:
         """Setup after wallbox connects: ensure transaction exists and is paused.
 
         Fully event-driven — no fixed sleeps. Sequence:
-        1. Wait for BootNotification
+        1. Wait briefly for BootNotification (only sent on fresh boot, not reconnect)
         2. Wait for connector status to reach startable state
         3. Send RemoteStartTransaction
         4. Wait for StartTransaction confirmation
@@ -293,12 +293,18 @@ class OCPPServer:
         if not self.charge_point:
             return
 
-        # Step 1: Wait for BootNotification
-        try:
-            await asyncio.wait_for(self.charge_point.boot_event.wait(), timeout=30)
-            logger.info("Post-connect: BootNotification received")
-        except asyncio.TimeoutError:
-            logger.warning("Post-connect: no BootNotification after 30s, giving up")
+        # Step 1: Wait for first message from wallbox (Boot or Status)
+        boot = asyncio.create_task(self.charge_point.boot_event.wait())
+        status = asyncio.create_task(self.charge_point.status_event.wait())
+        done, pending = await asyncio.wait(
+            {boot, status}, timeout=30, return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in pending:
+            t.cancel()
+        if done:
+            logger.info("Post-connect: wallbox ready (boot or status received)")
+        else:
+            logger.warning("Post-connect: no message from wallbox after 30s, giving up")
             return
 
         if not self.charge_point:
