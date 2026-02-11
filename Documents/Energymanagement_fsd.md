@@ -2137,13 +2137,12 @@ ev_charging:
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| ESP32 OCPP Server | ✅ In progress | [OCPP-ESP32-Server](https://github.com/SensorsIot/OCPP-ESP32-Server) |
-| MQTT topics | ✅ Implemented | status, session, phase, command/* |
-| Phase switching | ✅ Implemented | GPIO relay control at ESP32 |
-| EnergyManager MQTT client | ⬜ Not started | Subscribe to status, publish commands |
+| OCPP Server HA add-on | ✅ Done | v0.7.2, see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md) |
+| HA entity interface | ✅ Done | Sensors + number.wallbox_power_limit |
+| Phase switching | ✅ Done | EARU latching relay via ESPHome |
+| Calibrated power conversion | ✅ Done | 3-phase lookup table (measured) |
 | Opportunistic solar mode | ⬜ Not started | Real-time power adjustment |
 | Goal mode | ⬜ Not started | Cheap tariff scheduling |
-| HA MQTT sensors | ⬜ Not started | configuration.yaml templates |
 
 ### 4.5.13 Open Questions
 
