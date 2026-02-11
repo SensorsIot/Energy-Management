@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.7.4"
+__version__ = "0.7.5"
 
 import asyncio
 import json
@@ -281,14 +281,13 @@ class OCPPServer:
     async def _post_connect_setup(self):
         """Setup after wallbox connects: ensure transaction exists and is paused.
 
-        Fully event-driven — no fixed sleeps. Sequence:
-        1. Wait briefly for BootNotification (only sent on fresh boot, not reconnect)
-        2. Wait for connector status to reach startable state
-        3. Send RemoteStartTransaction
-        4. Wait for StartTransaction confirmation
-        5. Pause with 0A profile
+        Fully event-driven. Sequence:
+        1. Wait for first wallbox message (Boot or Status)
+        2. If already charging → just set 0A to pause (transaction exists)
+        3. If startable → RemoteStart with min current, wait for StartTransaction, then pause
         """
         STARTABLE = {"Available", "Preparing"}
+        ALREADY_ACTIVE = {"Charging", "SuspendedEV", "SuspendedEVSE"}
 
         if not self.charge_point:
             return
@@ -310,7 +309,17 @@ class OCPPServer:
         if not self.charge_point:
             return
 
-        # Step 2: Wait for startable state (event-driven)
+        ws = self.charge_point.current_status
+        logger.info(f"Post-connect: status={ws}")
+
+        # Step 2: Already charging → transaction exists, just pause
+        if ws in ALREADY_ACTIVE:
+            logger.info(f"Wallbox already active ({ws}), pausing")
+            await self.charge_point.set_charging_power(0, num_phases=self._current_phases)
+            logger.info("Post-connect setup complete: existing transaction, paused")
+            return
+
+        # Step 3: Wait for startable state if needed (e.g. Finishing)
         deadline = asyncio.get_event_loop().time() + 60
         while (
             self.charge_point
@@ -319,58 +328,46 @@ class OCPPServer:
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 logger.warning(
-                    f"Wallbox not in startable state after 60s "
-                    f"({self.charge_point.current_status}), skipping auto-start"
+                    f"Wallbox not startable after 60s ({self.charge_point.current_status})"
                 )
                 return
-            logger.info(
-                f"Post-connect: waiting for startable state "
-                f"(current={self.charge_point.current_status})"
-            )
+            logger.info(f"Post-connect: waiting for startable state ({self.charge_point.current_status})")
             self.charge_point.status_event.clear()
             try:
                 await asyncio.wait_for(
                     self.charge_point.status_event.wait(), timeout=remaining
                 )
             except asyncio.TimeoutError:
-                break  # will check condition in log below
+                break
 
-        if not self.charge_point:
+        if not self.charge_point or self.charge_point.current_status not in STARTABLE:
+            logger.warning(f"Wallbox not startable ({getattr(self.charge_point, 'current_status', '?')})")
             return
 
-        if self.charge_point.current_status not in STARTABLE:
-            logger.warning(
-                f"Wallbox status {self.charge_point.current_status}, cannot start"
+        # Step 4: RemoteStart + set min current so wallbox actually begins
+        self.charge_point.transaction_started_event.clear()
+        logger.info("Sending RemoteStartTransaction")
+        ok = await self.charge_point.remote_start()
+        if not ok:
+            logger.warning("RemoteStartTransaction not accepted")
+            return
+
+        # Set minimum current — wallbox needs non-zero profile to start transaction
+        min_power_w = self.min_current_a * 230 * self._current_phases
+        await self.charge_point.set_charging_power(min_power_w, num_phases=self._current_phases)
+        logger.info(f"Set minimum power {min_power_w}W to trigger transaction start")
+
+        # Step 5: Wait for StartTransaction confirmation
+        try:
+            await asyncio.wait_for(
+                self.charge_point.transaction_started_event.wait(), timeout=30
             )
+            logger.info(f"Transaction confirmed: id={self.charge_point.transaction_id}")
+        except asyncio.TimeoutError:
+            logger.warning("StartTransaction not received after 30s")
             return
 
-        logger.info(
-            f"Post-connect: status={self.charge_point.current_status}, "
-            f"transaction_id={self.charge_point.transaction_id}"
-        )
-
-        # Step 3: Start transaction if none active
-        if self.charge_point.transaction_id is None:
-            self.charge_point.transaction_started_event.clear()
-            logger.info("No active transaction, sending RemoteStartTransaction")
-            ok = await self.charge_point.remote_start()
-            if not ok:
-                logger.warning("RemoteStartTransaction not accepted")
-                return
-
-            # Step 4: Wait for StartTransaction confirmation
-            try:
-                await asyncio.wait_for(
-                    self.charge_point.transaction_started_event.wait(), timeout=30
-                )
-                logger.info(
-                    f"Transaction confirmed: id={self.charge_point.transaction_id}"
-                )
-            except asyncio.TimeoutError:
-                logger.warning("StartTransaction not received after 30s")
-                return
-
-        # Step 5: Pause charging (0A profile)
+        # Step 6: Pause charging (0A) — ready for EnergyManager commands
         await self.charge_point.set_charging_power(0, num_phases=self._current_phases)
         logger.info("Post-connect setup complete: transaction active, charging paused")
 
