@@ -48,12 +48,16 @@ appliances:
 sensors:
   pv_power: "sensor.solar_pv_total_ac_power"
   load_power: "sensor.load_power"
+  grid_power: "sensor.grid_power"
   appliance_signal: "sensor.appliance_signal"
 
-# EV charging settings (future use)
+# EV charging settings (FSD 4.5 — opportunistic solar mode)
 ev_charging:
-  min_power_w: 4100
-  max_power_w: 11000
+  enabled: true
+  min_power_1phase_w: 1400
+  max_power_1phase_w: 3700
+  min_power_3phase_w: 4100
+  max_power_3phase_w: 11000
 
 # Schedule settings
 schedule:

@@ -25,6 +25,7 @@ from src.forecast_reader import ForecastReader
 from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
 from src.appliance_signal import calculate_appliance_signal
+from src.ev_charging import calculate_ev_power
 from src.influxdb_writer import SimulationWriter
 from src.notifications import init_telegram, notify_error
 
@@ -162,6 +163,20 @@ class EnergyManager:
             bot_token=telegram_opts.get("bot_token", ""),
             chat_id=telegram_opts.get("chat_id", ""),
         )
+
+        # EV charging config (FSD 4.5)
+        ev_opts = options.get("ev_charging", {})
+        self.ev_charging_enabled = ev_opts.get("enabled", False)
+        self.ev_min_power_1phase_w = ev_opts.get("min_power_1phase_w", 1400)
+        self.ev_max_power_1phase_w = ev_opts.get("max_power_1phase_w", 3700)
+        self.ev_min_power_3phase_w = ev_opts.get("min_power_3phase_w", 4100)
+        self.ev_max_power_3phase_w = ev_opts.get("max_power_3phase_w", 11000)
+        self.grid_power_entity = sensors_opts.get("grid_power", "sensor.grid_power")
+        self.wallbox_power_entity = ev_opts.get("wallbox_power_entity", "sensor.wallbox_power")
+        self.wallbox_connected_entity = ev_opts.get("wallbox_connected_entity", "binary_sensor.wallbox_connected")
+        self.wallbox_power_limit_entity = ev_opts.get("wallbox_power_limit_entity", "number.wallbox_power_limit")
+        self.ev_target_power_entity = ev_opts.get("ev_target_power_entity", "sensor.ev_target_power")
+        self._last_ev_power_limit = None
 
     def connect(self):
         """Connect to services."""
@@ -462,6 +477,69 @@ class EnergyManager:
         except Exception as e:
             logger.error(f"Failed to calculate appliance signal: {e}")
 
+    def control_ev_charging(self):
+        """Control EV charging based on solar excess (FSD 4.5)."""
+        if not self.ev_charging_enabled:
+            return
+
+        try:
+            # Check wallbox connectivity
+            wb_state = self.ha_client.get_state(self.wallbox_connected_entity)
+            if not wb_state or wb_state.get("state") != "on":
+                logger.debug("Wallbox not connected, skipping EV control")
+                return
+
+            # Read grid and wallbox power
+            grid_power = self.ha_client.get_sensor_value(self.grid_power_entity)
+            wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity)
+
+            if grid_power is None:
+                logger.warning(f"Cannot read {self.grid_power_entity}, skipping EV control")
+                return
+
+            wallbox_power = wallbox_power or 0.0
+
+            # Calculate target
+            result = calculate_ev_power(
+                grid_power_w=grid_power,
+                wallbox_power_w=wallbox_power,
+                min_power_1phase_w=self.ev_min_power_1phase_w,
+                max_power_1phase_w=self.ev_max_power_1phase_w,
+                min_power_3phase_w=self.ev_min_power_3phase_w,
+                max_power_3phase_w=self.ev_max_power_3phase_w,
+            )
+
+            # Only send command if target changed
+            if result.target_power_w != self._last_ev_power_limit:
+                logger.info(f"EV charging: {result.reason} (grid={grid_power:.0f}W, wallbox={wallbox_power:.0f}W)")
+                success, err = self.ha_client.set_number(
+                    self.wallbox_power_limit_entity,
+                    result.target_power_w,
+                    max_retries=3,
+                )
+                if success:
+                    self._last_ev_power_limit = result.target_power_w
+                else:
+                    logger.error(f"Failed to set wallbox power limit: {err}")
+            else:
+                logger.debug(f"EV charging unchanged at {result.target_power_w:.0f}W")
+
+            # Update dashboard sensor
+            self.ha_client.set_sensor_state(
+                self.ev_target_power_entity,
+                int(result.target_power_w),
+                attributes={
+                    "friendly_name": "EV Target Power",
+                    "unit_of_measurement": "W",
+                    "available_excess_w": result.available_excess_w,
+                    "reason": result.reason,
+                    "icon": "mdi:ev-station",
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"EV charging control failed: {e}", exc_info=True)
+
     def start(self):
         """Start the scheduler."""
         logger.info(f"Starting scheduler (every {self.update_interval} minutes)")
@@ -479,6 +557,20 @@ class EnergyManager:
             max_instances=1,
             coalesce=True,
         )
+
+        # Schedule EV charging control (1-minute interval)
+        if self.ev_charging_enabled:
+            self.control_ev_charging()  # Run immediately
+            self.scheduler.add_job(
+                self.control_ev_charging,
+                "interval",
+                minutes=1,
+                id="ev_charging",
+                name="EV Charging Control",
+                max_instances=1,
+                coalesce=True,
+            )
+            logger.info("EV charging control enabled (1-minute interval)")
 
         self.scheduler.start()
 
