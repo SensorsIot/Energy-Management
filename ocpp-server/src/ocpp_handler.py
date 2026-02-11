@@ -73,9 +73,11 @@ class ChargePointHandler(CP):
     ):
         """Wallbox status changed."""
         logger.info(f"Status: connector={connector_id}, status={status}, error={error_code}")
-        self.current_status = status
-        if self.on_status_change:
-            self.on_status_change("status", status)
+        # Only track status from our connector (connector 0 = charge point level, ignore)
+        if connector_id == self.connector_id:
+            self.current_status = status
+            if self.on_status_change:
+                self.on_status_change("status", status)
         return call_result.StatusNotification()
 
     @on(Action.meter_values)
