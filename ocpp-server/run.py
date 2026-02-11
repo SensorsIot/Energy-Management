@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 
 import asyncio
 import json
@@ -343,11 +343,15 @@ class OCPPServer:
         logger.info(f"Wallbox connecting: id={cp_id}, path={path}")
 
         # Create charge point handler
-        self.charge_point = ChargePointHandler(
+        cp = ChargePointHandler(
             cp_id,
             websocket,
             on_status_change=self._on_status_change,
         )
+        self.charge_point = cp
+
+        # Reset power limit tracking so _watch_controls re-evaluates
+        self._last_power_limit = None
 
         # Publish connected status
         self._on_status_change("connected", True)
@@ -356,17 +360,18 @@ class OCPPServer:
         setup_task = None
         try:
             setup_task = asyncio.create_task(self._post_connect_setup())
-            await self.charge_point.start()
+            await cp.start()
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"Wallbox disconnected: {cp_id}")
         finally:
             if setup_task and not setup_task.done():
                 setup_task.cancel()
-            # Reset sensor entities on disconnect
-            self._on_status_change("connected", False)
-            self._on_status_change("power_w", 0)
-            self._on_status_change("transaction", "stopped")
-            self.charge_point = None
+            # Only clear state if this is still the active connection
+            if self.charge_point is cp:
+                self._on_status_change("connected", False)
+                self._on_status_change("power_w", 0)
+                self._on_status_change("transaction", "stopped")
+                self.charge_point = None
 
     async def start_server(self):
         """Start WebSocket server and HA integration."""
