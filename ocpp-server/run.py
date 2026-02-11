@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.7.7"
+__version__ = "0.7.8"
 
 import asyncio
 import json
@@ -357,18 +357,19 @@ class OCPPServer:
             logger.warning(f"Wallbox not startable ({getattr(self.charge_point, 'current_status', '?')})")
             return
 
-        # Step 4: RemoteStart + set min current so wallbox actually begins
+        # Step 4: Set ChargePointMaxProfile FIRST so pilot signal goes to 6A,
+        # then RemoteStart.  TxDefaultProfile only takes effect after a
+        # transaction starts — without a non-zero pilot signal the car won't
+        # close its relay and StartTransaction never arrives.
+        min_current_a = float(self.min_current_a)
+        await self.charge_point.set_max_current(min_current_a, num_phases=self._current_phases)
+
         self.charge_point.transaction_started_event.clear()
         logger.info("Sending RemoteStartTransaction")
         ok = await self.charge_point.remote_start()
         if not ok:
             logger.warning("RemoteStartTransaction not accepted")
             return
-
-        # Set minimum current — wallbox needs non-zero profile to start transaction
-        min_power_w = self.min_current_a * 230 * self._current_phases
-        await self.charge_point.set_charging_power(min_power_w, num_phases=self._current_phases)
-        logger.info(f"Set minimum power {min_power_w}W to trigger transaction start")
 
         # Step 5: Wait for StartTransaction confirmation
         try:

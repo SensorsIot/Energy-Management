@@ -213,6 +213,41 @@ class ChargePointHandler(CP):
         logger.info(f"SetChargingProfile response: {response.status}")
         return response.status == "Accepted"
 
+    async def set_max_current(self, current_a: float, num_phases: int = 3):
+        """Set charge point max current via ChargePointMaxProfile.
+
+        Unlike TxDefaultProfile, this takes effect immediately on the CP
+        pilot signal — even before a transaction starts.
+        """
+        current_a = round(current_a, 1)
+        current_a = max(0, min(current_a, 32))
+
+        logger.info(f"Setting ChargePointMaxProfile: {current_a:.1f}A, {num_phases}-phase")
+
+        request = call.SetChargingProfile(
+            connector_id=0,  # ChargePointMaxProfile must target connector 0
+            cs_charging_profiles={
+                "charging_profile_id": 2,
+                "stack_level": 0,
+                "charging_profile_purpose": ChargingProfilePurposeType.charge_point_max_profile,
+                "charging_profile_kind": ChargingProfileKindType.absolute,
+                "charging_schedule": {
+                    "charging_rate_unit": ChargingRateUnitType.amps,
+                    "charging_schedule_period": [
+                        {
+                            "start_period": 0,
+                            "limit": current_a,
+                            "number_phases": num_phases,
+                        }
+                    ],
+                },
+            },
+        )
+
+        response = await self.call(request)
+        logger.info(f"ChargePointMaxProfile response: {response.status}")
+        return response.status == "Accepted"
+
     async def remote_start(self, id_tag: str = "EnergyManager"):
         """Start charging remotely."""
         logger.info("Sending RemoteStartTransaction")
