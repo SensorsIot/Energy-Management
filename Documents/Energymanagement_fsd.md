@@ -1847,67 +1847,50 @@ cd energymanager && python -m pytest tests/test_appliance_signal.py -v
 
 ### 4.5.1 Overview
 
-EV charging optimization maximizes solar self-consumption while ensuring charging goals are met. The system uses a dedicated ESP32-based OCPP server that bridges the wallbox to Home Assistant via MQTT.
+EV charging optimization maximizes solar self-consumption while ensuring charging goals are met. The OCPP Server HA add-on bridges the wallbox to Home Assistant via native HA entities — no MQTT required.
 
 **Key Features:**
-- ESP32 OCPP 1.6J server with hardware phase switching (GPIO relays)
-- MQTT bridge to EnergyManager for control commands
-- Phase switching (1-phase / 3-phase) for wider power range
+- OCPP 1.6J server as HA add-on (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md))
+- Phase switching (1-phase / 3-phase) via EARU latching relay (ESPHome)
+- Calibrated power-to-current conversion (3-phase lookup table)
 - Opportunistic solar charging (default)
 - Goal-based charging with cheap tariff guarantee
 - Real-time power adjustment every minute
 - Forecast-based optimization decisions
 
-**Hardware:** [OCPP-ESP32-Server](https://github.com/SensorsIot/OCPP-ESP32-Server) on WT32-ETH01
-
 ### 4.5.2 Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              Home Assistant                                  │
-│                                                                             │
-│  ┌─────────────────────┐      ┌─────────────────────────────────────────┐  │
-│  │   EnergyManager     │      │              MQTT Broker                │  │
-│  │                     │      │            (Mosquitto)                  │  │
-│  │  • Forecast-based   │      │                                         │  │
-│  │    optimization     │◄────▶│  ocpp/{chargepoint_id}/status          │  │
-│  │  • Real-time power  │      │  ocpp/{chargepoint_id}/session         │  │
-│  │    decisions (1min) │      │  ocpp/{chargepoint_id}/command/limit   │  │
-│  │  • Goal management  │      │                                         │  │
-│  └─────────────────────┘      └──────────────────┬──────────────────────┘  │
-│                                                   │                         │
-└───────────────────────────────────────────────────│─────────────────────────┘
-                                                    │ MQTT (WiFi)
-                                                    │
-                                          ┌─────────────────────┐
-                                          │  ESP32 OCPP Server  │
-                                          │    (WT32-ETH01)     │
-                                          │                     │
-                                          │  • OCPP 1.6J server │
-                                          │  • Phase relay GPIO │
-                                          │  • MQTT client      │
-                                          └──────────┬──────────┘
-                                                     │ Ethernet
-                                                     │ OCPP 1.6J WebSocket
-                                                     ▼
-                                          ┌─────────────────┐
-                                          │    Wallbox      │
-                                          │    (AcTec)      │
-                                          │                 │
-                                          │  • OCPP client  │
-                                          │  • 6-16A        │
-                                          └────────┬────────┘
-                                                   │
-                                                   ▼
-                                          ┌─────────────────┐
-                                          │   Electric      │
-                                          │   Vehicle       │
-                                          └─────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                     Home Assistant                            │
+│                                                              │
+│  ┌──────────────┐              ┌───────────────────────┐    │
+│  │ EnergyManager│──HA states──►│  OCPP Server Add-on   │    │
+│  │              │  & services  │                       │    │
+│  │  reads:      │              │  • WebSocket :8887    │    │
+│  │  sensors     │              │  • OCPP 1.6J handler  │    │
+│  │  sets:       │              │  • HA entity provider │    │
+│  │  power_limit │              │  • Phase switch ctrl  │    │
+│  └──────────────┘              └───┬───────────┬───────┘    │
+│                                    │           │            │
+│  ┌─────────────────────┐          │           │            │
+│  │ EARU Breaker        │◄─────────┘           │            │
+│  │ (ESPHome BK7231N)   │  switch.turn_on/off  │            │
+│  │ ON=3φ  OFF=1φ       │                       │            │
+│  └─────────┬───────────┘                       │            │
+│            │ relay                              │            │
+└────────────┼───────────────────────────────────┼────────────┘
+             │ L1/L2/L3 switching                │ OCPP 1.6J
+             │                                   │ WebSocket
+             │                         ┌─────────┴─────────┐
+             │                         │     Wallbox        │
+             └────────────────────────►│  (AcTec / OCPP)    │
+                                       │  • OCPP 1.6J client│
+                                       │  • 6-16A           │
+                                       └────────────────────┘
 ```
 
-**Network Separation:**
-- **Ethernet**: Dedicated link between ESP32 and wallbox (isolated, reliable)
-- **WiFi**: ESP32 connects to home network for MQTT communication
+**Communication:** EnergyManager reads wallbox sensors and sets `number.wallbox_power_limit` via HA Supervisor API. No MQTT between EnergyManager and OCPP Server.
 
 ### 4.5.3 Power Ranges
 
@@ -1944,7 +1927,7 @@ Every minute:
    ELSE:
       → No charging (or use battery buffer, see 4.5.6)
 
-3. Send OCPP charging profile to wallbox
+3. Set number.wallbox_power_limit (OCPP Server handles the rest)
 ```
 
 #### 4.5.4.2 Goal Mode (Override)
@@ -2001,7 +1984,7 @@ Reacts to actual conditions:
 - Current PV production
 - Current household load
 - Battery state
-- Adjusts charging power via OCPP profile
+- Adjusts charging power via `number.wallbox_power_limit`
 
 ### 4.5.6 Battery Buffer for Solar Fluctuations
 
@@ -2018,115 +2001,30 @@ IF charging AND solar_drops_suddenly:
 
 **Limit:** Maximum buffer duration and energy TBD.
 
-### 4.5.7 MQTT Interface
+### 4.5.7 HA Entity Interface
 
-The ESP32 OCPP Server bridges wallbox control to MQTT. EnergyManager communicates via MQTT topics.
+The OCPP Server add-on exposes wallbox state as native HA entities via the Supervisor API. EnergyManager reads sensors and sets the power limit — no MQTT required.
 
-**Topic Base:** `ocpp/{chargepoint_id}/` (e.g., `ocpp/AcTec001/`)
+For the full entity specification, see [ocpp-server-fsd.md Section 4.3](../ocpp-server/docs/ocpp-server-fsd.md).
 
-#### Published Topics (ESP32 → EnergyManager)
+#### Entities Read by EnergyManager
 
-| Topic | QoS | Content |
-|-------|-----|---------|
-| `status` | 1 | Wallbox connection and connector status |
-| `session` | 1 | Active transaction with meter values |
-| `phase` | 1 | Current phase mode |
-| `phase/result` | 1 | Phase switch result |
+| Entity | Type | Description |
+|--------|------|-------------|
+| `sensor.wallbox_power` | sensor (W) | Current charging power |
+| `sensor.wallbox_energy` | sensor (Wh) | Session energy delivered |
+| `sensor.wallbox_status` | sensor | Available / Preparing / Charging / Finishing / Faulted |
+| `binary_sensor.wallbox_connected` | binary_sensor | Wallbox WebSocket connected |
+| `sensor.wallbox_transaction` | sensor | `idle` / `charging` |
+| `sensor.wallbox_phases` | sensor | Active phase count: `1` or `3` |
 
-**Status Message:**
-```json
-{
-  "timestamp": "2026-01-25T10:30:00Z",
-  "connected": true,
-  "status": "Charging",
-  "error_code": "NoError"
-}
-```
+#### Entity Written by EnergyManager
 
-**Session Message:**
-```json
-{
-  "timestamp": "2026-01-25T10:30:00Z",
-  "transaction_id": 12345,
-  "id_tag": "ENERGY_MANAGER",
-  "energy_wh": 1500,
-  "power_w": 7400,
-  "current_a": 32.0,
-  "duration_s": 1800,
-  "phase_mode": "3-phase",
-  "active": true
-}
-```
+| Entity | Type | Description |
+|--------|------|-------------|
+| `number.wallbox_power_limit` | number (W) | Target power. OCPP Server auto-manages transactions: >0 starts charging, 0 pauses (transaction stays alive). |
 
-**Phase Message:**
-```json
-{
-  "timestamp": "2026-01-25T10:30:00Z",
-  "phase_mode": "3-phase",
-  "power_correction_factor": 1.0
-}
-```
-
-#### Subscribed Topics (EnergyManager → ESP32)
-
-| Topic | QoS | Content |
-|-------|-----|---------|
-| `command/start` | 1 | Start charging transaction |
-| `command/stop` | 1 | Stop charging transaction |
-| `command/limit` | 1 | Set power limit (auto phase switching) |
-
-**Start Command:**
-```json
-{"id_tag": "ENERGY_MANAGER"}
-```
-
-**Stop Command:**
-```json
-{}
-```
-
-**Limit Command:**
-```json
-{"power_w": 7400}
-```
-
-### 4.5.8 Phase Switching
-
-Phase switching is automatic based on the power limit command. The ESP32 controls GPIO relays to physically switch between 1-phase and 3-phase.
-
-```
-When command/limit received with power_w:
-
-IF power_w >= 4100:
-   → Switch to 3-phase mode (if not already)
-   → Set OCPP charging profile limit
-ELSE IF power_w >= 1400:
-   → Switch to 1-phase mode (if not already)
-   → Set OCPP charging profile limit
-ELSE:
-   → Stop charging
-```
-
-**Safety:** Phase switching only occurs when charging is paused (relays never switch under load).
-
-**Switching delay:** ~10 seconds settling time after relay switch.
-
-### 4.5.9 Home Assistant Entities
-
-#### Inputs (from MQTT / User)
-
-| Entity | Type | Source | Description |
-|--------|------|--------|-------------|
-| `sensor.wallbox_connected` | binary | MQTT | Wallbox connected to ESP32 |
-| `sensor.wallbox_status` | sensor | MQTT | Available/Preparing/Charging/Faulted |
-| `sensor.wallbox_power` | sensor | MQTT | Current charging power (W) |
-| `sensor.wallbox_energy` | sensor | MQTT | Session energy (Wh) |
-| `sensor.wallbox_phase_mode` | sensor | MQTT | 1-phase / 3-phase |
-| `binary_sensor.ev_plugged_in` | binary | MQTT | Car plugged in (status != Available) |
-| `input_number.ev_soc` | number | User | Car SOC (manual input or car API) |
-| `input_number.ev_battery_kwh` | number | User | Car battery capacity (default 60) |
-
-#### Outputs (from EnergyManager)
+#### EnergyManager Output Entities
 
 | Entity | Type | Description |
 |--------|------|-------------|
@@ -2136,65 +2034,51 @@ ELSE:
 | `input_datetime.ev_deadline` | datetime | Goal: charge by time |
 | `input_boolean.ev_goal_mode` | boolean | Enable/disable goal mode |
 
-#### MQTT Sensor Configuration (configuration.yaml)
+#### User Input Entities
 
-```yaml
-mqtt:
-  sensor:
-    - name: "Wallbox Status"
-      state_topic: "ocpp/AcTec001/status"
-      value_template: "{{ value_json.status }}"
-      json_attributes_topic: "ocpp/AcTec001/status"
+| Entity | Type | Description |
+|--------|------|-------------|
+| `input_number.ev_soc` | number | Car SOC (manual input or car API) |
+| `input_number.ev_battery_kwh` | number | Car battery capacity (default 60) |
 
-    - name: "Wallbox Power"
-      state_topic: "ocpp/AcTec001/session"
-      value_template: "{{ value_json.power_w | default(0) }}"
-      unit_of_measurement: "W"
-      device_class: power
+### 4.5.8 Phase Switching
 
-    - name: "Wallbox Energy"
-      state_topic: "ocpp/AcTec001/session"
-      value_template: "{{ value_json.energy_wh | default(0) }}"
-      unit_of_measurement: "Wh"
-      device_class: energy
+Phase switching is automatic based on the power limit. The OCPP Server add-on controls an EARU latching relay via ESPHome to physically switch between 1-phase and 3-phase.
 
-    - name: "Wallbox Phase Mode"
-      state_topic: "ocpp/AcTec001/phase"
-      value_template: "{{ value_json.phase_mode }}"
+```
+When number.wallbox_power_limit changes:
 
-  binary_sensor:
-    - name: "Wallbox Connected"
-      state_topic: "ocpp/AcTec001/status"
-      value_template: "{{ value_json.connected }}"
-      payload_on: true
-      payload_off: false
-
-    - name: "EV Plugged In"
-      state_topic: "ocpp/AcTec001/status"
-      value_template: "{{ value_json.status not in ['Available', 'Unavailable'] }}"
-      payload_on: true
-      payload_off: false
+IF power_w >= 4140:
+   → Switch to 3-phase mode (if not already)
+   → Set OCPP charging profile (calibrated current)
+ELSE IF power_w >= 1400:
+   → Switch to 1-phase mode (if not already)
+   → Set OCPP charging profile
+ELSE IF power_w > 0:
+   → Keep current phase, set minimum current
+ELSE:
+   → Pause charging (0A profile, transaction stays alive)
 ```
 
-### 4.5.10 Configuration
+**Safety:** Phase switching only occurs when charging is paused (relays never switch under load). See [ocpp-server-fsd.md Section 4.3.3](../ocpp-server/docs/ocpp-server-fsd.md) for the full safety sequence.
+
+**Switching delay:** 2s current drop + 3s relay settle = 5s total.
+
+### 4.5.9 Configuration
 
 ```yaml
 ev_charging:
   # Enable EV charging optimization
   enabled: true
 
-  # MQTT settings (ESP32 OCPP Server)
-  mqtt_topic_prefix: "ocpp"
-  chargepoint_id: "AcTec001"
-
   # Power limits
   min_power_1phase_w: 1400      # 230V × 6A
   max_power_1phase_w: 3700      # 230V × 16A
-  min_power_3phase_w: 4100      # 400V × 6A
-  max_power_3phase_w: 11000     # 400V × 16A
+  min_power_3phase_w: 4140      # 230V × 6A × 3
+  max_power_3phase_w: 11000     # 230V × 16A × 3
 
-  # Phase switching threshold (automatic at ESP32)
-  phase_switch_threshold_w: 4100
+  # Phase switching threshold (automatic at OCPP Server)
+  phase_switch_threshold_w: 4140
 
   # Battery buffer for solar fluctuations
   buffer_enabled: true
@@ -2214,7 +2098,7 @@ ev_charging:
   ev_battery_entity: "input_number.ev_battery_kwh"
 ```
 
-### 4.5.11 Algorithm Summary
+### 4.5.10 Algorithm Summary
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
