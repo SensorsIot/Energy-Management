@@ -243,8 +243,12 @@ class OCPPServer:
                                 # Auto-transaction: start when power requested, never auto-stop
                                 # (0W just pauses via SetChargingProfile 0A, transaction stays alive)
                                 if power_w > 0 and self.charge_point.transaction_id is None:
-                                    logger.info("Power requested, starting transaction")
-                                    await self.charge_point.remote_start()
+                                    logger.info("No active transaction, starting one first")
+                                    ok = await self.charge_point.remote_start()
+                                    if ok:
+                                        await asyncio.sleep(2)  # Wait for StartTransaction from wallbox
+                                    else:
+                                        logger.warning("RemoteStartTransaction not accepted")
 
                                 # Phase switching
                                 if power_w > 0 and self.phase_switch_entity:
