@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.7.5"
+__version__ = "0.7.6"
 
 import asyncio
 import json
@@ -312,9 +312,10 @@ class OCPPServer:
         ws = self.charge_point.current_status
         logger.info(f"Post-connect: status={ws}")
 
-        # Step 2: Already charging → transaction exists, just pause
+        # Step 2: Already charging → transaction exists, recover and pause
         if ws in ALREADY_ACTIVE:
-            logger.info(f"Wallbox already active ({ws}), pausing")
+            logger.info(f"Wallbox already active ({ws}), requesting MeterValues to recover transaction_id")
+            await self.charge_point.trigger_meter_values()
             await self.charge_point.set_charging_power(0, num_phases=self._current_phases)
             logger.info("Post-connect setup complete: existing transaction, paused")
             return

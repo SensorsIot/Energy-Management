@@ -89,6 +89,13 @@ class ChargePointHandler(CP):
     @on(Action.meter_values)
     async def on_meter_values(self, connector_id: int, meter_value: list, **kwargs):
         """Wallbox sent meter values (power, energy, etc.)."""
+        # Recover transaction_id from MeterValues (e.g. after server restart)
+        txn_id = kwargs.get("transaction_id")
+        if txn_id is not None and self.transaction_id is None:
+            self.transaction_id = txn_id
+            self.transaction_started_event.set()
+            logger.info(f"Recovered transaction_id={txn_id} from MeterValues")
+
         for mv in meter_value:
             for sampled in mv.get("sampled_value", []):
                 measurand = sampled.get("measurand", "Energy.Active.Import.Register")
