@@ -2,6 +2,7 @@
 OCPP 1.6j message handler for wallbox communication.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Callable
@@ -47,6 +48,9 @@ class ChargePointHandler(CP):
         self.connector_id = 1
         self.transaction_id: Optional[int] = None
         self._transaction_counter = 0
+        self.boot_event = asyncio.Event()
+        self.status_event = asyncio.Event()
+        self.transaction_started_event = asyncio.Event()
 
     # ========== Incoming messages from wallbox ==========
 
@@ -54,6 +58,7 @@ class ChargePointHandler(CP):
     async def on_boot_notification(self, charge_point_vendor: str, charge_point_model: str, **kwargs):
         """Wallbox connected and sent boot notification."""
         logger.info(f"Wallbox connected: {charge_point_vendor} {charge_point_model}")
+        self.boot_event.set()
         return call_result.BootNotification(
             current_time=datetime.now(timezone.utc).isoformat(),
             interval=60,  # Heartbeat interval in seconds
@@ -76,6 +81,7 @@ class ChargePointHandler(CP):
         # Only track status from our connector (connector 0 = charge point level, ignore)
         if connector_id == self.connector_id:
             self.current_status = status
+            self.status_event.set()
             if self.on_status_change:
                 self.on_status_change("status", status)
         return call_result.StatusNotification()
@@ -107,6 +113,7 @@ class ChargePointHandler(CP):
         """Wallbox started a charging transaction."""
         self._transaction_counter += 1
         self.transaction_id = self._transaction_counter
+        self.transaction_started_event.set()
         logger.info(f"Transaction started: id={self.transaction_id}, connector={connector_id}")
         if self.on_status_change:
             self.on_status_change("transaction", "started")
@@ -208,18 +215,6 @@ class ChargePointHandler(CP):
         )
         response = await self.call(request)
         logger.info(f"RemoteStartTransaction response: {response.status}")
-        return response.status == "Accepted"
-
-    async def remote_stop(self):
-        """Stop charging remotely."""
-        if self.transaction_id is None:
-            logger.warning("No active transaction to stop")
-            return False
-
-        logger.info(f"Sending RemoteStopTransaction: transaction_id={self.transaction_id}")
-        request = call.RemoteStopTransaction(transaction_id=self.transaction_id)
-        response = await self.call(request)
-        logger.info(f"RemoteStopTransaction response: {response.status}")
         return response.status == "Accepted"
 
     async def trigger_meter_values(self):
