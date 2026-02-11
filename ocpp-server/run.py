@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 import asyncio
 import json
@@ -240,13 +240,11 @@ class OCPPServer:
                             power_w = float(power_state)
                             logger.info(f"Power limit changed to {power_w}W")
                             if self.charge_point:
-                                # Auto-transaction management
+                                # Auto-transaction: start when power requested, never auto-stop
+                                # (0W just pauses via SetChargingProfile 0A, transaction stays alive)
                                 if power_w > 0 and self.charge_point.transaction_id is None:
                                     logger.info("Power requested, starting transaction")
                                     await self.charge_point.remote_start()
-                                elif power_w == 0 and self.charge_point.transaction_id is not None:
-                                    logger.info("Power zero, stopping transaction")
-                                    await self.charge_point.remote_stop()
 
                                 # Phase switching
                                 if power_w > 0 and self.phase_switch_entity:

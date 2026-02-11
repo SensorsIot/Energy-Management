@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 1.4 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 1.5 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -145,7 +145,7 @@ The server extracts the chargepoint ID from the WebSocket connection path.
 |---------|---------|
 | `SetChargingProfile` | `number.wallbox_power_limit` changed |
 | `RemoteStartTransaction` | Auto: power limit changes from 0 to >0 (no active transaction) |
-| `RemoteStopTransaction` | Auto: power limit changes to 0 (active transaction exists) |
+| `RemoteStopTransaction` | Wallbox-initiated (plug removed) or future explicit mechanism |
 | `TriggerMessage` (MeterValues) | Periodic or on demand |
 
 ### 4.3 HA Entity Interface
@@ -167,14 +167,14 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 
 | Entity | Type | Description |
 |--------|------|-------------|
-| `number.wallbox_power_limit` | number | Target power in W (min/max from config). The OCPP server auto-manages transactions: setting power >0 starts a transaction if none is active; setting power to 0 stops the active transaction. |
+| `number.wallbox_power_limit` | number | Target power in W (min/max from config). The OCPP server auto-starts transactions: setting power >0 starts a transaction if none is active. Setting power to 0 pauses charging (0A profile) but keeps the transaction alive. |
 
 #### 4.3.3 SetChargingProfile and Phase Switching
 
 When `number.wallbox_power_limit` changes:
 1. **Auto-transaction management:**
    - Power 0 → >0 (no active transaction): send `RemoteStartTransaction`
-   - Power >0 → 0 (active transaction): send `RemoteStopTransaction`
+   - Power >0 → 0: send `SetChargingProfile` with 0A (pause), transaction stays alive
 2. Determine target phases (if `phase_switch_entity` configured):
    - 0 W → keep current phases (pause only)
    - 1–4139 W → 1-phase (relay OFF)
@@ -231,7 +231,8 @@ Current implementation: accept all tags. Future: configurable whitelist.
 Transactions are managed automatically by the OCPP server — no external start/stop commands needed. EnergyManager only sets `number.wallbox_power_limit`.
 
 - **Auto-start:** When power limit changes from 0 to >0 and no transaction is active, the server sends `RemoteStartTransaction`
-- **Auto-stop:** When power limit changes to 0 and a transaction is active, the server sends `RemoteStopTransaction`
+- **Pause (not stop):** When power limit changes to 0, the server sends `SetChargingProfile` with 0A limit — the transaction stays alive so charging can resume instantly when power becomes available again
+- **Transaction end:** Transactions end only when the wallbox initiates `StopTransaction` (e.g., plug removed) or on WebSocket disconnect
 - Server assigns incrementing transaction IDs (starting from 1, not persisted across restarts)
 - Only one transaction at a time
 - On wallbox disconnect: transaction state cleared, entities updated
@@ -252,7 +253,7 @@ Transactions are managed automatically by the OCPP server — no external start/
 |----|------|----------|
 | TC-01 | Wallbox connects via WebSocket | BootNotification accepted, `wallbox_connected` = on |
 | TC-02 | Power limit 0 → >0 (no transaction) | Auto `RemoteStartTransaction`, then `SetChargingProfile` |
-| TC-03 | Power limit >0 → 0 (active transaction) | Auto `RemoteStopTransaction`, profile set to 0A |
+| TC-03 | Power limit >0 → 0 (active transaction) | `SetChargingProfile` 0A sent, transaction stays alive (no RemoteStopTransaction) |
 | TC-04 | Power limit change (transaction active) | `SetChargingProfile` sent, no start/stop |
 | TC-05 | MeterValues received | `sensor.wallbox_power` and `sensor.wallbox_energy` update |
 | TC-06 | Wallbox disconnect | `wallbox_connected` = off, transaction cleared |
@@ -293,7 +294,7 @@ ocpp-server/
 | Phase switching | ✅ Done | EARU relay via ESPHome, auto based on power limit |
 | Unit tests | ✅ Done | 9 tests |
 | HA add-on deployment | ✅ Done | Tested on HA instance, s6-overlay service starts |
-| Wallbox integration test | ❌ TODO | Not tested with real AcTec wallbox |
+| Wallbox integration test | ✅ Done | Tested with AcTec EV-AC22K (FW V1.17.9), 3-phase charging at 5kW |
 
 ## 9. Revision History
 
@@ -304,3 +305,4 @@ ocpp-server/
 | 1.2 | 2026-02-10 | Added Section 2.2: integration with EnergyManager, SwissSolarForecast, LoadForecast |
 | 1.3 | 2026-02-10 | Added phase switching via EARU breaker: config, sensor, safety sequence, test cases |
 | 1.4 | 2026-02-11 | Removed button entities, auto-transaction management (start/stop driven by power limit) |
+| 1.5 | 2026-02-11 | Fix: 0W pauses charging (0A profile) instead of stopping transaction. Tested with real AcTec wallbox. |
