@@ -100,8 +100,6 @@ The EnergyManager decides charging power every minute based on:
 
 **Grid power data path:** The EBL smart meter is read via a gPlug M-Bus adapter on the remote provisioning server. The MQTT bridge forwards `B0-81-84-25-22-5C/SENSOR` to the local broker. An MQTT sensor in HA computes `(Po - Pi) × 1000` → `sensor.grid_power` (W, negative = importing). Note: `sensor.power_meter_active_power` is the separate Huawei DTSU meter at the inverter.
 
-**Difference from ESP32 OCPP Server:** The ESP32 hardware supports GPIO-based phase switching (1-phase/3-phase) directly. This HA add-on achieves the same via an external EARU latching relay controlled through ESPHome. When `phase_switch_entity` is configured, the add-on auto-switches phases based on the requested power limit — no manual intervention needed.
-
 ## 3. Configuration
 
 Configured via HA add-on options (`/data/options.json`):
@@ -331,7 +329,7 @@ ocpp-server/
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.0 | 2026-02-10 | Initial FSD, based on ESP32 OCPP Server FSD v1.4 |
+| 1.0 | 2026-02-10 | Initial FSD |
 | 1.1 | 2026-02-10 | Replaced MQTT interface with native HA entities and services |
 | 1.2 | 2026-02-10 | Added Section 2.2: integration with EnergyManager, SwissSolarForecast, LoadForecast |
 | 1.3 | 2026-02-10 | Added phase switching via EARU breaker: config, sensor, safety sequence, test cases |
