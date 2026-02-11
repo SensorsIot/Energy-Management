@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 import asyncio
 import json
@@ -232,7 +232,9 @@ class OCPPServer:
                 # Power limit (number entity)
                 power_state = await self.ha.get_state("number.wallbox_power_limit")
                 if power_state is not None and power_state != self._last_power_limit:
-                    if self._last_power_limit is not None:
+                    prev = self._last_power_limit
+                    self._last_power_limit = power_state
+                    if prev is not None:
                         # Value changed — send to wallbox
                         try:
                             power_w = float(power_state)
@@ -262,7 +264,6 @@ class OCPPServer:
                                 logger.warning("No wallbox connected, ignoring power limit")
                         except ValueError:
                             logger.warning(f"Invalid power limit value: {power_state}")
-                    self._last_power_limit = power_state
 
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")

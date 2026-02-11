@@ -33,4 +33,4 @@ LABEL \
     io.hass.description="OCPP 1.6J server for EV wallbox control via HA entities" \
     io.hass.arch="aarch64|amd64|armv7" \
     io.hass.type="addon" \
-    io.hass.version="0.3.0"
+    io.hass.version="0.4.0"

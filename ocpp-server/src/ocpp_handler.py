@@ -140,6 +140,7 @@ class ChargePointHandler(CP):
         # Convert power to current (assuming 230V per phase)
         voltage = 230
         current_a = power_w / (voltage * num_phases)
+        current_a = round(current_a, 1)  # OCPP requires multiple of 0.1
         current_a = max(0, min(current_a, 32))  # Clamp to valid range
 
         logger.info(f"Setting charging power: {power_w}W ({current_a:.1f}A, {num_phases}-phase)")
