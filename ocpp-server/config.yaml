@@ -1,0 +1,40 @@
+name: "OCPP Server"
+version: "0.2.0"
+slug: "ocpp-server"
+description: "OCPP 1.6j server for EV wallbox control via HA entities"
+url: "https://github.com/SensorsIot/Energy-Management"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+
+startup: services
+boot: auto
+timeout: 120
+
+# WebSocket port for OCPP connection from wallbox
+ports:
+  8887/tcp: 8887
+ports_description:
+  8887/tcp: "OCPP WebSocket server"
+
+# Home Assistant API for publishing entities
+homeassistant_api: true
+
+map:
+  - addon_config:rw
+
+options:
+  wallbox_id: "AcTec001"
+  ws_port: 8887
+  min_current_a: 6
+  max_current_a: 16
+  phase_switch_entity: ""
+
+schema:
+  wallbox_id: str
+  ws_port: int
+  min_current_a: int
+  max_current_a: int
+  phase_switch_entity: "str?"
