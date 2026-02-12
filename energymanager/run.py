@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.5.16"
+__version__ = "1.5.17"
 
 import json
 import logging
@@ -26,8 +26,10 @@ from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
 from src.appliance_signal import calculate_appliance_signal
 from src.ev_charging import calculate_ev_power
+from src.ev_goal_mode import calculate_goal_mode
 from src.influxdb_writer import SimulationWriter
 from src.notifications import init_telegram, notify_error
+from src.smart_car import HelloSmartClient, get_soc
 
 # Swiss timezone for display
 SWISS_TZ = ZoneInfo("Europe/Zurich")
@@ -177,6 +179,35 @@ class EnergyManager:
         self.wallbox_power_limit_entity = ev_opts.get("wallbox_power_limit_entity", "number.wallbox_power_limit")
         self.ev_target_power_entity = ev_opts.get("ev_target_power_entity", "sensor.ev_target_power")
         self._last_ev_power_limit = None
+
+        # Goal mode config (FSD 4.5.4.2)
+        self.ev_goal_charge_entity = ev_opts.get(
+            "goal_charge_entity", "input_boolean.ev_goal_charge"
+        )
+        self.ev_charge_now_entity = ev_opts.get(
+            "charge_now_entity", "input_boolean.ev_charge_now"
+        )
+        self.ev_charge_status_entity = ev_opts.get(
+            "charge_status_entity", "sensor.ev_charge_status"
+        )
+        self.ev_wallbox_status_entity = ev_opts.get(
+            "wallbox_status_entity", "sensor.wallbox_status"
+        )
+        self.ev_goal_max_power_w = ev_opts.get("goal_max_power_w", 11000)
+        self.ev_auto_reset_timeout_min = ev_opts.get("auto_reset_timeout_min", 5)
+        self._ev_idle_since: datetime | None = None
+        self._last_goal_error_notified: str | None = None
+
+        # Smart car config (FSD 4.5 Step 2 — hourly SOC readback)
+        smart_opts = options.get("smart_car", {})
+        self.smart_car_enabled = smart_opts.get("enabled", False)
+        self.smart_car_user = smart_opts.get("user", "")
+        self.smart_car_password = smart_opts.get("password", "")
+        self.smart_car_vin = smart_opts.get("vin", "")
+        self.smart_car_soc_entity = smart_opts.get(
+            "soc_entity", "sensor.smart_battery"
+        )
+        self._smart_car_client: HelloSmartClient | None = None
 
     def connect(self):
         """Connect to services."""
@@ -477,6 +508,114 @@ class EnergyManager:
         except Exception as e:
             logger.error(f"Failed to calculate appliance signal: {e}")
 
+    def control_ev_goal_mode(
+        self, wallbox_connected: bool, wallbox_power: float
+    ) -> bool:
+        """Control EV goal mode charging (FSD 4.5.4.2).
+
+        Args:
+            wallbox_connected: Whether wallbox WebSocket is connected
+            wallbox_power: Current wallbox power in watts
+
+        Returns:
+            True if goal mode handled charging (skip opportunistic solar),
+            False if goal mode is inactive.
+        """
+        goal_charge = self.ha_client.get_input_boolean(self.ev_goal_charge_entity)
+        charge_now = self.ha_client.get_input_boolean(self.ev_charge_now_entity)
+
+        if not goal_charge and not charge_now:
+            # Goal mode inactive — update status and let solar mode run
+            self.ha_client.set_sensor_state(
+                self.ev_charge_status_entity,
+                "idle",
+                attributes={
+                    "friendly_name": "EV Charge Status",
+                    "status_text": "Idle",
+                    "icon": "mdi:ev-station",
+                },
+            )
+            self._ev_idle_since = None
+            self._last_goal_error_notified = None
+            return False
+
+        # Read wallbox status
+        wb_status_state = self.ha_client.get_state(self.ev_wallbox_status_entity)
+        wb_status = wb_status_state.get("state", "Unknown") if wb_status_state else "Unknown"
+
+        # Track idle time for auto-reset
+        if wallbox_power == 0 and wb_status in ("Finishing", "SuspendedEV", "Available"):
+            if self._ev_idle_since is None:
+                self._ev_idle_since = datetime.now(timezone.utc)
+            idle_minutes = (datetime.now(timezone.utc) - self._ev_idle_since).total_seconds() / 60
+        else:
+            self._ev_idle_since = None
+            idle_minutes = 0
+
+        # Check tariff
+        now = datetime.now(timezone.utc)
+        tariff = self.optimizer.get_tariff_periods(now)
+
+        result = calculate_goal_mode(
+            ev_goal_charge=goal_charge,
+            ev_charge_now=charge_now,
+            is_cheap_tariff=tariff.is_cheap_now,
+            wallbox_status=wb_status,
+            wallbox_connected=wallbox_connected,
+            wallbox_power_w=wallbox_power,
+            idle_minutes=idle_minutes,
+            auto_reset_timeout_min=self.ev_auto_reset_timeout_min,
+            goal_max_power_w=self.ev_goal_max_power_w,
+        )
+
+        logger.info(f"EV goal mode: {result.charge_status} — {result.reason}")
+
+        # Set wallbox power limit
+        if result.target_power_w != self._last_ev_power_limit:
+            success, err = self.ha_client.set_number(
+                self.wallbox_power_limit_entity,
+                result.target_power_w,
+                max_retries=3,
+            )
+            if success:
+                self._last_ev_power_limit = result.target_power_w
+            else:
+                logger.error(f"Failed to set wallbox power limit: {err}")
+
+        # Update status sensor
+        self.ha_client.set_sensor_state(
+            self.ev_charge_status_entity,
+            result.charge_status,
+            attributes={
+                "friendly_name": "EV Charge Status",
+                "status_text": result.status_text,
+                "target_power_w": result.target_power_w,
+                "reason": result.reason,
+                "icon": "mdi:ev-station",
+            },
+        )
+
+        # Auto-reset: charging complete
+        if result.charge_status == "idle" and "complete" in result.status_text.lower():
+            logger.info("Charging session complete — auto-resetting buttons")
+            self.ha_client.set_input_boolean(self.ev_goal_charge_entity, False)
+            self.ha_client.set_input_boolean(self.ev_charge_now_entity, False)
+            self._ev_idle_since = None
+            self._last_goal_error_notified = None
+
+        # Error notification (one-shot)
+        if result.charge_status == "error":
+            if self._last_goal_error_notified != result.status_text:
+                self._last_goal_error_notified = result.status_text
+                notify_error(
+                    title="EV Charging Error",
+                    message=f"{result.status_text}\n{result.reason}",
+                )
+        else:
+            self._last_goal_error_notified = None
+
+        return True
+
     def control_ev_charging(self):
         """Control EV charging based on solar excess (FSD 4.5)."""
         if not self.ev_charging_enabled:
@@ -485,19 +624,27 @@ class EnergyManager:
         try:
             # Check wallbox connectivity
             wb_state = self.ha_client.get_state(self.wallbox_connected_entity)
-            if not wb_state or wb_state.get("state") != "on":
+            wb_connected = wb_state is not None and wb_state.get("state") == "on"
+
+            # Read wallbox power (needed by both goal mode and solar mode)
+            wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity)
+            wallbox_power = wallbox_power or 0.0
+
+            # Priority: goal mode > opportunistic solar mode
+            if self.control_ev_goal_mode(wb_connected, wallbox_power):
+                return
+
+            # --- Opportunistic solar mode ---
+            if not wb_connected:
                 logger.debug("Wallbox not connected, skipping EV control")
                 return
 
-            # Read grid and wallbox power
+            # Read grid power
             grid_power = self.ha_client.get_sensor_value(self.grid_power_entity)
-            wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity)
 
             if grid_power is None:
                 logger.warning(f"Cannot read {self.grid_power_entity}, skipping EV control")
                 return
-
-            wallbox_power = wallbox_power or 0.0
 
             # Calculate target
             result = calculate_ev_power(
@@ -540,6 +687,43 @@ class EnergyManager:
         except Exception as e:
             logger.error(f"EV charging control failed: {e}", exc_info=True)
 
+    def update_car_soc(self):
+        """Read SOC from Smart car API and update HA sensor."""
+        if not self.smart_car_enabled:
+            return
+
+        try:
+            # Re-authenticate each time (token expires, rate limits)
+            client = HelloSmartClient(self.smart_car_user, self.smart_car_password)
+            client.authenticate()
+
+            vin = self.smart_car_vin
+            if not vin:
+                vehicles = client.list_vehicles()
+                if not vehicles:
+                    logger.error("Smart car: no vehicles found")
+                    return
+                vin = vehicles[0]
+
+            soc = get_soc(client, vin)
+            logger.info(f"Smart car SOC: {soc}%")
+
+            self.ha_client.set_sensor_state(
+                self.smart_car_soc_entity,
+                soc,
+                attributes={
+                    "state_class": "measurement",
+                    "unit_of_measurement": "%",
+                    "device_class": "battery",
+                    "icon": "mdi:car-battery",
+                    "friendly_name": "Smart Battery",
+                    "attribution": "Data provided by Hello Smart API",
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"Smart car SOC update failed: {e}")
+
     def start(self):
         """Start the scheduler."""
         logger.info(f"Starting scheduler (every {self.update_interval} minutes)")
@@ -571,6 +755,20 @@ class EnergyManager:
                 coalesce=True,
             )
             logger.info("EV charging control enabled (1-minute interval)")
+
+        # Schedule Smart car SOC update (hourly)
+        if self.smart_car_enabled:
+            self.update_car_soc()  # Run immediately
+            self.scheduler.add_job(
+                self.update_car_soc,
+                "interval",
+                hours=1,
+                id="smart_car_soc",
+                name="Smart Car SOC Update",
+                max_instances=1,
+                coalesce=True,
+            )
+            logger.info("Smart car SOC update enabled (1-hour interval)")
 
         self.scheduler.start()
 
@@ -656,6 +854,17 @@ def load_config(config_path: str = None) -> dict:
         logger.info("InfluxDB token loaded from environment")
     else:
         logger.warning("InfluxDB token not set - configure it in the add-on Configuration tab")
+
+    smart_user = os.environ.get("SMART_USER")
+    smart_password = os.environ.get("SMART_PASSWORD")
+    if smart_user or smart_password:
+        if "smart_car" not in merged:
+            merged["smart_car"] = {}
+        if smart_user:
+            merged["smart_car"]["user"] = smart_user
+        if smart_password:
+            merged["smart_car"]["password"] = smart_password
+        logger.info("Smart car credentials loaded from environment")
 
     telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")

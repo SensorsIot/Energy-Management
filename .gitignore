@@ -1,6 +1,8 @@
 .claude/*
 !.claude/skills/
 !.claude/commands/
+.claude-data/
+
 # AI agent files
 claude.md
 AGENTS.md

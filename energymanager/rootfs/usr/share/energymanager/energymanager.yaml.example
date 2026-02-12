@@ -51,13 +51,33 @@ sensors:
   grid_power: "sensor.grid_power"
   appliance_signal: "sensor.appliance_signal"
 
-# EV charging settings (FSD 4.5 — opportunistic solar mode)
+# EV charging settings (FSD 4.5)
 ev_charging:
   enabled: true
+
+  # Opportunistic solar mode (FSD 4.5.4.1)
   min_power_1phase_w: 1400
   max_power_1phase_w: 3700
   min_power_3phase_w: 4100
   max_power_3phase_w: 11000
+
+  # Goal mode (FSD 4.5.4.2)
+  goal_max_power_w: 11000           # Always 3-phase max in goal mode
+  auto_reset_timeout_min: 5         # Minutes of 0W before auto-reset
+
+  # Entity overrides (defaults should work for most setups)
+  # goal_charge_entity: "input_boolean.ev_goal_charge"
+  # charge_now_entity: "input_boolean.ev_charge_now"
+  # charge_status_entity: "sensor.ev_charge_status"
+  # wallbox_status_entity: "sensor.wallbox_status"
+
+# Smart # car API (hourly SOC readback via Hello Smart API)
+# NOTE: Password is configured in the add-on Configuration tab (not here)
+smart_car:
+  enabled: true
+  user: ""                           # Your Hello Smart login email
+  vin: ""                           # Auto-detects if empty
+  soc_entity: "sensor.smart_battery"
 
 # Schedule settings
 schedule:

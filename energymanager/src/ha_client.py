@@ -229,6 +229,49 @@ class HAClient:
         """
         return self.set_number(entity_id, power_w, max_retries=max_retries)
 
+    def get_input_boolean(self, entity_id: str) -> bool:
+        """
+        Get input_boolean state.
+
+        Args:
+            entity_id: The input_boolean entity ID
+
+        Returns:
+            True if "on", False otherwise (including errors)
+        """
+        state = self.get_state(entity_id)
+        return state is not None and state.get("state") == "on"
+
+    def set_input_boolean(self, entity_id: str, state: bool) -> bool:
+        """
+        Set input_boolean on or off.
+
+        Args:
+            entity_id: The input_boolean entity ID
+            state: True for on, False for off
+
+        Returns:
+            True on success, False on error
+        """
+        if not self.token:
+            logger.warning("No token available for set_input_boolean")
+            return False
+
+        service = "turn_on" if state else "turn_off"
+        try:
+            url = self._api_url(f"/services/input_boolean/{service}")
+            data = {"entity_id": entity_id}
+            logger.debug(f"POST {url} with {data}")
+            response = requests.post(
+                url, headers=self._headers(), json=data, timeout=30
+            )
+            response.raise_for_status()
+            logger.info(f"Set {entity_id} to {'on' if state else 'off'}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set {entity_id}: {e}")
+            return False
+
     def set_sensor_state(
         self,
         entity_id: str,

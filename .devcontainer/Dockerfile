@@ -4,7 +4,12 @@ FROM mcr.microsoft.com/devcontainers/base:debian
 RUN usermod -l dev -d /home/dev -m vscode \
     && groupmod -n dev vscode \
     && sed -i 's/vscode/dev/g' /etc/sudoers.d/vscode || true \
-    && mv /etc/sudoers.d/vscode /etc/sudoers.d/dev 2>/dev/null || true
+    && mv /etc/sudoers.d/vscode /etc/sudoers.d/dev 2>/dev/null || true \
+    && echo "dev ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dev \
+    && chmod 0440 /etc/sudoers.d/dev
+
+# Remove unused zsh/oh-my-zsh (~15MB)
+RUN rm -rf /home/*/.oh-my-zsh /root/.oh-my-zsh && apt-get purge -y zsh && apt-get autoremove -y
 
 # Install Python and development dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -20,3 +25,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PATH="/home/dev/.local/bin:${PATH}"
 
 USER dev
+
+# Set default working directory for SSH logins
+WORKDIR /workspaces/Energy-Management

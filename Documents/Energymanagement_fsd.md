@@ -1932,35 +1932,111 @@ Every minute:
 
 #### 4.5.4.2 Goal Mode (Override)
 
-Ensures car reaches target SOC by specified time, using cheap tariff grid energy.
+Charges the car during cheap tariff hours at maximum power. The car's internal SOC limit controls when charging stops — no SOC readback needed for the first implementation step.
 
-**Example goal:** "Car at 80% SOC by 07:00"
+**Principle:** "Plug in, press the button, the car is charged by morning."
+
+##### Dashboard Controls
+
+Two buttons on the HA dashboard (Amazon Fire tablet / kitchen dashboard):
+
+| Button | Entity | Default | Description |
+|--------|--------|---------|-------------|
+| **Charge Car** | `input_boolean.ev_goal_charge` | off | Arms goal-mode charging for the next cheap tariff window |
+| **Charge Now** | `input_boolean.ev_charge_now` | off | Override: start charging immediately at max power, regardless of tariff |
+
+Both buttons are **momentary-style toggles** — the system resets them automatically after the charging session completes (car stops drawing current) or the user turns them off manually.
+
+##### Behavior
 
 ```
-Goal parameters:
-  target_soc: 80%
-  deadline: 07:00
-  current_soc: 30% (from car)
+EVERY 1 MINUTE:
+  IF ev_charge_now == ON:
+      → Set wallbox_power_limit = 11000W (3-phase max)
+      → Charging starts / continues immediately
 
-Energy needed:
-  energy_kwh = (target_soc - current_soc) / 100 × battery_capacity_kwh
-             = (80 - 30) / 100 × 60 kWh = 30 kWh
+  ELSE IF ev_goal_charge == ON:
+      IF cheap_tariff_active (weekday 21:00-06:00, weekend all day):
+          → Set wallbox_power_limit = 11000W (3-phase max)
+      ELSE:
+          → Set wallbox_power_limit = 0W (wait for cheap tariff)
 
-Charging strategy:
-  1. Calculate required charging time at max power (11kW)
-     time_hours = 30 kWh / 11 kW = 2.7 hours
-
-  2. Schedule charging during cheap tariff (21:00-06:00)
-     - Latest start: 07:00 - 2.7h = 04:18
-     - Preferred: Start at 21:00, charge with solar first, top up with grid
-
-  3. During day: Use opportunistic solar mode
-
-  4. If goal not reachable with cheap energy alone:
-     → Alert user, suggest earlier deadline or lower target
+  ELSE:
+      → Set wallbox_power_limit = 0W (goal mode inactive)
 ```
 
-**Grid usage for goals:** Only during cheap tariff (21:00-06:00). Never buy expensive energy for EV.
+##### Auto-Reset
+
+```
+IF wallbox charging power == 0W for > 5 minutes
+   AND wallbox status == "Finishing" or "Available"
+   AND (ev_goal_charge == ON or ev_charge_now == ON):
+      → Car has reached its internal SOC limit
+      → Set ev_goal_charge = OFF
+      → Set ev_charge_now = OFF
+      → Log: "Charging session complete"
+      → Optional: Telegram notification
+```
+
+##### Typical Usage
+
+1. User plugs in the car and sets desired SOC in the car (e.g. 80%)
+2. User presses **Charge Car** on the kitchen dashboard
+3. System waits until 21:00 (or immediately on weekends)
+4. Charges at full power (11 kW, 3-phase)
+5. Car's BMS stops accepting current when SOC target is reached
+6. System detects charging stopped → resets button → done
+
+**Override scenario:** User needs the car urgently → presses **Charge Now** → charging starts immediately at max power from grid, regardless of tariff.
+
+##### Status Indicator (Dashboard)
+
+A status indicator on the Amazon/kitchen dashboard shows whether the armed charge will work:
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| `sensor.ev_charge_status` | sensor | `ready` / `waiting` / `charging` / `error` / `idle` |
+
+**States:**
+
+| State | Icon Color | Condition |
+|-------|------------|-----------|
+| `idle` | grey | No charging armed (both buttons off) |
+| `ready` | green | Charging armed, car plugged in, wallbox connected |
+| `waiting` | orange | Charging armed, waiting for cheap tariff |
+| `charging` | green (pulsing) | Actively charging |
+| `error` | **red** | Charging armed but cannot proceed (see error conditions) |
+
+**Error conditions** (any of these sets `error` state):
+
+| Condition | Dashboard text |
+|-----------|---------------|
+| `sensor.wallbox_status` == "Available" (no car) | "Car not connected" |
+| `binary_sensor.wallbox_connected` == off | "Wallbox offline" |
+| `sensor.wallbox_status` == "Faulted" | "Wallbox fault" |
+
+**Behavior:**
+- Status updates every minute alongside the charging control loop
+- When `error`: the dashboard card turns red so the user notices immediately
+- Errors are also sent as Telegram notification (one-shot, not repeated every minute)
+- When the user plugs in the car, status transitions from `error` → `ready` or `waiting` automatically
+
+##### Preconditions
+
+- Car must be plugged in (`sensor.wallbox_status` == "Preparing" or "Charging")
+- If car is not connected when button is pressed, system arms the goal but shows **red error** on dashboard until car is plugged in
+- Wallbox must be WebSocket-connected (`binary_sensor.wallbox_connected` == on)
+
+##### Phase Selection
+
+Goal mode always uses 3-phase charging at maximum power (11 kW) to minimize charging time. No 1-phase fallback — this mode is about speed, not solar optimization.
+
+##### Future Enhancement (Step 2)
+
+Once the Smart # car API is reliable:
+- Read actual SOC from car → calculate energy needed → schedule optimal start time
+- Example: car at 30%, target 80%, 60 kWh battery → 30 kWh needed → 2.7h at 11 kW → start at 04:18 instead of 21:00
+- Avoids unnecessary early charging and reduces grid cost if tariff has time-of-use tiers within the cheap window
 
 ### 4.5.5 Decision Layers
 
@@ -2028,18 +2104,16 @@ For the full entity specification, see [ocpp-server-fsd.md Section 4.3](../ocpp-
 
 | Entity | Type | Description |
 |--------|------|-------------|
-| `sensor.ev_charging_signal` | sensor | opportunistic/goal/off |
+| `sensor.ev_charging_signal` | sensor | goal/charge_now/off |
 | `sensor.ev_target_power` | sensor | Target charging power (W) |
-| `input_number.ev_target_soc` | number | Goal: target SOC (%) |
-| `input_datetime.ev_deadline` | datetime | Goal: charge by time |
-| `input_boolean.ev_goal_mode` | boolean | Enable/disable goal mode |
+| `sensor.ev_charge_status` | sensor | idle/ready/waiting/charging/error |
 
-#### User Input Entities
+#### User Input Entities (Dashboard Buttons)
 
-| Entity | Type | Description |
-|--------|------|-------------|
-| `input_number.ev_soc` | number | Car SOC (manual input or car API) |
-| `input_number.ev_battery_kwh` | number | Car battery capacity (default 60) |
+| Entity | Type | Default | Description |
+|--------|------|---------|-------------|
+| `input_boolean.ev_goal_charge` | boolean | off | Arm charging for next cheap tariff window |
+| `input_boolean.ev_charge_now` | boolean | off | Override: charge immediately at max power |
 
 ### 4.5.8 Phase Switching
 
@@ -2085,49 +2159,51 @@ ev_charging:
   buffer_max_minutes: 5
   buffer_max_wh: 500
 
-  # Goal mode defaults
-  default_target_soc: 80
-  default_battery_kwh: 60       # Car battery capacity
+  # Goal mode
+  goal_max_power_w: 11000       # Always 3-phase max in goal mode
+  auto_reset_timeout_min: 5     # Minutes of 0W before auto-reset
 
   # Update intervals
-  forecast_interval_minutes: 15
   realtime_interval_seconds: 60
 
-  # HA entities for EV SOC (user input or car API)
-  ev_soc_entity: "input_number.ev_soc"
-  ev_battery_entity: "input_number.ev_battery_kwh"
+  # Dashboard buttons
+  goal_charge_entity: "input_boolean.ev_goal_charge"
+  charge_now_entity: "input_boolean.ev_charge_now"
 ```
 
 ### 4.5.10 Algorithm Summary
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    EV Charging Decision Flow                     │
+│             EV Charging Decision Flow (Step 1)                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  Every 15 minutes (Forecast Optimization):                       │
+│  Every 1 minute:                                                 │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │ 1. Check if goal mode active                               │  │
-│  │ 2. If goal: Calculate energy needed, plan charging windows │  │
-│  │ 3. Check goal feasibility with cheap tariff                │  │
-│  │ 4. Coordinate with battery charging strategy               │  │
+│  │                                                             │  │
+│  │  ev_charge_now ON?                                          │  │
+│  │    YES → power_limit = 11000W                               │  │
+│  │    NO  ↓                                                    │  │
+│  │                                                             │  │
+│  │  ev_goal_charge ON?                                         │  │
+│  │    YES → cheap tariff now?                                  │  │
+│  │           YES → power_limit = 11000W                        │  │
+│  │           NO  → power_limit = 0W (wait)                     │  │
+│  │    NO  ↓                                                    │  │
+│  │                                                             │  │
+│  │  (future: opportunistic solar mode)                         │  │
+│  │  power_limit = 0W                                           │  │
+│  │                                                             │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
-│  Every 1 minute (Real-time Control):                             │
+│  Auto-reset check:                                               │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │ 1. Read current PV, load, battery state                    │  │
-│  │ 2. Calculate available excess for EV                       │  │
-│  │ 3. Determine target power and phase mode                   │  │
-│  │ 4. Apply battery buffer if solar fluctuating               │  │
-│  │ 5. Send OCPP charging profile                              │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                                                                  │
-│  Goal Mode Check (if active):                                    │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │ IF in cheap tariff AND goal not reached:                   │  │
-│  │    → Charge at max power from grid                         │  │
-│  │ ELSE:                                                      │  │
-│  │    → Use opportunistic solar mode                          │  │
+│  │  IF (ev_goal_charge OR ev_charge_now) == ON                 │  │
+│  │     AND wallbox power == 0W for > 5 minutes                 │  │
+│  │     AND wallbox status in (Finishing, Available):            │  │
+│  │        → Car reached its SOC limit                          │  │
+│  │        → Reset both buttons to OFF                          │  │
+│  │        → Log completion                                     │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
@@ -2142,13 +2218,14 @@ ev_charging:
 | Phase switching | ✅ Done | EARU latching relay via ESPHome |
 | Calibrated power conversion | ✅ Done | 3-phase lookup table (measured) |
 | Opportunistic solar mode | ⬜ Not started | Real-time power adjustment |
-| Goal mode | ⬜ Not started | Cheap tariff scheduling |
+| Goal mode (Step 1) | 🔧 In progress | Cheap tariff charging with dashboard buttons |
+| Goal mode (Step 2) | ⬜ Not started | SOC-aware scheduling via Smart # car API |
 
 ### 4.5.13 Open Questions
 
 | # | Question | Status |
 |---|----------|--------|
-| 1 | Car SOC source (manual input, car API, OBD?) | Manual input for now |
+| 1 | Car SOC source (manual input, car API, OBD?) | Step 1: car's internal limit. Step 2: Hello Smart API (see [Smart-Car-Interface.md](Smart-Car-Interface.md)) |
 | 2 | Battery buffer limits (duration, energy) | TBD - start with 5min/500Wh |
 | 3 | Multiple EVs support needed? | No - single charger |
 | 4 | Session logging to InfluxDB? | Nice to have |
@@ -2302,10 +2379,17 @@ cards:
   # EV Charging
   - type: custom:mushroom-template-card
     primary: Auto
-    secondary: "{{ states('sensor.ev_charging_power') | int }} W"
+    secondary: >
+      {% set s = states('sensor.ev_charge_status') %}
+      {% if s == 'charging' %}{{ states('sensor.ev_charging_power') | int }} W
+      {% elif s == 'error' %}{{ state_attr('sensor.ev_charge_status', 'error_text') }}
+      {% elif s == 'waiting' %}Wartet auf Niedertarif
+      {% elif s == 'ready' %}Bereit
+      {% else %}Aus{% endif %}
     icon: mdi:car-electric
     icon_color: >
-      {{ 'green' if states('sensor.ev_charging_power') | int > 0 else 'grey' }}
+      {% set s = states('sensor.ev_charge_status') %}
+      {{ 'red' if s == 'error' else 'green' if s in ['ready','charging'] else 'orange' if s == 'waiting' else 'grey' }}
 
   # Battery
   - type: custom:mushroom-template-card
