@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.8.7"
+__version__ = "0.8.8"
 
 import asyncio
 import json
@@ -178,6 +178,9 @@ class OCPPServer:
         # Track last-seen control states for change detection
         self._last_power_limit: Optional[str] = None
 
+        # Synchronization: _watch_controls waits until _post_connect_setup finishes
+        self._setup_complete = asyncio.Event()
+
     def _on_status_change(self, key: str, value):
         """Callback when wallbox status changes — update HA entity."""
         entity_id = STATUS_ENTITY_MAP.get(key)
@@ -238,6 +241,9 @@ class OCPPServer:
         logger.info("Control watcher started")
         while self.running:
             await asyncio.sleep(1)
+            # Wait for post-connect setup to finish before processing controls
+            if not self._setup_complete.is_set():
+                await self._setup_complete.wait()
             try:
                 # Power limit (number entity)
                 power_state = await self.ha.get_state("number.wallbox_power_limit")
@@ -252,8 +258,21 @@ class OCPPServer:
                             if self.charge_point:
                                 # Auto-transaction: start when power requested, never auto-stop
                                 # (0W just pauses via SetChargingProfile 0A, transaction stays alive)
+                                # Phase switching (before setting profile)
+                                if power_w > 0 and self.phase_switch_entity:
+                                    if power_w < self._phase_threshold_w:
+                                        target_phases = 1
+                                    else:
+                                        target_phases = 3
+                                    await self._switch_phases(target_phases)
+
                                 if power_w > 0 and self.charge_point.transaction_id is None:
-                                    logger.info("No active transaction, starting one first")
+                                    # No transaction yet — send profile first, then start
+                                    logger.info("No active transaction, setting profile then starting")
+                                    await self.charge_point.set_charging_power(
+                                        power_w, num_phases=self._current_phases
+                                    )
+                                    await asyncio.sleep(3)
                                     self.charge_point.transaction_started_event.clear()
                                     ok = await self.charge_point.remote_start()
                                     if ok:
@@ -267,19 +286,11 @@ class OCPPServer:
                                             continue
                                     else:
                                         logger.warning("RemoteStartTransaction not accepted")
-
-                                # Phase switching
-                                if power_w > 0 and self.phase_switch_entity:
-                                    if power_w < self._phase_threshold_w:
-                                        target_phases = 1
-                                    else:
-                                        target_phases = 3
-                                    await self._switch_phases(target_phases)
-
-                                # Set charging profile
-                                await self.charge_point.set_charging_power(
-                                    power_w, num_phases=self._current_phases
-                                )
+                                else:
+                                    # Transaction active — just update profile
+                                    await self.charge_point.set_charging_power(
+                                        power_w, num_phases=self._current_phases
+                                    )
                             else:
                                 logger.warning("No wallbox connected, ignoring power limit")
                         except ValueError:
@@ -292,9 +303,9 @@ class OCPPServer:
         """Sync state after wallbox connects (FSD 4.5).
 
         Accepts any message (Boot, Status, or Heartbeat) as proof the
-        wallbox is alive.  Then starts a transaction and immediately
-        pauses with 0A so charging can begin instantly when the
-        EnergyManager sets a power limit.
+        wallbox is alive.  Triggers MeterValues to recover power/energy/
+        transaction state.  Does NOT start a transaction — that happens
+        in _watch_controls when EnergyManager requests power.
         """
         ALREADY_ACTIVE = {"Charging", "SuspendedEV", "SuspendedEVSE"}
         CAR_PRESENT = {"Preparing"} | ALREADY_ACTIVE
@@ -335,26 +346,13 @@ class OCPPServer:
 
         if ws in ALREADY_ACTIVE:
             logger.info(f"Wallbox already active ({ws}), recovering transaction state")
-        elif ws in CAR_PRESENT and self.charge_point.transaction_id is None:
-            # Car plugged in but no transaction — start one and pause at 0A
-            # so charging can begin instantly when EnergyManager requests power
-            logger.info("Car present, starting transaction and pausing at 0A")
-            self.charge_point.transaction_started_event.clear()
-            ok = await self.charge_point.remote_start()
-            if ok:
-                try:
-                    await asyncio.wait_for(
-                        self.charge_point.transaction_started_event.wait(),
-                        timeout=15,
-                    )
-                    logger.info("Transaction started, pausing with 0A profile")
-                    await self.charge_point.set_charging_power(0, num_phases=self._current_phases)
-                except asyncio.TimeoutError:
-                    logger.warning("StartTransaction not received after 15s")
-            else:
-                logger.warning("RemoteStartTransaction not accepted")
+        elif ws in CAR_PRESENT:
+            logger.info(f"Car present ({ws}), waiting for EnergyManager to request power")
         else:
             logger.info(f"Post-connect: no car ({ws}), waiting for plug-in")
+
+        self._setup_complete.set()
+        logger.info("Post-connect setup complete")
 
     async def handle_websocket(self, websocket):
         """Handle incoming WebSocket connection from wallbox."""
@@ -374,6 +372,9 @@ class OCPPServer:
 
         # Reset power limit tracking so _watch_controls re-applies current value
         self._last_power_limit = "0"
+
+        # Block _watch_controls until post-connect setup finishes
+        self._setup_complete.clear()
 
         # Publish connected status
         self._on_status_change("connected", True)

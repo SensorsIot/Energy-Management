@@ -98,19 +98,24 @@ class ChargePointHandler(CP):
             self.transaction_started_event.set()
             logger.info(f"Recovered transaction_id={txn_id} from MeterValues")
 
+        total_power = 0.0
         for mv in meter_value:
             for sampled in mv.get("sampled_value", []):
                 measurand = sampled.get("measurand", "Energy.Active.Import.Register")
                 value = float(sampled.get("value", 0))
 
                 if "Power" in measurand:
-                    self.current_power_w = value
-                    if self.on_status_change:
-                        self.on_status_change("power_w", value)
+                    total_power += value
                 elif "Energy" in measurand:
                     self.session_energy_wh = value
                     if self.on_status_change:
                         self.on_status_change("energy_wh", value)
+
+        # Update power only when we got a reading or when clearing to zero
+        if total_power > 0 or self.current_power_w > 0:
+            self.current_power_w = total_power
+            if self.on_status_change:
+                self.on_status_change("power_w", total_power)
 
         logger.debug(f"MeterValues: power={self.current_power_w}W, energy={self.session_energy_wh}Wh")
         return call_result.MeterValues()

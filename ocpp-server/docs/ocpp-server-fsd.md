@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 1.8 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 2.0 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -144,10 +144,11 @@ The server extracts the chargepoint ID from the WebSocket connection path.
 
 | Message | Trigger |
 |---------|---------|
-| `SetChargingProfile` | `number.wallbox_power_limit` changed |
-| `RemoteStartTransaction` | Auto: power limit changes from 0 to >0 (no active transaction) |
-| `RemoteStopTransaction` | Wallbox-initiated (plug removed) or future explicit mechanism |
-| `TriggerMessage` (MeterValues) | Periodic or on demand |
+| `SetChargingProfile` | `number.wallbox_power_limit` changed, or before `RemoteStartTransaction` |
+| `RemoteStartTransaction` | Auto: after `SetChargingProfile`, when no active transaction |
+| `TriggerMessage` (MeterValues) | On connect (sync state) |
+
+**Not used:** `RemoteStopTransaction` (causes Finishing state), `Reset` (causes disruptive reboot and stale Finishing state).
 
 ### 4.3 HA Entity Interface
 
@@ -159,7 +160,7 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 |--------|------|------|-------------|
 | `sensor.wallbox_power` | sensor | W | Current charging power |
 | `sensor.wallbox_energy` | sensor | Wh | Session energy delivered |
-| `sensor.wallbox_status` | sensor | - | `Available` / `Preparing` / `Charging` / `Faulted` |
+| `sensor.wallbox_status` | sensor | - | `Available` / `Preparing` / `Charging` / `SuspendedEVSE` / `Finishing` / `Faulted` |
 | `binary_sensor.wallbox_connected` | binary_sensor | - | Wallbox WebSocket connected |
 | `sensor.wallbox_transaction` | sensor | - | `idle` / `charging` |
 | `sensor.wallbox_phases` | sensor | - | Active phase count: `1` or `3` |
@@ -168,14 +169,15 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 
 | Entity | Type | Description |
 |--------|------|-------------|
-| `number.wallbox_power_limit` | number | Target power in W (min/max from config). The OCPP server auto-starts transactions: setting power >0 starts a transaction if none is active. Setting power to 0 pauses charging (0A profile) but keeps the transaction alive. |
+| `number.wallbox_power_limit` | number | Target power in W (min/max from config). The OCPP server auto-starts transactions: setting power >0 sends a charging profile first, then `RemoteStartTransaction` if no transaction is active. Setting power to 0 sends a 0A profile to pause charging (→ `SuspendedEVSE`), keeping the transaction alive. |
 
 #### 4.3.3 SetChargingProfile and Phase Switching
 
 When `number.wallbox_power_limit` changes:
 1. **Auto-transaction management:**
-   - Power 0 → >0 (no active transaction): send `RemoteStartTransaction`
-   - Power >0 → 0: send `SetChargingProfile` with 0A (pause), transaction stays alive
+   - Power 0 → >0 (no active transaction): send `SetChargingProfile` first, then `RemoteStartTransaction` (see Section 4.5)
+   - Power >0 → 0: send `SetChargingProfile` with 0A (pause → `SuspendedEVSE`), transaction stays alive
+   - Power change (active transaction): send `SetChargingProfile` only, no start/stop needed
 2. Determine target phases (if `phase_switch_entity` configured):
    - 0 W → keep current phases (pause only)
    - 1–4139 W → 1-phase (relay OFF)
@@ -231,13 +233,62 @@ Current implementation: accept all tags. Future: configurable whitelist.
 
 Transactions are managed automatically by the OCPP server — no external start/stop commands needed. EnergyManager only sets `number.wallbox_power_limit`.
 
-- **Post-connect setup:** When the wallbox connects (after BootNotification + StatusNotification), the server automatically starts a transaction via `RemoteStartTransaction` and immediately pauses it with a 0A charging profile. This puts the wallbox in a "ready but paused" state so charging can begin instantly when the EnergyManager sets a power limit.
-- **Auto-start fallback:** When power limit changes from 0 to >0 and no transaction is active (e.g., after a transaction ended), the server sends `RemoteStartTransaction`
-- **Pause (not stop):** When power limit changes to 0, the server sends `SetChargingProfile` with 0A limit — the transaction stays alive so charging can resume instantly when power becomes available again
-- **Transaction end:** Transactions end only when the wallbox initiates `StopTransaction` (e.g., plug removed) or on WebSocket disconnect
+#### 4.5.1 AcTec Wallbox Behavior (verified 2026-02-12)
+
+The AcTec EV-AC22K (FW V1.17.9) requires a specific command sequence. Deviating from this sequence causes the wallbox to reject commands or enter stuck states.
+
+**Start charging sequence** (order is critical):
+
+| Step | Command | Response | Notes |
+|------|---------|----------|-------|
+| 1 | `SetChargingProfile` (target amps, `TxDefaultProfile`) | Accepted | Must be sent **before** RemoteStart |
+| 2 | Wait 3 s | — | Let wallbox apply the profile |
+| 3 | `RemoteStartTransaction` (idTag, connector_id=1) | Accepted | Rejected if no profile is set first |
+| 4 | — | `Authorize` (from wallbox) | Server accepts |
+| 5 | — | `StatusNotification`: Charging | ~6 s after RemoteStart |
+| 6 | — | `StartTransaction` | Server assigns transaction ID |
+
+**Pause charging:** `SetChargingProfile` with 0A → wallbox reports `SuspendedEVSE`. Transaction stays alive.
+
+**Resume charging:** `SetChargingProfile` with target amps → wallbox reports `Charging`. No new `RemoteStartTransaction` needed.
+
+**Stop charging:** `SetChargingProfile` with 0A → `SuspendedEVSE`. Transaction stays alive until car is unplugged (`StopTransaction` from wallbox).
+
+**MeterValues:** Sent periodically (~60 s) during active transactions. Per-phase power values (L1, L2, L3) must be summed for total power.
+
+#### 4.5.2 Commands NOT to use
+
+| Command | Reason |
+|---------|--------|
+| `RemoteStopTransaction` | Causes wallbox to enter `Finishing` state — connector is blocked until cable is physically unplugged |
+| `Reset` | Forces wallbox reboot, interrupts active transactions, leaves connector in `Finishing` state |
+| `RemoteStartTransaction` without prior `SetChargingProfile` | Wallbox rejects the command |
+
+#### 4.5.3 Connection and Reconnect Behavior
+
+- The wallbox may or may not send `BootNotification` on reconnect (only on fresh power-up). The server accepts any first message (Boot, StatusNotification, or Heartbeat) as proof the wallbox is alive.
+- On reconnect after server restart, the wallbox sends `StopTransaction` with `reason=PowerLoss` to close the previous session.
+- If the server process dies while charging, the wallbox continues charging autonomously with the last profile. To stop it, reconnect and send a 0A profile.
+- Killing a stale TCP connection (e.g., via socat proxy) may be needed to force the wallbox to reconnect.
+
+#### 4.5.4 Post-connect Setup
+
+On wallbox connect, the server waits for the first message (Boot, StatusNotification, or Heartbeat), then triggers MeterValues to sync state. It does **not** start a transaction — that only happens when EnergyManager requests power via `number.wallbox_power_limit`.
+
+| Wallbox status | Action |
+|----------------|--------|
+| `Charging` / `SuspendedEV` / `SuspendedEVSE` | Recover `transaction_id` from MeterValues, resume control via `SetChargingProfile` |
+| `Preparing` | Log "car present", wait for EnergyManager to request power (which triggers start sequence in `_watch_controls`) |
+| `Available` | Log "no car", wait for plug-in |
+
+A `_setup_complete` event prevents `_watch_controls` from sending commands until post-connect setup finishes, avoiding race conditions.
+
+#### 4.5.5 General Rules
+
 - Server assigns incrementing transaction IDs (starting from 1, not persisted across restarts)
 - Only one transaction at a time
 - On wallbox disconnect: transaction state cleared, entities updated
+- Transaction ends only when the wallbox initiates `StopTransaction` (plug removed, PowerLoss) or on WebSocket disconnect
 
 ## 5. Non-Functional Requirements
 
@@ -253,12 +304,12 @@ Transactions are managed automatically by the OCPP server — no external start/
 
 | ID | Test | Expected |
 |----|------|----------|
-| TC-01 | Wallbox connects via WebSocket | BootNotification accepted, `wallbox_connected` = on |
-| TC-02a | Wallbox connects (car plugged in) | Post-connect setup: `RemoteStartTransaction` + `SetChargingProfile` 0A (paused) |
-| TC-02b | Power limit 0 → >0 (no transaction) | Fallback auto `RemoteStartTransaction`, then `SetChargingProfile` |
-| TC-03 | Power limit >0 → 0 (active transaction) | `SetChargingProfile` 0A sent, transaction stays alive (no RemoteStopTransaction) |
-| TC-04 | Power limit change (transaction active) | `SetChargingProfile` sent, no start/stop |
-| TC-05 | MeterValues received | `sensor.wallbox_power` and `sensor.wallbox_energy` update |
+| TC-01 | Wallbox connects via WebSocket | First message accepted (Boot, StatusNotification, or Heartbeat), `wallbox_connected` = on |
+| TC-02a | Wallbox connects (car plugged in, status=Preparing) | Post-connect: TriggerMessage(MeterValues) sent, no transaction started. Waits for EnergyManager to set power limit. |
+| TC-02b | Power limit 0 → >0 (no transaction) | `SetChargingProfile` (target amps) → wait 3s → `RemoteStartTransaction` → Charging |
+| TC-03 | Power limit >0 → 0 (active transaction) | `SetChargingProfile` 0A → `SuspendedEVSE`, transaction stays alive |
+| TC-04 | Power limit change (transaction active) | `SetChargingProfile` sent only, no start/stop |
+| TC-05 | MeterValues received during transaction | Per-phase power values summed → `sensor.wallbox_power`, energy → `sensor.wallbox_energy` |
 | TC-06 | Wallbox disconnect | `wallbox_connected` = off, transaction cleared |
 | TC-07 | Power limit = 0 (no transaction) | Profile set to 0A, no `RemoteStopTransaction` |
 | TC-08 | Invalid power limit | Clamped to min/max, no crash |
@@ -267,6 +318,9 @@ Transactions are managed automatically by the OCPP server — no external start/
 | TC-11 | Power limit ≥ 4140 W with phase_switch_entity set | Relay ON, 3-phase charging, `sensor.wallbox_phases` = 3 |
 | TC-12 | Phase switch safety: pause → relay → resume | SetChargingProfile(0A) sent before relay toggle, 2s + 3s delays observed |
 | TC-13 | phase_switch_entity empty (default) | No relay calls, 3-phase assumed, no `_switch_phases` invoked |
+| TC-14 | Wallbox reconnects after server restart | `StopTransaction` (reason=PowerLoss) received, previous session closed cleanly |
+| TC-15 | Server dies while charging | Wallbox continues charging autonomously, 0A profile needed to stop on reconnect |
+| TC-16 | Full charge cycle | Profile 6A → Start → Charging → Pause 0A → SuspendedEVSE → Resume 10A → Charging → Stop 0A → SuspendedEVSE |
 
 ## 7. Calibration Data
 
@@ -323,7 +377,7 @@ ocpp-server/
 | Phase switching | ✅ Done | EARU relay via ESPHome, auto based on power limit |
 | Unit tests | ✅ Done | 9 tests |
 | HA add-on deployment | ✅ Done | Tested on HA instance, s6-overlay service starts |
-| Wallbox integration test | ✅ Done | Tested with AcTec EV-AC22K (FW V1.17.9), 3-phase charging at 5kW |
+| Wallbox integration test | ✅ Done | Full cycle verified with AcTec EV-AC22K (FW V1.17.9): start, pause (0A→SuspendedEVSE), resume, stop. Profile-first sequence confirmed. |
 
 ## 10. Revision History
 
@@ -338,3 +392,5 @@ ocpp-server/
 | 1.6 | 2026-02-11 | Added calibration data (Section 7): 16A–6A sweep with wallbox and grid meter comparison. Documented EBL M-Bus grid power data path. |
 | 1.7 | 2026-02-11 | Calibrated power-to-current conversion: linear interpolation on 3-phase calibration table replaces naive formula. |
 | 1.8 | 2026-02-11 | Post-connect setup: auto-start transaction and pause (0A) on wallbox connection so charging is instantly available. |
+| 1.9 | 2026-02-12 | Verified AcTec wallbox behavior via direct testing. Corrected start sequence: SetChargingProfile MUST precede RemoteStartTransaction. Removed Reset and RemoteStopTransaction. Documented reconnect behavior, autonomous charging, per-phase MeterValues summing. Updated test cases. |
+| 2.0 | 2026-02-12 | Post-connect no longer auto-starts transactions. Transactions start only when EnergyManager requests power. Added `_setup_complete` event to prevent race between post-connect setup and control watcher. |
