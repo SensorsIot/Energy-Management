@@ -2067,20 +2067,22 @@ The kitchen dashboard (Amazon Fire tablet, Fully Kiosk) shows two mode buttons a
 
 Buttons are simple on/off indicators — no power display. Tapping an active button returns to `solar` (default). Tapping an inactive button activates that mode.
 
-**Car status card** (`custom:button-card`):
+**Car status card** (`custom:button-card`, horizontal layout: icon left, large status text centered):
 
 | State | Label | Color |
 |-------|-------|-------|
-| Car not connected | "Nicht verbunden" | Grey |
-| Connected, not charging | "Verbunden" | Cyan |
-| Connected, charging normally | "{power} W" | Green |
-| Power mismatch (problem) | "{power} W" | **Red** |
+| Car not connected | "Not connected" | Grey |
+| Connected, not charging | "Connected" | Dodgerblue |
+| Charging normally | "{power} W" | Green |
+| Suspended/paused | "0 W" | Dodgerblue |
+| Finished | "Finished" | Dodgerblue |
+| **Power mismatch** | label + **red background** | White on red |
 
-**Mismatch detection:** The card turns entirely red (icon, name, label) when:
-- `number.wallbox_power_limit` > 0 but `sensor.wallbox_power` = 0 (requested but not charging)
-- `number.wallbox_power_limit` = 0 but `sensor.wallbox_power` > 100 (charging but not requested)
+**Mismatch detection:** The entire card (background, icon, text) turns red when:
+- `abs(wallbox_power_limit - wallbox_power) > 1000` AND `sensor.smart_battery` < `input_number.ev_target_soc`
+- OR `number.wallbox_power_limit` = 0 but `sensor.wallbox_power` > 100
 
-This signals a wallbox communication or hardware problem.
+The SOC check prevents false alarms when the car stops charging because it reached the target.
 
 ### 4.5.12 Configuration
 
@@ -2111,8 +2113,9 @@ Power limits and phase switching thresholds are configured in the OCPP Server ad
 | EV-11 | Dashboard: tap Charge Now | `input_select.ev_charging_mode` = `immediate` |
 | EV-12 | Dashboard: tap active button | `input_select.ev_charging_mode` = `solar` (back to default) |
 | EV-13 | Dashboard: car status, car connected, charging | Card shows power in W, green |
-| EV-14 | Dashboard: car status, power mismatch | Card turns red (limit > 0, power = 0) |
-| EV-15 | Dashboard: car status, car not connected | Card shows "Nicht verbunden", grey |
+| EV-14 | Dashboard: power mismatch, SOC < target | Card turns red (abs(limit - power) > 1000) |
+| EV-14b | Dashboard: power mismatch, SOC >= target | Card stays normal (car finished charging) |
+| EV-15 | Dashboard: car status, car not connected | Card shows "Not connected", grey |
 | EV-16 | Mode change while charging | New mode takes effect within 1 min |
 
 ### 4.5.14 Implementation Status
