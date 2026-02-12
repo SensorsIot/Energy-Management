@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 2.0 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 2.1 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -248,13 +248,13 @@ The AcTec EV-AC22K (FW V1.17.9) requires a specific command sequence. Deviating 
 | 5 | — | `StatusNotification`: Charging | ~6 s after RemoteStart |
 | 6 | — | `StartTransaction` | Server assigns transaction ID |
 
-**Pause charging:** `SetChargingProfile` with 0A → wallbox reports `SuspendedEVSE`. Transaction stays alive.
+**Pause charging:** `SetChargingProfile` with 0A → wallbox reports `SuspendedEVSE`. Transaction stays alive. Wallbox does **not** send MeterValues with 0W when paused — the server must zero `sensor.wallbox_power` on `StatusNotification: SuspendedEVSE`.
 
 **Resume charging:** `SetChargingProfile` with target amps → wallbox reports `Charging`. No new `RemoteStartTransaction` needed.
 
 **Stop charging:** `SetChargingProfile` with 0A → `SuspendedEVSE`. Transaction stays alive until car is unplugged (`StopTransaction` from wallbox).
 
-**MeterValues:** Sent periodically (~60 s) during active transactions. Per-phase power values (L1, L2, L3) must be summed for total power.
+**MeterValues:** Sent periodically (~60 s) during active transactions. Per-phase power values (L1, L2, L3) must be summed for total power. Not sent when paused (`SuspendedEVSE`).
 
 #### 4.5.2 Commands NOT to use
 
@@ -394,3 +394,4 @@ ocpp-server/
 | 1.8 | 2026-02-11 | Post-connect setup: auto-start transaction and pause (0A) on wallbox connection so charging is instantly available. |
 | 1.9 | 2026-02-12 | Verified AcTec wallbox behavior via direct testing. Corrected start sequence: SetChargingProfile MUST precede RemoteStartTransaction. Removed Reset and RemoteStopTransaction. Documented reconnect behavior, autonomous charging, per-phase MeterValues summing. Updated test cases. |
 | 2.0 | 2026-02-12 | Post-connect no longer auto-starts transactions. Transactions start only when EnergyManager requests power. Added `_setup_complete` event to prevent race between post-connect setup and control watcher. |
+| 2.1 | 2026-02-12 | Wallbox does not send MeterValues with 0W when paused. Server now zeros power on StatusNotification: SuspendedEVSE/SuspendedEV. |

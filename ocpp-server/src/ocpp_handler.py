@@ -86,6 +86,11 @@ class ChargePointHandler(CP):
             self.status_event.set()
             if self.on_status_change:
                 self.on_status_change("status", status)
+            # Wallbox does not send MeterValues with 0W when paused
+            if status in ("SuspendedEVSE", "SuspendedEV") and self.current_power_w > 0:
+                self.current_power_w = 0
+                if self.on_status_change:
+                    self.on_status_change("power_w", 0)
         return call_result.StatusNotification()
 
     @on(Action.meter_values)
