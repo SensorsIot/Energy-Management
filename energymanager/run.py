@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.5.17"
+__version__ = "1.5.18"
 
 import json
 import logging
@@ -523,6 +523,12 @@ class EnergyManager:
         """
         goal_charge = self.ha_client.get_input_boolean(self.ev_goal_charge_entity)
         charge_now = self.ha_client.get_input_boolean(self.ev_charge_now_entity)
+
+        # Mutual exclusion: Charge Now overrides and resets Charge Car
+        if charge_now and goal_charge:
+            logger.info("Charge Now active — resetting Charge Car")
+            self.ha_client.set_input_boolean(self.ev_goal_charge_entity, False)
+            goal_charge = False
 
         if not goal_charge and not charge_now:
             # Goal mode inactive — update status and let solar mode run
