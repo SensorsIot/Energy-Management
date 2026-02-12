@@ -1841,9 +1841,7 @@ cd energymanager && python -m pytest tests/test_appliance_signal.py -v
 
 ---
 
-## 4.5 EV Charging Optimization
-
-> **Status: NOT YET IMPLEMENTED** - This section describes planned functionality.
+## 4.5 EV Charging
 
 ### 4.5.1 Overview
 
@@ -1905,13 +1903,41 @@ The wallbox supports phase switching for a wider usable power range:
 
 **Minimum charging power:** 1.4 kW (1-phase, 6A)
 
-### 4.5.4 Operating Modes
+### 4.5.4 Charging Mode Selection
 
-#### 4.5.4.1 Opportunistic Solar Mode (Default)
+The user selects one of four charging modes via the kitchen dashboard (Amazon Fire tablet). The mode is persistent — it stays selected until the user changes it.
 
-Charges only when sufficient PV excess is available. No grid import for charging.
+| Mode | `input_select` value | Dashboard Label | Description |
+|------|---------------------|----------------|-------------|
+| **Off** | `off` | Aus | No charging |
+| **Solar** | `solar` | Solar | Charge from PV excess only |
+| **Immediate** | `immediate` | Sofort | Charge now at max power |
+| **Cheap Tariff** | `cheap` | Niedertarif | Charge during cheap tariff at max power |
 
-**Priority:** EV charging is second priority after battery charging.
+**Control entity:** `input_select.ev_charging_mode` (replaces the two `input_boolean` entities)
+
+**Decision flow (every 1 minute):**
+
+```
+MATCH ev_charging_mode:
+  "off"       → wallbox_power_limit = 0
+  "solar"     → wallbox_power_limit = calculated_solar_excess (see 4.5.6)
+  "immediate" → wallbox_power_limit = 11000W
+  "cheap"     → IF cheap_tariff_active: wallbox_power_limit = 11000W
+                ELSE: wallbox_power_limit = 0W (waiting)
+```
+
+### 4.5.5 Off Mode
+
+No charging. `number.wallbox_power_limit` = 0.
+
+If a transaction is active, the wallbox enters `SuspendedEVSE` (paused). The transaction stays alive until the car is unplugged.
+
+### 4.5.6 Solar Mode
+
+Charges only from PV excess. Never imports from grid for EV charging.
+
+**Priority:** EV charging is lowest priority — after household load and battery charging.
 
 ```
 Every minute:
@@ -1920,202 +1946,53 @@ Every minute:
    excess_w = current_pv - current_load - battery_charge_power
 
 2. Determine charging power
-   IF excess_w >= 4100:
+   IF excess_w >= 4140:
       → 3-phase charging at min(excess_w, 11000)W
    ELSE IF excess_w >= 1400:
       → 1-phase charging at min(excess_w, 3700)W
    ELSE:
-      → No charging (or use battery buffer, see 4.5.6)
+      → wallbox_power_limit = 0W (not enough excess)
 
-3. Set number.wallbox_power_limit (OCPP Server handles the rest)
+3. Set number.wallbox_power_limit
 ```
 
-#### 4.5.4.2 Goal Mode (Override)
+**Phase switching** is automatic based on the power level (see 4.5.9).
 
-Charges the car during cheap tariff hours at maximum power. The car's internal SOC limit controls when charging stops — no SOC readback needed for the first implementation step.
+### 4.5.7 Immediate Mode
 
-**Principle:** "Plug in, press the button, the car is charged by morning."
+Charges at maximum power immediately, regardless of tariff or solar.
 
-##### Dashboard Controls
+`number.wallbox_power_limit` = 11000W (3-phase, 16A).
 
-Two buttons on the HA dashboard (Amazon Fire tablet / kitchen dashboard):
+**Use case:** User needs the car urgently — presses "Sofort" on the dashboard, car starts charging at full speed.
 
-| Button | Entity | Default | Description |
-|--------|--------|---------|-------------|
-| **Charge Car** | `input_boolean.ev_goal_charge` | off | Arms goal-mode charging for the next cheap tariff window |
-| **Charge Now** | `input_boolean.ev_charge_now` | off | Override: start charging immediately at max power, regardless of tariff |
+### 4.5.8 Cheap Tariff Mode
 
-Both buttons are **momentary-style toggles** — the system resets them automatically after the charging session completes (car stops drawing current) or the user turns them off manually.
-
-##### Behavior
+Charges at maximum power during cheap tariff hours. Waits (0W) during expensive hours.
 
 ```
-EVERY 1 MINUTE:
-  IF ev_charge_now == ON:
-      → Set wallbox_power_limit = 11000W (3-phase max)
-      → Charging starts / continues immediately
-
-  ELSE IF ev_goal_charge == ON:
-      IF cheap_tariff_active (weekday 21:00-06:00, weekend all day):
-          → Set wallbox_power_limit = 11000W (3-phase max)
-      ELSE:
-          → Set wallbox_power_limit = 0W (wait for cheap tariff)
-
-  ELSE:
-      → Set wallbox_power_limit = 0W (goal mode inactive)
+IF cheap_tariff_active:
+   → wallbox_power_limit = 11000W (3-phase max)
+ELSE:
+   → wallbox_power_limit = 0W (wait)
 ```
 
-##### Auto-Reset
+**Cheap tariff windows:**
+- Weekdays: 21:00 - 06:00
+- Weekends: all day
+- Holidays: configurable list (treated as weekends)
 
-```
-IF wallbox charging power == 0W for > 5 minutes
-   AND wallbox status == "Finishing" or "Available"
-   AND (ev_goal_charge == ON or ev_charge_now == ON):
-      → Car has reached its internal SOC limit
-      → Set ev_goal_charge = OFF
-      → Set ev_charge_now = OFF
-      → Log: "Charging session complete"
-      → Optional: Telegram notification
-```
-
-##### Typical Usage
-
-1. User plugs in the car and sets desired SOC in the car (e.g. 80%)
-2. User presses **Charge Car** on the kitchen dashboard
-3. System waits until 21:00 (or immediately on weekends)
+**Typical usage:**
+1. User plugs in the car, sets desired SOC in the car (e.g. 80%)
+2. User presses "Niedertarif" on the kitchen dashboard
+3. System waits until 21:00 (or charges immediately on weekends)
 4. Charges at full power (11 kW, 3-phase)
 5. Car's BMS stops accepting current when SOC target is reached
-6. System detects charging stopped → resets button → done
+6. Mode stays on "Niedertarif" — next time user plugs in, same behavior
 
-**Override scenario:** User needs the car urgently → presses **Charge Now** → charging starts immediately at max power from grid, regardless of tariff.
+**Future (SOC-aware scheduling):** Once the Smart # car API is reliable, read actual SOC → calculate energy needed → schedule optimal start time within the cheap window.
 
-##### Status Indicator (Dashboard)
-
-A status indicator on the Amazon/kitchen dashboard shows whether the armed charge will work:
-
-| Entity | Type | Description |
-|--------|------|-------------|
-| `sensor.ev_charge_status` | sensor | `ready` / `waiting` / `charging` / `error` / `idle` |
-
-**States:**
-
-| State | Icon Color | Condition |
-|-------|------------|-----------|
-| `idle` | grey | No charging armed (both buttons off) |
-| `ready` | green | Charging armed, car plugged in, wallbox connected |
-| `waiting` | orange | Charging armed, waiting for cheap tariff |
-| `charging` | green (pulsing) | Actively charging |
-| `error` | **red** | Charging armed but cannot proceed (see error conditions) |
-
-**Error conditions** (any of these sets `error` state):
-
-| Condition | Dashboard text |
-|-----------|---------------|
-| `sensor.wallbox_status` == "Available" (no car) | "Car not connected" |
-| `binary_sensor.wallbox_connected` == off | "Wallbox offline" |
-| `sensor.wallbox_status` == "Faulted" | "Wallbox fault" |
-
-**Behavior:**
-- Status updates every minute alongside the charging control loop
-- When `error`: the dashboard card turns red so the user notices immediately
-- Errors are also sent as Telegram notification (one-shot, not repeated every minute)
-- When the user plugs in the car, status transitions from `error` → `ready` or `waiting` automatically
-
-##### Preconditions
-
-- Car must be plugged in (`sensor.wallbox_status` == "Preparing" or "Charging")
-- If car is not connected when button is pressed, system arms the goal but shows **red error** on dashboard until car is plugged in
-- Wallbox must be WebSocket-connected (`binary_sensor.wallbox_connected` == on)
-
-##### Phase Selection
-
-Goal mode always uses 3-phase charging at maximum power (11 kW) to minimize charging time. No 1-phase fallback — this mode is about speed, not solar optimization.
-
-##### Future Enhancement (Step 2)
-
-Once the Smart # car API is reliable:
-- Read actual SOC from car → calculate energy needed → schedule optimal start time
-- Example: car at 30%, target 80%, 60 kWh battery → 30 kWh needed → 2.7h at 11 kW → start at 04:18 instead of 21:00
-- Avoids unnecessary early charging and reduces grid cost if tariff has time-of-use tiers within the cheap window
-
-### 4.5.5 Decision Layers
-
-Two decision frequencies work together:
-
-| Layer | Frequency | Purpose |
-|-------|-----------|---------|
-| **Forecast Optimization** | Every 15 min | Plan charging windows, check goal feasibility |
-| **Real-time Control** | Every 1 min | Adjust charging power to actual PV excess |
-
-#### Forecast Optimization (15 min)
-
-Uses PV and load forecasts to:
-- Determine if goal is achievable
-- Plan optimal charging windows
-- Coordinate with battery strategy
-
-#### Real-time Control (1 min)
-
-Reacts to actual conditions:
-- Current PV production
-- Current household load
-- Battery state
-- Adjusts charging power via `number.wallbox_power_limit`
-
-### 4.5.6 Battery Buffer for Solar Fluctuations
-
-During daytime solar charging, short-term battery discharge is allowed to smooth PV fluctuations (clouds).
-
-```
-IF charging AND solar_drops_suddenly:
-   Allow battery discharge for up to X minutes
-   to maintain charging session
-   (avoids frequent start/stop of charging)
-```
-
-**Rationale:** Starting/stopping EV charging frequently is inefficient and may stress the car's BMS. Short battery buffer keeps charging stable.
-
-**Limit:** Maximum buffer duration and energy TBD.
-
-### 4.5.7 HA Entity Interface
-
-The OCPP Server add-on exposes wallbox state as native HA entities via the Supervisor API. EnergyManager reads sensors and sets the power limit — no MQTT required.
-
-For the full entity specification, see [ocpp-server-fsd.md Section 4.3](../ocpp-server/docs/ocpp-server-fsd.md).
-
-#### Entities Read by EnergyManager
-
-| Entity | Type | Description |
-|--------|------|-------------|
-| `sensor.wallbox_power` | sensor (W) | Current charging power |
-| `sensor.wallbox_energy` | sensor (Wh) | Session energy delivered |
-| `sensor.wallbox_status` | sensor | Available / Preparing / Charging / Finishing / Faulted |
-| `binary_sensor.wallbox_connected` | binary_sensor | Wallbox WebSocket connected |
-| `sensor.wallbox_transaction` | sensor | `idle` / `charging` |
-| `sensor.wallbox_phases` | sensor | Active phase count: `1` or `3` |
-
-#### Entity Written by EnergyManager
-
-| Entity | Type | Description |
-|--------|------|-------------|
-| `number.wallbox_power_limit` | number (W) | Target power. OCPP Server auto-manages transactions: >0 starts charging, 0 pauses (transaction stays alive). |
-
-#### EnergyManager Output Entities
-
-| Entity | Type | Description |
-|--------|------|-------------|
-| `sensor.ev_charging_signal` | sensor | goal/charge_now/off |
-| `sensor.ev_target_power` | sensor | Target charging power (W) |
-| `sensor.ev_charge_status` | sensor | idle/ready/waiting/charging/error |
-
-#### User Input Entities (Dashboard Buttons)
-
-| Entity | Type | Default | Description |
-|--------|------|---------|-------------|
-| `input_boolean.ev_goal_charge` | boolean | off | Arm charging for next cheap tariff window |
-| `input_boolean.ev_charge_now` | boolean | off | Override: charge immediately at max power |
-
-### 4.5.8 Phase Switching
+### 4.5.9 Phase Switching
 
 Phase switching is automatic based on the power limit. The OCPP Server add-on controls an EARU latching relay via ESPHome to physically switch between 1-phase and 3-phase.
 
@@ -2128,8 +2005,6 @@ IF power_w >= 4140:
 ELSE IF power_w >= 1400:
    → Switch to 1-phase mode (if not already)
    → Set OCPP charging profile
-ELSE IF power_w > 0:
-   → Keep current phase, set minimum current
 ELSE:
    → Pause charging (0A profile, transaction stays alive)
 ```
@@ -2138,101 +2013,148 @@ ELSE:
 
 **Switching delay:** 2s current drop + 3s relay settle = 5s total.
 
-### 4.5.9 Configuration
+### 4.5.10 HA Entity Interface
+
+The OCPP Server add-on exposes wallbox state as native HA entities. EnergyManager reads sensors and sets the power limit — no MQTT required.
+
+For the full OCPP entity specification, see [ocpp-server-fsd.md Section 4.3](../ocpp-server/docs/ocpp-server-fsd.md).
+
+**Entities read by EnergyManager:**
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| `sensor.wallbox_power` | sensor (W) | Current charging power |
+| `sensor.wallbox_energy` | sensor (Wh) | Session energy delivered |
+| `sensor.wallbox_status` | sensor | Available / Preparing / Charging / SuspendedEVSE / Finishing / Faulted |
+| `binary_sensor.wallbox_connected` | binary_sensor | Wallbox WebSocket connected |
+| `sensor.wallbox_transaction` | sensor | `idle` / `charging` |
+| `sensor.wallbox_phases` | sensor | Active phase count: `1` or `3` |
+
+**Entity written by EnergyManager:**
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| `number.wallbox_power_limit` | number (W) | Target power. OCPP Server auto-manages transactions: >0 starts charging, 0 pauses. |
+
+**User input entity:**
+
+| Entity | Type | Options | Description |
+|--------|------|---------|-------------|
+| `input_select.ev_charging_mode` | input_select | `off`, `solar`, `immediate`, `cheap` | Active charging mode, set via dashboard |
+
+**EnergyManager output entities:**
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| `sensor.ev_charge_status` | sensor | `off` / `solar` / `charging` / `waiting` / `error` |
+
+**Status states:**
+
+| State | Dashboard Color | Condition |
+|-------|----------------|-----------|
+| `off` | grey | Mode is Off |
+| `solar` | green | Solar mode, waiting for excess PV |
+| `charging` | green | Actively charging (any mode) |
+| `waiting` | orange | Cheap mode, waiting for cheap tariff |
+| `error` | red | Car not connected, wallbox offline, or wallbox fault |
+
+### 4.5.11 Dashboard
+
+The kitchen dashboard (Amazon Fire tablet, Fully Kiosk) shows two Mushroom Template Cards for mode selection and a status indicator.
+
+**Charge Car** (Mushroom Template Card):
+
+```yaml
+type: custom:mushroom-template-card
+entity: input_select.ev_charging_mode
+primary: Charge Car
+secondary: >
+  {% if states('input_select.ev_charging_mode') != 'off' %}
+    {{ states('sensor.wallbox_power') | int }} W
+  {% else %}Aus{% endif %}
+icon: mdi:car-clock
+icon_color: >
+  {% set m = states('input_select.ev_charging_mode') %}
+  {{ 'green' if m in ['solar','cheap','immediate'] else 'grey' }}
+tap_action:
+  action: call-service
+  service: input_select.select_option
+  data:
+    option: cheap
+  target:
+    entity_id: input_select.ev_charging_mode
+```
+
+**Charge Now** (Mushroom Template Card):
+
+```yaml
+type: custom:mushroom-template-card
+entity: input_select.ev_charging_mode
+primary: Charge Now
+secondary: >
+  {% if is_state('input_select.ev_charging_mode', 'immediate') %}
+    {{ states('sensor.wallbox_power') | int }} W
+  {% else %}Aus{% endif %}
+icon: mdi:flash
+icon_color: >
+  {{ 'amber' if is_state('input_select.ev_charging_mode', 'immediate') else 'grey' }}
+tap_action:
+  action: call-service
+  service: input_select.select_option
+  data:
+    option: immediate
+  target:
+    entity_id: input_select.ev_charging_mode
+```
+
+**Behavior:** Tapping "Charge Car" sets mode to `cheap`. Tapping "Charge Now" sets mode to `immediate`. Tapping the active button again sets mode to `off`. Both cards show current power when their mode is active.
+
+### 4.5.12 Configuration
 
 ```yaml
 ev_charging:
-  # Enable EV charging optimization
   enabled: true
-
-  # Power limits
-  min_power_1phase_w: 1400      # 230V × 6A
-  max_power_1phase_w: 3700      # 230V × 16A
-  min_power_3phase_w: 4140      # 230V × 6A × 3
-  max_power_3phase_w: 11000     # 230V × 16A × 3
-
-  # Phase switching threshold (automatic at OCPP Server)
-  phase_switch_threshold_w: 4140
-
-  # Battery buffer for solar fluctuations
-  buffer_enabled: true
-  buffer_max_minutes: 5
-  buffer_max_wh: 500
-
-  # Goal mode
-  goal_max_power_w: 11000       # Always 3-phase max in goal mode
-  auto_reset_timeout_min: 5     # Minutes of 0W before auto-reset
-
-  # Update intervals
+  mode_entity: "input_select.ev_charging_mode"
+  max_power_w: 11000
   realtime_interval_seconds: 60
-
-  # Dashboard buttons
-  goal_charge_entity: "input_boolean.ev_goal_charge"
-  charge_now_entity: "input_boolean.ev_charge_now"
 ```
 
-### 4.5.10 Algorithm Summary
+Power limits and phase switching thresholds are configured in the OCPP Server add-on.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│             EV Charging Decision Flow (Step 1)                   │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Every 1 minute:                                                 │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │                                                             │  │
-│  │  ev_charge_now ON?                                          │  │
-│  │    YES → power_limit = 11000W                               │  │
-│  │    NO  ↓                                                    │  │
-│  │                                                             │  │
-│  │  ev_goal_charge ON?                                         │  │
-│  │    YES → cheap tariff now?                                  │  │
-│  │           YES → power_limit = 11000W                        │  │
-│  │           NO  → power_limit = 0W (wait)                     │  │
-│  │    NO  ↓                                                    │  │
-│  │                                                             │  │
-│  │  (future: opportunistic solar mode)                         │  │
-│  │  power_limit = 0W                                           │  │
-│  │                                                             │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                                                                  │
-│  Auto-reset check:                                               │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  IF (ev_goal_charge OR ev_charge_now) == ON                 │  │
-│  │     AND wallbox power == 0W for > 5 minutes                 │  │
-│  │     AND wallbox status in (Finishing, Available):            │  │
-│  │        → Car reached its SOC limit                          │  │
-│  │        → Reset both buttons to OFF                          │  │
-│  │        → Log completion                                     │  │
-│  └────────────────────────────────────────────────────────────┘  │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+### 4.5.13 Test Cases
 
-### 4.5.12 Implementation Status
+| ID | Test | Expected |
+|----|------|----------|
+| EV-01 | Mode = off | `wallbox_power_limit` = 0 |
+| EV-02 | Mode = immediate | `wallbox_power_limit` = 11000 |
+| EV-03 | Mode = cheap, during cheap tariff | `wallbox_power_limit` = 11000 |
+| EV-04 | Mode = cheap, during expensive tariff | `wallbox_power_limit` = 0 |
+| EV-05 | Mode = cheap, tariff transitions cheap→expensive | `wallbox_power_limit` changes 11000→0 within 1 min |
+| EV-06 | Mode = solar, 6000W excess | `wallbox_power_limit` = 6000 (3-phase) |
+| EV-07 | Mode = solar, 2000W excess | `wallbox_power_limit` = 2000 (1-phase) |
+| EV-08 | Mode = solar, 500W excess | `wallbox_power_limit` = 0 (below minimum) |
+| EV-09 | Mode = solar, excess drops below minimum | `wallbox_power_limit` = 0, wallbox pauses |
+| EV-10 | Dashboard: tap Charge Car | `input_select.ev_charging_mode` = `cheap` |
+| EV-11 | Dashboard: tap Charge Now | `input_select.ev_charging_mode` = `immediate` |
+| EV-12 | Dashboard: power display while charging | Card shows current W from `sensor.wallbox_power` |
+| EV-13 | Wallbox not connected, any mode | `sensor.ev_charge_status` = `error` |
+| EV-14 | Car not plugged in, any mode | `sensor.ev_charge_status` = `error` |
+| EV-15 | Mode change while charging | New mode takes effect within 1 min |
+
+### 4.5.14 Implementation Status
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| OCPP Server HA add-on | ✅ Done | v0.7.2, see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md) |
+| OCPP Server HA add-on | ✅ Done | v0.8.9, see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md) |
 | HA entity interface | ✅ Done | Sensors + number.wallbox_power_limit |
 | Phase switching | ✅ Done | EARU latching relay via ESPHome |
 | Calibrated power conversion | ✅ Done | 3-phase lookup table (measured) |
-| Opportunistic solar mode | ⬜ Not started | Real-time power adjustment |
-| Goal mode (Step 1) | 🔧 In progress | Cheap tariff charging with dashboard buttons |
-| Goal mode (Step 2) | ⬜ Not started | SOC-aware scheduling via Smart # car API |
-
-### 4.5.13 Open Questions
-
-| # | Question | Status |
-|---|----------|--------|
-| 1 | Car SOC source (manual input, car API, OBD?) | Step 1: car's internal limit. Step 2: Hello Smart API (see [Smart-Car-Interface.md](Smart-Car-Interface.md)) |
-| 2 | Battery buffer limits (duration, energy) | TBD - start with 5min/500Wh |
-| 3 | Multiple EVs support needed? | No - single charger |
-| 4 | Session logging to InfluxDB? | Nice to have |
-
-### 4.5.14 Test Cases
-
-> To be defined after implementation.
+| Dashboard (mode cards) | 🔧 In progress | Mushroom Template Cards on AmazonFire dashboard |
+| Off mode | ⬜ Not started | Trivial: set 0W |
+| Solar mode | ⬜ Not started | Excess PV calculation |
+| Immediate mode | ⬜ Not started | Trivial: set 11000W |
+| Cheap tariff mode | ⬜ Not started | Tariff window logic |
+| SOC-aware scheduling | ⬜ Not started | Future: Smart # car API |
 
 ---
 
@@ -2281,7 +2203,8 @@ appliances:
   energy_wh: 1500
 
 ev_charging:
-  min_power_w: 4100
+  enabled: true
+  mode_entity: "input_select.ev_charging_mode"
   max_power_w: 11000
 
 schedule:
@@ -2376,20 +2299,18 @@ cards:
       {% set s = states('sensor.appliance_signal') %}
       {{ 'green' if s == 'green' else 'orange' if s == 'orange' else 'red' }}
 
-  # EV Charging
+  # EV Charging (see 4.5.11 for full dashboard spec)
   - type: custom:mushroom-template-card
+    entity: input_select.ev_charging_mode
     primary: Auto
     secondary: >
-      {% set s = states('sensor.ev_charge_status') %}
-      {% if s == 'charging' %}{{ states('sensor.ev_charging_power') | int }} W
-      {% elif s == 'error' %}{{ state_attr('sensor.ev_charge_status', 'error_text') }}
-      {% elif s == 'waiting' %}Wartet auf Niedertarif
-      {% elif s == 'ready' %}Bereit
+      {% set m = states('input_select.ev_charging_mode') %}
+      {% if m != 'off' %}{{ states('sensor.wallbox_power') | int }} W
       {% else %}Aus{% endif %}
     icon: mdi:car-electric
     icon_color: >
-      {% set s = states('sensor.ev_charge_status') %}
-      {{ 'red' if s == 'error' else 'green' if s in ['ready','charging'] else 'orange' if s == 'waiting' else 'grey' }}
+      {% set m = states('input_select.ev_charging_mode') %}
+      {{ 'green' if m in ['solar','cheap','immediate'] else 'grey' }}
 
   # Battery
   - type: custom:mushroom-template-card
