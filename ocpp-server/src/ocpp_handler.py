@@ -51,6 +51,7 @@ class ChargePointHandler(CP):
         self._transaction_counter = 0
         self.boot_event = asyncio.Event()
         self.status_event = asyncio.Event()
+        self.heartbeat_event = asyncio.Event()
         self.transaction_started_event = asyncio.Event()
 
     # ========== Incoming messages from wallbox ==========
@@ -69,6 +70,7 @@ class ChargePointHandler(CP):
     @on(Action.heartbeat)
     async def on_heartbeat(self):
         """Wallbox heartbeat - keep connection alive."""
+        self.heartbeat_event.set()
         return call_result.Heartbeat(
             current_time=datetime.now(timezone.utc).isoformat()
         )

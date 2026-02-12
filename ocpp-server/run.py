@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.8.4"
+__version__ = "0.8.5"
 
 import asyncio
 import json
@@ -292,24 +292,35 @@ class OCPPServer:
         """Sync state after wallbox connects.
 
         Only syncs — does NOT start a transaction.  Transaction start is
-        handled by _watch_controls when the EnergyManager requests power
-        (exactly like v0.5.0 which worked reliably).
+        handled by _watch_controls when the EnergyManager requests power.
+
+        Accepts any message (Boot, Status, or Heartbeat) as proof the
+        wallbox is alive.  Does NOT send Reset — the wallbox rarely
+        reboots and a forced reset is disruptive.
         """
         ALREADY_ACTIVE = {"Charging", "SuspendedEV", "SuspendedEVSE"}
 
         if not self.charge_point:
             return
 
-        # Wait for first message from wallbox (Boot or Status)
+        # Wait for first message from wallbox (Boot, Status, or Heartbeat)
         boot = asyncio.create_task(self.charge_point.boot_event.wait())
         status = asyncio.create_task(self.charge_point.status_event.wait())
+        heartbeat = asyncio.create_task(self.charge_point.heartbeat_event.wait())
         done, pending = await asyncio.wait(
-            {boot, status}, timeout=30, return_when=asyncio.FIRST_COMPLETED
+            {boot, status, heartbeat}, timeout=30, return_when=asyncio.FIRST_COMPLETED
         )
         for t in pending:
             t.cancel()
         if done:
-            logger.info("Post-connect: wallbox ready (boot or status received)")
+            which = []
+            if self.charge_point.boot_event.is_set():
+                which.append("boot")
+            if self.charge_point.status_event.is_set():
+                which.append("status")
+            if self.charge_point.heartbeat_event.is_set():
+                which.append("heartbeat")
+            logger.info(f"Post-connect: wallbox ready ({', '.join(which)} received)")
         else:
             logger.warning("Post-connect: no message from wallbox after 30s, giving up")
             return
@@ -325,12 +336,6 @@ class OCPPServer:
 
         if ws in ALREADY_ACTIVE:
             logger.info(f"Wallbox already active ({ws}), recovering transaction state")
-        elif not self.charge_point.boot_event.is_set():
-            # No BootNotification → this is a WebSocket reconnect, not a fresh boot.
-            # Reset the wallbox to get a clean boot with proper pilot signal init.
-            logger.info(f"No BootNotification received, sending Reset to reinitialize")
-            await self.charge_point.reset()
-            # Wallbox will disconnect and reconnect with BootNotification
         else:
             logger.info(f"Post-connect: idle ({ws}), waiting for EnergyManager power request")
 

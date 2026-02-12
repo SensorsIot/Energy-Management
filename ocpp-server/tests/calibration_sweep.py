@@ -21,9 +21,10 @@ DTSU_METER_ENTITY = "sensor.power_meter_active_power"  # Huawei DTSU
 WALLBOX_POWER_ENTITY = "sensor.wallbox_power"     # Wallbox OCPP MeterValues
 WALLBOX_STATUS_ENTITY = "sensor.wallbox_status"
 
-SETTLE_TIME_S = 15   # seconds to wait after setting power
+# Wallbox MeterValues arrive every 60s — need long settle time
+SETTLE_TIME_S = 75   # seconds to wait after setting power
 SAMPLE_COUNT = 3     # number of readings to average
-SAMPLE_INTERVAL_S = 5
+SAMPLE_INTERVAL_S = 10
 
 
 def ha_get(entity_id: str) -> str:
@@ -37,10 +38,15 @@ def ha_get(entity_id: str) -> str:
     return data["state"]
 
 
-def ha_set_number(entity_id: str, value: float):
-    """Set a number entity in HA."""
-    url = f"{HA_URL}/api/services/number/set_value"
-    payload = json.dumps({"entity_id": entity_id, "value": value}).encode()
+def ha_set_state(entity_id: str, value: str):
+    """Set entity state via direct POST (preserves attributes)."""
+    url = f"{HA_URL}/api/states/{entity_id}"
+    current = json.loads(urllib.request.urlopen(
+        urllib.request.Request(url, headers={"Authorization": f"Bearer {HA_TOKEN}"}),
+        timeout=10,
+    ).read())
+    attrs = current.get("attributes", {})
+    payload = json.dumps({"state": value, "attributes": attrs}).encode()
     req = urllib.request.Request(url, data=payload, headers={
         "Authorization": f"Bearer {HA_TOKEN}",
         "Content-Type": "application/json",
@@ -71,8 +77,19 @@ def average_readings(n: int, interval: float) -> dict:
 
 
 def main():
-    # Read baseline (before charging)
-    print("Reading baseline (no charging)...")
+    # First ensure wallbox is paused for clean baseline
+    print("Pausing wallbox for baseline measurement...")
+    ha_set_state(POWER_LIMIT_ENTITY, "0")
+    time.sleep(10)
+
+    status = ha_get(WALLBOX_STATUS_ENTITY)
+    print(f"  Wallbox status: {status}")
+    if status not in ("SuspendedEVSE", "Charging", "Preparing"):
+        print(f"  WARNING: unexpected status {status}")
+
+    # Read baseline with no charging
+    print("Reading baseline (no charging, waiting 20s)...")
+    time.sleep(20)
     baseline = average_readings(SAMPLE_COUNT, SAMPLE_INTERVAL_S)
     print(f"  Baseline: grid={baseline['grid_w']:.0f}W, dtsu={baseline['dtsu_w']:.0f}W, wb={baseline['wallbox_w']:.0f}W")
     print()
@@ -80,12 +97,12 @@ def main():
     steps = list(range(5000, 12000, 1000))  # 5000, 6000, ..., 11000
     results = []
 
-    print(f"{'Req W':>7} | {'WB W':>7} | {'Grid W':>8} | {'DTSU W':>8} | {'Grid-Base':>10} | {'DTSU-Base':>10} | {'Diff(Grid)':>10}")
-    print("-" * 80)
+    print(f"{'Req W':>7} | {'WB W':>7} | {'Grid W':>8} | {'DTSU W':>8} | {'Grid-Base':>10} | {'DTSU-Base':>10}")
+    print("-" * 70)
 
     for target_w in steps:
         # Set power limit
-        ha_set_number(POWER_LIMIT_ENTITY, target_w)
+        ha_set_state(POWER_LIMIT_ENTITY, str(int(target_w)))
         status = ha_get(WALLBOX_STATUS_ENTITY)
         print(f"  Set {target_w}W, status={status}, settling {SETTLE_TIME_S}s...", end="", flush=True)
         time.sleep(SETTLE_TIME_S)
@@ -103,7 +120,6 @@ def main():
         avg = average_readings(SAMPLE_COUNT, SAMPLE_INTERVAL_S)
         grid_delta = avg["grid_w"] - baseline["grid_w"]
         dtsu_delta = avg["dtsu_w"] - baseline["dtsu_w"]
-        diff = grid_delta - avg["wallbox_w"]
 
         results.append({
             "target_w": target_w,
@@ -114,11 +130,11 @@ def main():
             "dtsu_delta_w": dtsu_delta,
         })
 
-        print(f"{target_w:>7} | {avg['wallbox_w']:>7.0f} | {avg['grid_w']:>8.0f} | {avg['dtsu_w']:>8.0f} | {grid_delta:>10.0f} | {dtsu_delta:>10.0f} | {diff:>+10.0f}")
+        print(f"{target_w:>7} | {avg['wallbox_w']:>7.0f} | {avg['grid_w']:>8.0f} | {avg['dtsu_w']:>8.0f} | {grid_delta:>10.0f} | {dtsu_delta:>10.0f}")
 
     # Stop charging
     print("\nStopping: setting power limit to 0W...")
-    ha_set_number(POWER_LIMIT_ENTITY, 0)
+    ha_set_state(POWER_LIMIT_ENTITY, "0")
     time.sleep(5)
     status = ha_get(WALLBOX_STATUS_ENTITY)
     print(f"Final status: {status}")
