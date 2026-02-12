@@ -307,7 +307,7 @@ A `_setup_complete` event prevents `_watch_controls` from sending commands until
 | TC-01 | Wallbox connects via WebSocket | First message accepted (Boot, StatusNotification, or Heartbeat), `wallbox_connected` = on |
 | TC-02a | Wallbox connects (car plugged in, status=Preparing) | Post-connect: TriggerMessage(MeterValues) sent, no transaction started. Waits for EnergyManager to set power limit. |
 | TC-02b | Power limit 0 → >0 (no transaction) | `SetChargingProfile` (target amps) → wait 3s → `RemoteStartTransaction` → Charging |
-| TC-03 | Power limit >0 → 0 (active transaction) | `SetChargingProfile` 0A → `SuspendedEVSE`, transaction stays alive |
+| TC-03 | Power limit >0 → 0 (active transaction) | `SetChargingProfile` 0A → `SuspendedEVSE`, transaction stays alive, `sensor.wallbox_power` = 0 immediately |
 | TC-04 | Power limit change (transaction active) | `SetChargingProfile` sent only, no start/stop |
 | TC-05 | MeterValues received during transaction | Per-phase power values summed → `sensor.wallbox_power`, energy → `sensor.wallbox_energy` |
 | TC-06 | Wallbox disconnect | `wallbox_connected` = off, transaction cleared |

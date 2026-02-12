@@ -1909,31 +1909,27 @@ The user selects one of four charging modes via the kitchen dashboard (Amazon Fi
 
 | Mode | `input_select` value | Dashboard Label | Description |
 |------|---------------------|----------------|-------------|
-| **Off** | `off` | Aus | No charging |
-| **Solar** | `solar` | Solar | Charge from PV excess only |
+| **Solar** | `solar` | *(default)* | Charge from PV excess only |
 | **Immediate** | `immediate` | Sofort | Charge now at max power |
 | **Cheap Tariff** | `cheap` | Niedertarif | Charge during cheap tariff at max power |
 
-**Control entity:** `input_select.ev_charging_mode` (replaces the two `input_boolean` entities)
+**Control entity:** `input_select.ev_charging_mode` — default is `solar`. The dashboard provides two buttons ("Cheap Charge" and "Charge Now") that toggle between the selected mode and `solar`.
 
 **Decision flow (every 1 minute):**
 
 ```
 MATCH ev_charging_mode:
-  "off"       → wallbox_power_limit = 0
   "solar"     → wallbox_power_limit = calculated_solar_excess (see 4.5.6)
   "immediate" → wallbox_power_limit = 11000W
   "cheap"     → IF cheap_tariff_active: wallbox_power_limit = 11000W
                 ELSE: wallbox_power_limit = 0W (waiting)
 ```
 
-### 4.5.5 Off Mode
+### 4.5.5 Paused State
 
-No charging. `number.wallbox_power_limit` = 0.
+When `number.wallbox_power_limit` = 0 (e.g. solar mode with no excess, or cheap mode outside tariff window), the wallbox enters `SuspendedEVSE`. The transaction stays alive until the car is unplugged.
 
-If a transaction is active, the wallbox enters `SuspendedEVSE` (paused). The transaction stays alive until the car is unplugged.
-
-### 4.5.6 Solar Mode
+### 4.5.6 Solar Mode (Default)
 
 Charges only from PV excess. Never imports from grid for EV charging.
 
@@ -2060,54 +2056,31 @@ For the full OCPP entity specification, see [ocpp-server-fsd.md Section 4.3](../
 
 ### 4.5.11 Dashboard
 
-The kitchen dashboard (Amazon Fire tablet, Fully Kiosk) shows two Mushroom Template Cards for mode selection and a status indicator.
+The kitchen dashboard (Amazon Fire tablet, Fully Kiosk) shows two mode buttons and a car status indicator in the EV section (view 0, section 6). All cards use `custom:button-card` (HACS).
 
-**Charge Car** (Mushroom Template Card):
+**Mode buttons** (horizontal-stack):
 
-```yaml
-type: custom:mushroom-template-card
-entity: input_select.ev_charging_mode
-primary: Charge Car
-secondary: >
-  {% if states('input_select.ev_charging_mode') != 'off' %}
-    {{ states('sensor.wallbox_power') | int }} W
-  {% else %}Aus{% endif %}
-icon: mdi:car-clock
-icon_color: >
-  {% set m = states('input_select.ev_charging_mode') %}
-  {{ 'green' if m in ['solar','cheap','immediate'] else 'grey' }}
-tap_action:
-  action: call-service
-  service: input_select.select_option
-  data:
-    option: cheap
-  target:
-    entity_id: input_select.ev_charging_mode
-```
+| Button | Icon | Active Color | Toggles |
+|--------|------|-------------|---------|
+| **Cheap Charge** | `mdi:car-clock` | Green | `cheap` ↔ `solar` |
+| **Charge Now** | `mdi:flash` | Amber | `immediate` ↔ `solar` |
 
-**Charge Now** (Mushroom Template Card):
+Buttons are simple on/off indicators — no power display. Tapping an active button returns to `solar` (default). Tapping an inactive button activates that mode.
 
-```yaml
-type: custom:mushroom-template-card
-entity: input_select.ev_charging_mode
-primary: Charge Now
-secondary: >
-  {% if is_state('input_select.ev_charging_mode', 'immediate') %}
-    {{ states('sensor.wallbox_power') | int }} W
-  {% else %}Aus{% endif %}
-icon: mdi:flash
-icon_color: >
-  {{ 'amber' if is_state('input_select.ev_charging_mode', 'immediate') else 'grey' }}
-tap_action:
-  action: call-service
-  service: input_select.select_option
-  data:
-    option: immediate
-  target:
-    entity_id: input_select.ev_charging_mode
-```
+**Car status card** (`custom:button-card`):
 
-**Behavior:** Tapping "Charge Car" sets mode to `cheap`. Tapping "Charge Now" sets mode to `immediate`. Tapping the active button again sets mode to `off`. Both cards show current power when their mode is active.
+| State | Label | Color |
+|-------|-------|-------|
+| Car not connected | "Nicht verbunden" | Grey |
+| Connected, not charging | "Verbunden" | Cyan |
+| Connected, charging normally | "{power} W" | Green |
+| Power mismatch (problem) | "{power} W" | **Red** |
+
+**Mismatch detection:** The card turns entirely red (icon, name, label) when:
+- `number.wallbox_power_limit` > 0 but `sensor.wallbox_power` = 0 (requested but not charging)
+- `number.wallbox_power_limit` = 0 but `sensor.wallbox_power` > 100 (charging but not requested)
+
+This signals a wallbox communication or hardware problem.
 
 ### 4.5.12 Configuration
 
@@ -2125,7 +2098,7 @@ Power limits and phase switching thresholds are configured in the OCPP Server ad
 
 | ID | Test | Expected |
 |----|------|----------|
-| EV-01 | Mode = off | `wallbox_power_limit` = 0 |
+| EV-01 | Mode = solar (default) | `wallbox_power_limit` = calculated excess |
 | EV-02 | Mode = immediate | `wallbox_power_limit` = 11000 |
 | EV-03 | Mode = cheap, during cheap tariff | `wallbox_power_limit` = 11000 |
 | EV-04 | Mode = cheap, during expensive tariff | `wallbox_power_limit` = 0 |
@@ -2134,12 +2107,13 @@ Power limits and phase switching thresholds are configured in the OCPP Server ad
 | EV-07 | Mode = solar, 2000W excess | `wallbox_power_limit` = 2000 (1-phase) |
 | EV-08 | Mode = solar, 500W excess | `wallbox_power_limit` = 0 (below minimum) |
 | EV-09 | Mode = solar, excess drops below minimum | `wallbox_power_limit` = 0, wallbox pauses |
-| EV-10 | Dashboard: tap Charge Car | `input_select.ev_charging_mode` = `cheap` |
+| EV-10 | Dashboard: tap Cheap Charge | `input_select.ev_charging_mode` = `cheap` |
 | EV-11 | Dashboard: tap Charge Now | `input_select.ev_charging_mode` = `immediate` |
-| EV-12 | Dashboard: power display while charging | Card shows current W from `sensor.wallbox_power` |
-| EV-13 | Wallbox not connected, any mode | `sensor.ev_charge_status` = `error` |
-| EV-14 | Car not plugged in, any mode | `sensor.ev_charge_status` = `error` |
-| EV-15 | Mode change while charging | New mode takes effect within 1 min |
+| EV-12 | Dashboard: tap active button | `input_select.ev_charging_mode` = `solar` (back to default) |
+| EV-13 | Dashboard: car status, car connected, charging | Card shows power in W, green |
+| EV-14 | Dashboard: car status, power mismatch | Card turns red (limit > 0, power = 0) |
+| EV-15 | Dashboard: car status, car not connected | Card shows "Nicht verbunden", grey |
+| EV-16 | Mode change while charging | New mode takes effect within 1 min |
 
 ### 4.5.14 Implementation Status
 
@@ -2149,8 +2123,7 @@ Power limits and phase switching thresholds are configured in the OCPP Server ad
 | HA entity interface | ✅ Done | Sensors + number.wallbox_power_limit |
 | Phase switching | ✅ Done | EARU latching relay via ESPHome |
 | Calibrated power conversion | ✅ Done | 3-phase lookup table (measured) |
-| Dashboard (mode cards) | 🔧 In progress | Mushroom Template Cards on AmazonFire dashboard |
-| Off mode | ⬜ Not started | Trivial: set 0W |
+| Dashboard (mode + status) | ✅ Done | button-card on AmazonFire dashboard |
 | Solar mode | ⬜ Not started | Excess PV calculation |
 | Immediate mode | ⬜ Not started | Trivial: set 11000W |
 | Cheap tariff mode | ⬜ Not started | Tariff window logic |
