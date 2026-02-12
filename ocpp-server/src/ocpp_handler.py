@@ -19,7 +19,6 @@ from ocpp.v16.enums import (
     ChargingProfilePurposeType,
     ChargingRateUnitType,
     MessageTrigger,
-    ResetType,
 )
 
 logger = logging.getLogger(__name__)
@@ -273,10 +272,3 @@ class ChargePointHandler(CP):
         logger.info(f"TriggerMessage response: {response.status}")
         return response.status == "Accepted"
 
-    async def reset(self, reset_type: str = "Soft"):
-        """Send Reset command to wallbox."""
-        logger.info(f"Sending Reset ({reset_type})")
-        request = call.Reset(type=reset_type)
-        response = await self.call(request)
-        logger.info(f"Reset response: {response.status}")
-        return response.status == "Accepted"
