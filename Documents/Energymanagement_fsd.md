@@ -1876,7 +1876,7 @@ INPUTS:
   ev_soc                = sensor.smart_battery
   ev_target_soc         = sensor.ev_target_soc
   forecast_excess_60min = simulated PV excess for next 60 min (p50)
-  battery_reaches_80    = SOC forecast shows battery >= 80% by next cheap tariff
+  battery_reaches_80    = SOC forecast at cheap tariff start (21:00) >= 80%
   current_phases        = sensor.wallbox_phases (1 or 3)
   last_phase_switch     = timestamp of last phase change
 

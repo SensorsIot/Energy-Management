@@ -1,20 +1,20 @@
 # EnergyManager Changelog
 
-## [1.6.1] - 2026-02-13
+## [1.6.2] - 2026-02-13
 
 ### Changed
 - EV solar mode uses PV-based excess (`pv_power - load_power`) instead of grid-based
   formula. The Huawei inverter hides available PV by greedily charging the battery,
   so grid export understates true excess. When battery protection confirms the battery
-  will reach 80%, EV starts immediately from total PV instead of waiting for grid
-  export to rise. Battery protection re-checks every minute for safety.
+  will reach 80% at 21:00, EV starts immediately from total PV instead of waiting
+  for grid export to rise. Battery protection re-checks every minute for safety.
 - `calculate_ev_power()` interface simplified: single `excess_w` parameter replaces
   `grid_power_w` + `wallbox_power_w`
 
 ### Fixed
-- Battery protection now checks forecast SOC **at** cheap tariff start (21:00) instead
-  of peak SOC between now and 21:00. Previously `max()` could pass even when the
-  battery would discharge back below 80% by evening.
+- Battery protection now checks forecast SOC **at** cheap tariff start (21:00) using
+  a ±15min query window, instead of peak SOC between now and 21:00. Previously
+  `max()` could pass even when the battery would discharge back below 80% by evening.
 
 ## [1.6.0] - 2026-02-13
 
