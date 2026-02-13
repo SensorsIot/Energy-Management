@@ -1,5 +1,11 @@
 # EnergyManager Changelog
 
+## [1.6.5] - 2026-02-13
+
+### Fixed
+- InfluxDB entity_id query: strip domain prefix (`sensor.smart_battery` → `smart_battery`)
+  to match how HA's InfluxDB integration stores entity_id tags in `HomeAssistant` bucket
+
 ## [1.6.4] - 2026-02-13
 
 ### Fixed
