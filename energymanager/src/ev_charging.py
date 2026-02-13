@@ -1,11 +1,9 @@
 """
 EV charging power calculation for opportunistic solar mode.
 
-Uses PV-based excess: excess = pv_power - load_power.
-Phase selection per FSD 4.5.4.1:
-  >= 4100W → 3-phase (up to 11000W)
-  >= 1400W → 1-phase (up to 3700W)
-  < 1400W  → pause (0W, transaction stays alive)
+Clamps excess power to wallbox min/max limits:
+  excess >= min_power_w → charge at min(excess, max_power_w)
+  excess <  min_power_w → pause (0W, transaction stays alive)
 """
 
 import logging
@@ -24,48 +22,33 @@ class EVChargingResult:
 
 def calculate_ev_power(
     excess_w: float,
-    min_power_1phase_w: float = 1400,
-    max_power_1phase_w: float = 3700,
-    min_power_3phase_w: float = 4100,
-    max_power_3phase_w: float = 11000,
+    min_power_w: float = 1400,
+    max_power_w: float = 11000,
 ) -> EVChargingResult:
     """
     Calculate target EV charging power from solar excess.
 
     Args:
-        excess_w: Available solar excess in watts (pv_power - load_power)
-        min_power_1phase_w: Minimum 1-phase charging power
-        max_power_1phase_w: Maximum 1-phase charging power
-        min_power_3phase_w: Minimum 3-phase charging power
-        max_power_3phase_w: Maximum 3-phase charging power
+        excess_w: Available solar excess in watts
+        min_power_w: Minimum wallbox power (below this → pause)
+        max_power_w: Maximum wallbox power (clamp ceiling)
 
     Returns:
         EVChargingResult with target power, excess, and reason
     """
-    excess = excess_w
-
-    if excess >= min_power_3phase_w:
-        target = min(excess, max_power_3phase_w)
+    if excess_w >= min_power_w:
+        target = min(excess_w, max_power_w)
         target = _round_to_step(target)
         return EVChargingResult(
             target_power_w=target,
-            available_excess_w=excess,
-            reason=f"3-phase {target:.0f}W (excess {excess:.0f}W)",
-        )
-
-    if excess >= min_power_1phase_w:
-        target = min(excess, max_power_1phase_w)
-        target = _round_to_step(target)
-        return EVChargingResult(
-            target_power_w=target,
-            available_excess_w=excess,
-            reason=f"1-phase {target:.0f}W (excess {excess:.0f}W)",
+            available_excess_w=excess_w,
+            reason=f"Charging {target:.0f}W (excess {excess_w:.0f}W)",
         )
 
     return EVChargingResult(
         target_power_w=0,
-        available_excess_w=excess,
-        reason=f"Pause: excess {excess:.0f}W < {min_power_1phase_w:.0f}W minimum",
+        available_excess_w=excess_w,
+        reason=f"Pause: excess {excess_w:.0f}W < {min_power_w:.0f}W minimum",
     )
 
 

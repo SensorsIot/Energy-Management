@@ -7,6 +7,9 @@
   `pv_power - load_power`. Formula: `excess = -grid_power + wallbox_power`.
   Prefers M-Bus smart meter if fresh (<30s), falls back to Huawei
   `sensor.power_meter_active_power`.
+- Simplified EV power calculation: replaced 4 phase-specific parameters with
+  `min_power_w` / `max_power_w`. Phase switching is the OCPP server's concern.
+  Examples: 1-phase (1400–3700), 3-phase (4100–11000), switchable (1400–11000).
 
 ## [1.6.9] - 2026-02-13
 

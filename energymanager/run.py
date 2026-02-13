@@ -169,10 +169,8 @@ class EnergyManager:
         # EV charging config (FSD 4.5)
         ev_opts = options.get("ev_charging", {})
         self.ev_charging_enabled = ev_opts.get("enabled", False)
-        self.ev_min_power_1phase_w = ev_opts.get("min_power_1phase_w", 1400)
-        self.ev_max_power_1phase_w = ev_opts.get("max_power_1phase_w", 3700)
-        self.ev_min_power_3phase_w = ev_opts.get("min_power_3phase_w", 4100)
-        self.ev_max_power_3phase_w = ev_opts.get("max_power_3phase_w", 11000)
+        self.ev_min_power_w = ev_opts.get("min_power_w", 1400)
+        self.ev_max_power_w = ev_opts.get("max_power_w", 11000)
         self.grid_power_entity = sensors_opts.get("grid_power", "sensor.grid_power")
         self.huawei_grid_power_entity = sensors_opts.get("huawei_grid_power", "sensor.power_meter_active_power")
         self.wallbox_power_entity = ev_opts.get("wallbox_power_entity", "sensor.wallbox_power")
@@ -193,7 +191,6 @@ class EnergyManager:
         self.ev_wallbox_status_entity = ev_opts.get(
             "wallbox_status_entity", "sensor.wallbox_status"
         )
-        self.ev_max_power_w = ev_opts.get("max_power_w", 11000)
         self.ev_auto_reset_timeout_min = ev_opts.get("auto_reset_timeout_min", 5)
         self.ev_battery_protection_soc = ev_opts.get("battery_protection_soc", 80)
         self._ev_idle_since: datetime | None = None
@@ -741,10 +738,8 @@ class EnergyManager:
 
                     ev_result = calculate_ev_power(
                         excess_w=excess,
-                        min_power_1phase_w=self.ev_min_power_1phase_w,
-                        max_power_1phase_w=self.ev_max_power_1phase_w,
-                        min_power_3phase_w=self.ev_min_power_3phase_w,
-                        max_power_3phase_w=self.ev_max_power_3phase_w,
+                        min_power_w=self.ev_min_power_w,
+                        max_power_w=self.ev_max_power_w,
                     )
                     target_power = ev_result.target_power_w
                     reason = ev_result.reason
