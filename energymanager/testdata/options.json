@@ -47,7 +47,7 @@
     "max_power_1phase_w": 3700,
     "min_power_3phase_w": 4100,
     "max_power_3phase_w": 11000,
-    "goal_max_power_w": 11000,
+    "max_power_w": 11000,
     "auto_reset_timeout_min": 5
   },
   "schedule": {

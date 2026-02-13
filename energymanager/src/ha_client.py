@@ -272,6 +272,31 @@ class HAClient:
             logger.error(f"Failed to set {entity_id}: {e}")
             return False
 
+    def get_input_select(self, entity_id: str) -> str:
+        """Get input_select state."""
+        state = self.get_state(entity_id)
+        return state.get("state", "") if state else ""
+
+    def set_input_select(self, entity_id: str, option: str) -> bool:
+        """Set input_select to a specific option."""
+        if not self.token:
+            logger.warning("No token available for set_input_select")
+            return False
+
+        try:
+            url = self._api_url("/services/input_select/select_option")
+            data = {"entity_id": entity_id, "option": option}
+            logger.debug(f"POST {url} with {data}")
+            response = requests.post(
+                url, headers=self._headers(), json=data, timeout=30
+            )
+            response.raise_for_status()
+            logger.info(f"Set {entity_id} to '{option}'")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set {entity_id}: {e}")
+            return False
+
     def set_sensor_state(
         self,
         entity_id: str,

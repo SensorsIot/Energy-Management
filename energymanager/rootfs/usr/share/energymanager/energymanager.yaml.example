@@ -61,13 +61,12 @@ ev_charging:
   min_power_3phase_w: 4100
   max_power_3phase_w: 11000
 
-  # Goal mode (FSD 4.5.4.2)
-  goal_max_power_w: 11000           # Always 3-phase max in goal mode
-  auto_reset_timeout_min: 5         # Minutes of 0W before auto-reset
+  # Charging mode (FSD 4.5.4)
+  max_power_w: 11000                # 3-phase max for immediate/cheap modes
+  auto_reset_timeout_min: 5         # Minutes of 0W before auto-revert to solar
 
   # Entity overrides (defaults should work for most setups)
-  # goal_charge_entity: "input_boolean.ev_goal_charge"
-  # charge_now_entity: "input_boolean.ev_charge_now"
+  # mode_entity: "input_select.ev_charging_mode"
   # charge_status_entity: "sensor.ev_charge_status"
   # wallbox_status_entity: "sensor.wallbox_status"
 

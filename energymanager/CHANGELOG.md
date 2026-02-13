@@ -1,5 +1,19 @@
 # EnergyManager Changelog
 
+## [1.6.0] - 2026-02-13
+
+### Changed
+- Migrated EV charging from two `input_boolean` entities to `input_select.ev_charging_mode`
+  - Replaces `input_boolean.ev_goal_charge` + `input_boolean.ev_charge_now`
+  - Single entity with options: `solar`, `immediate`, `cheap`
+- Immediate and Cheap modes now auto-revert to `solar` when charging completes
+  - Previously buttons stayed on; now mode switches back after 5 min idle
+- Renamed `calculate_goal_mode()` → `calculate_charging_mode()` with mode string interface
+
+### Added
+- `get_input_select()` and `set_input_select()` methods in HAClient
+- `revert_to_solar` flag in `ChargingModeResult` for auto-revert logic
+
 ## [1.5.16] - 2026-02-09
 
 ### Fixed

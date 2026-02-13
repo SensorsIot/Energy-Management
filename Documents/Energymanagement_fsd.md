@@ -1848,8 +1848,8 @@ This check runs every minute using the latest forecast data. As conditions chang
 When both battery SOC < 100% and EV SOC < target, and the battery protection rule is satisfied:
 
 - Low PV power (excess < 1700W): Battery gets all excess. EV stays paused — the wallbox minimum is 1.4kW (1-phase, 6A) and we need margin.
-- Medium PV power (excess 1700W–4100W): EV charges on 1-phase. Battery continues charging from remaining PV.
-- High PV power (excess > 4100W): EV charges on 3-phase. Battery continues charging from remaining PV.
+- Medium PV power (excess 1700W–4100W): EV charges on 1-phase and consumes all excess energy (grid power=0).
+- High PV power (excess > 4100W): EV charges on 3-phase and consumes all excess energy (grid power=0)
 
 EV charging stops when:
 - EV reaches target SOC, OR
@@ -1930,7 +1930,7 @@ Charges at maximum power immediately, regardless of tariff or solar.
 
 `number.wallbox_power_limit` = 11000W (3-phase, 16A).
 
-**Use case:** User needs the car urgently — presses "Sofort" on the dashboard, car starts charging at full speed.
+**Use case:** User needs the car urgently — presses "Charge now" on the dashboard, car starts charging at full speed and when it reaches target SOC, mode is switched back to solar (default).
 
 ### 4.5.8 Cheap Tariff Mode
 
@@ -1950,11 +1950,11 @@ ELSE:
 
 **Typical usage:**
 1. User plugs in the car, sets desired SOC in the car (e.g. 80%)
-2. User presses "Niedertarif" on the kitchen dashboard
+2. User presses "Cheap Charge" on the kitchen dashboard
 3. System waits until 21:00 (or charges immediately on weekends)
 4. Charges at full power (11 kW, 3-phase)
 5. Car's BMS stops accepting current when SOC target is reached
-6. Mode stays on "Niedertarif" — next time user plugs in, same behavior
+6. Mode goes back to "solar" (default)
 
 **Future (SOC-aware scheduling):** Once the Smart # car API is reliable, read actual SOC → calculate energy needed → schedule optimal start time within the cheap window.
 
@@ -2041,11 +2041,13 @@ Buttons are simple on/off indicators — no power display. Tapping an active but
 
 | State | Label | Color |
 |-------|-------|-------|
-| Car not connected | "Not connected" | Grey |
-| Connected, not charging | "Connected" | Dodgerblue |
-| Charging normally | "{power} W" | Green |
-| Suspended/paused | "0 W" | Dodgerblue |
-| Finished | "Finished" | Dodgerblue |
+| Not plugged in, SOC < target | "Not connected" | White on orange background |
+| Not plugged in, SOC >= target | "Not connected" | Green text, default background |
+| Connected, not charging | "Connected" | White on green background |
+| Charging normally | "{power} W" | White on green background |
+| SOC >= target (plugged in) | "Full" | White on green background |
+| Suspended/paused | "0 W" | White on green background |
+| Finished | "Finished" | White on green background |
 | **Power mismatch** | label + **red background** | White on red |
 
 **Mismatch detection:** The entire card (background, icon, text) turns red when:
@@ -2080,8 +2082,8 @@ See [Appendix D.3 — EV Charging Tests](#d3-ev-charging-tests) (17 test cases).
 | Calibrated power conversion | ✅ Done | 3-phase lookup table (measured) |
 | Dashboard (mode + status) | ✅ Done | button-card on AmazonFire dashboard |
 | Solar mode | ⬜ Not started | Excess PV calculation |
-| Immediate mode | ⬜ Not started | Trivial: set 11000W |
-| Cheap tariff mode | ⬜ Not started | Tariff window logic |
+| Immediate mode | ✅ Done | Sets 11000W, auto-reverts to solar |
+| Cheap tariff mode | ✅ Done | Tariff window logic, auto-reverts to solar |
 | SOC-aware scheduling | ⬜ Not started | Future: Smart # car API |
 
 ---
