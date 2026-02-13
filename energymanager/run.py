@@ -607,14 +607,15 @@ class EnergyManager:
         return True
 
     def check_battery_protection(self) -> tuple[bool, float]:
-        """Check if battery forecast reaches protection target (FSD 4.5.6).
+        """Check if battery SOC at cheap tariff start meets protection target (FSD 4.5.6).
 
         Queries the SOC forecast from InfluxDB (written by run_optimization)
-        and checks if battery reaches the protection SOC target before the
-        next cheap tariff window.
+        and checks the predicted SOC at the start of the next cheap tariff
+        window (21:00 on weekdays). EV charging is only allowed if the
+        battery will have >= 80% SOC at that time.
 
         Returns:
-            (reaches_target, max_forecast_soc) tuple
+            (reaches_target, soc_at_cheap_start) tuple
         """
         try:
             now = datetime.now(timezone.utc)
@@ -627,19 +628,20 @@ class EnergyManager:
               |> filter(fn: (r) => r._measurement == "soc_forecast")
               |> filter(fn: (r) => r.scenario == "with_strategy")
               |> filter(fn: (r) => r._field == "soc_percent")
-              |> max()
+              |> last()
             '''
 
             result = query_api.query(query)
             if result and result[0].records:
-                max_soc = result[0].records[0].get_value()
-                reaches_target = max_soc >= self.ev_battery_protection_soc
+                soc_at_target = result[0].records[0].get_value()
+                reaches_target = soc_at_target >= self.ev_battery_protection_soc
                 logger.info(
-                    f"Battery protection: forecast max SOC={max_soc:.0f}% "
+                    f"Battery protection: forecast SOC at {swiss_time(tariff.cheap_start)}="
+                    f"{soc_at_target:.0f}% "
                     f"(target={self.ev_battery_protection_soc}%) → "
                     f"{'EV allowed' if reaches_target else 'EV blocked'}"
                 )
-                return reaches_target, max_soc
+                return reaches_target, soc_at_target
             else:
                 logger.warning("No SOC forecast data — blocking EV as precaution")
                 return False, 0.0
@@ -692,15 +694,15 @@ class EnergyManager:
                 reason = f"Car full: SOC {ev_soc:.0f}% >= target {self.ev_target_soc}%"
             else:
                 # Step 2: Battery protection — query InfluxDB forecast
-                reaches_target, max_soc = self.check_battery_protection()
+                reaches_target, soc_at_target = self.check_battery_protection()
                 self._battery_reaches_target = reaches_target
-                self._battery_min_soc_forecast = max_soc
+                self._battery_min_soc_forecast = soc_at_target
 
                 if not reaches_target:
-                    # Battery can't reach target — block EV, all PV to battery
+                    # Battery won't reach target by cheap tariff — block EV, all PV to battery
                     target_power = 0
                     reason = (
-                        f"Battery protection: forecast max SOC {max_soc:.0f}% "
+                        f"Battery protection: forecast SOC at 21:00 = {soc_at_target:.0f}% "
                         f"< {self.ev_battery_protection_soc}% target — all PV to battery"
                     )
                 else:

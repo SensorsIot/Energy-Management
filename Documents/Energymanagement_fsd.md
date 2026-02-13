@@ -1836,10 +1836,10 @@ Before any PV power is allocated to the EV, the Energy Manager must verify that 
 | `pv_forecast` | `pv_forecast` | `power_w_p50` (tag: `inverter=total`) | Median PV power forecast |
 | `HuaweiNew` | `Energy` | `BATT_Level` | Current battery SOC % |
 
-The battery protection check uses `soc_forecast` (`scenario=with_strategy`) to find the maximum SOC before the next cheap tariff. If `max(soc_percent)` reaches 80%, the battery will have enough energy and the surplus is available for the EV.
+The battery protection check uses `soc_forecast` (`scenario=with_strategy`) to read the predicted SOC at the start of the next cheap tariff window (21:00 on weekdays). If the SOC at that time is >= 80%, the battery will have enough energy and the surplus is available for the EV.
 
-- If the forecast shows the battery reaching 80% with energy to spare → the surplus is available for EV charging.
-- If the forecast shows the battery NOT reaching 80% → all PV excess goes to the battery. EV charging is paused (`wallbox_power_limit = 0`).
+- If the forecast shows battery >= 80% at 21:00 → the surplus is available for EV charging.
+- If the forecast shows battery < 80% at 21:00 → all PV excess goes to the battery. EV charging is paused (`wallbox_power_limit = 0`).
 
 This check runs every minute using the latest forecast data. As conditions change (clouds clear, load drops), EV charging can start or stop dynamically.
 
@@ -1926,13 +1926,13 @@ INPUTS:
 
 **Worked example:**
 
-Conditions: PV total = 4,418W, house load = 622W, battery SOC = 32%, forecast max SOC = 74.5%.
+Conditions: PV total = 4,418W, house load = 622W, battery SOC = 32%.
 
-*Scenario A — battery protection fails (typical cloudy forecast):*
+*Scenario A — battery protection fails (cloudy forecast):*
 ```
-Step 1: ev_soc < target             → continue
+Step 1: ev_soc < target                    → continue
 Step 2: battery_reaches_80?
-        forecast max SOC = 74.5% < 80% → NO
+        forecast SOC at 21:00 = 74.5% < 80% → NO
         → wallbox_power_limit = 0  (all PV to battery)
         → DONE
 ```
@@ -1940,14 +1940,14 @@ Result: EV stays paused. The Huawei inverter charges the battery with all availa
 
 *Scenario B — battery protection passes (sunny forecast):*
 ```
-Step 1: ev_soc < target             → continue
+Step 1: ev_soc < target                    → continue
 Step 2: battery_reaches_80?
-        forecast max SOC = 92% >= 80% → YES → continue
+        forecast SOC at 21:00 = 92% >= 80%  → YES → continue
 Step 3: excess_w = 4418 - 622 = 3796W
-Step 4: 3796W >= 1400W              → 1-phase, clamped to 3700W
+Step 4: 3796W >= 1400W                     → 1-phase, clamped to 3700W
         → wallbox_power_limit = 3700
 ```
-Result: EV starts charging immediately at 3,700W (1-phase). The Huawei inverter automatically reduces battery charging by that amount. If clouds roll in and the next minute's battery protection re-check shows the forecast dropping below 80%, the EV is blocked and all PV returns to the battery.
+Result: EV starts charging immediately at 3,700W (1-phase). The Huawei inverter automatically reduces battery charging by that amount. If clouds roll in and the next minute's battery protection re-check shows the forecast SOC at 21:00 dropping below 80%, the EV is blocked and all PV returns to the battery.
 
 ### 4.5.7 Immediate Mode
 

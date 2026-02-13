@@ -11,6 +11,11 @@
 - `calculate_ev_power()` interface simplified: single `excess_w` parameter replaces
   `grid_power_w` + `wallbox_power_w`
 
+### Fixed
+- Battery protection now checks forecast SOC **at** cheap tariff start (21:00) instead
+  of peak SOC between now and 21:00. Previously `max()` could pass even when the
+  battery would discharge back below 80% by evening.
+
 ## [1.6.0] - 2026-02-13
 
 ### Changed
