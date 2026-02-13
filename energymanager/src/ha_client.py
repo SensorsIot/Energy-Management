@@ -79,6 +79,12 @@ class HAClient:
             response = requests.get(url, headers=self._headers(), timeout=30)
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                logger.debug(f"Entity {entity_id} not found (404)")
+            else:
+                logger.error(f"Failed to get state for {entity_id}: {e}")
+            return None
         except Exception as e:
             logger.error(f"Failed to get state for {entity_id}: {e}")
             return None

@@ -1,5 +1,11 @@
 # EnergyManager Changelog
 
+## [1.6.6] - 2026-02-13
+
+### Fixed
+- Log missing entities (404) at debug level instead of error. Wallbox/OCPP entities
+  that don't exist when the wallbox is disconnected no longer spam the log every minute.
+
 ## [1.6.5] - 2026-02-13
 
 ### Fixed
