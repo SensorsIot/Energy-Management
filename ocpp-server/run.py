@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 import asyncio
 import json
@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiohttp
+import aiomqtt
 import websockets
 
 from src.ha_entities import ALL_ENTITIES, BINARY_SENSORS, CONTROLS, SENSORS
@@ -174,6 +175,12 @@ class OCPPServer:
         self.ws_server = None
         self.running = False
 
+        # MQTT config for ESP32 Modbus Proxy power correction
+        self._mqtt_host = options.get("mqtt_host", "192.168.0.203")
+        self._mqtt_port = options.get("mqtt_port", 1883)
+        self._mqtt_topic = options.get("mqtt_topic", "wallbox")
+        self._mqtt_client: Optional[aiomqtt.Client] = None
+
         # Phase switching state
         self._current_phases = 3
         self._phase_threshold_w = self.min_current_a * 230 * 3
@@ -184,8 +191,51 @@ class OCPPServer:
         # Synchronization: _watch_controls waits until _post_connect_setup finishes
         self._setup_complete = asyncio.Event()
 
+    async def _mqtt_loop(self):
+        """Maintain MQTT connection and reconnect on failure."""
+        if not self._mqtt_host:
+            logger.info("MQTT disabled (no mqtt_host configured)")
+            return
+        while self.running:
+            try:
+                async with aiomqtt.Client(
+                    hostname=self._mqtt_host,
+                    port=self._mqtt_port,
+                ) as client:
+                    self._mqtt_client = client
+                    logger.info(
+                        f"MQTT connected to {self._mqtt_host}:{self._mqtt_port}, "
+                        f"topic={self._mqtt_topic}"
+                    )
+                    # Keep connection alive until cancelled or disconnected
+                    while self.running:
+                        await asyncio.sleep(1)
+            except aiomqtt.MqttError as e:
+                self._mqtt_client = None
+                if self.running:
+                    logger.warning(f"MQTT connection lost: {e}, reconnecting in 5s")
+                    await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._mqtt_client = None
+                if self.running:
+                    logger.error(f"MQTT error: {e}, reconnecting in 10s")
+                    await asyncio.sleep(10)
+        self._mqtt_client = None
+
+    async def _publish_mqtt_power(self, power_w: float):
+        """Publish wallbox power to MQTT for ESP32 Modbus Proxy correction."""
+        if self._mqtt_client is None:
+            return
+        try:
+            await self._mqtt_client.publish(self._mqtt_topic, str(power_w))
+            logger.debug(f"MQTT publish {self._mqtt_topic}: {power_w}W")
+        except Exception as e:
+            logger.warning(f"MQTT publish failed: {e}")
+
     def _on_status_change(self, key: str, value):
-        """Callback when wallbox status changes — update HA entity."""
+        """Callback when wallbox status changes — update HA entity and MQTT."""
         entity_id = STATUS_ENTITY_MAP.get(key)
         if not entity_id:
             logger.debug(f"No entity mapping for status key: {key}")
@@ -201,6 +251,10 @@ class OCPPServer:
             state = value
 
         asyncio.ensure_future(self.ha.set_state(entity_id, state))
+
+        # Publish wallbox power to MQTT for ESP32 Modbus Proxy correction
+        if key == "power_w":
+            asyncio.ensure_future(self._publish_mqtt_power(float(value)))
 
     async def _switch_phases(self, target_phases: int):
         """Switch between 1-phase and 3-phase charging via EARU relay.
@@ -441,17 +495,20 @@ class OCPPServer:
         self.running = True
         logger.info("OCPP server ready, waiting for wallbox connection...")
 
-        # Run control watcher alongside the server
+        # Run control watcher and MQTT loop alongside the server
         watcher = asyncio.create_task(self._watch_controls())
+        mqtt_task = asyncio.create_task(self._mqtt_loop())
         try:
             while self.running:
                 await asyncio.sleep(1)
         finally:
             watcher.cancel()
+            mqtt_task.cancel()
 
     async def stop(self):
-        """Stop the server and close HA session."""
+        """Stop the server, MQTT, and close HA session."""
         self.running = False
+        self._mqtt_client = None
         if self.ws_server:
             self.ws_server.close()
         await self.ha.stop()
@@ -475,6 +532,11 @@ async def async_main():
 
     options = load_options()
     logger.info(f"Config: wallbox_id={options.get('wallbox_id', 'wallbox1')}")
+    logger.info(
+        f"MQTT: host={options.get('mqtt_host', '')}, "
+        f"port={options.get('mqtt_port', 1883)}, "
+        f"topic={options.get('mqtt_topic', 'wallbox')}"
+    )
 
     server = OCPPServer(options)
 
