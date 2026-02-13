@@ -705,13 +705,16 @@ class EnergyManager:
                 # Step 2: Battery protection — query InfluxDB forecast
                 reaches_target, soc_at_target = self.check_battery_protection()
 
-                # Override: if exporting to grid, disable battery protection.
-                # Better to charge EV than sell at low feed-in tariff.
+                # Override: if battery is full and exporting to grid, disable
+                # battery protection.  No point selling at feed-in tariff when
+                # the EV can use the energy.  Only applies at SOC 100% — while
+                # the battery is still charging, PV is not wasted.
+                battery_soc = self.ha_client.get_sensor_value(self.soc_entity) or 0
                 grid_power = self.ha_client.get_sensor_value(self.grid_power_entity) or 0
-                if not reaches_target and grid_power < 0:
+                if not reaches_target and battery_soc >= 100 and grid_power < 0:
                     logger.info(
-                        f"Battery protection overridden: grid exporting {-grid_power:.0f}W "
-                        f"(forecast SOC {soc_at_target:.0f}%)"
+                        f"Battery protection overridden: battery full ({battery_soc:.0f}%), "
+                        f"grid exporting {-grid_power:.0f}W (forecast SOC {soc_at_target:.0f}%)"
                     )
                     reaches_target = True
 

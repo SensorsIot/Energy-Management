@@ -3,9 +3,10 @@
 ## [1.6.9] - 2026-02-13
 
 ### Changed
-- Battery protection overridden when grid is exporting (selling energy).
-  Better to charge EV with excess PV than sell at low feed-in tariff.
-  Re-checks every minute: if export stops, battery protection re-engages.
+- Battery protection overridden when battery is full (SOC 100%) and grid is
+  exporting. No point selling at feed-in tariff when the EV can use the energy.
+  While battery is still charging, protection remains active (PV is not wasted).
+  Re-checks every minute.
 
 ## [1.6.8] - 2026-02-13
 
