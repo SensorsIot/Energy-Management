@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.3"
+__version__ = "1.6.4"
 
 import json
 import logging
@@ -796,14 +796,38 @@ class EnergyManager:
         except Exception as e:
             logger.error(f"Smart car SOC update failed: {e}")
 
+    def _query_last_value(self, entity_id: str) -> str | None:
+        """Query InfluxDB for the last known value of an HA entity."""
+        try:
+            query_api = self.influx_client.query_api()
+            query = f'''
+            from(bucket: "HomeAssistant")
+              |> range(start: -7d)
+              |> filter(fn: (r) => r.entity_id == "{entity_id}")
+              |> filter(fn: (r) => r._field == "value")
+              |> last()
+            '''
+            result = query_api.query(query, org="spiessa")
+            if result and result[0].records:
+                value = result[0].records[0].get_value()
+                logger.info(f"Restored {entity_id} from InfluxDB: {value}")
+                return value
+        except Exception as e:
+            logger.debug(f"Could not query InfluxDB for {entity_id}: {e}")
+        return None
+
     def _ensure_sensor_exists(self, entity_id: str, default_state, attributes: dict):
-        """Ensure a sensor exists in HA. Only writes default if entity is missing."""
+        """Ensure a sensor exists in HA. Restores last value from InfluxDB if missing."""
         existing = self.ha_client.get_state(entity_id)
         if existing is not None:
             logger.debug(f"Sensor {entity_id} exists (state={existing.get('state')})")
             return
-        logger.info(f"Creating missing sensor {entity_id} with default state={default_state}")
-        self.ha_client.set_sensor_state(entity_id, default_state, attributes=attributes)
+        # Try to restore from InfluxDB history
+        restored = self._query_last_value(entity_id)
+        state = restored if restored is not None else default_state
+        logger.info(f"Creating sensor {entity_id} with state={state}"
+                     f"{' (from InfluxDB)' if restored is not None else ' (default)'}")
+        self.ha_client.set_sensor_state(entity_id, state, attributes=attributes)
 
     def _publish_initial_sensors(self):
         """Ensure all managed sensors exist in HA at startup."""

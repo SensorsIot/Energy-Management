@@ -1,12 +1,12 @@
 # EnergyManager Changelog
 
-## [1.6.3] - 2026-02-13
+## [1.6.4] - 2026-02-13
 
 ### Fixed
-- Ensure managed sensors exist at startup: reads existing state first (preserves
-  last known value across HA restarts), only writes defaults if entity is missing.
-  Prevents "Entity not found" on dashboards for `sensor.smart_battery`,
-  `sensor.ev_target_soc`, `sensor.ev_target_power`, `sensor.ev_charge_status`.
+- Restore sensor values from InfluxDB after HA restart. REST API sensors are lost
+  on restart; now queries last known value from `HomeAssistant` bucket (7-day window)
+  before falling back to defaults. `sensor.smart_battery` shows last known SOC (e.g.
+  73%) instead of "unknown" even when the Smart car API is temporarily down.
 
 ## [1.6.2] - 2026-02-13
 
