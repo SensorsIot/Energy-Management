@@ -1,5 +1,16 @@
 # EnergyManager Changelog
 
+## [1.6.1] - 2026-02-13
+
+### Changed
+- EV solar mode uses PV-based excess (`pv_power - load_power`) instead of grid-based
+  formula. The Huawei inverter hides available PV by greedily charging the battery,
+  so grid export understates true excess. When battery protection confirms the battery
+  will reach 80%, EV starts immediately from total PV instead of waiting for grid
+  export to rise. Battery protection re-checks every minute for safety.
+- `calculate_ev_power()` interface simplified: single `excess_w` parameter replaces
+  `grid_power_w` + `wallbox_power_w`
+
 ## [1.6.0] - 2026-02-13
 
 ### Changed
@@ -13,11 +24,6 @@
 ### Added
 - `get_input_select()` and `set_input_select()` methods in HAClient
 - `revert_to_solar` flag in `ChargingModeResult` for auto-revert logic
-- PV-based solar excess for EV charging: `excess = pv_power - load_power` replaces
-  grid-based formula. When battery protection passes, EV starts immediately from
-  total PV instead of waiting for grid export to rise. Battery protection re-checks
-  every minute — if forecast drops below 80% SOC, EV is paused and all PV returns
-  to the battery.
 
 ## [1.5.16] - 2026-02-09
 
