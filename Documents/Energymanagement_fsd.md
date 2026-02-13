@@ -1814,7 +1814,7 @@ When `number.wallbox_power_limit` = 0 (e.g. solar mode with no excess, or cheap 
 
 ### 4.5.6 Solar Mode (Default)
 
-Charges only from PV excess. Never imports from grid for EV charging. This is the default mode — active whenever the user has not explicitly selected "Cheap Charge" or "Charge Now".
+Charges only from PV excess. Never imports from grid for EV charging. This is the default mode — active whenever the user has not explicitly selected "Cheap Charge" or "Charge Now" and when EV is plugged-in.
 
 **Priority order:**
 
@@ -1824,7 +1824,19 @@ Charges only from PV excess. Never imports from grid for EV charging. This is th
 
 **Battery protection rule:**
 
-Before any PV power is allocated to the EV, the Energy Manager must verify that the battery can reach 80% SOC by the start of the next cheap tariff window (weekdays 21:00, weekends: immediate). This is calculated using the SOC forecast simulation (p50) from the "Cumulative Energy Balance" curve in Grafana / InfluxDB.
+Before any PV power is allocated to the EV, the Energy Manager must verify that the battery can reach 80% SOC by the start of the next cheap tariff window (weekdays 21:00, weekends: immediate).
+
+**Data sources (InfluxDB):**
+
+| Bucket | Measurement | Field | Description |
+|--------|-------------|-------|-------------|
+| `energy_manager` | `soc_forecast` | `soc_percent` (tag: `scenario=with_strategy`) | Rolling SOC trajectory with discharge blocking applied |
+| `energy_manager` | `energy_balance` | `cumulative_wh` | Cumulative energy balance (PV - Load running sum) |
+| `energy_manager` | `energy_balance` | `net_wh` | Net energy per 15-min period |
+| `pv_forecast` | `pv_forecast` | `power_w_p50` (tag: `inverter=total`) | Median PV power forecast |
+| `HuaweiNew` | `Energy` | `BATT_Level` | Current battery SOC % |
+
+The battery protection check uses `soc_forecast` (`scenario=with_strategy`) to find the minimum SOC before the next cheap tariff. If `min(soc_percent)` stays above 80% with the planned EV charging subtracted, the surplus is available for the EV.
 
 - If the forecast shows the battery reaching 80% with energy to spare → the surplus is available for EV charging.
 - If the forecast shows the battery NOT reaching 80% → all PV excess goes to the battery. EV charging is paused (`wallbox_power_limit = 0`).
