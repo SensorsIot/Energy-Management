@@ -1,5 +1,12 @@
 # EnergyManager Changelog
 
+## [1.6.9] - 2026-02-13
+
+### Changed
+- Battery protection overridden when grid is exporting (selling energy).
+  Better to charge EV with excess PV than sell at low feed-in tariff.
+  Re-checks every minute: if export stops, battery protection re-engages.
+
 ## [1.6.8] - 2026-02-13
 
 ### Fixed
