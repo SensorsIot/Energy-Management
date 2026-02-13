@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.8
+**Version:** 2.12
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -1621,58 +1621,7 @@ data:
 
 ### 4.3.6 Test Cases
 
-Test file: `energymanager/tests/test_battery_optimizer.py`
-
-#### Expensive Tariff (06:00-21:00) → Always ALLOW
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_expensive_tariff_allows_discharge` | At 12:00 (expensive), discharge should be allowed regardless of SOC forecast | Time: Monday 11:00, PV: 0W, Load: 2000W, SOC: 50% | `discharge_allowed=True`, reason contains "Expensive tariff" |
-| `test_expensive_tariff_low_soc_still_allows` | Even with low SOC during expensive tariff, discharge is allowed | Time: Monday 14:00, PV: 0W, Load: 5000W, SOC: 15% | `discharge_allowed=True` |
-
-#### Cheap Tariff + SOC OK → ALLOW
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_cheap_tariff_high_pv_allows_discharge` | At 22:00 (cheap), with good PV forecast, discharge should be allowed | Time: Monday 21:30, PV: 4000W during day, Load: 500W, SOC: 80% | `discharge_allowed=True`, reason contains "SOC stays >=" |
-| `test_cheap_tariff_full_battery_allows_discharge` | With 100% SOC and good PV, should allow discharge | Time: Monday 22:00, PV: 5000W during day, Load: 400W, SOC: 100% | `discharge_allowed=True` |
-
-#### Cheap Tariff + SOC NOT OK → BLOCK
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_cheap_tariff_low_pv_blocks_discharge` | At 22:00 (cheap), with poor PV forecast, discharge should be blocked | Time: Monday 21:30, PV: 500W (cloudy), Load: 1500W, SOC: 50% | `discharge_allowed=False`, reason contains "Block" |
-| `test_cheap_tariff_low_soc_blocks_discharge` | At 22:00 (cheap), with low starting SOC, discharge should be blocked | Time: Monday 22:00, PV: 2000W, Load: 1000W, SOC: 20% | `discharge_allowed=False` |
-| `test_min_soc_threshold_respected` | Custom threshold (20%) is respected | Time: Monday 22:00, threshold: 20%, SOC: 40% | If `min_soc_percent < 20%` then `discharge_allowed=False` |
-
-#### Self-Correcting Behavior
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_block_then_allow_as_conditions_improve` | If initially blocked, later check with better SOC should allow | Same forecast, First: SOC 30%, Second: SOC 90% | `decision2.min_soc_percent > decision1.min_soc_percent`, `decision2.discharge_allowed=True` |
-
-#### Edge Cases
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_no_forecast_data_allows_discharge` | With no forecast data, default to allowing discharge | Empty forecast DataFrame | `discharge_allowed=True`, reason: "No forecast data" |
-| `test_weekend_all_day_cheap` | Weekend is all-day cheap tariff | Saturday 12:00 | `tariff.is_cheap_now=True` |
-| `test_weekday_morning_is_expensive` | Weekday 08:00 should be expensive tariff | Monday 08:00 | `tariff.is_cheap_now=False` |
-| `test_weekday_night_is_cheap` | Weekday 23:00 should be cheap tariff | Monday 23:00 | `tariff.is_cheap_now=True` |
-| `test_holiday_is_cheap` | Configured holidays should be all-day cheap | 2026-01-01 12:00, holidays=["2026-01-01"] | `is_holiday=True`, `is_cheap_day=True` |
-
-#### Dataclass Validation
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_decision_has_required_fields` | DischargeDecision has all required fields | Create DischargeDecision | Has `discharge_allowed`, `reason`, `min_soc_percent` fields |
-
-**Run tests:**
-```bash
-cd energymanager && python -m pytest tests/test_battery_optimizer.py -v
-```
-
-**All 14 tests passing** (as of v1.5.0)
+See [Appendix D.1 — Battery Discharge Optimizer Tests](#d1-battery-discharge-optimizer-tests). Test file: `energymanager/tests/test_battery_optimizer.py` (14 tests passing as of v1.5.0).
 
 ---
 
@@ -1762,82 +1711,7 @@ If grid_export_wh >= appliance_energy_wh (1500Wh):
 
 ### 4.4.5 Test Cases
 
-Test file: `energymanager/tests/test_appliance_signal.py`
-
-#### GREEN Signal: PV excess > appliance power
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_green_when_pv_excess_above_threshold` | PV excess 3000W > 2500W appliance power | PV: 4000W, Load: 1000W, appliance_power: 2500W | `signal="green"`, excess_power=3000W |
-| `test_green_ignores_soc_when_pv_sufficient` | Even with low SOC, GREEN if PV excess sufficient | PV: 5000W, Load: 2000W, SOC: 5% | `signal="green"` |
-| `test_not_green_when_pv_excess_exactly_equals_threshold` | PV excess exactly 2500W (need >) | PV: 3500W, Load: 1000W | `signal != "green"` |
-
-#### ORANGE Signal: Min SOC% >= reserve% + appliance%
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_orange_when_soc_above_threshold` | Min SOC 30% >= 25% threshold | Min SOC: 30%, reserve: 10%, appliance: 15% | `signal="orange"` |
-| `test_orange_exactly_at_threshold` | Min SOC exactly at threshold (25%) | Min SOC: 25%, reserve: 10%, appliance: 15% | `signal="orange"` |
-| `test_orange_threshold_calculation` | Different parameters: 20% reserve + 20% appliance = 40% | Min SOC: 45%, reserve: 20%, appliance: 2000Wh/10000Wh=20% | `signal="orange"` |
-| `test_orange_with_different_battery_capacity` | 15kWh battery: 1500Wh = 10% appliance | Capacity: 15kWh, Min SOC: 25%, threshold: 20% | `signal="orange"` |
-
-#### ORANGE Signal: Grid export >= appliance energy
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_orange_when_exporting_enough_energy` | Export 2000Wh >= 1500Wh threshold | Min SOC: 10%, Export: 2000Wh | `signal="orange"` |
-| `test_orange_when_export_exactly_equals_threshold` | Export exactly 1500Wh | Min SOC: 10%, Export: 1500Wh | `signal="orange"` |
-| `test_red_when_export_below_threshold` | Export 1000Wh < 1500Wh | Min SOC: 10%, Export: 1000Wh | `signal="red"` |
-| `test_soc_check_takes_priority_over_export` | SOC check before export check | Min SOC: 30% (above threshold) | `signal="orange"` with SOC reason |
-
-#### RED Signal: Min SOC% < threshold AND export < appliance
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_red_when_soc_below_threshold` | Min SOC 20% < 25% threshold | Min SOC: 20%, reserve: 10%, appliance: 15% | `signal="red"` |
-| `test_red_with_zero_pv` | No PV and low SOC | PV: 0W, Min SOC: 15% | `signal="red"` |
-| `test_red_just_below_threshold` | Min SOC 24% just below 25% | Min SOC: 24%, threshold: 25% | `signal="red"` |
-
-#### Min SOC Check (dip and recover scenarios)
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_red_when_soc_dips_below_reserve` | SOC dips to 0% but recovers to 48% | Min SOC: 0%, Final SOC: 48% | `signal="red"` |
-| `test_red_when_soc_dips_just_below_threshold` | SOC dips to 24% (just below 25%) | Min SOC: 24%, Final SOC: 48% | `signal="red"` |
-| `test_orange_when_soc_stays_above_threshold` | SOC stays above 25% threshold | Min SOC: 30%, Final SOC: 30% | `signal="orange"` |
-| `test_orange_when_min_soc_exactly_at_threshold` | SOC dips to exactly 25% | Min SOC: 25%, Final SOC: 30% | `signal="orange"` |
-
-#### Edge Cases
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_empty_simulation_returns_red` | Empty simulation DataFrame | Empty DataFrame | `signal="red"` (safe default) |
-| `test_simulation_without_soc_column` | Missing soc_percent column | DataFrame without soc_percent | `signal="red"` |
-| `test_negative_pv_excess` | Load > PV (deficit) | PV: 500W, Load: 2000W, Min SOC: 30% | `signal="orange"` (checks SOC threshold) |
-| `test_zero_reserve_percent` | Zero reserve, only need appliance% | reserve: 0%, appliance: 15%, Min SOC: 16% | `signal="orange"` |
-| `test_high_reserve_percent` | High reserve (30%) changes threshold | reserve: 30%, appliance: 15%, Min SOC: 40% | `signal="red"` (threshold=45%) |
-
-#### Helper Functions
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_returns_last_value` | get_final_soc_percent returns last value | Simulation ending at 42% | Returns 42% |
-| `test_returns_minimum_value` | get_min_soc_percent returns min value | Simulation dipping to 5% | Returns 5% |
-| `test_empty_dataframe_returns_zero` | Empty DataFrame returns 0 | Empty DataFrame | Returns 0% |
-| `test_missing_column_returns_zero` | Missing column returns 0 | DataFrame without soc_percent | Returns 0% |
-
-#### Dataclass Validation
-
-| Test | Description | Conditions | Expected Result |
-|------|-------------|------------|-----------------|
-| `test_dataclass_fields` | ApplianceSignal has all required fields | Create ApplianceSignal | Has `signal`, `reason`, `excess_power_w`, `final_soc_percent` |
-
-**Run tests:**
-```bash
-cd energymanager && python -m pytest tests/test_appliance_signal.py -v
-```
-
-**All 26 tests passing** (as of v1.5.12)
+See [Appendix D.2 — Appliance Signal Tests](#d2-appliance-signal-tests). Test file: `energymanager/tests/test_appliance_signal.py` (26 tests passing as of v1.5.12).
 
 ---
 
@@ -2098,25 +1972,7 @@ Power limits and phase switching thresholds are configured in the OCPP Server ad
 
 ### 4.5.13 Test Cases
 
-| ID | Test | Expected |
-|----|------|----------|
-| EV-01 | Mode = solar (default) | `wallbox_power_limit` = calculated excess |
-| EV-02 | Mode = immediate | `wallbox_power_limit` = 11000 |
-| EV-03 | Mode = cheap, during cheap tariff | `wallbox_power_limit` = 11000 |
-| EV-04 | Mode = cheap, during expensive tariff | `wallbox_power_limit` = 0 |
-| EV-05 | Mode = cheap, tariff transitions cheap→expensive | `wallbox_power_limit` changes 11000→0 within 1 min |
-| EV-06 | Mode = solar, 6000W excess | `wallbox_power_limit` = 6000 (3-phase) |
-| EV-07 | Mode = solar, 2000W excess | `wallbox_power_limit` = 2000 (1-phase) |
-| EV-08 | Mode = solar, 500W excess | `wallbox_power_limit` = 0 (below minimum) |
-| EV-09 | Mode = solar, excess drops below minimum | `wallbox_power_limit` = 0, wallbox pauses |
-| EV-10 | Dashboard: tap Cheap Charge | `input_select.ev_charging_mode` = `cheap` |
-| EV-11 | Dashboard: tap Charge Now | `input_select.ev_charging_mode` = `immediate` |
-| EV-12 | Dashboard: tap active button | `input_select.ev_charging_mode` = `solar` (back to default) |
-| EV-13 | Dashboard: car status, car connected, charging | Card shows power in W, green |
-| EV-14 | Dashboard: power mismatch, SOC < target | Card turns red (abs(limit - power) > 1000) |
-| EV-14b | Dashboard: power mismatch, SOC >= target | Card stays normal (car finished charging) |
-| EV-15 | Dashboard: car status, car not connected | Card shows "Not connected", grey |
-| EV-16 | Mode change while charging | New mode takes effect within 1 min |
+See [Appendix D.3 — EV Charging Tests](#d3-ev-charging-tests) (17 test cases).
 
 ### 4.5.14 Implementation Status
 
@@ -2828,11 +2684,176 @@ The delete API in InfluxDB 2.x can be slow with large datasets and may cause gor
 
 ---
 
+# Appendix D: Test Cases
+
+## D.1 Battery Discharge Optimizer Tests
+
+Test file: `energymanager/tests/test_battery_optimizer.py`
+
+#### Expensive Tariff (06:00-21:00) → Always ALLOW
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_expensive_tariff_allows_discharge` | At 12:00 (expensive), discharge should be allowed regardless of SOC forecast | Time: Monday 11:00, PV: 0W, Load: 2000W, SOC: 50% | `discharge_allowed=True`, reason contains "Expensive tariff" |
+| `test_expensive_tariff_low_soc_still_allows` | Even with low SOC during expensive tariff, discharge is allowed | Time: Monday 14:00, PV: 0W, Load: 5000W, SOC: 15% | `discharge_allowed=True` |
+
+#### Cheap Tariff + SOC OK → ALLOW
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_cheap_tariff_high_pv_allows_discharge` | At 22:00 (cheap), with good PV forecast, discharge should be allowed | Time: Monday 21:30, PV: 4000W during day, Load: 500W, SOC: 80% | `discharge_allowed=True`, reason contains "SOC stays >=" |
+| `test_cheap_tariff_full_battery_allows_discharge` | With 100% SOC and good PV, should allow discharge | Time: Monday 22:00, PV: 5000W during day, Load: 400W, SOC: 100% | `discharge_allowed=True` |
+
+#### Cheap Tariff + SOC NOT OK → BLOCK
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_cheap_tariff_low_pv_blocks_discharge` | At 22:00 (cheap), with poor PV forecast, discharge should be blocked | Time: Monday 21:30, PV: 500W (cloudy), Load: 1500W, SOC: 50% | `discharge_allowed=False`, reason contains "Block" |
+| `test_cheap_tariff_low_soc_blocks_discharge` | At 22:00 (cheap), with low starting SOC, discharge should be blocked | Time: Monday 22:00, PV: 2000W, Load: 1000W, SOC: 20% | `discharge_allowed=False` |
+| `test_min_soc_threshold_respected` | Custom threshold (20%) is respected | Time: Monday 22:00, threshold: 20%, SOC: 40% | If `min_soc_percent < 20%` then `discharge_allowed=False` |
+
+#### Self-Correcting Behavior
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_block_then_allow_as_conditions_improve` | If initially blocked, later check with better SOC should allow | Same forecast, First: SOC 30%, Second: SOC 90% | `decision2.min_soc_percent > decision1.min_soc_percent`, `decision2.discharge_allowed=True` |
+
+#### Edge Cases
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_no_forecast_data_allows_discharge` | With no forecast data, default to allowing discharge | Empty forecast DataFrame | `discharge_allowed=True`, reason: "No forecast data" |
+| `test_weekend_all_day_cheap` | Weekend is all-day cheap tariff | Saturday 12:00 | `tariff.is_cheap_now=True` |
+| `test_weekday_morning_is_expensive` | Weekday 08:00 should be expensive tariff | Monday 08:00 | `tariff.is_cheap_now=False` |
+| `test_weekday_night_is_cheap` | Weekday 23:00 should be cheap tariff | Monday 23:00 | `tariff.is_cheap_now=True` |
+| `test_holiday_is_cheap` | Configured holidays should be all-day cheap | 2026-01-01 12:00, holidays=["2026-01-01"] | `is_holiday=True`, `is_cheap_day=True` |
+
+#### Dataclass Validation
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_decision_has_required_fields` | DischargeDecision has all required fields | Create DischargeDecision | Has `discharge_allowed`, `reason`, `min_soc_percent` fields |
+
+**Run tests:**
+```bash
+cd energymanager && python -m pytest tests/test_battery_optimizer.py -v
+```
+
+**All 14 tests passing** (as of v1.5.0)
+
+---
+
+## D.2 Appliance Signal Tests
+
+Test file: `energymanager/tests/test_appliance_signal.py`
+
+#### GREEN Signal: PV excess > appliance power
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_green_when_pv_excess_above_threshold` | PV excess 3000W > 2500W appliance power | PV: 4000W, Load: 1000W, appliance_power: 2500W | `signal="green"`, excess_power=3000W |
+| `test_green_ignores_soc_when_pv_sufficient` | Even with low SOC, GREEN if PV excess sufficient | PV: 5000W, Load: 2000W, SOC: 5% | `signal="green"` |
+| `test_not_green_when_pv_excess_exactly_equals_threshold` | PV excess exactly 2500W (need >) | PV: 3500W, Load: 1000W | `signal != "green"` |
+
+#### ORANGE Signal: Min SOC% >= reserve% + appliance%
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_orange_when_soc_above_threshold` | Min SOC 30% >= 25% threshold | Min SOC: 30%, reserve: 10%, appliance: 15% | `signal="orange"` |
+| `test_orange_exactly_at_threshold` | Min SOC exactly at threshold (25%) | Min SOC: 25%, reserve: 10%, appliance: 15% | `signal="orange"` |
+| `test_orange_threshold_calculation` | Different parameters: 20% reserve + 20% appliance = 40% | Min SOC: 45%, reserve: 20%, appliance: 2000Wh/10000Wh=20% | `signal="orange"` |
+| `test_orange_with_different_battery_capacity` | 15kWh battery: 1500Wh = 10% appliance | Capacity: 15kWh, Min SOC: 25%, threshold: 20% | `signal="orange"` |
+
+#### ORANGE Signal: Grid export >= appliance energy
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_orange_when_exporting_enough_energy` | Export 2000Wh >= 1500Wh threshold | Min SOC: 10%, Export: 2000Wh | `signal="orange"` |
+| `test_orange_when_export_exactly_equals_threshold` | Export exactly 1500Wh | Min SOC: 10%, Export: 1500Wh | `signal="orange"` |
+| `test_red_when_export_below_threshold` | Export 1000Wh < 1500Wh | Min SOC: 10%, Export: 1000Wh | `signal="red"` |
+| `test_soc_check_takes_priority_over_export` | SOC check before export check | Min SOC: 30% (above threshold) | `signal="orange"` with SOC reason |
+
+#### RED Signal: Min SOC% < threshold AND export < appliance
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_red_when_soc_below_threshold` | Min SOC 20% < 25% threshold | Min SOC: 20%, reserve: 10%, appliance: 15% | `signal="red"` |
+| `test_red_with_zero_pv` | No PV and low SOC | PV: 0W, Min SOC: 15% | `signal="red"` |
+| `test_red_just_below_threshold` | Min SOC 24% just below 25% | Min SOC: 24%, threshold: 25% | `signal="red"` |
+
+#### Min SOC Check (dip and recover scenarios)
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_red_when_soc_dips_below_reserve` | SOC dips to 0% but recovers to 48% | Min SOC: 0%, Final SOC: 48% | `signal="red"` |
+| `test_red_when_soc_dips_just_below_threshold` | SOC dips to 24% (just below 25%) | Min SOC: 24%, Final SOC: 48% | `signal="red"` |
+| `test_orange_when_soc_stays_above_threshold` | SOC stays above 25% threshold | Min SOC: 30%, Final SOC: 30% | `signal="orange"` |
+| `test_orange_when_min_soc_exactly_at_threshold` | SOC dips to exactly 25% | Min SOC: 25%, Final SOC: 30% | `signal="orange"` |
+
+#### Edge Cases
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_empty_simulation_returns_red` | Empty simulation DataFrame | Empty DataFrame | `signal="red"` (safe default) |
+| `test_simulation_without_soc_column` | Missing soc_percent column | DataFrame without soc_percent | `signal="red"` |
+| `test_negative_pv_excess` | Load > PV (deficit) | PV: 500W, Load: 2000W, Min SOC: 30% | `signal="orange"` (checks SOC threshold) |
+| `test_zero_reserve_percent` | Zero reserve, only need appliance% | reserve: 0%, appliance: 15%, Min SOC: 16% | `signal="orange"` |
+| `test_high_reserve_percent` | High reserve (30%) changes threshold | reserve: 30%, appliance: 15%, Min SOC: 40% | `signal="red"` (threshold=45%) |
+
+#### Helper Functions
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_returns_last_value` | get_final_soc_percent returns last value | Simulation ending at 42% | Returns 42% |
+| `test_returns_minimum_value` | get_min_soc_percent returns min value | Simulation dipping to 5% | Returns 5% |
+| `test_empty_dataframe_returns_zero` | Empty DataFrame returns 0 | Empty DataFrame | Returns 0% |
+| `test_missing_column_returns_zero` | Missing column returns 0 | DataFrame without soc_percent | Returns 0% |
+
+#### Dataclass Validation
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_dataclass_fields` | ApplianceSignal has all required fields | Create ApplianceSignal | Has `signal`, `reason`, `excess_power_w`, `final_soc_percent` |
+
+**Run tests:**
+```bash
+cd energymanager && python -m pytest tests/test_appliance_signal.py -v
+```
+
+**All 26 tests passing** (as of v1.5.12)
+
+---
+
+## D.3 EV Charging Tests
+
+| ID | Test | Expected |
+|----|------|----------|
+| EV-01 | Mode = solar (default) | `wallbox_power_limit` = calculated excess |
+| EV-02 | Mode = immediate | `wallbox_power_limit` = 11000 |
+| EV-03 | Mode = cheap, during cheap tariff | `wallbox_power_limit` = 11000 |
+| EV-04 | Mode = cheap, during expensive tariff | `wallbox_power_limit` = 0 |
+| EV-05 | Mode = cheap, tariff transitions cheap→expensive | `wallbox_power_limit` changes 11000→0 within 1 min |
+| EV-06 | Mode = solar, 6000W excess | `wallbox_power_limit` = 6000 (3-phase) |
+| EV-07 | Mode = solar, 2000W excess | `wallbox_power_limit` = 2000 (1-phase) |
+| EV-08 | Mode = solar, 500W excess | `wallbox_power_limit` = 0 (below minimum) |
+| EV-09 | Mode = solar, excess drops below minimum | `wallbox_power_limit` = 0, wallbox pauses |
+| EV-10 | Dashboard: tap Cheap Charge | `input_select.ev_charging_mode` = `cheap` |
+| EV-11 | Dashboard: tap Charge Now | `input_select.ev_charging_mode` = `immediate` |
+| EV-12 | Dashboard: tap active button | `input_select.ev_charging_mode` = `solar` (back to default) |
+| EV-13 | Dashboard: car status, car connected, charging | Card shows power in W, green |
+| EV-14 | Dashboard: power mismatch, SOC < target | Card turns red (abs(limit - power) > 1000) |
+| EV-14b | Dashboard: power mismatch, SOC >= target | Card stays normal (car finished charging) |
+| EV-15 | Dashboard: car status, car not connected | Card shows "Not connected", grey |
+| EV-16 | Mode change while charging | New mode takes effect within 1 min |
+
+---
+
 **End of Document**
 
-*Version 2.10 - January 2026*
+*Version 2.12 - February 2026*
 
 **Changelog:**
+- v2.12: Moved all test cases to Appendix D with references from main chapters; dashboard button feedback (orange/green); car status card redesign
 - v2.11: Appliance signal ORANGE now also triggers on grid export >= 1.5kWh before evening (Section 4.4.2.2)
 - v2.10: Expensive hours check now excludes weekend/holiday days (Section 4.3.2, 4.3.3); fixes incorrect discharge blocking on Friday nights
 - v2.9: Appliance signal uses min SOC instead of final SOC for ORANGE check (Section 4.4); ensures SOC never dips below threshold at any point in simulation
