@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.8.9"
+__version__ = "0.9.0"
 
 import asyncio
 import json
@@ -101,6 +101,9 @@ class HAEntityManager:
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("state")
+                elif resp.status == 404:
+                    logger.debug(f"Entity {entity_id} not found (404)")
+                    return None
                 else:
                     logger.error(f"Failed to get {entity_id}: {resp.status}")
                     return None
@@ -247,6 +250,12 @@ class OCPPServer:
             try:
                 # Power limit (number entity)
                 power_state = await self.ha.get_state("number.wallbox_power_limit")
+                if power_state is None:
+                    # Entity lost (e.g. HA core restarted) — re-register all entities
+                    logger.warning("Control entity missing, re-registering HA entities")
+                    await self.ha.register_entities()
+                    await asyncio.sleep(5)
+                    continue
                 if power_state is not None and power_state != self._last_power_limit:
                     prev = self._last_power_limit
                     self._last_power_limit = power_state
