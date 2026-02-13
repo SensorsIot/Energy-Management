@@ -1725,10 +1725,9 @@ EV charging optimization maximizes solar self-consumption while ensuring chargin
 - OCPP 1.6J server as HA add-on (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md))
 - Phase switching (1-phase / 3-phase) via EARU latching relay (ESPHome)
 - Calibrated power-to-current conversion (3-phase lookup table)
-- Opportunistic solar charging (default)
-- Goal-based charging with cheap tariff guarantee
-- Real-time power adjustment every minute
-- Forecast-based optimization decisions
+- It offers 4 modes: Off, cheap charging, immediate charging, and optimized charging 
+- Optimized charging is the default mode
+- Real-time charging power adjustment every minute
 
 ### 4.5.2 Architecture
 
@@ -1762,7 +1761,14 @@ EV charging optimization maximizes solar self-consumption while ensuring chargin
                                        └────────────────────┘
 ```
 
-**Communication:** EnergyManager reads wallbox sensors and sets `number.wallbox_power_limit` via HA Supervisor API. No MQTT between EnergyManager and OCPP Server.
+**Communication:** 
+Energy Manager reads:
+
+- Solar forecasts
+- load forecase
+- wallbox sensors 
+
+Energy Manager sets  `number.wallbox_power_limit` via HA Supervisor API
 
 ### 4.5.3 Power Ranges
 
@@ -1777,17 +1783,20 @@ The wallbox supports phase switching for a wider usable power range:
 
 **Minimum charging power:** 1.4 kW (1-phase, 6A)
 
+**Maximum charging power:** 11 kW (3-phase, 16A)
+
 ### 4.5.4 Charging Mode Selection
 
 The user selects one of four charging modes via the kitchen dashboard (Amazon Fire tablet). The mode is persistent — it stays selected until the user changes it.
 
 | Mode | `input_select` value | Dashboard Label | Description |
 |------|---------------------|----------------|-------------|
+| **Off** |  | none | this is only for testing |
 | **Solar** | `solar` | *(default)* | Charge from PV excess only |
 | **Immediate** | `immediate` | Sofort | Charge now at max power |
 | **Cheap Tariff** | `cheap` | Niedertarif | Charge during cheap tariff at max power |
 
-**Control entity:** `input_select.ev_charging_mode` — default is `solar`. The dashboard provides two buttons ("Cheap Charge" and "Charge Now") that toggle between the selected mode and `solar`.
+**Control entity:** `input_select.ev_charging_mode` — default is `solar`. The dashboard provides two buttons ("Cheap Charge" and "Charge Now") that toggle between the selected mode. If both are unselected, `solar` is active. Charge now starts charging immediately. 
 
 **Decision flow (every 1 minute):**
 
@@ -1805,28 +1814,103 @@ When `number.wallbox_power_limit` = 0 (e.g. solar mode with no excess, or cheap 
 
 ### 4.5.6 Solar Mode (Default)
 
-Charges only from PV excess. Never imports from grid for EV charging.
+Charges only from PV excess. Never imports from grid for EV charging. This is the default mode — active whenever the user has not explicitly selected "Cheap Charge" or "Charge Now".
 
-**Priority:** EV charging is lowest priority — after household load and battery charging.
+**Priority order:**
+
+1. Household load (always served first)
+2. Battery charging (must reach 80% SOC before next cheap tariff)
+3. EV charging (only from remaining excess)
+
+**Battery protection rule:**
+
+Before any PV power is allocated to the EV, the Energy Manager must verify that the battery can reach 80% SOC by the start of the next cheap tariff window (weekdays 21:00, weekends: immediate). This is calculated using the SOC forecast simulation (p50) from the "Cumulative Energy Balance" curve in Grafana / InfluxDB.
+
+- If the forecast shows the battery reaching 80% with energy to spare → the surplus is available for EV charging.
+- If the forecast shows the battery NOT reaching 80% → all PV excess goes to the battery. EV charging is paused (`wallbox_power_limit = 0`).
+
+This check runs every minute using the latest forecast data. As conditions change (clouds clear, load drops), EV charging can start or stop dynamically.
+
+**Power distribution between battery and EV:**
+
+When both battery SOC < 100% and EV SOC < target, and the battery protection rule is satisfied:
+
+- Low PV power (excess < 1700W): Battery gets all excess. EV stays paused — the wallbox minimum is 1.4kW (1-phase, 6A) and we need margin.
+- Medium PV power (excess 1700W–4100W): EV charges on 1-phase. Battery continues charging from remaining PV.
+- High PV power (excess > 4100W): EV charges on 3-phase. Battery continues charging from remaining PV.
+
+EV charging stops when:
+- EV reaches target SOC, OR
+- the remaining simulated PV excess can no longer fill the battery to 80%, OR
+- PV excess drops below 1400W (wallbox minimum)
+
+**Phase switching (forecast-aware):**
+
+Phase switching uses the forecast, not just instantaneous power, to avoid rapid toggling:
+
+- Switch to 3-phase: only if the simulated excess power for the **next 60 minutes** averages above 4.1kW.
+- Stay in 3-phase: minimum 60 minutes before switching back to 1-phase (relay protection).
+- Switch to 1-phase: if the 60-minute forecast drops below 4.1kW and the 60-minute hold has elapsed.
+
+See section 4.5.9 for the physical relay switching sequence and safety delays.
+
+**Algorithm (every 1 minute):**
 
 ```
-Every minute:
+INPUTS:
+  current_pv_w          = sensor.solar_pv_total_ac_power
+  current_load_w        = sensor.load_power
+  battery_soc           = sensor.battery_state_of_capacity
+  ev_soc                = sensor.smart_battery
+  ev_target_soc         = input_number.ev_target_soc
+  forecast_excess_60min = simulated PV excess for next 60 min (p50)
+  battery_reaches_80    = SOC forecast shows battery >= 80% by next cheap tariff
+  current_phases        = sensor.wallbox_phases (1 or 3)
+  last_phase_switch     = timestamp of last phase change
 
-1. Calculate available excess
-   excess_w = current_pv - current_load - battery_charge_power
+1. CHECK PRECONDITIONS
+   IF ev_soc >= ev_target_soc:
+      → wallbox_power_limit = 0  (EV is full)
+      → DONE
 
-2. Determine charging power
-   IF excess_w >= 4140:
-      → 3-phase charging at min(excess_w, 11000)W
-   ELSE IF excess_w >= 1400:
-      → 1-phase charging at min(excess_w, 3700)W
-   ELSE:
-      → wallbox_power_limit = 0W (not enough excess)
+   IF NOT battery_reaches_80:
+      → wallbox_power_limit = 0  (battery needs all PV)
+      → DONE
 
-3. Set number.wallbox_power_limit
+2. CALCULATE AVAILABLE EXCESS
+   excess_w = current_pv_w - current_load_w - battery_charge_power_w
+
+3. DETERMINE PHASE MODE (forecast-aware)
+   IF forecast_excess_60min > 4100 AND current_phases == 1:
+      → switch to 3-phase (see 4.5.9 for relay sequence)
+      → last_phase_switch = now
+
+   IF forecast_excess_60min < 4100 AND current_phases == 3:
+      IF (now - last_phase_switch) >= 60 minutes:
+         → switch to 1-phase
+         → last_phase_switch = now
+
+4. SET CHARGING POWER
+   IF current_phases == 3:
+      IF excess_w >= 4140:
+         → wallbox_power_limit = min(excess_w, 11000)
+      ELSE:
+         → wallbox_power_limit = 0  (below 3-phase minimum, wait)
+
+   IF current_phases == 1:
+      IF excess_w >= 1400:
+         → wallbox_power_limit = min(excess_w, 3700)
+      ELSE:
+         → wallbox_power_limit = 0  (below 1-phase minimum)
+
+5. RE-CHECK BATTERY PROTECTION
+   IF setting wallbox_power_limit > 0:
+      remaining_excess = simulated_remaining_pv - energy_to_ev
+      IF remaining_excess cannot fill battery to 80%:
+         → wallbox_power_limit = 0  (withdraw EV allocation)
+
+6. SET number.wallbox_power_limit
 ```
-
-**Phase switching** is automatic based on the power level (see 4.5.9).
 
 ### 4.5.7 Immediate Mode
 
