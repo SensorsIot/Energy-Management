@@ -109,7 +109,7 @@ MeteoSwiss STAC API                    InfluxDB (HomeAssistant bucket)
 | Home Assistant | 192.168.0.202 | 8123 | Device integration, add-on host |
 | InfluxDB | 192.168.0.203 | 8087 | Time series storage |
 | Grafana | 192.168.0.203 | 3000 | Visualization |
-| MQTT Broker | 192.168.0.203 | 1883 | IoT messaging (Enphase) |
+| MQTT Broker | 192.168.0.203 | 1883 | IoT messaging (Enphase, Wallbox → Modbus Proxy) |
 
 ## 1.6 InfluxDB Buckets
 
@@ -147,12 +147,17 @@ MeteoSwiss STAC API                    InfluxDB (HomeAssistant bucket)
                       └───────────────────────┘
                                   │
                       ┌───────────────────────┐
-                      │      Wallbox          │  EV charging
+                      │      Wallbox          │  EV charging (outside solar control loop)
+                      │   (AcTec / OCPP)      │
                       └───────────────────────┘
                                   │
                       ┌───────────────────────┐
-                      │   Huawei Smartmeter   │  sensor.power_meter_active_power
-                      │   (DTSU666-H)         │
+                      │   Huawei Smartmeter   │  DTSU666-H (RS485 to SUN2000)
+                      └───────────────────────┘
+                                  │
+                      ┌───────────────────────┐
+                      │   ESP32 Modbus Proxy  │  Intercepts RS485, adds wallbox power
+                      │   (ESP32-C3)          │  corrected = dtsu + wallbox_power
                       └───────────────────────┘
                                   │
           ┌───────────────────────┼───────────────────────┐
@@ -166,6 +171,16 @@ MeteoSwiss STAC API                    InfluxDB (HomeAssistant bucket)
 │  │  (LUNA)   │  │    │  │  (CT clamps)  │  │
 │  └───────────┘  │    │  └───────────────┘  │
 └─────────────────┘    └─────────────────────┘
+```
+
+**Modbus Proxy Power Correction:** The wallbox is wired between the grid and the DTSU meter, so the SUN2000 doesn't see wallbox consumption. Without correction, the SUN2000 would see grid export when the wallbox is actually importing from the grid. The ESP32 Modbus Proxy sits on the RS485 bus between the DTSU and SUN2000, intercepts meter responses, and adds the wallbox power: `corrected = dtsu_power + wallbox_power`. The wallbox power arrives via MQTT (topic `wallbox`) published by the OCPP Server add-on every 10 seconds. See [Modbus-Proxy-FSD.md](Modbus-Proxy-FSD.md) for the full ESP32 specification.
+
+**Example** (wallbox charging at 4343W, PV covering house load):
+```
+DTSU measures:     -4300 W  (house exporting PV surplus)
+Wallbox (MQTT):    +4343 W  (actual wallbox consumption)
+SUN2000 sees:         43 W  (≈ balanced — correct!)
+Without correction: -4300 W  (SUN2000 would think grid is exporting)
 ```
 
 ## 1.8 Home Assistant Entities
@@ -1719,7 +1734,7 @@ See [Appendix D.2 — Appliance Signal Tests](#d2-appliance-signal-tests). Test 
 
 ### 4.5.1 Overview
 
-EV charging optimization maximizes solar self-consumption while ensuring charging goals are met. The OCPP Server HA add-on bridges the wallbox to Home Assistant via native HA entities — no MQTT required.
+EV charging optimization maximizes solar self-consumption while ensuring charging goals are met. The OCPP Server HA add-on bridges the wallbox to Home Assistant via native HA entities, and publishes actual wallbox power to MQTT for the ESP32 Modbus Proxy power correction (see Section 1.7.3).
 
 **Key Features:**
 - OCPP 1.6J server as HA add-on (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md))
@@ -1732,43 +1747,54 @@ EV charging optimization maximizes solar self-consumption while ensuring chargin
 ### 4.5.2 Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     Home Assistant                            │
-│                                                              │
-│  ┌──────────────┐              ┌───────────────────────┐    │
-│  │ EnergyManager│──HA states──►│  OCPP Server Add-on   │    │
-│  │              │  & services  │                       │    │
-│  │  reads:      │              │  • WebSocket :8887    │    │
-│  │  sensors     │              │  • OCPP 1.6J handler  │    │
-│  │  sets:       │              │  • HA entity provider │    │
-│  │  power_limit │              │  • Phase switch ctrl  │    │
-│  └──────────────┘              └───┬───────────┬───────┘    │
-│                                    │           │            │
-│  ┌─────────────────────┐          │           │            │
-│  │ EARU Breaker        │◄─────────┘           │            │
-│  │ (ESPHome BK7231N)   │  switch.turn_on/off  │            │
-│  │ ON=3φ  OFF=1φ       │                       │            │
-│  └─────────┬───────────┘                       │            │
-│            │ relay                              │            │
-└────────────┼───────────────────────────────────┼────────────┘
-             │ L1/L2/L3 switching                │ OCPP 1.6J
-             │                                   │ WebSocket
-             │                         ┌─────────┴─────────┐
-             │                         │     Wallbox        │
-             └────────────────────────►│  (AcTec / OCPP)    │
-                                       │  • OCPP 1.6J client│
-                                       │  • 6-16A           │
-                                       └────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                       Home Assistant                              │
+│                                                                  │
+│  ┌──────────────┐              ┌───────────────────────────┐    │
+│  │ EnergyManager│──HA states──►│    OCPP Server Add-on     │    │
+│  │              │  & services  │                           │    │
+│  │  reads:      │              │  • WebSocket :8887        │    │
+│  │  sensors     │              │  • OCPP 1.6J handler      │    │
+│  │  sets:       │              │  • HA entity provider     │    │
+│  │  power_limit │              │  • Phase switch ctrl      │    │
+│  └──────────────┘              │  • MQTT publisher (10s)   │    │
+│                                └──┬────────────┬──────┬───┘    │
+│                                   │            │      │        │
+│  ┌─────────────────────┐         │            │      │ MQTT   │
+│  │ EARU Breaker        │◄────────┘            │      │        │
+│  │ (ESPHome BK7231N)   │ switch.turn_on/off   │      │        │
+│  │ ON=3φ  OFF=1φ       │                      │      │        │
+│  └─────────┬───────────┘                      │      │        │
+│            │ relay                             │      │        │
+└────────────┼──────────────────────────────────┼──────┼────────┘
+             │ L1/L2/L3 switching               │      │
+             │                                  │      │ topic: wallbox
+             │                        OCPP 1.6J │      │ (power in W)
+             │                        WebSocket │      │
+             │                        ┌─────────┴──┐   │
+             │                        │   Wallbox   │   │
+             └───────────────────────►│ (AcTec)     │   │
+                                      │ 6-16A, OCPP │   │
+                                      └─────────────┘   │
+                                                        │
+                                      ┌─────────────────┴───┐
+                                      │  ESP32 Modbus Proxy  │
+                                      │  (RS485 on DTSU bus) │
+                                      │  corrected = dtsu +  │
+                                      │    wallbox_power     │
+                                      └─────────────────────┘
 ```
 
-**Communication:** 
-Energy Manager reads:
+**Communication paths:**
 
-- Solar forecasts
-- load forecase
-- wallbox sensors 
+1. **Command** (EnergyManager → Wallbox):
+   `EnergyManager → number.wallbox_power_limit → OCPP Server → SetChargingProfile → Wallbox`
 
-Energy Manager sets  `number.wallbox_power_limit` via HA Supervisor API
+2. **Measurement** (Wallbox → EnergyManager):
+   `Wallbox → MeterValues → OCPP Server → sensor.wallbox_power → EnergyManager`
+
+3. **Power correction** (Wallbox → SUN2000 via Modbus Proxy):
+   `Wallbox → MeterValues → OCPP Server → MQTT "wallbox" (every 10s) → ESP32 Modbus Proxy → RS485 → SUN2000`
 
 ### 4.5.3 Power Ranges
 
@@ -2006,9 +2032,15 @@ ELSE:
 
 ### 4.5.10 HA Entity Interface
 
-The OCPP Server add-on exposes wallbox state as native HA entities. EnergyManager reads sensors and sets the power limit — no MQTT required.
+The OCPP Server add-on exposes wallbox state as native HA entities. EnergyManager reads sensors and sets the power limit. Additionally, the OCPP Server publishes actual wallbox power to MQTT every 10 seconds for the ESP32 Modbus Proxy power correction (see Section 1.7.3).
 
 For the full OCPP entity specification, see [ocpp-server-fsd.md Section 4.3](../ocpp-server/docs/ocpp-server-fsd.md).
+
+**MQTT output (OCPP Server → Modbus Proxy):**
+
+| Topic | Payload | Interval | Consumer |
+|-------|---------|----------|----------|
+| `wallbox` (configurable) | Plain float in watts, e.g. `4343.0` | Every 10s (re-publish last known) + on every MeterValues | ESP32 Modbus Proxy |
 
 **Entities read by EnergyManager:**
 
@@ -2083,6 +2115,7 @@ The SOC check prevents false alarms when the car stops charging because it reach
 
 ### 4.5.12 Configuration
 
+**EnergyManager** (`/config/energymanager.yaml`):
 ```yaml
 ev_charging:
   enabled: true
@@ -2091,7 +2124,17 @@ ev_charging:
   realtime_interval_seconds: 60
 ```
 
-Power limits and phase switching thresholds are configured in the OCPP Server add-on.
+**OCPP Server** (add-on config UI):
+```yaml
+wallbox_id: "AcTec001"
+ws_port: 8887
+min_current_a: 6
+max_current_a: 16
+phase_switch_entity: ""          # ESPHome switch for 1φ/3φ relay
+mqtt_host: "192.168.0.203"       # MQTT broker for Modbus Proxy
+mqtt_port: 1883
+mqtt_topic: "wallbox"            # Must match ESP32 Modbus Proxy config
+```
 
 ### 4.5.13 Test Cases
 
@@ -2101,15 +2144,16 @@ See [Appendix D.3 — EV Charging Tests](#d3-ev-charging-tests) (17 test cases).
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| OCPP Server HA add-on | ✅ Done | v0.8.9, see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md) |
-| HA entity interface | ✅ Done | Sensors + number.wallbox_power_limit |
+| OCPP Server HA add-on | ✅ Done | v0.9.2, see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md) |
+| HA entity interface | ✅ Done | Sensors + number.wallbox_power_limit (REST API entities) |
+| MQTT → Modbus Proxy | ✅ Done | Publishes wallbox power every 10s for SUN2000 correction |
 | Phase switching | ✅ Done | EARU latching relay via ESPHome |
 | Calibrated power conversion | ✅ Done | 3-phase lookup table (measured) |
 | Dashboard (mode + status) | ✅ Done | button-card on AmazonFire dashboard |
 | Solar mode | ✅ Done | Excess PV + battery protection (InfluxDB forecast) |
 | Immediate mode | ✅ Done | Sets 11000W, auto-reverts to solar |
 | Cheap tariff mode | ✅ Done | Tariff window logic, auto-reverts to solar |
-| SOC-aware scheduling | ⬜ Not started | Future: Smart # car API |
+| SOC-aware scheduling | ⬜ Not started | Future: Smart car API |
 
 ---
 
@@ -2338,10 +2382,9 @@ control_battery(discharge_allowed)
     (last_discharge_allowed unchanged - will retry next cycle)
 ```
 
-### 4.9.4 Underlying Communication Chain
+### 4.9.4 Underlying Communication Chains
 
-The battery control command passes through multiple layers:
-
+**Battery discharge control:**
 ```
 EnergyManager → HA REST API → Huawei Solar Integration → Modbus TCP → Inverter
 ```
@@ -2351,6 +2394,20 @@ Each layer has its own error handling:
 - **Huawei Solar Integration**: Login verification, permission handling
 - **huawei-solar-lib**: 10s timeout, 3 retries with exponential backoff
 - **Modbus TCP**: pymodbus connection handling
+
+**EV charging control:**
+```
+EnergyManager → POST /api/states/ → number.wallbox_power_limit → OCPP Server → SetChargingProfile → Wallbox
+```
+
+Note: `number.wallbox_power_limit` is a REST API entity (not a platform entity), so EnergyManager uses `POST /api/states/` instead of `number.set_value` service.
+
+**Wallbox power correction (SUN2000 meter compensation):**
+```
+Wallbox → MeterValues (OCPP) → OCPP Server → MQTT topic "wallbox" (every 10s) → ESP32 Modbus Proxy → RS485 → SUN2000
+```
+
+The ESP32 Modbus Proxy adds wallbox power to the DTSU meter reading so the SUN2000 sees actual grid demand including the wallbox (which is wired outside the DTSU measurement loop).
 
 ---
 
