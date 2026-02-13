@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
 
 import asyncio
 import json
@@ -180,6 +180,7 @@ class OCPPServer:
         self._mqtt_port = options.get("mqtt_port", 1883)
         self._mqtt_topic = options.get("mqtt_topic", "wallbox")
         self._mqtt_client: Optional[aiomqtt.Client] = None
+        self._last_mqtt_power: float = 0.0  # re-publish periodically to prevent staleness
 
         # Phase switching state
         self._current_phases = 3
@@ -207,9 +208,11 @@ class OCPPServer:
                         f"MQTT connected to {self._mqtt_host}:{self._mqtt_port}, "
                         f"topic={self._mqtt_topic}"
                     )
-                    # Keep connection alive until cancelled or disconnected
+                    # Re-publish last known power every 10s to prevent
+                    # Modbus Proxy staleness (30s timeout on ESP32)
                     while self.running:
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(10)
+                        await self._publish_mqtt_power(self._last_mqtt_power)
             except aiomqtt.MqttError as e:
                 self._mqtt_client = None
                 if self.running:
@@ -226,6 +229,7 @@ class OCPPServer:
 
     async def _publish_mqtt_power(self, power_w: float):
         """Publish wallbox power to MQTT for ESP32 Modbus Proxy correction."""
+        self._last_mqtt_power = power_w
         if self._mqtt_client is None:
             return
         try:
