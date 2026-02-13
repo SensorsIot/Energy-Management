@@ -1,5 +1,12 @@
 # EnergyManager Changelog
 
+## [1.6.8] - 2026-02-13
+
+### Fixed
+- Set wallbox power limit via REST API (`POST /api/states/`) instead of `number.set_value`
+  service. The wallbox entity is created by the OCPP server via REST API, not as a
+  platform-backed number entity, so the service call silently did nothing.
+
 ## [1.6.7] - 2026-02-13
 
 ### Fixed

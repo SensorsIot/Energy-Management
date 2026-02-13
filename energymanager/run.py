@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.7"
+__version__ = "1.6.8"
 
 import json
 import logging
@@ -561,17 +561,21 @@ class EnergyManager:
 
         logger.info(f"EV {ev_mode} mode: {result.charge_status} — {result.reason}")
 
-        # Set wallbox power limit
+        # Set wallbox power limit (REST API entity, not a platform number)
         if result.target_power_w != self._last_ev_power_limit:
-            success, err = self.ha_client.set_number(
+            success = self.ha_client.set_sensor_state(
                 self.wallbox_power_limit_entity,
-                result.target_power_w,
-                max_retries=3,
+                int(result.target_power_w),
+                attributes={
+                    "friendly_name": "Wallbox Power Limit",
+                    "unit_of_measurement": "W",
+                    "icon": "mdi:speedometer",
+                },
             )
             if success:
                 self._last_ev_power_limit = result.target_power_w
             else:
-                logger.error(f"Failed to set wallbox power limit: {err}")
+                logger.error(f"Failed to set wallbox power limit")
 
         # Update status sensor
         self.ha_client.set_sensor_state(
@@ -727,18 +731,22 @@ class EnergyManager:
                     reason = ev_result.reason
                     available_excess_w = ev_result.available_excess_w
 
-            # Only send command if target changed
+            # Only send command if target changed (REST API entity, not a platform number)
             if target_power != self._last_ev_power_limit:
                 logger.info(f"EV charging: {reason} (wallbox={wallbox_power:.0f}W)")
-                success, err = self.ha_client.set_number(
+                success = self.ha_client.set_sensor_state(
                     self.wallbox_power_limit_entity,
-                    target_power,
-                    max_retries=3,
+                    int(target_power),
+                    attributes={
+                        "friendly_name": "Wallbox Power Limit",
+                        "unit_of_measurement": "W",
+                        "icon": "mdi:speedometer",
+                    },
                 )
                 if success:
                     self._last_ev_power_limit = target_power
                 else:
-                    logger.error(f"Failed to set wallbox power limit: {err}")
+                    logger.error(f"Failed to set wallbox power limit")
             else:
                 logger.debug(f"EV charging unchanged at {target_power:.0f}W")
 
