@@ -1852,7 +1852,7 @@ Charges only from PV excess. Never imports from grid for EV charging. This is th
 
 Before any PV power is allocated to the EV, the Energy Manager must verify that the battery can reach 80% SOC by the start of the next cheap tariff window (weekdays 21:00, weekends: immediate).
 
-**Grid export override:** If the forecast shows < 80% but the battery is full (SOC = 100%) and the grid is currently exporting (selling energy), battery protection is disabled. While the battery is still charging, PV is not wasted and battery protection remains active. Only when the battery is full and excess goes to the grid does the override apply — better to charge the EV than sell at the low feed-in tariff. The check re-runs every minute.
+**Battery full override:** If battery SOC = 100%, battery protection is skipped — the battery is already full so all excess PV is available for the EV.
 
 **Data sources (InfluxDB):**
 
@@ -1867,8 +1867,8 @@ Before any PV power is allocated to the EV, the Energy Manager must verify that 
 The battery protection check uses `soc_forecast` (`scenario=with_strategy`) to read the predicted SOC at the start of the next cheap tariff window (21:00 on weekdays). If the SOC at that time is >= 80%, the battery will have enough energy and the surplus is available for the EV.
 
 - If the forecast shows battery >= 80% at 21:00 → the surplus is available for EV charging.
-- If the forecast shows battery < 80% at 21:00 AND battery SOC = 100% AND grid is exporting → surplus available for EV (grid export override).
-- If the forecast shows battery < 80% at 21:00 otherwise → all PV excess goes to the battery. EV charging is paused (`wallbox_power_limit = 0`).
+- If battery SOC = 100% → battery protection skipped, surplus available for EV.
+- If the forecast shows battery < 80% at 21:00 → all PV excess goes to the battery. EV charging is paused (`wallbox_power_limit = 0`).
 
 This check runs every minute using the latest forecast data. As conditions change (clouds clear, load drops), EV charging can start or stop dynamically.
 
@@ -1901,7 +1901,6 @@ See section 4.5.9 for the physical relay switching sequence and safety delays.
 INPUTS:
   current_pv_w          = sensor.solar_pv_total_ac_power  (Huawei + Enphase total)
   current_load_w        = sensor.load_power               (Shelly meter)
-  grid_power_w          = sensor.grid_power               (neg=export)
   battery_soc           = sensor.battery_state_of_capacity
   ev_soc                = sensor.smart_battery
   ev_target_soc         = sensor.ev_target_soc
@@ -1915,9 +1914,9 @@ INPUTS:
       → wallbox_power_limit = 0  (EV is full)
       → DONE
 
-   IF NOT battery_reaches_80 AND battery_soc >= 100 AND grid_power_w < 0:
-      → battery protection overridden (battery full, exporting to grid)
-      → continue as if battery_reaches_80 = true
+   IF battery_soc >= 100:
+      → battery protection skipped (battery full)
+      → continue
 
    IF NOT battery_reaches_80:
       → wallbox_power_limit = 0  (battery needs all PV)
@@ -1983,17 +1982,15 @@ Step 4: 3796W >= 1400W                     → 1-phase, clamped to 3700W
 ```
 Result: EV starts charging immediately at 3,700W (1-phase). The Huawei inverter automatically reduces battery charging by that amount. If clouds roll in and the next minute's battery protection re-check shows the forecast SOC at 21:00 dropping below 80%, the EV is blocked and all PV returns to the battery.
 
-*Scenario C — battery protection fails but battery full and exporting:*
+*Scenario C — battery full, pessimistic forecast:*
 ```
 Step 1: ev_soc < target                    → continue
-Step 2: battery_reaches_80?
-        forecast SOC at 21:00 = 74.5% < 80% → NO
-        battery_soc = 100%, grid = -885W    → override, treat as YES → continue
+Step 2: battery_soc = 100%                 → skip battery protection → continue
 Step 3: excess_w = 4418 - 622 = 3796W
 Step 4: 3796W >= 1400W                     → 1-phase, clamped to 3700W
         → wallbox_power_limit = 3700
 ```
-Result: The forecast is pessimistic but the battery is already full and 885W is being sold to the grid — better to charge the EV. Once the EV starts drawing power, grid export drops to ~0W. The override remains active as long as battery SOC stays at 100%. If the battery drops below 100% (e.g. evening load starts draining it), battery protection re-engages and EV is paused.
+Result: Battery is full so all excess PV goes to the EV.
 
 ### 4.5.7 Immediate Mode
 

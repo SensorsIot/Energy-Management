@@ -3,10 +3,8 @@
 ## [1.6.9] - 2026-02-13
 
 ### Changed
-- Battery protection overridden when battery is full (SOC 100%) and grid is
-  exporting. No point selling at feed-in tariff when the EV can use the energy.
-  While battery is still charging, protection remains active (PV is not wasted).
-  Re-checks every minute.
+- Skip battery protection when battery SOC = 100%. Battery is full, all
+  excess PV available for EV.
 
 ## [1.6.8] - 2026-02-13
 
