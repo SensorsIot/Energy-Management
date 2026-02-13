@@ -1,5 +1,13 @@
 # EnergyManager Changelog
 
+## [1.6.3] - 2026-02-13
+
+### Fixed
+- Ensure managed sensors exist at startup: reads existing state first (preserves
+  last known value across HA restarts), only writes defaults if entity is missing.
+  Prevents "Entity not found" on dashboards for `sensor.smart_battery`,
+  `sensor.ev_target_soc`, `sensor.ev_target_power`, `sensor.ev_charge_status`.
+
 ## [1.6.2] - 2026-02-13
 
 ### Changed

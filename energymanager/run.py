@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 
 import json
 import logging
@@ -796,9 +796,54 @@ class EnergyManager:
         except Exception as e:
             logger.error(f"Smart car SOC update failed: {e}")
 
+    def _ensure_sensor_exists(self, entity_id: str, default_state, attributes: dict):
+        """Ensure a sensor exists in HA. Only writes default if entity is missing."""
+        existing = self.ha_client.get_state(entity_id)
+        if existing is not None:
+            logger.debug(f"Sensor {entity_id} exists (state={existing.get('state')})")
+            return
+        logger.info(f"Creating missing sensor {entity_id} with default state={default_state}")
+        self.ha_client.set_sensor_state(entity_id, default_state, attributes=attributes)
+
+    def _publish_initial_sensors(self):
+        """Ensure all managed sensors exist in HA at startup."""
+        try:
+            self._ensure_sensor_exists(
+                self.ev_target_soc_entity,
+                int(self.ev_target_soc),
+                {"friendly_name": "EV Target SOC", "unit_of_measurement": "%",
+                 "icon": "mdi:battery-charging-80"},
+            )
+            self._ensure_sensor_exists(
+                self.ev_target_power_entity,
+                0,
+                {"friendly_name": "EV Target Power", "unit_of_measurement": "W",
+                 "reason": "Waiting for first update", "icon": "mdi:ev-station"},
+            )
+            self._ensure_sensor_exists(
+                self.ev_charge_status_entity,
+                "unknown",
+                {"friendly_name": "EV Charge Status",
+                 "status_text": "Waiting for first update", "icon": "mdi:ev-station"},
+            )
+            if self.smart_car_enabled:
+                self._ensure_sensor_exists(
+                    self.smart_car_soc_entity,
+                    "unknown",
+                    {"state_class": "measurement", "unit_of_measurement": "%",
+                     "device_class": "battery", "icon": "mdi:car-battery",
+                     "friendly_name": "Smart Battery"},
+                )
+            logger.info("Initial sensor check complete")
+        except Exception as e:
+            logger.warning(f"Failed to check initial sensors: {e}")
+
     def start(self):
         """Start the scheduler."""
         logger.info(f"Starting scheduler (every {self.update_interval} minutes)")
+
+        # Ensure all sensors exist in HA before anything else
+        self._publish_initial_sensors()
 
         # Run immediately
         self.run_optimization()
