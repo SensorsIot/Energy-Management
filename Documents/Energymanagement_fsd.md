@@ -1836,7 +1836,7 @@ Before any PV power is allocated to the EV, the Energy Manager must verify that 
 | `pv_forecast` | `pv_forecast` | `power_w_p50` (tag: `inverter=total`) | Median PV power forecast |
 | `HuaweiNew` | `Energy` | `BATT_Level` | Current battery SOC % |
 
-The battery protection check uses `soc_forecast` (`scenario=with_strategy`) to find the minimum SOC before the next cheap tariff. If `min(soc_percent)` stays above 80% with the planned EV charging subtracted, the surplus is available for the EV.
+The battery protection check uses `soc_forecast` (`scenario=with_strategy`) to find the maximum SOC before the next cheap tariff. If `max(soc_percent)` reaches 80%, the battery will have enough energy and the surplus is available for the EV.
 
 - If the forecast shows the battery reaching 80% with energy to spare → the surplus is available for EV charging.
 - If the forecast shows the battery NOT reaching 80% → all PV excess goes to the battery. EV charging is paused (`wallbox_power_limit = 0`).
@@ -1870,11 +1870,11 @@ See section 4.5.9 for the physical relay switching sequence and safety delays.
 
 ```
 INPUTS:
-  current_pv_w          = sensor.solar_pv_total_ac_power
-  current_load_w        = sensor.load_power
+  current_pv_w          = sensor.solar_pv_total_ac_power  (Huawei + Enphase total)
+  current_load_w        = sensor.load_power               (Shelly meter)
   battery_soc           = sensor.battery_state_of_capacity
   ev_soc                = sensor.smart_battery
-  ev_target_soc         = input_number.ev_target_soc
+  ev_target_soc         = sensor.ev_target_soc
   forecast_excess_60min = simulated PV excess for next 60 min (p50)
   battery_reaches_80    = SOC forecast shows battery >= 80% by next cheap tariff
   current_phases        = sensor.wallbox_phases (1 or 3)
@@ -1890,7 +1890,7 @@ INPUTS:
       → DONE
 
 2. CALCULATE AVAILABLE EXCESS
-   excess_w = current_pv_w - current_load_w - battery_charge_power_w
+   excess_w = current_pv_w - current_load_w
 
 3. DETERMINE PHASE MODE (forecast-aware)
    IF forecast_excess_60min > 4100 AND current_phases == 1:
@@ -1923,6 +1923,31 @@ INPUTS:
 
 6. SET number.wallbox_power_limit
 ```
+
+**Worked example:**
+
+Conditions: PV total = 4,418W, house load = 622W, battery SOC = 32%, forecast max SOC = 74.5%.
+
+*Scenario A — battery protection fails (typical cloudy forecast):*
+```
+Step 1: ev_soc < target             → continue
+Step 2: battery_reaches_80?
+        forecast max SOC = 74.5% < 80% → NO
+        → wallbox_power_limit = 0  (all PV to battery)
+        → DONE
+```
+Result: EV stays paused. The Huawei inverter charges the battery with all available PV.
+
+*Scenario B — battery protection passes (sunny forecast):*
+```
+Step 1: ev_soc < target             → continue
+Step 2: battery_reaches_80?
+        forecast max SOC = 92% >= 80% → YES → continue
+Step 3: excess_w = 4418 - 622 = 3796W
+Step 4: 3796W >= 1400W              → 1-phase, clamped to 3700W
+        → wallbox_power_limit = 3700
+```
+Result: EV starts charging immediately at 3,700W (1-phase). The Huawei inverter automatically reduces battery charging by that amount. If clouds roll in and the next minute's battery protection re-check shows the forecast dropping below 80%, the EV is blocked and all PV returns to the battery.
 
 ### 4.5.7 Immediate Mode
 
@@ -2051,7 +2076,7 @@ Buttons are simple on/off indicators — no power display. Tapping an active but
 | **Power mismatch** | label + **red background** | White on red |
 
 **Mismatch detection:** The entire card (background, icon, text) turns red when:
-- `abs(wallbox_power_limit - wallbox_power) > 1000` AND `sensor.smart_battery` < `input_number.ev_target_soc`
+- `abs(wallbox_power_limit - wallbox_power) > 1000` AND `sensor.smart_battery` < `sensor.ev_target_soc`
 - OR `number.wallbox_power_limit` = 0 but `sensor.wallbox_power` > 100
 
 The SOC check prevents false alarms when the car stops charging because it reached the target.
@@ -2081,7 +2106,7 @@ See [Appendix D.3 — EV Charging Tests](#d3-ev-charging-tests) (17 test cases).
 | Phase switching | ✅ Done | EARU latching relay via ESPHome |
 | Calibrated power conversion | ✅ Done | 3-phase lookup table (measured) |
 | Dashboard (mode + status) | ✅ Done | button-card on AmazonFire dashboard |
-| Solar mode | ⬜ Not started | Excess PV calculation |
+| Solar mode | ✅ Done | Excess PV + battery protection (InfluxDB forecast) |
 | Immediate mode | ✅ Done | Sets 11000W, auto-reverts to solar |
 | Cheap tariff mode | ✅ Done | Tariff window logic, auto-reverts to solar |
 | SOC-aware scheduling | ⬜ Not started | Future: Smart # car API |

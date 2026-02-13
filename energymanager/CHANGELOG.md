@@ -13,6 +13,11 @@
 ### Added
 - `get_input_select()` and `set_input_select()` methods in HAClient
 - `revert_to_solar` flag in `ChargingModeResult` for auto-revert logic
+- PV-based solar excess for EV charging: `excess = pv_power - load_power` replaces
+  grid-based formula. When battery protection passes, EV starts immediately from
+  total PV instead of waiting for grid export to rise. Battery protection re-checks
+  every minute — if forecast drops below 80% SOC, EV is paused and all PV returns
+  to the battery.
 
 ## [1.5.16] - 2026-02-09
 

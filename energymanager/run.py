@@ -178,6 +178,8 @@ class EnergyManager:
         self.wallbox_connected_entity = ev_opts.get("wallbox_connected_entity", "binary_sensor.wallbox_connected")
         self.wallbox_power_limit_entity = ev_opts.get("wallbox_power_limit_entity", "number.wallbox_power_limit")
         self.ev_target_power_entity = ev_opts.get("ev_target_power_entity", "sensor.ev_target_power")
+        self.ev_target_soc = ev_opts.get("target_soc", 80)
+        self.ev_target_soc_entity = ev_opts.get("target_soc_entity", "sensor.ev_target_soc")
         self._last_ev_power_limit = None
 
         # Charging mode config (FSD 4.5.4)
@@ -192,8 +194,11 @@ class EnergyManager:
         )
         self.ev_max_power_w = ev_opts.get("max_power_w", 11000)
         self.ev_auto_reset_timeout_min = ev_opts.get("auto_reset_timeout_min", 5)
+        self.ev_battery_protection_soc = ev_opts.get("battery_protection_soc", 80)
         self._ev_idle_since: datetime | None = None
         self._last_mode_error_notified: str | None = None
+        self._battery_reaches_target: bool = False
+        self._battery_min_soc_forecast: float = 0.0
 
         # Smart car config (FSD 4.5 Step 2 — hourly SOC readback)
         smart_opts = options.get("smart_car", {})
@@ -601,12 +606,65 @@ class EnergyManager:
 
         return True
 
+    def check_battery_protection(self) -> tuple[bool, float]:
+        """Check if battery forecast reaches protection target (FSD 4.5.6).
+
+        Queries the SOC forecast from InfluxDB (written by run_optimization)
+        and checks if battery reaches the protection SOC target before the
+        next cheap tariff window.
+
+        Returns:
+            (reaches_target, max_forecast_soc) tuple
+        """
+        try:
+            now = datetime.now(timezone.utc)
+            tariff = self.optimizer.get_tariff_periods(now)
+            query_api = self.influx_client.query_api()
+
+            query = f'''
+            from(bucket: "{self.output_bucket}")
+              |> range(start: {now.isoformat()}, stop: {tariff.cheap_start.isoformat()})
+              |> filter(fn: (r) => r._measurement == "soc_forecast")
+              |> filter(fn: (r) => r.scenario == "with_strategy")
+              |> filter(fn: (r) => r._field == "soc_percent")
+              |> max()
+            '''
+
+            result = query_api.query(query)
+            if result and result[0].records:
+                max_soc = result[0].records[0].get_value()
+                reaches_target = max_soc >= self.ev_battery_protection_soc
+                logger.info(
+                    f"Battery protection: forecast max SOC={max_soc:.0f}% "
+                    f"(target={self.ev_battery_protection_soc}%) → "
+                    f"{'EV allowed' if reaches_target else 'EV blocked'}"
+                )
+                return reaches_target, max_soc
+            else:
+                logger.warning("No SOC forecast data — blocking EV as precaution")
+                return False, 0.0
+
+        except Exception as e:
+            logger.error(f"Battery protection check failed: {e}")
+            return False, 0.0
+
     def control_ev_charging(self):
         """Control EV charging based on solar excess (FSD 4.5)."""
         if not self.ev_charging_enabled:
             return
 
         try:
+            # Publish target SOC config value as display-only sensor
+            self.ha_client.set_sensor_state(
+                self.ev_target_soc_entity,
+                int(self.ev_target_soc),
+                attributes={
+                    "friendly_name": "EV Target SOC",
+                    "unit_of_measurement": "%",
+                    "icon": "mdi:battery-charging-80",
+                },
+            )
+
             # Check wallbox connectivity
             wb_state = self.ha_client.get_state(self.wallbox_connected_entity)
             wb_connected = wb_state is not None and wb_state.get("state") == "on"
@@ -619,52 +677,75 @@ class EnergyManager:
             if self.control_ev_charging_mode(wb_connected, wallbox_power):
                 return
 
-            # --- Solar mode (default) ---
+            # --- Solar mode (default, FSD 4.5.6) ---
             if not wb_connected:
                 logger.debug("Wallbox not connected, skipping EV control")
                 return
 
-            # Read grid power
-            grid_power = self.ha_client.get_sensor_value(self.grid_power_entity)
+            # Step 1: Check preconditions
+            ev_soc = self.ha_client.get_sensor_value(self.smart_car_soc_entity) if self.smart_car_enabled else None
+            available_excess_w = 0
 
-            if grid_power is None:
-                logger.warning(f"Cannot read {self.grid_power_entity}, skipping EV control")
-                return
+            if ev_soc is not None and ev_soc >= self.ev_target_soc:
+                # Car is full
+                target_power = 0
+                reason = f"Car full: SOC {ev_soc:.0f}% >= target {self.ev_target_soc}%"
+            else:
+                # Step 2: Battery protection — query InfluxDB forecast
+                reaches_target, max_soc = self.check_battery_protection()
+                self._battery_reaches_target = reaches_target
+                self._battery_min_soc_forecast = max_soc
 
-            # Calculate target
-            result = calculate_ev_power(
-                grid_power_w=grid_power,
-                wallbox_power_w=wallbox_power,
-                min_power_1phase_w=self.ev_min_power_1phase_w,
-                max_power_1phase_w=self.ev_max_power_1phase_w,
-                min_power_3phase_w=self.ev_min_power_3phase_w,
-                max_power_3phase_w=self.ev_max_power_3phase_w,
-            )
+                if not reaches_target:
+                    # Battery can't reach target — block EV, all PV to battery
+                    target_power = 0
+                    reason = (
+                        f"Battery protection: forecast max SOC {max_soc:.0f}% "
+                        f"< {self.ev_battery_protection_soc}% target — all PV to battery"
+                    )
+                else:
+                    # Step 3: Calculate PV-based solar excess
+                    pv_power = self.ha_client.get_sensor_value(self.pv_power_entity) or 0
+                    load_power = self.ha_client.get_sensor_value(self.load_power_entity) or 0
+                    excess = pv_power - load_power
+
+                    ev_result = calculate_ev_power(
+                        excess_w=excess,
+                        min_power_1phase_w=self.ev_min_power_1phase_w,
+                        max_power_1phase_w=self.ev_max_power_1phase_w,
+                        min_power_3phase_w=self.ev_min_power_3phase_w,
+                        max_power_3phase_w=self.ev_max_power_3phase_w,
+                    )
+                    target_power = ev_result.target_power_w
+                    reason = ev_result.reason
+                    available_excess_w = ev_result.available_excess_w
 
             # Only send command if target changed
-            if result.target_power_w != self._last_ev_power_limit:
-                logger.info(f"EV charging: {result.reason} (grid={grid_power:.0f}W, wallbox={wallbox_power:.0f}W)")
+            if target_power != self._last_ev_power_limit:
+                logger.info(f"EV charging: {reason} (wallbox={wallbox_power:.0f}W)")
                 success, err = self.ha_client.set_number(
                     self.wallbox_power_limit_entity,
-                    result.target_power_w,
+                    target_power,
                     max_retries=3,
                 )
                 if success:
-                    self._last_ev_power_limit = result.target_power_w
+                    self._last_ev_power_limit = target_power
                 else:
                     logger.error(f"Failed to set wallbox power limit: {err}")
             else:
-                logger.debug(f"EV charging unchanged at {result.target_power_w:.0f}W")
+                logger.debug(f"EV charging unchanged at {target_power:.0f}W")
 
             # Update dashboard sensor
             self.ha_client.set_sensor_state(
                 self.ev_target_power_entity,
-                int(result.target_power_w),
+                int(target_power),
                 attributes={
                     "friendly_name": "EV Target Power",
                     "unit_of_measurement": "W",
-                    "available_excess_w": result.available_excess_w,
-                    "reason": result.reason,
+                    "available_excess_w": available_excess_w,
+                    "reason": reason,
+                    "battery_protection": not self._battery_reaches_target,
+                    "battery_forecast_max_soc": self._battery_min_soc_forecast,
                     "icon": "mdi:ev-station",
                 },
             )

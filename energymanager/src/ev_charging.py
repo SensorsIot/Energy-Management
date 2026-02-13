@@ -1,7 +1,7 @@
 """
 EV charging power calculation for opportunistic solar mode.
 
-Uses grid power as ground truth: excess = -grid_power + wallbox_power.
+Uses PV-based excess: excess = pv_power - load_power.
 Phase selection per FSD 4.5.4.1:
   >= 4100W → 3-phase (up to 11000W)
   >= 1400W → 1-phase (up to 3700W)
@@ -23,8 +23,7 @@ class EVChargingResult:
 
 
 def calculate_ev_power(
-    grid_power_w: float,
-    wallbox_power_w: float,
+    excess_w: float,
     min_power_1phase_w: float = 1400,
     max_power_1phase_w: float = 3700,
     min_power_3phase_w: float = 4100,
@@ -34,8 +33,7 @@ def calculate_ev_power(
     Calculate target EV charging power from solar excess.
 
     Args:
-        grid_power_w: Current grid power (positive = import, negative = export)
-        wallbox_power_w: Current wallbox draw in watts
+        excess_w: Available solar excess in watts (pv_power - load_power)
         min_power_1phase_w: Minimum 1-phase charging power
         max_power_1phase_w: Maximum 1-phase charging power
         min_power_3phase_w: Minimum 3-phase charging power
@@ -44,7 +42,7 @@ def calculate_ev_power(
     Returns:
         EVChargingResult with target power, excess, and reason
     """
-    excess = -grid_power_w + wallbox_power_w
+    excess = excess_w
 
     if excess >= min_power_3phase_w:
         target = min(excess, max_power_3phase_w)

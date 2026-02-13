@@ -63,6 +63,8 @@ ev_charging:
 
   # Charging mode (FSD 4.5.4)
   max_power_w: 11000                # 3-phase max for immediate/cheap modes
+  target_soc: 80                    # Target SOC % (set to match car's target)
+  battery_protection_soc: 80        # Block EV until battery forecast reaches this %
   auto_reset_timeout_min: 5         # Minutes of 0W before auto-revert to solar
 
   # Entity overrides (defaults should work for most setups)

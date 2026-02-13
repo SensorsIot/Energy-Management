@@ -12,7 +12,7 @@ Home Assistant add-ons for energy forecasting and optimization.
 |--------|-------------|--------|
 | [SwissSolarForecast](swisssolarforecast/) | PV power forecast using MeteoSwiss ICON data | ![Version](https://img.shields.io/badge/v1.2.4-stable-green) |
 | [LoadForecast](loadforecast/) | Statistical load prediction from historical data | ![Version](https://img.shields.io/badge/v1.2.3-stable-green) |
-| [EnergyManager](energymanager/) | Battery/EV/appliance optimization using forecasts | ![Version](https://img.shields.io/badge/v1.5.11-stable-green) |
+| [EnergyManager](energymanager/) | Battery/EV/appliance optimization using forecasts | ![Version](https://img.shields.io/badge/v1.6.0-stable-green) |
 
 ## Related Projects
 
@@ -43,6 +43,7 @@ Home Assistant add-ons for energy forecasting and optimization.
               │  EnergyManager  │
               │  ─────────────  │
               │  Battery Control│
+              │  EV Solar Charge│
               │  Appliance Signal
               │  SOC Forecast   │
               └─────────────────┘
@@ -95,8 +96,10 @@ InfluxDB (HomeAssistant bucket) → Statistical Model → InfluxDB (load_forecas
 
 ### EnergyManager
 ```
-InfluxDB (pv_forecast + load_forecast) → Optimization → Battery/Appliance Control
+InfluxDB (pv_forecast + load_forecast) → Optimization → Battery/EV/Appliance Control
 ```
+
+**EV solar charging** uses total PV production minus house load (`excess = pv_power - load_power`) to determine available power for the EV. A battery protection check runs every minute: the EV only charges when the SOC forecast shows the battery reaching 80% before the next cheap tariff window. If the forecast drops, EV is paused and all PV returns to the battery.
 
 ## Output Format
 
