@@ -1,10 +1,11 @@
 # EnergyManager Changelog
 
-## [1.6.6] - 2026-02-13
+## [1.6.7] - 2026-02-13
 
 ### Fixed
-- Log missing entities (404) at debug level instead of error. Wallbox/OCPP entities
-  that don't exist when the wallbox is disconnected no longer spam the log every minute.
+- Skip EV charging control immediately when wallbox entity doesn't exist (OCPP server
+  not running). Previously made 2 API calls per minute that both returned 404.
+- Log missing entities (404) at debug level instead of error.
 
 ## [1.6.5] - 2026-02-13
 

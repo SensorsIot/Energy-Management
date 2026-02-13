@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.6"
+__version__ = "1.6.7"
 
 import json
 import logging
@@ -671,21 +671,22 @@ class EnergyManager:
                 },
             )
 
-            # Check wallbox connectivity
+            # Check wallbox connectivity — skip everything if entity doesn't exist
             wb_state = self.ha_client.get_state(self.wallbox_connected_entity)
-            wb_connected = wb_state is not None and wb_state.get("state") == "on"
+            if wb_state is None:
+                # Entity doesn't exist (OCPP server not running)
+                return
+            wb_connected = wb_state.get("state") == "on"
+
+            if not wb_connected:
+                logger.debug("Wallbox not connected, skipping EV control")
+                return
 
             # Read wallbox power (needed by both goal mode and solar mode)
-            wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity)
-            wallbox_power = wallbox_power or 0.0
+            wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity) or 0.0
 
             # Priority: immediate/cheap mode > solar mode
             if self.control_ev_charging_mode(wb_connected, wallbox_power):
-                return
-
-            # --- Solar mode (default, FSD 4.5.6) ---
-            if not wb_connected:
-                logger.debug("Wallbox not connected, skipping EV control")
                 return
 
             # Step 1: Check preconditions
