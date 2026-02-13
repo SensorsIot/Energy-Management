@@ -622,9 +622,13 @@ class EnergyManager:
             tariff = self.optimizer.get_tariff_periods(now)
             query_api = self.influx_client.query_api()
 
+            # Query SOC at cheap tariff start (narrow window around 21:00)
+            window_start = (tariff.cheap_start - timedelta(minutes=15)).isoformat()
+            window_stop = (tariff.cheap_start + timedelta(minutes=15)).isoformat()
+
             query = f'''
             from(bucket: "{self.output_bucket}")
-              |> range(start: {now.isoformat()}, stop: {tariff.cheap_start.isoformat()})
+              |> range(start: {window_start}, stop: {window_stop})
               |> filter(fn: (r) => r._measurement == "soc_forecast")
               |> filter(fn: (r) => r.scenario == "with_strategy")
               |> filter(fn: (r) => r._field == "soc_percent")
