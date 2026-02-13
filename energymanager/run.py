@@ -799,11 +799,14 @@ class EnergyManager:
     def _query_last_value(self, entity_id: str) -> str | None:
         """Query InfluxDB for the last known value of an HA entity."""
         try:
+            # HA InfluxDB integration stores entity_id without domain prefix
+            # e.g. "sensor.smart_battery" → entity_id tag = "smart_battery"
+            short_id = entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
             query_api = self.influx_client.query_api()
             query = f'''
             from(bucket: "HomeAssistant")
               |> range(start: -7d)
-              |> filter(fn: (r) => r.entity_id == "{entity_id}")
+              |> filter(fn: (r) => r.entity_id == "{short_id}")
               |> filter(fn: (r) => r._field == "value")
               |> last()
             '''
