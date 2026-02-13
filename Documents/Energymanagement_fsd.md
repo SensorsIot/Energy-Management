@@ -1899,8 +1899,10 @@ See section 4.5.9 for the physical relay switching sequence and safety delays.
 
 ```
 INPUTS:
-  current_pv_w          = sensor.solar_pv_total_ac_power  (Huawei + Enphase total)
-  current_load_w        = sensor.load_power               (Shelly meter)
+  grid_power_w          = sensor.grid_power               (M-Bus smart meter, neg=export)
+                          fallback: sensor.power_meter_active_power (Huawei DTSU)
+                          M-Bus preferred if last_updated < 30s
+  wallbox_power_w       = sensor.wallbox_power             (OCPP server measurement)
   battery_soc           = sensor.battery_state_of_capacity
   ev_soc                = sensor.smart_battery
   ev_target_soc         = sensor.ev_target_soc
@@ -1922,8 +1924,8 @@ INPUTS:
       → wallbox_power_limit = 0  (battery needs all PV)
       → DONE
 
-2. CALCULATE AVAILABLE EXCESS
-   excess_w = current_pv_w - current_load_w
+2. CALCULATE AVAILABLE EXCESS (closed-loop)
+   excess_w = -grid_power_w + wallbox_power_w
 
 3. DETERMINE PHASE MODE (forecast-aware)
    IF forecast_excess_60min > 4100 AND current_phases == 1:
@@ -1959,7 +1961,7 @@ INPUTS:
 
 **Worked example:**
 
-Conditions: PV total = 4,418W, house load = 622W, battery SOC = 32%.
+Conditions: PV total = 4,418W, house load = 622W, battery SOC = 32%, grid = -885W (exporting), wallbox = 0W.
 
 *Scenario A — battery protection fails (cloudy forecast):*
 ```
@@ -1976,18 +1978,34 @@ Result: EV stays paused. The Huawei inverter charges the battery with all availa
 Step 1: ev_soc < target                    → continue
 Step 2: battery_reaches_80?
         forecast SOC at 21:00 = 92% >= 80%  → YES → continue
-Step 3: excess_w = 4418 - 622 = 3796W
-Step 4: 3796W >= 1400W                     → 1-phase, clamped to 3700W
-        → wallbox_power_limit = 3700
+Step 3: excess_w = -(-885) + 0 = 885W
+Step 4: 885W < 1400W                       → pause (below minimum)
+        → wallbox_power_limit = 0
 ```
-Result: EV starts charging immediately at 3,700W (1-phase). The Huawei inverter automatically reduces battery charging by that amount. If clouds roll in and the next minute's battery protection re-check shows the forecast SOC at 21:00 dropping below 80%, the EV is blocked and all PV returns to the battery.
+Result: Only 885W export — not enough for minimum 1-phase charging (1400W). EV stays paused. Next minute, if export rises above 1400W, EV starts.
+
+*Scenario B2 — battery protection passes, high export:*
+```
+Step 1: ev_soc < target                    → continue
+Step 2: battery_reaches_80? YES            → continue
+Step 3: grid = -2500W, wallbox = 0W
+        excess_w = -(-2500) + 0 = 2500W
+Step 4: 2500W >= 1400W                     → 1-phase, clamped to 2500W
+        → wallbox_power_limit = 2500
+```
+Next minute (wallbox now drawing 2400W):
+```
+Step 3: grid = -100W, wallbox = 2400W
+        excess_w = -(-100) + 2400 = 2500W  → stable closed loop
+```
 
 *Scenario C — battery full, pessimistic forecast:*
 ```
 Step 1: ev_soc < target                    → continue
 Step 2: battery_soc = 100%                 → skip battery protection → continue
-Step 3: excess_w = 4418 - 622 = 3796W
-Step 4: 3796W >= 1400W                     → 1-phase, clamped to 3700W
+Step 3: grid = -3800W, wallbox = 0W
+        excess_w = -(-3800) + 0 = 3800W
+Step 4: 3800W >= 1400W                     → 1-phase, clamped to 3700W
         → wallbox_power_limit = 3700
 ```
 Result: Battery is full so all excess PV goes to the EV.

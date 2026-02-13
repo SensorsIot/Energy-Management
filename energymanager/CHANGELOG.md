@@ -1,5 +1,13 @@
 # EnergyManager Changelog
 
+## [1.6.10] - 2026-02-13
+
+### Changed
+- EV solar mode: closed-loop excess from grid meter instead of open-loop
+  `pv_power - load_power`. Formula: `excess = -grid_power + wallbox_power`.
+  Prefers M-Bus smart meter if fresh (<30s), falls back to Huawei
+  `sensor.power_meter_active_power`.
+
 ## [1.6.9] - 2026-02-13
 
 ### Changed

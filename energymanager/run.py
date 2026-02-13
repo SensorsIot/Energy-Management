@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.9"
+__version__ = "1.6.10"
 
 import json
 import logging
@@ -174,6 +174,7 @@ class EnergyManager:
         self.ev_min_power_3phase_w = ev_opts.get("min_power_3phase_w", 4100)
         self.ev_max_power_3phase_w = ev_opts.get("max_power_3phase_w", 11000)
         self.grid_power_entity = sensors_opts.get("grid_power", "sensor.grid_power")
+        self.huawei_grid_power_entity = sensors_opts.get("huawei_grid_power", "sensor.power_meter_active_power")
         self.wallbox_power_entity = ev_opts.get("wallbox_power_entity", "sensor.wallbox_power")
         self.wallbox_connected_entity = ev_opts.get("wallbox_connected_entity", "binary_sensor.wallbox_connected")
         self.wallbox_power_limit_entity = ev_opts.get("wallbox_power_limit_entity", "number.wallbox_power_limit")
@@ -610,6 +611,20 @@ class EnergyManager:
 
         return True
 
+    def _read_grid_power(self) -> float:
+        """Read grid power, preferring M-Bus smart meter if fresh (<30s)."""
+        state = self.ha_client.get_state(self.grid_power_entity)
+        if state:
+            try:
+                updated = datetime.fromisoformat(state["last_updated"])
+                age = (datetime.now(timezone.utc) - updated).total_seconds()
+                if age < 30:
+                    return float(state["state"])
+                logger.debug(f"M-Bus stale ({age:.0f}s), falling back to Huawei")
+            except (ValueError, KeyError):
+                pass
+        return self.ha_client.get_sensor_value(self.huawei_grid_power_entity) or 0
+
     def check_battery_protection(self) -> tuple[bool, float]:
         """Check if battery SOC at cheap tariff start meets protection target (FSD 4.5.6).
 
@@ -720,10 +735,9 @@ class EnergyManager:
                         f"< {self.ev_battery_protection_soc}% target — all PV to battery"
                     )
                 else:
-                    # Step 3: Calculate PV-based solar excess
-                    pv_power = self.ha_client.get_sensor_value(self.pv_power_entity) or 0
-                    load_power = self.ha_client.get_sensor_value(self.load_power_entity) or 0
-                    excess = pv_power - load_power
+                    # Step 3: Closed-loop excess from grid meter
+                    grid_power = self._read_grid_power()
+                    excess = -grid_power + wallbox_power
 
                     ev_result = calculate_ev_power(
                         excess_w=excess,
