@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.2"
+__version__ = "0.9.3"
 
 import asyncio
 import json
@@ -14,6 +14,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -297,6 +298,25 @@ class OCPPServer:
         self._on_status_change("phases", target_phases)
         logger.info(f"Phase switch complete: now {target_phases}-phase")
 
+    async def _meter_values_watchdog(self):
+        """Reset power to 0 if no MeterValues received for 2 minutes."""
+        METER_VALUES_TIMEOUT = 120  # seconds
+        while self.running:
+            await asyncio.sleep(10)
+            cp = self.charge_point
+            if cp is None or cp.current_power_w == 0:
+                continue
+            if cp.last_meter_values_time == 0:
+                continue
+            age = time.monotonic() - cp.last_meter_values_time
+            if age > METER_VALUES_TIMEOUT:
+                logger.warning(
+                    f"No MeterValues for {age:.0f}s — resetting power from "
+                    f"{cp.current_power_w}W to 0W"
+                )
+                cp.current_power_w = 0
+                self._on_status_change("power_w", 0)
+
     async def _watch_controls(self):
         """Poll HA control entities for changes from EnergyManager."""
         logger.info("Control watcher started")
@@ -358,6 +378,12 @@ class OCPPServer:
                                     await self.charge_point.set_charging_power(
                                         power_w, num_phases=self._current_phases
                                     )
+                                # When pausing (0W), reset reported power immediately
+                                # Wallbox may not send MeterValues with 0W
+                                if power_w == 0 and self.charge_point.current_power_w > 0:
+                                    logger.info("Power limit set to 0W — resetting reported power")
+                                    self.charge_point.current_power_w = 0
+                                    self._on_status_change("power_w", 0)
                             else:
                                 logger.warning("No wallbox connected, ignoring power limit")
                         except ValueError:
@@ -499,15 +525,17 @@ class OCPPServer:
         self.running = True
         logger.info("OCPP server ready, waiting for wallbox connection...")
 
-        # Run control watcher and MQTT loop alongside the server
+        # Run control watcher, MQTT loop, and MeterValues watchdog alongside the server
         watcher = asyncio.create_task(self._watch_controls())
         mqtt_task = asyncio.create_task(self._mqtt_loop())
+        mv_watchdog = asyncio.create_task(self._meter_values_watchdog())
         try:
             while self.running:
                 await asyncio.sleep(1)
         finally:
             watcher.cancel()
             mqtt_task.cancel()
+            mv_watchdog.cancel()
 
     async def stop(self):
         """Stop the server, MQTT, and close HA session."""

@@ -4,6 +4,7 @@ OCPP 1.6j message handler for wallbox communication.
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Optional, Callable
 
@@ -52,6 +53,7 @@ class ChargePointHandler(CP):
         self.status_event = asyncio.Event()
         self.heartbeat_event = asyncio.Event()
         self.transaction_started_event = asyncio.Event()
+        self.last_meter_values_time: float = 0  # monotonic timestamp of last MeterValues
 
     # ========== Incoming messages from wallbox ==========
 
@@ -86,8 +88,9 @@ class ChargePointHandler(CP):
             self.status_event.set()
             if self.on_status_change:
                 self.on_status_change("status", status)
-            # Wallbox does not send MeterValues with 0W when paused
-            if status in ("SuspendedEVSE", "SuspendedEV") and self.current_power_w > 0:
+            # Zero power when wallbox is not actively charging
+            if status != "Charging" and self.current_power_w > 0:
+                logger.info(f"Status {status}: resetting power from {self.current_power_w}W to 0W")
                 self.current_power_w = 0
                 if self.on_status_change:
                     self.on_status_change("power_w", 0)
@@ -97,11 +100,16 @@ class ChargePointHandler(CP):
     async def on_meter_values(self, connector_id: int, meter_value: list, **kwargs):
         """Wallbox sent meter values (power, energy, etc.)."""
         # Recover transaction_id from MeterValues (e.g. after server restart)
+        # Only recover if wallbox status indicates active charging — stale
+        # MeterValues from a completed transaction may carry an old txn_id
         txn_id = kwargs.get("transaction_id")
         if txn_id is not None and self.transaction_id is None:
-            self.transaction_id = txn_id
-            self.transaction_started_event.set()
-            logger.info(f"Recovered transaction_id={txn_id} from MeterValues")
+            if self.current_status in ("Charging", ChargePointStatus.charging):
+                self.transaction_id = txn_id
+                self.transaction_started_event.set()
+                logger.info(f"Recovered transaction_id={txn_id} from MeterValues")
+            else:
+                logger.info(f"Ignoring stale transaction_id={txn_id} from MeterValues (status={self.current_status})")
 
         total_power = 0.0
         for mv in meter_value:
@@ -116,11 +124,17 @@ class ChargePointHandler(CP):
                     if self.on_status_change:
                         self.on_status_change("energy_wh", value)
 
-        # Update power only when we got a reading or when clearing to zero
-        if total_power > 0 or self.current_power_w > 0:
-            self.current_power_w = total_power
-            if self.on_status_change:
-                self.on_status_change("power_w", total_power)
+        self.last_meter_values_time = time.monotonic()
+
+        # Only accept power readings during an active transaction
+        # Wallbox may return stale cached MeterValues when triggered outside a transaction
+        if self.transaction_id is not None:
+            if total_power > 0 or self.current_power_w > 0:
+                self.current_power_w = total_power
+                if self.on_status_change:
+                    self.on_status_change("power_w", total_power)
+        elif total_power > 0:
+            logger.info(f"Ignoring MeterValues power {total_power}W — no active transaction")
 
         logger.debug(f"MeterValues: power={self.current_power_w}W, energy={self.session_energy_wh}Wh")
         return call_result.MeterValues()
@@ -148,6 +162,12 @@ class ChargePointHandler(CP):
         """Wallbox stopped a charging transaction."""
         logger.info(f"Transaction stopped: id={transaction_id}, energy={meter_stop}Wh")
         self.transaction_id = None
+        # Reset power to 0 — no more MeterValues will arrive after transaction ends
+        if self.current_power_w > 0:
+            logger.info(f"Transaction ended: resetting power from {self.current_power_w}W to 0W")
+            self.current_power_w = 0
+            if self.on_status_change:
+                self.on_status_change("power_w", 0)
         if self.on_status_change:
             self.on_status_change("transaction", "stopped")
         return call_result.StopTransaction(
