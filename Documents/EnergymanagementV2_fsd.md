@@ -2013,6 +2013,392 @@ class EVOutput:
 | `state` | `sensor.ev_charge_status` | Current state for dashboard/logging |
 | `reason` | Logged to InfluxDB | Human-readable reason for current decision |
 
+## 4.7 InfluxDB Storage
+
+**Bucket:** `energy_manager`
+
+**Measurements:**
+
+| Measurement | Purpose | Tags | Fields |
+|-------------|---------|------|--------|
+| `soc_forecast` | Rolling SOC trajectory (overwritten every 15 min) | `scenario` | `soc_percent` |
+| `soc_forecast_snapshot` | Persistent forecast for accuracy tracking | (none) | `soc_percent` |
+| `energy_balance` | Energy flow per timestep | (none) | `pv_wh`, `load_wh`, `net_wh`, `cumulative_wh` |
+| `discharge_decision` | Battery control decisions | (none) | `allowed`, `reason`, `min_soc_percent`, `min_soc_time`, `current_soc` |
+| `appliance_signal` | Appliance signal output | (none) | `signal`, `reason`, `excess_power_w`, `final_soc_percent` |
+
+### 4.7.1 SOC Forecast Scenarios
+
+The `soc_forecast` measurement uses a `scenario` tag to store two curves:
+
+| Scenario | Description | Color in Grafana |
+|----------|-------------|------------------|
+| `with_strategy` | What will happen with discharge blocking applied | Green (solid) |
+| `without_strategy` | What would happen without any blocking | Orange (dashed) |
+
+### 4.7.2 Forecast Snapshot for Accuracy Tracking
+
+The `soc_forecast_snapshot` measurement provides persistent forecast storage:
+
+- **Written every 15 minutes** with the current "with_strategy" forecast
+- **Only overwrites from NOW onwards** — earlier points remain from previous writes
+- **Accumulates over time** — creates continuous forecast history
+- **Compare with actual SOC** from `HomeData` bucket to evaluate forecast accuracy
+
+Example: At 21:00, forecast is written for 21:00→21:00 next day. At 23:00, only 23:00→21:00 is overwritten, preserving the 21:00→23:00 portion.
+
+**Query examples:**
+
+```flux
+# SOC forecast - with strategy (what will happen)
+from(bucket: "energy_manager")
+  |> range(start: -1h, stop: 48h)
+  |> filter(fn: (r) => r._measurement == "soc_forecast")
+  |> filter(fn: (r) => r.scenario == "with_strategy")
+
+# SOC forecast - without strategy (why we block)
+from(bucket: "energy_manager")
+  |> range(start: -1h, stop: 48h)
+  |> filter(fn: (r) => r._measurement == "soc_forecast")
+  |> filter(fn: (r) => r.scenario == "without_strategy")
+
+# Forecast snapshot (for accuracy comparison)
+from(bucket: "energy_manager")
+  |> range(start: -24h, stop: now())
+  |> filter(fn: (r) => r._measurement == "soc_forecast_snapshot")
+
+# Actual SOC (for comparison with forecast)
+from(bucket: "HomeData")
+  |> range(start: -24h, stop: now())
+  |> filter(fn: (r) => r._measurement == "Energy")
+  |> filter(fn: (r) => r._field == "BATT_Level")
+
+# Energy balance with cumulative
+from(bucket: "energy_manager")
+  |> range(start: -1h, stop: 48h)
+  |> filter(fn: (r) => r._measurement == "energy_balance")
+  |> filter(fn: (r) => r._field == "cumulative_wh")
+```
+
+## 4.8 Dashboard Examples
+
+### Kitchen Dashboard (Mushroom Cards)
+
+```yaml
+type: horizontal-stack
+cards:
+  # Appliance Signal
+  - type: custom:mushroom-template-card
+    primary: Waschen
+    icon: mdi:washing-machine
+    icon_color: >
+      {% set s = states('sensor.appliance_signal') %}
+      {{ 'green' if s == 'green' else 'orange' if s == 'orange' else 'red' }}
+
+  # EV Charging
+  - type: custom:mushroom-template-card
+    entity: input_select.ev_charging_mode
+    primary: Auto
+    secondary: >
+      {% set m = states('input_select.ev_charging_mode') %}
+      {% if m != 'off' %}{{ states('sensor.wallbox_power') | int }} W
+      {% else %}Aus{% endif %}
+    icon: mdi:car-electric
+    icon_color: >
+      {% set m = states('input_select.ev_charging_mode') %}
+      {{ 'green' if m in ['solar','cheap','immediate'] else 'grey' }}
+
+  # Battery
+  - type: custom:mushroom-template-card
+    primary: Batterie
+    secondary: "{{ states('sensor.battery_state_of_capacity') }}%"
+    icon: mdi:battery
+    icon_color: >
+      {{ 'green' if is_state('binary_sensor.battery_discharge_allowed', 'on') else 'orange' }}
+```
+
+## 4.9 Error Handling and Notifications
+
+### 4.9.1 Battery Control Retry Logic
+
+When controlling the battery via Home Assistant, the system implements retry logic to handle transient communication failures:
+
+**Retry Configuration:**
+- Maximum attempts: 5
+- Delay between retries: 2 seconds
+- Timeout per attempt: 30 seconds
+
+**Error Types Handled:**
+
+| Error Type | Behavior |
+|------------|----------|
+| Timeout | Retry after delay |
+| Connection Error | Retry after delay |
+| HTTP Error | Retry after delay |
+| No HA Token | Fail immediately (no retry) |
+
+### 4.9.2 Telegram Notifications
+
+If all retry attempts fail, a Telegram notification is sent to alert the user.
+
+**Notification Content:**
+```
+Error: Battery Control Failed
+
+Failed to [enable/block] battery discharge after 5 attempts.
+
+Entity: number.battery_maximum_discharging_power
+Target value: [0/5000]W
+Error: [error details]
+
+The battery may not be in the expected state!
+```
+
+### 4.9.3 Error Flow
+
+```
+control_battery(discharge_allowed)
+    |
+    +-- Attempt 1 -> Fail -> Wait 2s
+    +-- Attempt 2 -> Fail -> Wait 2s
+    +-- Attempt 3 -> Fail -> Wait 2s
+    +-- Attempt 4 -> Fail -> Wait 2s
+    +-- Attempt 5 -> Fail
+           |
+           v
+    Send Telegram Error Notification
+    Log error
+    (last_discharge_allowed unchanged - will retry next cycle)
+```
+
+### 4.9.4 Underlying Communication Chains
+
+**Battery discharge control:**
+```
+EnergyManager -> HA REST API -> Huawei Solar Integration -> Modbus TCP -> Inverter
+```
+
+Each layer has its own error handling:
+- **HA REST API**: 30s timeout, 5 retries (our code)
+- **Huawei Solar Integration**: Login verification, permission handling
+- **huawei-solar-lib**: 10s timeout, 3 retries with exponential backoff
+- **Modbus TCP**: pymodbus connection handling
+
+**EV charging control:**
+```
+EnergyManager -> POST /api/states/ -> number.wallbox_power_limit -> OCPP Server -> SetChargingProfile -> Wallbox
+```
+
+Note: `number.wallbox_power_limit` is a REST API entity (not a platform entity), so EnergyManager uses `POST /api/states/` instead of `number.set_value` service.
+
+**Wallbox power correction (SUN2000 meter compensation):**
+```
+Wallbox -> MeterValues (OCPP) -> OCPP Server -> MQTT topic "wallbox" (every 10s) -> ESP32 Modbus Proxy -> RS485 -> SUN2000
+```
+
+The ESP32 Modbus Proxy adds wallbox power to the DTSU meter reading so the SUN2000 sees actual grid demand including the wallbox (which is wired outside the DTSU measurement loop).
+
+# Chapter 5: Forecast Accuracy Tracking
+
+## 5.1 Purpose
+
+Forecast accuracy tracking serves to **improve decision-making quality** for energy optimization. The system makes critical decisions based on forecasted values, and understanding forecast accuracy allows us to:
+
+1. Validate that forecasts are reliable enough for automated decisions
+2. Identify systematic biases (over/under-forecasting)
+3. Tune optimization parameters based on observed accuracy
+4. Build confidence in the system's recommendations
+
+## 5.2 Optimization Decisions Dependent on Forecasts
+
+| Decision | Timing | Forecast Dependency | Impact of Error |
+|----------|--------|---------------------|-----------------|
+| **Battery discharge blocking** | 21:00 daily | PV forecast for next day | Grid import during expensive hours |
+| **Appliance signal** (washer) | Real-time | PV surplus forecast | Suboptimal timing, grid usage |
+| **EV charging power** | Real-time | PV surplus forecast + `forecasted_excess_kwh` | Missed solar charging, wrong phase selection |
+
+## 5.3 Forecast Accuracy #1: Battery Discharge Optimization
+
+### 5.3.1 Decision Context
+
+At **21:00** each evening, the system decides whether to block battery discharge during cheap tariff hours (21:00-06:00). This decision depends on:
+
+- **Current SOC** at 21:00
+- **PV forecast** for the next day (06:00-21:00)
+- **Load forecast** for the next day
+
+The goal: Preserve battery energy during cheap hours so it's available during expensive hours (06:00-21:00) when PV production may be insufficient.
+
+### 5.3.2 Accuracy Measurement Approach
+
+**Snapshot at 21:00:**
+
+At 21:00 each day, capture and store:
+- PV forecast (P10/P50/P90) for the next 24 hours until 21:00, at **15-minute resolution**
+- The specific `run_time` of the forecast being used
+- Current SOC at decision time
+
+**Compare with Actuals:**
+
+After the forecast period completes (next day 21:00), compare:
+- Forecasted PV energy (Wh) vs actual PV energy produced
+- Per 15-minute period comparison
+- Total daily comparison
+
+### 5.3.3 InfluxDB Storage Schema
+
+**Bucket:** `pv_forecast`
+
+**Measurement:** `pv_forecast_snapshot`
+
+Stores the "frozen" forecast at decision time, at 15-minute resolution, **per string**:
+
+| Tag | Description |
+|-----|-------------|
+| `snapshot_type` | `battery_21h` (identifies this as the 21:00 battery decision snapshot) |
+| `snapshot_id` | Date of decision in `YYYY-MM-DD` format (e.g., `2026-01-20`) |
+| `inverter` | `EastWest`, `South`, or `total` |
+| `string` | `East`, `West`, `SouthFront`, `SouthBack`, or `total` |
+| `forecast_run_time` | Original forecast run timestamp |
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `forecast_wh_p10` | Wh | Forecasted PV energy for this 15-min period (pessimistic) |
+| `forecast_wh_p50` | Wh | Forecasted PV energy for this 15-min period (expected) |
+| `forecast_wh_p90` | Wh | Forecasted PV energy for this 15-min period (optimistic) |
+
+**Strings tracked:**
+
+| String | Inverter | Orientation | Panels |
+|--------|----------|-------------|--------|
+| `East` | EastWest | Azimuth 90°, Tilt 15° | 8x AE455 |
+| `West` | EastWest | Azimuth 270°, Tilt 15° | 9x AE455 |
+| `SouthFront` | South | Azimuth 180°, Tilt 70° | 3x Generic400 |
+| `SouthBack` | South | Azimuth 180°, Tilt 60° | 2x Generic400 |
+| `total` | - | - | All 22 panels |
+
+**Measurement:** `pv_forecast_snapshot_meta`
+
+One record per decision:
+
+| Tag | Description |
+|-----|-------------|
+| `snapshot_type` | `battery_21h` |
+| `snapshot_id` | Date of decision in `YYYY-MM-DD` format |
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `soc_at_decision` | % | Battery SOC when decision was made |
+| `decision_discharge_blocked` | bool | Whether discharge was blocked |
+| `forecast_run_time` | string | Which forecast run was used |
+
+**Measurement:** `pv_accuracy`
+
+After actuals are available, comparison at 15-minute resolution, **per string**:
+
+| Tag | Description |
+|-----|-------------|
+| `snapshot_type` | `battery_21h` |
+| `snapshot_id` | Date of original decision |
+| `inverter` | `EastWest`, `South`, or `total` |
+| `string` | `East`, `West`, `SouthFront`, `SouthBack`, or `total` |
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `forecast_wh_p10` | Wh | What was forecasted (pessimistic) |
+| `forecast_wh_p50` | Wh | What was forecasted (expected) |
+| `forecast_wh_p90` | Wh | What was forecasted (optimistic) |
+| `actual_wh` | Wh | What was actually produced |
+| `error_wh` | Wh | forecast_p50 - actual (positive = over-forecast) |
+
+### 5.3.4 Data Storage Summary
+
+| Measurement | Purpose | Retention |
+|-------------|---------|-----------|
+| `pv_forecast_snapshot` | "What did we predict?" | Long-term |
+| `pv_forecast_snapshot_meta` | "What did we decide, and why?" | Long-term |
+| `pv_accuracy` | "Where did we go wrong?" | Long-term |
+
+### 5.3.5 Visualization (Grafana)
+
+**Dashboard Variables:**
+- `$snapshot_id`: Date picker (e.g., `2026-01-20`) — selects which day's forecast to view
+- `$inverter`: `EastWest`, `South`, `total`
+
+**Panel 1: Forecast vs Actual Curve**
+
+```flux
+// Forecast snapshot for selected date
+forecast = from(bucket: "pv_forecast")
+  |> range(start: -365d)
+  |> filter(fn: (r) => r._measurement == "pv_forecast_snapshot")
+  |> filter(fn: (r) => r.snapshot_id == "${snapshot_id}")
+  |> filter(fn: (r) => r.inverter == "${inverter}")
+
+// Actual production
+actual = from(bucket: "pv_forecast")
+  |> range(start: -365d)
+  |> filter(fn: (r) => r._measurement == "pv_accuracy")
+  |> filter(fn: (r) => r.snapshot_id == "${snapshot_id}")
+  |> filter(fn: (r) => r.inverter == "${inverter}")
+  |> filter(fn: (r) => r._field == "actual_wh")
+
+union(tables: [forecast, actual])
+```
+
+**Panel 2: Decision Context**
+
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: -365d)
+  |> filter(fn: (r) => r._measurement == "pv_forecast_snapshot_meta")
+  |> filter(fn: (r) => r.snapshot_id == "${snapshot_id}")
+```
+
+**Panel 3: Historical Date Picker**
+
+```flux
+from(bucket: "pv_forecast")
+  |> range(start: -90d)
+  |> filter(fn: (r) => r._measurement == "pv_forecast_snapshot_meta")
+  |> distinct(column: "snapshot_id")
+```
+
+### 5.3.6 Derived Metrics (Calculated in Grafana)
+
+| Metric | Calculation |
+|--------|-------------|
+| Total forecast energy | `sum(forecast_wh_p50)` from `pv_accuracy` |
+| Total actual energy | `sum(actual_wh)` from `pv_accuracy` |
+| Error (Wh) | `forecast_total - actual_total` |
+| Error (%) | `error / actual_total x 100` |
+| MAPE | `mean(abs(forecast - actual) / actual)` for non-zero periods |
+| Within P10-P90 | `actual_total >= sum(p10) AND actual_total <= sum(p90)` |
+
+### 5.3.7 Implementation Location
+
+Implemented in the **SwissSolarForecast** add-on:
+
+**Schedule:**
+- **21:00 daily (local time)**: Snapshot current forecast for next 24h, per string
+- **21:15 daily**: Evaluate previous day's forecast vs actuals
+
+### 5.3.8 Success Criteria
+
+| Metric | Target | Acceptable |
+|--------|--------|------------|
+| Mean Absolute Percentage Error (MAPE) | < 15% | < 25% |
+| P10-P90 coverage | 75-85% | 65-90% |
+| Bias (mean error) | +/-5% | +/-10% |
+
+## 5.4 Forecast Accuracy #2: Appliance Signal (Future)
+
+> **Status:** To be defined after Accuracy #1 is implemented and validated.
+
+## 5.5 Forecast Accuracy #3: EV Charging (Future)
+
+> **Status:** To be defined when EV charging optimization is validated in production.
+
 # Appendix A: Installation Guide
 
 ## A.1 Prerequisites
@@ -2372,11 +2758,77 @@ cd energymanager && python -m pytest tests/test_ev_state_machine.py -v
 
 ---
 
+# Appendix E: EnergyManager Configuration
+
+See **Section 1.10** for the full configuration architecture.
+
+## E.1 Secrets (Configuration UI)
+
+Enter in **Settings -> Add-ons -> EnergyManager -> Configuration**:
+- `influxdb_token` (required)
+- `telegram_bot_token` (optional — for error alerts)
+- `telegram_chat_id` (optional — for error alerts)
+
+## E.2 Non-Secrets (`/config/energymanager.yaml`)
+
+Editable via File Editor at `/addon_configs/energymanager/energymanager.yaml`:
+
+```yaml
+influxdb:
+  host: "192.168.0.203"
+  port: 8087
+  org: "energymanagement"
+  pv_bucket: "pv_forecast"
+  load_bucket: "load_forecast"
+  output_bucket: "energy_manager"
+
+battery:
+  capacity_kwh: 10.0
+  charge_efficiency: 0.95
+  discharge_efficiency: 0.95
+  max_charge_w: 5000
+  max_discharge_w: 5000
+  soc_entity: "sensor.battery_state_of_capacity"
+  discharge_control_entity: "number.battery_maximum_discharging_power"
+
+tariff:
+  weekday_cheap_start: "21:00"
+  weekday_cheap_end: "06:00"
+  weekend_all_day_cheap: true
+  holidays: []
+
+appliances:
+  power_w: 2500
+  energy_wh: 1500
+
+sensors:
+  pv_power: "sensor.solar_pv_total_ac_power"
+  load_power: "sensor.load_power"
+  grid_power: "sensor.grid_power"
+  huawei_grid_power: "sensor.power_meter_active_power"
+
+ev_charging:
+  enabled: true
+  mode_entity: "input_select.ev_charging_mode"
+  min_power_1p_w: 1400
+  min_power_3p_w: 4200
+  max_power_w: 11000
+  phase_threshold_kwh: 10
+
+schedule:
+  update_interval_minutes: 15
+
+log_level: "info"
+```
+
+---
+
 **End of Document**
 
-*Version 2.15 - February 2026*
+*Version 2.16 - February 2026*
 
 **Changelog:**
+- v2.16: Added sections 4.7 (InfluxDB Storage), 4.8 (Dashboard Examples), 4.9 (Error Handling and Notifications), Chapter 5 (Forecast Accuracy Tracking), Appendix E (EnergyManager Configuration). Updated EV config for 4-state machine (phase-based min power, phase_threshold_kwh). Updated EV decision table to include EV charging forecast dependency.
 - v2.15: FSD improvements — signal conventions box; weekend battery guard as explicit policy (`battery_guard_on_weekends`); `allow_1p_auto` flag for 1φ vs 3φ minimum; `effective_min_power_w` derived threshold; S06 forecast contract (measurement, field, staleness, missing=conservative); `battery_guard_margin_pct` (2% safety margin); smoothing defined (rolling median, 4 samples); rate limiting formalized (`setpoint_min_interval_s`, `setpoint_max_step_w`, `setpoint_step_w`); import tolerance (`import_tolerance_w`, `import_tolerance_cycles`); auto-revert trigger refined (only when setpoint > 0 recently); mode reset write-back semantics (one-shot, retry, idempotency); fault required-signals-per-mode; hard fault test-setpoint procedure; anti-flap table; S02 renamed EV_UNAVAILABLE; state priority order; scenario-based test table; edge-case worked examples (H: stale SoC, I: tariff boundary, J: phase gap)
 - v2.14: Redesigned EV state machine — states represent charging behavior, not device status (Section 4.5.6); 12 states in 3 groups (base/policy/PV-excess); debounce (S21), hysteresis (200W), cooldown (S24) prevent oscillation; soft/hard fault classification with recovery dwell and anti-flap; battery reserve guard with configurable scope policy; mode renamed to auto_pv_excess/immediate/deferred_tariff; auto-revert on EV finish
 - v2.13: Refactored EV charging to transition-based state machine with hysteresis (Section 4.5.6); 200W dead band prevents PAUSED↔SOLAR oscillation; 111 unit tests
