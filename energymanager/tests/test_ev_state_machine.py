@@ -46,7 +46,7 @@ def make_sm(state: EVState = EVState.NORMAL, *, now: float = _T0) -> EVStateMach
     """Create an EVStateMachine pre-set to the given state."""
     sm = EVStateMachine(time_fn=lambda: now)
     sm.state = state
-    if state == EVState.SOLAR_CHARGING:
+    if state == EVState.SOLAR:
         sm._entered_solar_at = now
     return sm
 
@@ -120,7 +120,7 @@ class TestNormalTransitions:
     def test_n1_immediate(self):
         sm = make_sm(EVState.NORMAL)
         out = sm.step(make_inputs(charging_mode="immediate"))
-        assert out.state == EVState.MAX_CHARGING
+        assert out.state == EVState.IMMEDIATE
         assert out.target_power_w == 11000
 
     def test_n1_immediate_no_wallbox_stays_normal(self):
@@ -147,7 +147,7 @@ class TestNormalTransitions:
         out = sm.step(make_inputs(
             grid_power_w=-5000, wallbox_power_w=0,
         ))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
         assert out.target_power_w == 5000
 
     def test_n3_solar_battery_full_overrides_protection(self):
@@ -158,86 +158,86 @@ class TestNormalTransitions:
             battery_soc=100,
             grid_power_w=-5000,
         ))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
 
     def test_n1_has_priority_over_n2(self):
         """N1 fires before N2 when both could match."""
         sm = make_sm(EVState.NORMAL)
         out = sm.step(make_inputs(charging_mode="immediate"))
-        assert out.state == EVState.MAX_CHARGING
+        assert out.state == EVState.IMMEDIATE
 
 
 # ===================================================================
-# SOLAR_CHARGING — stays
+# SOLAR — stays
 # ===================================================================
 
 class TestSolarStays:
     def test_stays_with_excess(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(grid_power_w=-5000))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
         assert out.target_power_w == 5000
 
     def test_stays_with_low_excess_holds_minimum(self):
         """When excess < min_power_w, output min_power_w (hold minimum)."""
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(grid_power_w=-500, wallbox_power_w=0))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
         assert out.target_power_w == 1400  # min_power_w
 
     def test_stays_during_minstay_even_battery_protection_fails(self):
         """During first 15 min, S4 cannot fire."""
-        sm = make_sm(EVState.SOLAR_CHARGING, now=_T0)
+        sm = make_sm(EVState.SOLAR, now=_T0)
         # Still within 15 min
         sm._time_fn = lambda: _T0 + MIN_STAY_S - 1
         out = sm.step(make_inputs(
             battery_protection_passed=False, battery_soc=70,
         ))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
 
 
 # ===================================================================
-# SOLAR_CHARGING → transitions (S1, S2, S3, S4)
+# SOLAR → transitions (S1, S2, S3, S4)
 # ===================================================================
 
 class TestSolarTransitions:
     def test_s1_car_full(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(ev_soc=90, ev_target_soc=80))
         assert out.state == EVState.NORMAL
         assert out.target_power_w == 0
         assert "90" in out.reason
 
     def test_s1_car_at_target(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(ev_soc=80, ev_target_soc=80))
         assert out.state == EVState.NORMAL
 
     def test_s1_ev_soc_none_stays(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(ev_soc=None))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
 
     def test_s2_switch_to_immediate(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(charging_mode="immediate"))
-        assert out.state == EVState.MAX_CHARGING
+        assert out.state == EVState.IMMEDIATE
         assert out.target_power_w == 11000
 
     def test_s3_switch_to_cheap(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(charging_mode="cheap", is_cheap_tariff=True))
         assert out.state == EVState.CHEAP
         assert out.target_power_w == 11000
 
     def test_s3_switch_to_cheap_expensive(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(charging_mode="cheap", is_cheap_tariff=False))
         assert out.state == EVState.CHEAP
         assert out.target_power_w == 0
 
     def test_s4_battery_protection_after_minstay(self):
-        sm = make_sm(EVState.SOLAR_CHARGING, now=_T0)
+        sm = make_sm(EVState.SOLAR, now=_T0)
         sm._time_fn = lambda: _T0 + MIN_STAY_S
         out = sm.step(make_inputs(
             battery_protection_passed=False, battery_soc=70,
@@ -246,16 +246,16 @@ class TestSolarTransitions:
 
     def test_s4_battery_full_overrides_protection(self):
         """battery_soc >= 100 prevents S4 from firing even after min-stay."""
-        sm = make_sm(EVState.SOLAR_CHARGING, now=_T0)
+        sm = make_sm(EVState.SOLAR, now=_T0)
         sm._time_fn = lambda: _T0 + MIN_STAY_S + 1
         out = sm.step(make_inputs(
             battery_protection_passed=False, battery_soc=100,
         ))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
 
     def test_s1_has_priority_over_s2(self):
         """S1 fires before S2 (car full beats mode switch)."""
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(
             ev_soc=90, ev_target_soc=80, charging_mode="immediate",
         ))
@@ -360,18 +360,18 @@ class TestCheapPowerToggle:
 
 
 # ===================================================================
-# MAX_CHARGING — stays
+# IMMEDIATE — stays
 # ===================================================================
 
 class TestMaxStays:
     def test_stays_at_max(self):
-        sm = make_sm(EVState.MAX_CHARGING)
+        sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(charging_mode="immediate"))
-        assert out.state == EVState.MAX_CHARGING
+        assert out.state == EVState.IMMEDIATE
         assert out.target_power_w == 11000
 
     def test_custom_max(self):
-        sm = make_sm(EVState.MAX_CHARGING)
+        sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(
             charging_mode="immediate", max_power_w=7400,
         ))
@@ -379,12 +379,12 @@ class TestMaxStays:
 
 
 # ===================================================================
-# MAX_CHARGING → transitions (M1, M2)
+# IMMEDIATE → transitions (M1, M2)
 # ===================================================================
 
 class TestMaxTransitions:
     def test_m1_car_full(self):
-        sm = make_sm(EVState.MAX_CHARGING)
+        sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(
             charging_mode="immediate", ev_soc=90, ev_target_soc=80,
         ))
@@ -392,40 +392,40 @@ class TestMaxTransitions:
         assert out.target_power_w == 0
 
     def test_m1_ev_soc_none_stays(self):
-        sm = make_sm(EVState.MAX_CHARGING)
+        sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(
             charging_mode="immediate", ev_soc=None,
         ))
-        assert out.state == EVState.MAX_CHARGING
+        assert out.state == EVState.IMMEDIATE
 
     def test_m2_mode_changed_to_solar(self):
-        sm = make_sm(EVState.MAX_CHARGING)
+        sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(charging_mode="solar"))
         assert out.state == EVState.NORMAL
 
     def test_m2_mode_changed_to_cheap(self):
-        sm = make_sm(EVState.MAX_CHARGING)
+        sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(charging_mode="cheap"))
         assert out.state == EVState.NORMAL
 
 
 # ===================================================================
-# Min-stay timer (SOLAR_CHARGING)
+# Min-stay timer (SOLAR)
 # ===================================================================
 
 class TestMinStayTimer:
     def test_min_stay_prevents_s4(self):
         """Battery protection cannot exit SOLAR during first 15 min."""
-        sm = make_sm(EVState.SOLAR_CHARGING, now=_T0)
+        sm = make_sm(EVState.SOLAR, now=_T0)
         # At 14 min 59 sec
         sm._time_fn = lambda: _T0 + MIN_STAY_S - 1
         out = sm.step(make_inputs(
             battery_protection_passed=False, battery_soc=70,
         ))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
 
     def test_s4_fires_at_exactly_15_min(self):
-        sm = make_sm(EVState.SOLAR_CHARGING, now=_T0)
+        sm = make_sm(EVState.SOLAR, now=_T0)
         sm._time_fn = lambda: _T0 + MIN_STAY_S
         out = sm.step(make_inputs(
             battery_protection_passed=False, battery_soc=70,
@@ -434,78 +434,78 @@ class TestMinStayTimer:
 
     def test_hold_minimum_during_low_excess(self):
         """During min-stay with low excess, hold min_power_w."""
-        sm = make_sm(EVState.SOLAR_CHARGING, now=_T0)
+        sm = make_sm(EVState.SOLAR, now=_T0)
         sm._time_fn = lambda: _T0 + 60  # 1 min in
         out = sm.step(make_inputs(
             grid_power_w=-500, wallbox_power_w=0,  # excess = 500 < 1400
         ))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
         assert out.target_power_w == 1400
 
     def test_s1_fires_during_minstay(self):
         """Car full (S1) can fire even during min-stay."""
-        sm = make_sm(EVState.SOLAR_CHARGING, now=_T0)
+        sm = make_sm(EVState.SOLAR, now=_T0)
         sm._time_fn = lambda: _T0 + 60
         out = sm.step(make_inputs(ev_soc=90, ev_target_soc=80))
         assert out.state == EVState.NORMAL
 
     def test_s2_fires_during_minstay(self):
         """Mode switch to immediate (S2) can fire during min-stay."""
-        sm = make_sm(EVState.SOLAR_CHARGING, now=_T0)
+        sm = make_sm(EVState.SOLAR, now=_T0)
         sm._time_fn = lambda: _T0 + 60
         out = sm.step(make_inputs(charging_mode="immediate"))
-        assert out.state == EVState.MAX_CHARGING
+        assert out.state == EVState.IMMEDIATE
 
     def test_entered_at_set_on_entry(self):
-        """Timestamp is recorded when entering SOLAR_CHARGING."""
+        """Timestamp is recorded when entering SOLAR."""
         t = [_T0]
         sm = EVStateMachine(time_fn=lambda: t[0])
         sm.step(make_inputs(grid_power_w=-5000))
-        assert sm.state == EVState.SOLAR_CHARGING
+        assert sm.state == EVState.SOLAR
         assert sm._entered_solar_at == _T0
 
     def test_entered_at_cleared_on_exit(self):
-        sm = make_sm(EVState.SOLAR_CHARGING, now=_T0)
+        sm = make_sm(EVState.SOLAR, now=_T0)
         sm.step(make_inputs(ev_soc=90, ev_target_soc=80))
         assert sm.state == EVState.NORMAL
         assert sm._entered_solar_at is None
 
 
 # ===================================================================
-# Power clamping & rounding (SOLAR_CHARGING)
+# Power clamping & rounding (SOLAR)
 # ===================================================================
 
 class TestSolarPower:
     def test_clamp_to_min(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(grid_power_w=-1400, wallbox_power_w=0))
         assert out.target_power_w == 1400
 
     def test_clamp_to_max(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(grid_power_w=-15000, wallbox_power_w=0))
         assert out.target_power_w == 11000
 
     def test_round_to_step(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         # excess = 1680 → round(1680/100)*100 = 1700
         out = sm.step(make_inputs(grid_power_w=-1680, wallbox_power_w=0))
         assert out.target_power_w == 1700
 
     def test_excess_includes_wallbox_power(self):
         """excess = -grid_power_w + wallbox_power_w."""
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         # grid=-2000, wallbox=3000 → excess = 2000+3000 = 5000
         out = sm.step(make_inputs(grid_power_w=-2000, wallbox_power_w=3000))
         assert out.target_power_w == 5000
 
     def test_low_excess_holds_minimum(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(grid_power_w=-500, wallbox_power_w=0))
         assert out.target_power_w == 1400
 
     def test_custom_min(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(
             grid_power_w=-2000, wallbox_power_w=0, min_power_w=2500,
         ))
@@ -513,7 +513,7 @@ class TestSolarPower:
         assert out.target_power_w == 2500
 
     def test_custom_max(self):
-        sm = make_sm(EVState.SOLAR_CHARGING)
+        sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(
             grid_power_w=-10000, wallbox_power_w=0, max_power_w=8000,
         ))
@@ -568,7 +568,7 @@ class TestMultiStep:
 
         # Excess appears → SOLAR
         out = sm.step(make_inputs(grid_power_w=-5000))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
 
         # Car full → NORMAL
         out = sm.step(make_inputs(ev_soc=90, ev_target_soc=80))
@@ -578,11 +578,11 @@ class TestMultiStep:
         t = [_T0]
         sm = EVStateMachine(time_fn=lambda: t[0])
 
-        # NORMAL → MAX_CHARGING
+        # NORMAL → IMMEDIATE
         out = sm.step(make_inputs(charging_mode="immediate"))
-        assert out.state == EVState.MAX_CHARGING
+        assert out.state == EVState.IMMEDIATE
 
-        # MAX_CHARGING → NORMAL (mode changed)
+        # IMMEDIATE → NORMAL (mode changed)
         out = sm.step(make_inputs(charging_mode="solar"))
         assert out.state == EVState.NORMAL
 
@@ -594,9 +594,9 @@ class TestMultiStep:
         out = sm.step(make_inputs(charging_mode="solar"))
         assert out.state == EVState.NORMAL
 
-        # NORMAL → SOLAR_CHARGING
+        # NORMAL → SOLAR
         out = sm.step(make_inputs(grid_power_w=-5000))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
 
     def test_solar_to_immediate_and_back(self):
         t = [_T0]
@@ -604,11 +604,11 @@ class TestMultiStep:
 
         # → SOLAR
         out = sm.step(make_inputs(grid_power_w=-5000))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
 
-        # → MAX_CHARGING
+        # → IMMEDIATE
         out = sm.step(make_inputs(charging_mode="immediate"))
-        assert out.state == EVState.MAX_CHARGING
+        assert out.state == EVState.IMMEDIATE
 
         # → NORMAL (mode back to solar)
         out = sm.step(make_inputs(charging_mode="solar"))
@@ -616,7 +616,7 @@ class TestMultiStep:
 
         # → SOLAR again (excess available)
         out = sm.step(make_inputs(grid_power_w=-5000))
-        assert out.state == EVState.SOLAR_CHARGING
+        assert out.state == EVState.SOLAR
 
 
 # ===================================================================

@@ -3,9 +3,9 @@ EV charging state machine — 4-state design.
 
 States:
   1. NORMAL          — no EV charging, SUN2000 has full control
-  2. SOLAR_CHARGING  — variable power from solar excess
+  2. SOLAR           — variable power from solar excess
   3. CHEAP           — max during cheap tariff, 0 during expensive
-  4. MAX_CHARGING    — immediate mode, max power regardless
+  4. IMMEDIATE       — immediate mode, max power regardless
 
 Infrastructure concerns (faults, disconnects) are handled by the OCPP
 server.  This state machine only makes charging decisions.
@@ -20,7 +20,7 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
-# Minimum time (seconds) to stay in SOLAR_CHARGING before allowing
+# Minimum time (seconds) to stay in SOLAR before allowing
 # battery-protection or low-excess exits.
 MIN_STAY_S = 15 * 60
 
@@ -32,9 +32,9 @@ MIN_STAY_S = 15 * 60
 class EVState(str, Enum):
     """EV charging states (str so it works as an HA sensor value)."""
     NORMAL = "normal"
-    SOLAR_CHARGING = "solar_charging"
+    SOLAR = "solar"
     CHEAP = "cheap"
-    MAX_CHARGING = "max_charging"
+    IMMEDIATE = "immediate"
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ def _clamp(value: float, lo: float, hi: float) -> float:
 
 
 def _solar_target(excess: float, min_power_w: float, max_power_w: float) -> float:
-    """Compute target power for SOLAR_CHARGING state."""
+    """Compute target power for SOLAR state."""
     if excess >= min_power_w:
         return _round_to_step(_clamp(excess, min_power_w, max_power_w))
     return min_power_w  # hold minimum during low-excess periods
@@ -110,9 +110,9 @@ class EVStateMachine:
     # -- helpers --
 
     def _set_state(self, new: EVState) -> None:
-        if new == EVState.SOLAR_CHARGING and self.state != EVState.SOLAR_CHARGING:
+        if new == EVState.SOLAR and self.state != EVState.SOLAR:
             self._entered_solar_at = self._time_fn()
-        if new != EVState.SOLAR_CHARGING:
+        if new != EVState.SOLAR:
             self._entered_solar_at = None
         self.state = new
 
@@ -128,8 +128,8 @@ class EVStateMachine:
     def _step_normal(self, i: EVInputs) -> EVOutput:
         # N1: immediate mode
         if i.charging_mode == "immediate" and i.wallbox_available:
-            self._set_state(EVState.MAX_CHARGING)
-            return EVOutput(EVState.MAX_CHARGING, i.max_power_w,
+            self._set_state(EVState.IMMEDIATE)
+            return EVOutput(EVState.IMMEDIATE, i.max_power_w,
                             "Immediate mode — charge at max power")
 
         # N2: cheap mode
@@ -147,9 +147,9 @@ class EVStateMachine:
                 and (i.battery_protection_passed or i.battery_soc >= 100)):
             excess = -i.grid_power_w + i.wallbox_power_w
             if excess >= i.min_power_w:
-                self._set_state(EVState.SOLAR_CHARGING)
+                self._set_state(EVState.SOLAR)
                 target = _solar_target(excess, i.min_power_w, i.max_power_w)
-                return EVOutput(EVState.SOLAR_CHARGING, target,
+                return EVOutput(EVState.SOLAR, target,
                                 f"Solar charging {target:.0f}W "
                                 f"(excess {excess:.0f}W)")
 
@@ -157,7 +157,7 @@ class EVStateMachine:
         return EVOutput(EVState.NORMAL, 0, "No EV charging")
 
     # -------------------------------------------------------------------
-    # SOLAR_CHARGING
+    # SOLAR
     # -------------------------------------------------------------------
 
     def _step_solar(self, i: EVInputs) -> EVOutput:
@@ -174,8 +174,8 @@ class EVStateMachine:
 
         # S2: user switched to immediate
         if i.charging_mode == "immediate":
-            self._set_state(EVState.MAX_CHARGING)
-            return EVOutput(EVState.MAX_CHARGING, i.max_power_w,
+            self._set_state(EVState.IMMEDIATE)
+            return EVOutput(EVState.IMMEDIATE, i.max_power_w,
                             "Immediate mode — charge at max power")
 
         # S3: user switched to cheap
@@ -195,9 +195,9 @@ class EVStateMachine:
             return EVOutput(EVState.NORMAL, 0,
                             "Battery protection — pausing EV charging")
 
-        # Stay in SOLAR_CHARGING — compute power
+        # Stay in SOLAR — compute power
         target = _solar_target(excess, i.min_power_w, i.max_power_w)
-        return EVOutput(EVState.SOLAR_CHARGING, target,
+        return EVOutput(EVState.SOLAR, target,
                         f"Solar charging {target:.0f}W "
                         f"(excess {excess:.0f}W)")
 
@@ -227,7 +227,7 @@ class EVStateMachine:
                         "Cheap mode — waiting for cheap tariff")
 
     # -------------------------------------------------------------------
-    # MAX_CHARGING
+    # IMMEDIATE
     # -------------------------------------------------------------------
 
     def _step_max(self, i: EVInputs) -> EVOutput:
@@ -244,15 +244,15 @@ class EVStateMachine:
             self._set_state(EVState.NORMAL)
             return EVOutput(EVState.NORMAL, 0, "No EV charging")
 
-        # Stay in MAX_CHARGING
-        return EVOutput(EVState.MAX_CHARGING, i.max_power_w,
+        # Stay in IMMEDIATE
+        return EVOutput(EVState.IMMEDIATE, i.max_power_w,
                         "Immediate mode — charge at max power")
 
 
 # Dispatch table
 _DISPATCH = {
     EVState.NORMAL: EVStateMachine._step_normal,
-    EVState.SOLAR_CHARGING: EVStateMachine._step_solar,
+    EVState.SOLAR: EVStateMachine._step_solar,
     EVState.CHEAP: EVStateMachine._step_cheap,
-    EVState.MAX_CHARGING: EVStateMachine._step_max,
+    EVState.IMMEDIATE: EVStateMachine._step_max,
 }
