@@ -2692,45 +2692,59 @@ cd energymanager && python -m pytest tests/test_appliance_signal.py -v
 
 Test file: `energymanager/tests/test_ev_state_machine.py`
 
-**Unit tests** organized by state, covering all transitions defined in Section 4.5.6.6:
+**70 unit tests** organized by state, covering all transitions defined in Section 4.5.6:
 
-| Category | Description |
-|----------|-------------|
-| TestInit (S00) | Startup validation, transition to S01/S02/S20 based on inputs |
-| TestFault (S01) | Soft/hard fault entry, recovery dwell, anti-flap backoff, manual reset latch |
-| TestEvUnavailable (S02) | EV unplugged/full, mode-based exit when EV reconnects |
-| TestBatteryReserve (S06) | Forecast-based blocking, scope policy (absolute vs auto-only), exit on risk clear |
-| TestDeferredWait (S10) | Waiting for cheap tariff, mode changes, battery guard preemption |
-| TestDeferredCharge (S11) | Charging during cheap tariff, tariff ends, auto-revert on EV full |
-| TestImmediateCharge (S12) | Fixed power charging, mode changes, auto-revert on EV full |
-| TestIdle (S20) | Neutral state, excess detection, mode changes, battery guard entry |
-| TestExcessDebounce (S21) | Debounce timing, excess drop resets timer, transitions to S22/S23 |
-| TestTrackExcess (S22) | Closed-loop power tracking, hysteresis exit, saturation entry, import tolerance, all exit transitions |
-| TestSaturated (S23) | Max power output, de-saturation to S22, all exit transitions |
-| TestPauseCooldown (S24) | Cooldown timer, retry via debounce, mode changes during cooldown |
-| TestHysteresis | Entry/exit thresholds, no oscillation in dead band |
-| TestAutoRevert | Mode reset on EV finish (S11, S12, S22, S23), T_revert timing, SuspendedEVSE in auto not triggering revert |
-| TestFaultClassification | Soft vs hard fault detection, staleness thresholds per mode, required signals per mode |
-| TestBatteryGuardPolicy | `battery_guard_absolute_priority` true vs false, weekend exception, margin, forecast missing |
-| TestSmoothing | Rolling median calculation, spike rejection, sample window |
-| TestRateLimiting | setpoint_min_interval_s, setpoint_max_step_w ramp, skip write on small delta |
-| TestPhaseGap | Setpoint around 3.7–4.1 kW gap, allow_1p_auto flag behavior |
+### State stay tests
 
-**Scenario-based tests** (multi-step sequences from Section 4.5.6.11, executed as parameterized tests):
+| Category | # Tests | Description |
+|----------|---------|-------------|
+| TestEVStateEnum | 3 | Enum has 4 states, str inheritance, snake_case values |
+| TestInit | 1 | Initial state is NORMAL |
+| TestNormalStays | 4 | Stays NORMAL: no wallbox, battery protection not passed, excess below min |
+| TestSolarStays | 3 | Stays SOLAR: with excess, low excess holds min_power_w, min-stay blocks S4 |
+| TestCheapStays | 2 | Stays CHEAP: expensive tariff (0W), cheap tariff (max_power_w) |
+| TestMaxStays | 2 | Stays IMMEDIATE: at max_power_w, with custom max |
 
-| Scenario | States traversed | Key assertion |
-|----------|-----------------|---------------|
-| A: Battery reserve blocks EV | S20 → S06 → S20 | Setpoint stays 0 while risk=true, resumes on clear |
-| B: Insufficient excess | S20 (stays) | No transition, setpoint = 0 |
-| C: Debounce then charge | S20 → S21 → S22 | Timer completes, setpoint = smoothed excess |
-| C2: Transient spike aborted | S20 → S21 → S20 | Debounce prevents charge start on brief spike |
-| D: Closed-loop tracking | S22 (stays) | Grid near zero with feedback |
-| E: Hysteresis prevents flapping | S22 (stays at 1300W) → S24 (at 1100W) | 200W dead band respected |
-| F: Saturated | S22 → S23 | Excess > max triggers saturation after 2 cycles |
-| G: Immediate auto-revert | S02 → S12 → S02 | Mode resets to auto_pv_excess on EV finish |
-| H: Stale EV SoC | S22 (stays) | Charging continues, no fault |
-| I: Tariff boundary | S11 → S10 → S11 | Seamless tariff transitions |
-| J: Phase gap crossing | S22 (stays) | Setpoint crosses 3.7–4.1 kW gap transparently |
+### State transition tests
+
+| Category | # Tests | Transitions covered |
+|----------|---------|---------------------|
+| TestNormalTransitions | 7 | N1 (→ IMMEDIATE), N2 (→ CHEAP), N3 (→ SOLAR), wallbox blocks, battery full override, priority |
+| TestSolarTransitions | 7 | S1 (car full), S2 (→ IMMEDIATE), S3 (→ CHEAP), S4 (battery protection after min-stay), battery full override, ev_soc=None stays, priority |
+| TestCheapTransitions | 4 | C1 (car full), C2 (mode changed to solar/immediate), ev_soc=None stays |
+| TestMaxTransitions | 4 | M1 (car full), M2 (mode changed to solar/cheap), ev_soc=None stays |
+
+### CHEAP power toggle tests
+
+| Category | # Tests | Description |
+|----------|---------|-------------|
+| TestCheapPowerToggle | 4 | Max when cheap, zero when expensive, toggle back-and-forth, custom max_power_w |
+
+### Min-stay timer tests (SOLAR)
+
+| Category | # Tests | Description |
+|----------|---------|-------------|
+| TestMinStayTimer | 7 | S4 blocked during first 15 min, S4 fires at exactly 15 min, hold min_power_w during low excess, S1/S2 fire during min-stay, entered_at set/cleared |
+
+### Excess calculation & power clamping tests (SOLAR)
+
+| Category | # Tests | Description |
+|----------|---------|-------------|
+| TestSolarPower | 7 | Clamp to min/max, round to 100W step, excess includes wallbox_power_w, low excess holds minimum, custom min/max |
+| TestRoundToStep | 4 | Round down/up/exact/midpoint |
+| TestSolarTarget | 3 | Above min, below min returns min, above max clamps |
+
+### Multi-step sequence tests
+
+| Category | # Tests | Scenarios |
+|----------|---------|-----------|
+| TestMultiStep | 3 | NORMAL → SOLAR → NORMAL (car full); full mode cycle (IMMEDIATE → NORMAL → CHEAP → NORMAL → SOLAR); SOLAR → IMMEDIATE → NORMAL → SOLAR |
+
+### wallbox_available guard tests
+
+| Category | # Tests | Description |
+|----------|---------|-------------|
+| TestWallboxAvailable | 3 | Immediate/cheap/solar all blocked when wallbox_available=False |
 
 **Run tests:**
 ```bash
@@ -2741,20 +2755,15 @@ cd energymanager && python -m pytest tests/test_ev_state_machine.py -v
 
 | ID | Test | Expected |
 |----|------|----------|
-| EV-10 | Dashboard: tap Cheap Charge | `input_select.ev_charging_mode` = `deferred_tariff` |
+| EV-10 | Dashboard: tap Cheap Charge | `input_select.ev_charging_mode` = `cheap` |
 | EV-11 | Dashboard: tap Charge Now | `input_select.ev_charging_mode` = `immediate` |
-| EV-12 | Dashboard: tap active button | `input_select.ev_charging_mode` = `auto_pv_excess` (back to default) |
-| EV-13 | Dashboard: car status, car connected, charging | Card shows power in W, green |
-| EV-14 | Dashboard: power mismatch, SOC < target | Card turns red (abs(limit - power) > 1000) |
-| EV-14b | Dashboard: power mismatch, SOC >= target | Card stays normal (car finished charging) |
-| EV-15 | Dashboard: car status, car not connected | Card shows "Not connected", grey |
-| EV-16 | Mode change while charging | New mode takes effect within ~60 s |
-| EV-17 | Battery reserve blocks auto charging | S06 active, EV stays at 0W until forecast improves |
-| EV-18 | Battery guard absolute priority blocks immediate | With flag=true, S06 preempts S12 |
-| EV-19 | Debounce prevents transient start | Brief PV spike does not start charging |
-| EV-20 | Cooldown prevents rapid cycling | After stop, charging waits T_cooldown before retry |
-| EV-21 | Weekend battery guard skip | Saturday, guard_on_weekends=false, EV charges despite low forecast |
-| EV-22 | Stale forecast blocks auto (conservative) | Forecast > 30 min old, S06 activates |
+| EV-12 | Dashboard: tap active button | `input_select.ev_charging_mode` = `solar` (back to default) |
+| EV-13 | Dashboard: car connected, charging | Card shows power in W, state = SOLAR/CHEAP/IMMEDIATE |
+| EV-14 | Mode change while charging | New mode takes effect within ~60 s (OCPP throttle) |
+| EV-15 | Battery protection blocks solar | Stays NORMAL, EV at 0W until battery_protection_passed |
+| EV-16 | Battery full, low excess | SOLAR with 1-phase min_power_w — captures every watt |
+| EV-17 | Cheap tariff toggles | CHEAP state: charges at max during cheap, pauses during expensive, no state change |
+| EV-18 | Car reaches target SOC | Returns to NORMAL from any charging state |
 
 ---
 
