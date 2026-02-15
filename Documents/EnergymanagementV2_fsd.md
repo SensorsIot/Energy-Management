@@ -2762,14 +2762,9 @@ cd energymanager && python -m pytest tests/test_ev_state_machine.py -v
 
 See **Section 1.10** for the full configuration architecture.
 
-## E.1 Secrets (Configuration UI)
+Secrets (InfluxDB token, Telegram credentials) are entered in the HA add-on Configuration UI — see Section 1.11.2. They are **not** stored in the YAML file below.
 
-Enter in **Settings -> Add-ons -> EnergyManager -> Configuration**:
-- `influxdb_token` (required)
-- `telegram_bot_token` (optional — for error alerts)
-- `telegram_chat_id` (optional — for error alerts)
-
-## E.2 Non-Secrets (`/config/energymanager.yaml`)
+## E.1 Non-Secrets (`/config/energymanager.yaml`)
 
 Editable via File Editor at `/addon_configs/energymanager/energymanager.yaml`:
 
