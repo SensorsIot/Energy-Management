@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 2.1 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 2.2 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -89,6 +89,7 @@ EnergyManager reads:                    EnergyManager writes:
   binary_sensor.wallbox_connected
   sensor.wallbox_transaction
   sensor.wallbox_phases
+  binary_sensor.wallbox_single_phase_supported
 ```
 
 The EnergyManager decides charging power every minute based on:
@@ -111,6 +112,7 @@ Configured via HA add-on options (`/data/options.json`):
 | `min_current_a` | int | 6 | Minimum charging current |
 | `max_current_a` | int | 16 | Maximum charging current |
 | `phase_switch_entity` | string? | `""` | HA switch entity for EARU relay (empty = disabled) |
+| `single_phase_supported` | bool | `false` | Wallbox supports 1-phase charging. Exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager to read. Requires `phase_switch_entity` to be set. |
 
 ## 4. Functional Requirements
 
@@ -164,6 +166,7 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 | `binary_sensor.wallbox_connected` | binary_sensor | - | Wallbox WebSocket connected |
 | `sensor.wallbox_transaction` | sensor | - | `idle` / `charging` |
 | `sensor.wallbox_phases` | sensor | - | Active phase count: `1` or `3` |
+| `binary_sensor.wallbox_single_phase_supported` | binary_sensor | - | From config: wallbox supports 1-phase charging |
 
 #### 4.3.2 Control Entities (set by EnergyManager)
 
@@ -395,3 +398,4 @@ ocpp-server/
 | 1.9 | 2026-02-12 | Verified AcTec wallbox behavior via direct testing. Corrected start sequence: SetChargingProfile MUST precede RemoteStartTransaction. Removed Reset and RemoteStopTransaction. Documented reconnect behavior, autonomous charging, per-phase MeterValues summing. Updated test cases. |
 | 2.0 | 2026-02-12 | Post-connect no longer auto-starts transactions. Transactions start only when EnergyManager requests power. Added `_setup_complete` event to prevent race between post-connect setup and control watcher. |
 | 2.1 | 2026-02-12 | Wallbox does not send MeterValues with 0W when paused. Server now zeros power on StatusNotification: SuspendedEVSE/SuspendedEV. |
+| 2.2 | 2026-02-15 | Added `single_phase_supported` config flag, exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager phase selection. |

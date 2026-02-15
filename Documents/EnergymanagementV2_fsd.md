@@ -1853,9 +1853,9 @@ The state machine controls **only the wallbox charging setpoint** (power in watt
 | # | State | What happens | Output |
 |---|-------|-------------|--------|
 | 1 | **NORMAL** | No EV charging. SUN2000 has full control. | `target_power=0` |
-| 2 | **SOLAR_CHARGING** | Variable power from solar excess. | `target_power=clamp(excess, min, max)` |
+| 2 | **SOLAR** | Variable power from solar excess. | `target_power=clamp(excess, min, max)` where excess = `measured_excess_w` if battery full, else `solar_excess_w` |
 | 3 | **CHEAP** | Cheap-tariff mode. Charges at max during cheap tariff, pauses during expensive. | `max_power_w` when cheap, `0` when expensive |
-| 4 | **MAX_CHARGING** | Immediate mode. Charging at maximum power regardless of tariff. | `target_power=max_power_w` |
+| 4 | **IMMEDIATE** | Immediate mode. Charging at maximum power regardless of tariff. | `target_power=max_power_w` |
 
 Initial state: **NORMAL**
 
@@ -1871,28 +1871,34 @@ The machine stays in its current state unless one of the listed conditions trigg
 
 | # | Condition | → New State |
 |---|-----------|-------------|
-| N1 | `charging_mode == "immediate" AND wallbox_available` | MAX_CHARGING |
+| N1 | `charging_mode == "immediate" AND wallbox_available` | IMMEDIATE |
 | N2 | `charging_mode == "cheap" AND wallbox_available` | CHEAP |
-| N3 | `charging_mode == "solar" AND wallbox_available AND (battery_protection_passed OR battery_soc >= 100) AND excess >= min_power_w` | SOLAR_CHARGING |
+| N3 | `charging_mode == "solar" AND wallbox_available AND (battery_protection_passed OR battery_soc >= 100) AND solar_excess_w >= min_power_w` | SOLAR |
 
 ---
 
-**SOLAR_CHARGING**
+**SOLAR**
 
-*Stays in SOLAR_CHARGING unless:*
+*Stays in SOLAR unless:*
 
 Records `entered_at` timestamp on entry. Always stays at least 15 minutes. Calculates target power each cycle.
 
 | # | Condition | → New State | Notes |
 |---|-----------|-------------|-------|
 | S1 | `ev_soc is not None AND ev_soc >= ev_target_soc` | NORMAL | Car full |
-| S2 | `charging_mode == "immediate"` | MAX_CHARGING | User switched mode |
+| S2 | `charging_mode == "immediate"` | IMMEDIATE | User switched mode |
 | S3 | `charging_mode == "cheap"` | CHEAP | User switched mode |
 | S4 | `time_in_state >= 15 min AND NOT battery_protection_passed AND battery_soc < 100` | NORMAL | Battery protection kicks in |
 
-**Power while in SOLAR_CHARGING:**
+**Power while in SOLAR:**
 ```
-excess = -grid_power_w + wallbox_power_w
+if battery_soc >= 100:
+    # Battery full — grid meter reflects true excess (closed-loop)
+    excess = -grid_power_w + wallbox_power_w          # measured_excess_w
+else:
+    # Battery charging — SUN2000 hides available power (open-loop)
+    excess = pv_power_w - household_load_w             # solar_excess_w
+
 if excess >= min_power_w:
     target = round_to_step(clamp(excess, min_power_w, max_power_w), 100)
 else:
@@ -1914,9 +1920,9 @@ Power toggles internally: `max_power_w` when `is_cheap_tariff`, `0` when expensi
 
 ---
 
-**MAX_CHARGING**
+**IMMEDIATE**
 
-*Stays in MAX_CHARGING unless:*
+*Stays in IMMEDIATE unless:*
 
 | # | Condition | → New State | Notes |
 |---|-----------|-------------|-------|
@@ -1931,36 +1937,27 @@ Power toggles internally: `max_power_w` when `is_cheap_tariff`, `0` when expensi
 
 Single boolean: wallbox entity exists AND WebSocket connected AND not faulted AND car plugged in (status != "Available").
 
-**`excess`**
+**`solar_excess_w`** (open-loop)
 
-Calculated each cycle: `excess = -grid_power_w + wallbox_power_w`
+Calculated each cycle: `solar_excess_w = pv_power_w - household_load_w`. Includes power currently charging the battery. Used for entry decision (N3) because SUN2000 will automatically reduce battery charging when EV demand appears.
 
-**Min-stay timer (SOLAR_CHARGING only)**
+**`measured_excess_w`** (closed-loop)
 
-- Record `entered_at` on entry to SOLAR_CHARGING
+Calculated each cycle: `measured_excess_w = -grid_power_w + wallbox_power_w`. What the grid meter actually sees. Only accurate when battery is full — when battery is charging, SUN2000 absorbs excess, making this value artificially low. Used for power adjustment in SOLAR state when `battery_soc >= 100`.
+
+**`forecasted_excess_kwh`**
+
+Computed by battery optimizer every 15 minutes. Forecasted excess energy (kWh) from now until next cheap tariff period — derived from SOC simulation as energy that would be exported after battery reaches 100%. Determines phase selection: high forecast → 3-phase minimum, low forecast → 1-phase minimum (if supported).
+
+**Min-stay timer (SOLAR only)**
+
+- Record `entered_at` on entry to SOLAR
 - S4 can only fire when `time_in_state >= 15 min`
-- During min-stay, if excess < min_power_w, output min_power_w (keep charging at minimum)
+- During min-stay, continue to calculate charging power as before
 
 #### 4.5.6.3 Required Signals
 
 **Inputs** (`EVInputs`):
-
-```python
-@dataclass(frozen=True)
-class EVInputs:
-    wallbox_available: bool
-    wallbox_power_w: float
-    wallbox_status: str               # for OCPP status logging only
-    battery_protection_passed: bool
-    battery_soc: float
-    ev_soc: float | None
-    ev_target_soc: float
-    charging_mode: str                # "solar" / "immediate" / "cheap"
-    is_cheap_tariff: bool
-    grid_power_w: float
-    min_power_w: float                # default 1400W
-    max_power_w: float                # default 11000W
-```
 
 | Input | HA Entity | Description |
 |-------|-----------|-------------|
@@ -1973,16 +1970,40 @@ class EVInputs:
 | `ev_target_soc` | `sensor.ev_target_soc` | Target EV SOC (%) |
 | `charging_mode` | `input_select.ev_charging_mode` | `"solar"` / `"immediate"` / `"cheap"` |
 | `is_cheap_tariff` | Computed from tariff schedule (Section 4.1.4) | True during cheap tariff window |
-| `grid_power_w` | `sensor.grid_power` (preferred) or `sensor.power_meter_active_power` (fallback) | Grid power: positive = import, negative = export |
-| `min_power_w` | Configuration | Minimum charging power, default 1400W |
+| `grid_power_w` | `sensor.grid_power` (preferred) or `sensor.power_meter_active_power` (fallback) | Grid power (W): positive = import, negative = export. Both include wallbox consumption — gPlug measures at the utility meter; DTSU is corrected by Modbus Proxy (`dtsu + wallbox_power`) before SUN2000 reports it. |
+| `pv_power_w` | `sensor.solar_pv_total_ac_power` | Total PV AC output (Huawei + Enphase) (W) |
+| `household_load_w` | `sensor.phase_1_power` + `sensor.phase_2_power` + `sensor.phase_3_power` | Household consumption from Shelly 3EM (W) |
+| `forecasted_excess_kwh` | Computed by battery optimizer (every 15 min) | Forecasted excess energy (kWh) from now until next cheap tariff period. Derived from SOC simulation: energy that would be exported after battery reaches 100%. |
+| `single_phase_supported` | `binary_sensor.wallbox_single_phase_supported` | Wallbox supports 1-phase charging (from OCPP server config) |
+| `min_power_1p_w` | Configuration | 1-phase minimum charging power, default 1400W (6A × 230V) |
+| `min_power_3p_w` | Configuration | 3-phase minimum charging power, default 4200W (6A × 230V × 3) |
 | `max_power_w` | Configuration | Maximum charging power, default 11000W |
+| `phase_threshold_kwh` | Configuration | Forecasted excess threshold for 3-phase selection, default 10 kWh |
 
 **Intermediate signals** (computed each cycle):
 
-| Signal | Calculation | Description |
-|--------|-------------|-------------|
-| `excess` | `-grid_power_w + wallbox_power_w` | Closed-loop measured excess: actual power available for EV |
-| `time_in_state` | `now - entered_at` | Time since entering SOLAR_CHARGING (seconds) |
+| Signal | Calculation | Use | Description |
+|--------|-------------|-----|-------------|
+| `solar_excess_w` | `pv_power_w - household_load_w` | Entry decision (N3), power adjustment when battery not full | Open-loop excess: includes power currently charging the battery. When EV charging starts, SUN2000 automatically reduces battery charging to maintain grid ≈ 0, making this power available for EV. |
+| `measured_excess_w` | `-grid_power_w + wallbox_power_w` | Power adjustment when battery full | Closed-loop excess: what the grid meter actually sees. Only accurate when battery is full — otherwise SUN2000 absorbs excess into battery, making this value artificially low. |
+| `min_power_w` | See phase selection logic below | Entry threshold and hold minimum | Effective minimum: depends on forecast and battery state. |
+| `time_in_state` | `now - entered_at` | Min-stay timer | Time since entering SOLAR (seconds) |
+
+**Phase selection** (re-evaluated every 15 min by battery optimizer):
+
+```
+if battery_soc >= 100:
+    # Battery full — capture any excess, use lowest possible minimum
+    min_power_w = min_power_1p_w if single_phase_supported else min_power_3p_w
+elif single_phase_supported AND forecasted_excess_kwh < phase_threshold_kwh:
+    # Marginal forecast — use 1-phase to capture smaller excess
+    min_power_w = min_power_1p_w
+else:
+    # Good forecast or no 1-phase support — use 3-phase minimum
+    min_power_w = min_power_3p_w
+```
+
+The OCPP server handles the actual phase switching automatically: setpoint < 4140W → 1-phase relay, ≥ 4140W → 3-phase relay (Section 4.3.3 of OCPP server FSD).
 
 **Output** (`EVOutput`):
 
