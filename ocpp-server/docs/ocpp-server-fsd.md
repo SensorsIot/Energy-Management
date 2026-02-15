@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 2.2 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 2.3 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -113,6 +113,7 @@ Configured via HA add-on options (`/data/options.json`):
 | `max_current_a` | int | 16 | Maximum charging current |
 | `phase_switch_entity` | string? | `""` | HA switch entity for EARU relay (empty = disabled) |
 | `single_phase_supported` | bool | `false` | Wallbox supports 1-phase charging. Exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager to read. Requires `phase_switch_entity` to be set. |
+| `power_update_interval_s` | int | 60 | Minimum seconds between `SetChargingProfile` commands. When `number.wallbox_power_limit` changes within this interval, the new value is queued and sent when the interval expires. No exceptions — all changes throttled uniformly. |
 
 ## 4. Functional Requirements
 
@@ -177,6 +178,8 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 #### 4.3.3 SetChargingProfile and Phase Switching
 
 When `number.wallbox_power_limit` changes:
+
+0. **Throttle check:** If less than `power_update_interval_s` seconds have passed since the last `SetChargingProfile`, queue the new value and send it when the interval expires. No exceptions — all changes are throttled uniformly to prevent oscillation.
 1. **Auto-transaction management:**
    - Power 0 → >0 (no active transaction): send `SetChargingProfile` first, then `RemoteStartTransaction` (see Section 4.5)
    - Power >0 → 0: send `SetChargingProfile` with 0A (pause → `SuspendedEVSE`), transaction stays alive
@@ -324,6 +327,9 @@ A `_setup_complete` event prevents `_watch_controls` from sending commands until
 | TC-14 | Wallbox reconnects after server restart | `StopTransaction` (reason=PowerLoss) received, previous session closed cleanly |
 | TC-15 | Server dies while charging | Wallbox continues charging autonomously, 0A profile needed to stop on reconnect |
 | TC-16 | Full charge cycle | Profile 6A → Start → Charging → Pause 0A → SuspendedEVSE → Resume 10A → Charging → Stop 0A → SuspendedEVSE |
+| TC-17 | Power limit changes within throttle interval | Only last value sent when interval expires. No intermediate `SetChargingProfile` commands. |
+| TC-18 | Power limit set to 0W during throttle interval | 0W queued, sent when interval expires (no bypass) |
+| TC-19 | Rapid 0W → >0W → 0W within throttle interval | Only final value (0W) sent when interval expires. Prevents oscillation. |
 
 ## 7. Calibration Data
 
@@ -399,3 +405,4 @@ ocpp-server/
 | 2.0 | 2026-02-12 | Post-connect no longer auto-starts transactions. Transactions start only when EnergyManager requests power. Added `_setup_complete` event to prevent race between post-connect setup and control watcher. |
 | 2.1 | 2026-02-12 | Wallbox does not send MeterValues with 0W when paused. Server now zeros power on StatusNotification: SuspendedEVSE/SuspendedEV. |
 | 2.2 | 2026-02-15 | Added `single_phase_supported` config flag, exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager phase selection. |
+| 2.3 | 2026-02-15 | Added `power_update_interval_s` throttle (default 60s) to rate-limit `SetChargingProfile` commands. No exceptions — all changes throttled uniformly to prevent oscillation. |

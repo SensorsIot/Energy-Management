@@ -1881,14 +1881,12 @@ The machine stays in its current state unless one of the listed conditions trigg
 
 *Stays in SOLAR unless:*
 
-Records `entered_at` timestamp on entry. Always stays at least 15 minutes. Calculates target power each cycle.
-
 | # | Condition | → New State | Notes |
 |---|-----------|-------------|-------|
 | S1 | `ev_soc is not None AND ev_soc >= ev_target_soc` | NORMAL | Car full |
 | S2 | `charging_mode == "immediate"` | IMMEDIATE | User switched mode |
 | S3 | `charging_mode == "cheap"` | CHEAP | User switched mode |
-| S4 | `time_in_state >= 15 min AND NOT battery_protection_passed AND battery_soc < 100` | NORMAL | Battery protection kicks in |
+| S4 | `NOT battery_protection_passed AND battery_soc < 100` | NORMAL | Battery protection kicks in |
 
 **Power while in SOLAR:**
 ```
@@ -1902,7 +1900,7 @@ else:
 if excess >= min_power_w:
     target = round_to_step(clamp(excess, min_power_w, max_power_w), 100)
 else:
-    target = min_power_w       # hold minimum (wallbox won't charge below this anyway)
+    target = 0                 # pause until excess recovers
 ```
 
 ---
@@ -1949,11 +1947,6 @@ Calculated each cycle: `measured_excess_w = -grid_power_w + wallbox_power_w`. Wh
 
 Computed by battery optimizer every 15 minutes. Forecasted excess energy (kWh) from now until next cheap tariff period — derived from SOC simulation as energy that would be exported after battery reaches 100%. Determines phase selection: high forecast → 3-phase minimum, low forecast → 1-phase minimum (if supported).
 
-**Min-stay timer (SOLAR only)**
-
-- Record `entered_at` on entry to SOLAR
-- S4 can only fire when `time_in_state >= 15 min`
-- During min-stay, continue to calculate charging power as before
 
 #### 4.5.6.3 Required Signals
 
@@ -1987,7 +1980,6 @@ Computed by battery optimizer every 15 minutes. Forecasted excess energy (kWh) f
 | `solar_excess_w` | `pv_power_w - household_load_w` | Entry decision (N3), power adjustment when battery not full | Open-loop excess: includes power currently charging the battery. When EV charging starts, SUN2000 automatically reduces battery charging to maintain grid ≈ 0, making this power available for EV. |
 | `measured_excess_w` | `-grid_power_w + wallbox_power_w` | Power adjustment when battery full | Closed-loop excess: what the grid meter actually sees. Only accurate when battery is full — otherwise SUN2000 absorbs excess into battery, making this value artificially low. |
 | `min_power_w` | See phase selection logic below | Entry threshold and hold minimum | Effective minimum: depends on forecast and battery state. |
-| `time_in_state` | `now - entered_at` | Min-stay timer | Time since entering SOLAR (seconds) |
 
 **Phase selection** (re-evaluated every 15 min by battery optimizer):
 
