@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.18"
+__version__ = "1.6.19"
 
 import json
 import logging
@@ -149,6 +149,9 @@ class EnergyManager:
 
         # Track last discharge state to only send signal on change
         self.last_discharge_allowed = None
+        # Two independent discharge-block reasons (OR logic)
+        self._discharge_blocked_by_protection = False
+        self._discharge_blocked_by_ev = False
 
         # SimulationWriter for FSD 4.2.3 output
         self.simulation_writer = SimulationWriter(
@@ -376,6 +379,23 @@ class EnergyManager:
             self.last_discharge_allowed = discharge_allowed
             logger.info(f"Battery control set: {self.discharge_control_entity} = {target_value}W (unverified)")
 
+    def _update_discharge_control(self):
+        """Combine both discharge-block flags and apply if changed."""
+        discharge_allowed = not (
+            self._discharge_blocked_by_protection or self._discharge_blocked_by_ev
+        )
+        if discharge_allowed != self.last_discharge_allowed:
+            reason = []
+            if self._discharge_blocked_by_protection:
+                reason.append("battery protection")
+            if self._discharge_blocked_by_ev:
+                reason.append("EV charging")
+            logger.info(
+                f"Discharge {'allowed' if discharge_allowed else 'blocked'}"
+                f"{' by ' + ' + '.join(reason) if reason else ''}"
+            )
+            self.control_battery(discharge_allowed)
+
     def run_optimization(self):
         """Run battery optimization cycle."""
         logger.info("=" * 50)
@@ -445,8 +465,9 @@ class EnergyManager:
             self.write_energy_balance(forecast)
             self.write_decision(decision, current_soc)
 
-            # Control battery
-            self.control_battery(decision.discharge_allowed)
+            # Control battery (protection flag — combined with EV flag)
+            self._discharge_blocked_by_protection = not decision.discharge_allowed
+            self._update_discharge_control()
 
             # Calculate appliance signal using full simulation
             # (checks if battery has enough energy to run appliance without grid import)
@@ -528,6 +549,9 @@ class EnergyManager:
 
         if ev_mode not in ("immediate", "cheap"):
             # Solar mode — let solar excess logic handle it
+            if self._discharge_blocked_by_ev:
+                self._discharge_blocked_by_ev = False
+                self._update_discharge_control()
             self._ev_idle_since = None
             self._last_mode_error_notified = None
             return False
@@ -612,6 +636,16 @@ class EnergyManager:
                 "icon": "mdi:ev-station",
             },
         )
+
+        # Block battery discharge while actively charging in immediate/cheap mode
+        if result.target_power_w > 0:
+            if not self._discharge_blocked_by_ev:
+                self._discharge_blocked_by_ev = True
+                self._update_discharge_control()
+        else:
+            if self._discharge_blocked_by_ev:
+                self._discharge_blocked_by_ev = False
+                self._update_discharge_control()
 
         # Auto-revert: charging complete → switch back to solar
         if result.revert_to_solar:

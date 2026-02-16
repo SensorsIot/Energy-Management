@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.15
+**Version:** 2.17
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -1549,13 +1549,36 @@ During cheap tariff (night), SOC can drop to any level since grid electricity is
 
 ### 4.3.2 Algorithm
 
-```
-Every 15 minutes:
+The discharge decision is driven by **two independent block flags** combined with OR logic:
 
+| Flag | Set by | Meaning |
+|------|--------|---------|
+| `_discharge_blocked_by_protection` | `run_optimization()` (every 15 min) | SOC forecast too low to safely discharge |
+| `_discharge_blocked_by_ev` | `control_ev_charging_mode()` (every 10 s) | EV actively charging in immediate/cheap mode |
+
+**Combined decision:**
+```
+discharge_allowed = NOT (blocked_by_protection OR blocked_by_ev)
+```
+
+Each mechanism only touches its own flag. `control_battery()` is called with the combined result whenever either flag changes.
+
+**Truth table:**
+
+| Protection | EV Charging | Result |
+|-----------|-------------|--------|
+| off | off | discharge allowed |
+| **on** | off | discharge blocked |
+| off | **on** | discharge blocked |
+| **on** | **on** | discharge blocked |
+
+#### Protection flag — set every 15 minutes by `run_optimization()`
+
+```
 1. CHECK CURRENT TARIFF
    IF expensive tariff (06:00-21:00):
-      → Discharge ALLOWED (we're in the period we're protecting)
-      → Skip to step 4
+      → blocked_by_protection = False
+      → Skip to step 3
 
 2. SIMULATE SOC (only during cheap tariff 21:00-06:00)
    - Simulate from NOW until end of next expensive period (21:00)
@@ -1563,21 +1586,31 @@ Every 15 minutes:
    - Use current SOC as starting point
    - Apply PV and load forecasts
 
-3. CHECK: Does SOC stay >= min_soc during ALL expensive hours?
+   CHECK: Does SOC stay >= min_soc during ALL expensive hours?
    - Extract minimum SOC from all 06:00-21:00 periods in simulation
    - Ignore SOC values during cheap hours (21:00-06:00)
    - Ignore weekend/holiday days entirely (all-day cheap → no expensive hours)
 
    IF min_soc_in_expensive_hours >= min_soc (10%):
-      → Discharge ALLOWED (safe to use battery now)
+      → blocked_by_protection = False
    ELSE:
-      → Discharge BLOCKED (preserve energy for expensive hours)
+      → blocked_by_protection = True
 
-4. SEND CONTROL SIGNAL (only when decision changes)
-   IF discharge_allowed != last_discharge_allowed:
-      → Set number.battery_maximum_discharging_power
-      → Log state change
+3. APPLY combined decision (see above)
 ```
+
+#### EV flag — set every 10 seconds by `control_ev_charging_mode()`
+
+```
+IF charging_mode in ("immediate", "cheap") AND target_power > 0:
+   → blocked_by_ev = True
+ELSE:
+   → blocked_by_ev = False
+
+APPLY combined decision (see above)
+```
+
+**Why block discharge during immediate/cheap EV charging:** When the wallbox draws significant power (e.g. 5 kW), the OCPP server publishes this to the Modbus Proxy, which corrects the DTSU reading so SUN2000 sees high household load and discharges the battery to cover it — wasting stored energy that should be preserved.
 
 ### 4.3.3 Key Design Decisions
 
@@ -1600,9 +1633,10 @@ Every 15 minutes:
 - The min_soc reserve (10%) ensures capacity for forecast errors and unexpected loads
 
 **Signal hysteresis:**
-- Control signal only sent when decision changes (not every 15 minutes)
+- Control signal only sent when the combined decision changes (not every cycle)
 - Reduces unnecessary Modbus communication with inverter
 - Prevents rapid on/off cycling
+- Each flag setter only calls `_update_discharge_control()` when its own flag actually changes
 
 ### 4.3.4 Self-Correcting Behavior
 
@@ -1637,6 +1671,8 @@ data:
 ### 4.3.6 Test Cases
 
 See [Appendix D.1 — Battery Discharge Optimizer Tests](#d1-battery-discharge-optimizer-tests). Test file: `energymanager/tests/test_battery_optimizer.py` (14 tests passing as of v1.5.0).
+
+See [Appendix D.4 — Discharge Blocking Tests](#d4-discharge-blocking-tests). Test file: `energymanager/tests/test_discharge_blocking.py` (17 tests passing as of v1.6.19).
 
 ---
 
@@ -1854,8 +1890,8 @@ The state machine controls **only the wallbox charging setpoint** (power in watt
 |---|-------|-------------|--------|
 | 1 | **NORMAL** | No EV charging. SUN2000 has full control. | `target_power=0` |
 | 2 | **SOLAR** | Variable power from solar excess. | `target_power=clamp(excess, min, max)` where excess = `measured_excess_w` if battery full, else `solar_excess_w` |
-| 3 | **CHEAP** | Cheap-tariff mode. Charges at max during cheap tariff, pauses during expensive. | `max_power_w` when cheap, `0` when expensive |
-| 4 | **IMMEDIATE** | Immediate mode. Charging at maximum power regardless of tariff. | `target_power=max_power_w` |
+| 3 | **CHEAP** | Cheap-tariff mode. Charges at max during cheap tariff, pauses during expensive. Battery discharge blocked while charging. | `max_power_w` when cheap, `0` when expensive |
+| 4 | **IMMEDIATE** | Immediate mode. Charging at maximum power regardless of tariff. Battery discharge blocked while charging. | `target_power=max_power_w` |
 
 Initial state: **NORMAL**
 
@@ -2767,6 +2803,58 @@ cd energymanager && python -m pytest tests/test_ev_state_machine.py -v
 
 ---
 
+## D.4 Discharge Blocking Tests
+
+Test file: `energymanager/tests/test_discharge_blocking.py`
+
+Tests the two-flag discharge blocking logic (Section 4.3.2) where battery protection and EV charging independently block discharge, combined with OR logic.
+
+#### `_update_discharge_control()` — OR Truth Table
+
+| Test | Description | Protection | EV | Expected |
+|------|-------------|-----------|-----|----------|
+| `test_both_off_allows_discharge` | Neither flag set | off | off | `control_battery(True)` |
+| `test_protection_blocks` | Protection flag only | on | off | `control_battery(False)` |
+| `test_ev_blocks` | EV flag only | off | on | `control_battery(False)` |
+| `test_both_block` | Both flags set | on | on | `control_battery(False)` |
+| `test_no_call_when_unchanged` | Already allowed, still allowed | off | off | No call (unchanged) |
+| `test_calls_on_transition_allow_to_block` | Was allowed, now blocked | — | on | `control_battery(False)` |
+| `test_calls_on_transition_block_to_allow` | Was blocked, now allowed | off | off | `control_battery(True)` |
+
+#### EV Flag — Immediate/Cheap Mode Charging
+
+| Test | Description | Expected |
+|------|-------------|----------|
+| `test_immediate_charging_blocks_discharge` | Immediate mode, power > 0 | `_discharge_blocked_by_ev = True`, discharge blocked |
+| `test_immediate_zero_power_clears_flag` | Immediate mode, power = 0 | `_discharge_blocked_by_ev = False`, discharge allowed |
+| `test_flag_not_toggled_when_already_set` | Flag already True, power > 0 | No redundant `control_battery` call |
+| `test_flag_not_toggled_when_already_clear` | Flag already False, power = 0 | No redundant `control_battery` call |
+
+#### Solar Mode Clears EV Flag
+
+| Test | Description | Expected |
+|------|-------------|----------|
+| `test_solar_mode_clears_ev_flag` | Switch from immediate to solar | `_discharge_blocked_by_ev = False`, discharge allowed |
+| `test_solar_mode_noop_when_flag_already_clear` | Solar mode, flag already False | No `control_battery` call |
+
+#### Combined: Protection + EV Interaction
+
+| Test | Description | Expected |
+|------|-------------|----------|
+| `test_ev_stops_but_protection_keeps_blocked` | EV finishes but protection active | Stays blocked (no call — unchanged) |
+| `test_protection_clears_but_ev_keeps_blocked` | Protection clears but EV charging | Stays blocked (no call — unchanged) |
+| `test_both_clear_allows_discharge` | Both flags cleared | `control_battery(True)` |
+| `test_ev_starts_during_protection_block` | EV starts while protection blocks | Stays blocked (no call — unchanged) |
+
+**Run tests:**
+```bash
+cd energymanager && python -m pytest tests/test_discharge_blocking.py -v
+```
+
+**All 17 tests passing** (as of v1.6.19)
+
+---
+
 # Appendix E: EnergyManager Configuration
 
 See **Section 1.10** for the full configuration architecture.
@@ -2829,9 +2917,10 @@ log_level: "info"
 
 **End of Document**
 
-*Version 2.16 - February 2026*
+*Version 2.17 - February 2026*
 
 **Changelog:**
+- v2.17: Two-flag battery discharge blocking — EV charging in immediate/cheap mode now independently blocks battery discharge (Section 4.3.2); prevents SUN2000 from draining battery to cover wallbox load via DTSU correction; 17 new tests (Appendix D.4)
 - v2.16: Added sections 4.7 (InfluxDB Storage), 4.8 (Dashboard Examples), 4.9 (Error Handling and Notifications), Chapter 5 (Forecast Accuracy Tracking), Appendix E (EnergyManager Configuration). Updated EV config for 4-state machine (phase-based min power, phase_threshold_kwh). Updated EV decision table to include EV charging forecast dependency.
 - v2.15: FSD improvements — signal conventions box; weekend battery guard as explicit policy (`battery_guard_on_weekends`); `allow_1p_auto` flag for 1φ vs 3φ minimum; `effective_min_power_w` derived threshold; S06 forecast contract (measurement, field, staleness, missing=conservative); `battery_guard_margin_pct` (2% safety margin); smoothing defined (rolling median, 4 samples); rate limiting formalized (`setpoint_min_interval_s`, `setpoint_max_step_w`, `setpoint_step_w`); import tolerance (`import_tolerance_w`, `import_tolerance_cycles`); auto-revert trigger refined (only when setpoint > 0 recently); mode reset write-back semantics (one-shot, retry, idempotency); fault required-signals-per-mode; hard fault test-setpoint procedure; anti-flap table; S02 renamed EV_UNAVAILABLE; state priority order; scenario-based test table; edge-case worked examples (H: stale SoC, I: tariff boundary, J: phase gap)
 - v2.14: Redesigned EV state machine — states represent charging behavior, not device status (Section 4.5.6); 12 states in 3 groups (base/policy/PV-excess); debounce (S21), hysteresis (200W), cooldown (S24) prevent oscillation; soft/hard fault classification with recovery dwell and anti-flap; battery reserve guard with configurable scope policy; mode renamed to auto_pv_excess/immediate/deferred_tariff; auto-revert on EV finish
