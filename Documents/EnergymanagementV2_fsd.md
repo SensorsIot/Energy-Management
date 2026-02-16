@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.17
+**Version:** 2.18
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -1874,7 +1874,7 @@ The state machine controls **only the wallbox charging setpoint** (power in watt
 **Primary goals:**
 1. **Maximize self-consumption:** use PV surplus for battery first (handled by SUN2000), then EV
 2. **Avoid export** when feasible; accept export when unavoidable (battery full/power-limited and EV at max)
-3. **Protect battery reserve:** if battery protection has not passed (forecast SOC too low), block solar EV charging until battery is full or protection clears
+3. **Monitor battery reserve:** battery protection status is reported to the dashboard for monitoring, but solar excess is always used for EV charging when available (SUN2000 gives the battery first priority via zero-export control)
 
 **Actuation constraints:**
 - Wallbox accepts power setpoint in range `[min_power_w .. max_power_w]` (configurable per installation)
@@ -1909,7 +1909,7 @@ The machine stays in its current state unless one of the listed conditions trigg
 |---|-----------|-------------|
 | N1 | `charging_mode == "immediate" AND wallbox_available` | IMMEDIATE |
 | N2 | `charging_mode == "cheap" AND wallbox_available` | CHEAP |
-| N3 | `charging_mode == "solar" AND wallbox_available AND (battery_protection_passed OR battery_soc >= 100) AND solar_excess_w >= min_power_w` | SOLAR |
+| N3 | `charging_mode == "solar" AND wallbox_available AND solar_excess_w >= min_power_w` | SOLAR |
 
 ---
 
@@ -1922,7 +1922,6 @@ The machine stays in its current state unless one of the listed conditions trigg
 | S1 | `ev_soc is not None AND ev_soc >= ev_target_soc` | NORMAL | Car full |
 | S2 | `charging_mode == "immediate"` | IMMEDIATE | User switched mode |
 | S3 | `charging_mode == "cheap"` | CHEAP | User switched mode |
-| S4 | `NOT battery_protection_passed AND battery_soc < 100` | NORMAL | Battery protection kicks in |
 
 **Power while in SOLAR:**
 ```
@@ -1993,7 +1992,7 @@ Computed by battery optimizer every 15 minutes. Forecasted excess energy (kWh) f
 | `wallbox_available` | Derived from `binary_sensor.wallbox_connected`, `sensor.wallbox_status` | Wallbox exists AND connected AND not faulted AND car plugged in |
 | `wallbox_power_w` | `sensor.wallbox_power` | Current wallbox charging power (W) |
 | `wallbox_status` | `sensor.wallbox_status` | OCPP status string (logging only) |
-| `battery_protection_passed` | Computed upstream | Battery forecast module output |
+| `battery_protection_passed` | Computed upstream | Battery forecast module output (informational — published to dashboard, does not gate solar charging) |
 | `battery_soc` | `sensor.battery_state_of_capacity` | Battery state of charge (%) |
 | `ev_soc` | `sensor.smart_battery` | EV battery SOC (%), None if unavailable |
 | `ev_target_soc` | `sensor.ev_target_soc` | Target EV SOC (%) |
@@ -2728,7 +2727,7 @@ cd energymanager && python -m pytest tests/test_appliance_signal.py -v
 
 Test file: `energymanager/tests/test_ev_state_machine.py`
 
-**70 unit tests** organized by state, covering all transitions defined in Section 4.5.6:
+**66 unit tests** organized by state, covering all transitions defined in Section 4.5.6:
 
 ### State stay tests
 
@@ -2736,8 +2735,8 @@ Test file: `energymanager/tests/test_ev_state_machine.py`
 |----------|---------|-------------|
 | TestEVStateEnum | 3 | Enum has 4 states, str inheritance, snake_case values |
 | TestInit | 1 | Initial state is NORMAL |
-| TestNormalStays | 4 | Stays NORMAL: no wallbox, battery protection not passed, excess below min |
-| TestSolarStays | 3 | Stays SOLAR: with excess, low excess holds min_power_w, min-stay blocks S4 |
+| TestNormalStays | 4 | Stays NORMAL: no wallbox, solar enters without battery protection, excess below min |
+| TestSolarStays | 3 | Stays SOLAR: with excess, low excess holds min_power_w, stays regardless of battery protection |
 | TestCheapStays | 2 | Stays CHEAP: expensive tariff (0W), cheap tariff (max_power_w) |
 | TestMaxStays | 2 | Stays IMMEDIATE: at max_power_w, with custom max |
 
@@ -2745,8 +2744,8 @@ Test file: `energymanager/tests/test_ev_state_machine.py`
 
 | Category | # Tests | Transitions covered |
 |----------|---------|---------------------|
-| TestNormalTransitions | 7 | N1 (→ IMMEDIATE), N2 (→ CHEAP), N3 (→ SOLAR), wallbox blocks, battery full override, priority |
-| TestSolarTransitions | 7 | S1 (car full), S2 (→ IMMEDIATE), S3 (→ CHEAP), S4 (battery protection after min-stay), battery full override, ev_soc=None stays, priority |
+| TestNormalTransitions | 7 | N1 (→ IMMEDIATE), N2 (→ CHEAP), N3 (→ SOLAR), wallbox blocks, battery protection ignored, priority |
+| TestSolarTransitions | 5 | S1 (car full), S2 (→ IMMEDIATE), S3 (→ CHEAP), ev_soc=None stays, priority |
 | TestCheapTransitions | 4 | C1 (car full), C2 (mode changed to solar/immediate), ev_soc=None stays |
 | TestMaxTransitions | 4 | M1 (car full), M2 (mode changed to solar/cheap), ev_soc=None stays |
 
@@ -2760,7 +2759,7 @@ Test file: `energymanager/tests/test_ev_state_machine.py`
 
 | Category | # Tests | Description |
 |----------|---------|-------------|
-| TestMinStayTimer | 7 | S4 blocked during first 15 min, S4 fires at exactly 15 min, hold min_power_w during low excess, S1/S2 fire during min-stay, entered_at set/cleared |
+| TestMinStayTimer | 5 | Hold min_power_w during low excess, S1/S2 fire during min-stay, entered_at set/cleared |
 
 ### Excess calculation & power clamping tests (SOLAR)
 
@@ -2796,7 +2795,7 @@ cd energymanager && python -m pytest tests/test_ev_state_machine.py -v
 | EV-12 | Dashboard: tap active button | `input_select.ev_charging_mode` = `solar` (back to default) |
 | EV-13 | Dashboard: car connected, charging | Card shows power in W, state = SOLAR/CHEAP/IMMEDIATE |
 | EV-14 | Mode change while charging | New mode takes effect within ~60 s (OCPP throttle) |
-| EV-15 | Battery protection blocks solar | Stays NORMAL, EV at 0W until battery_protection_passed |
+| EV-15 | Battery protection is informational | SOLAR mode active with excess even when battery_protection_passed=False; dashboard shows protection status |
 | EV-16 | Battery full, low excess | SOLAR with 1-phase min_power_w — captures every watt |
 | EV-17 | Cheap tariff toggles | CHEAP state: charges at max during cheap, pauses during expensive, no state change |
 | EV-18 | Car reaches target SOC | Returns to NORMAL from any charging state |
@@ -2917,9 +2916,10 @@ log_level: "info"
 
 **End of Document**
 
-*Version 2.17 - February 2026*
+*Version 2.18 - February 2026*
 
 **Changelog:**
+- v2.18: Removed battery protection gate from solar EV charging — solar mode always active when excess available; battery protection is now informational (dashboard only); removed S4 transition from SOLAR state; updated N3 condition (Section 4.5.6)
 - v2.17: Two-flag battery discharge blocking — EV charging in immediate/cheap mode now independently blocks battery discharge (Section 4.3.2); prevents SUN2000 from draining battery to cover wallbox load via DTSU correction; 17 new tests (Appendix D.4)
 - v2.16: Added sections 4.7 (InfluxDB Storage), 4.8 (Dashboard Examples), 4.9 (Error Handling and Notifications), Chapter 5 (Forecast Accuracy Tracking), Appendix E (EnergyManager Configuration). Updated EV config for 4-state machine (phase-based min power, phase_threshold_kwh). Updated EV decision table to include EV charging forecast dependency.
 - v2.15: FSD improvements — signal conventions box; weekend battery guard as explicit policy (`battery_guard_on_weekends`); `allow_1p_auto` flag for 1φ vs 3φ minimum; `effective_min_power_w` derived threshold; S06 forecast contract (measurement, field, staleness, missing=conservative); `battery_guard_margin_pct` (2% safety margin); smoothing defined (rolling median, 4 samples); rate limiting formalized (`setpoint_min_interval_s`, `setpoint_max_step_w`, `setpoint_step_w`); import tolerance (`import_tolerance_w`, `import_tolerance_cycles`); auto-revert trigger refined (only when setpoint > 0 recently); mode reset write-back semantics (one-shot, retry, idempotency); fault required-signals-per-mode; hard fault test-setpoint procedure; anti-flap table; S02 renamed EV_UNAVAILABLE; state priority order; scenario-based test table; edge-case worked examples (H: stale SoC, I: tariff boundary, J: phase gap)

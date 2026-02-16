@@ -142,9 +142,7 @@ class EVStateMachine:
             return EVOutput(EVState.CHEAP, power, reason)
 
         # N3: solar mode
-        if (i.charging_mode == "solar"
-                and i.wallbox_available
-                and (i.battery_protection_passed or i.battery_soc >= 100)):
+        if i.charging_mode == "solar" and i.wallbox_available:
             excess = -i.grid_power_w + i.wallbox_power_w
             if excess >= i.min_power_w:
                 self._set_state(EVState.SOLAR)
@@ -162,7 +160,6 @@ class EVStateMachine:
 
     def _step_solar(self, i: EVInputs) -> EVOutput:
         excess = -i.grid_power_w + i.wallbox_power_w
-        time_in = self._time_in_solar()
 
         # S1: car full
         if i.ev_soc is not None and i.ev_soc >= i.ev_target_soc:
@@ -186,14 +183,6 @@ class EVStateMachine:
                       if i.is_cheap_tariff
                       else "Cheap mode — waiting for cheap tariff")
             return EVOutput(EVState.CHEAP, power, reason)
-
-        # S4: battery protection kicks in (only after min-stay)
-        if (time_in >= MIN_STAY_S
-                and not i.battery_protection_passed
-                and i.battery_soc < 100):
-            self._set_state(EVState.NORMAL)
-            return EVOutput(EVState.NORMAL, 0,
-                            "Battery protection — pausing EV charging")
 
         # Stay in SOLAR — compute power
         target = _solar_target(excess, i.min_power_w, i.max_power_w)

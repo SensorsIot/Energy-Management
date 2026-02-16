@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.19"
+__version__ = "1.6.20"
 
 import json
 import logging
@@ -773,36 +773,27 @@ class EnergyManager:
                 target_power = 0
                 reason = f"Car full: SOC {ev_soc:.0f}% >= target {self.ev_target_soc}%"
             else:
-                # Step 2: Battery protection — query InfluxDB forecast
+                # Battery protection — informational only (for dashboard)
                 battery_soc = self.ha_client.get_sensor_value(self.soc_entity) or 0
                 if battery_soc >= 100:
                     reaches_target, soc_at_target = True, 100.0
                 else:
                     reaches_target, soc_at_target = self.check_battery_protection()
-
                 self._battery_reaches_target = reaches_target
                 self._battery_min_soc_forecast = soc_at_target
 
-                if not reaches_target:
-                    # Battery won't reach target by cheap tariff — block EV, all PV to battery
-                    target_power = 0
-                    reason = (
-                        f"Battery protection: forecast SOC at 21:00 = {soc_at_target:.0f}% "
-                        f"< {self.ev_battery_protection_soc}% target — all PV to battery"
-                    )
-                else:
-                    # Step 3: Closed-loop excess from grid meter
-                    grid_power = self._read_grid_power()
-                    excess = -grid_power + wallbox_power
+                # Closed-loop excess from grid meter — always calculate
+                grid_power = self._read_grid_power()
+                excess = -grid_power + wallbox_power
 
-                    ev_result = calculate_ev_power(
-                        excess_w=excess,
-                        min_power_w=self.ev_min_power_w,
-                        max_power_w=self.ev_max_power_w,
-                    )
-                    target_power = ev_result.target_power_w
-                    reason = ev_result.reason
-                    available_excess_w = ev_result.available_excess_w
+                ev_result = calculate_ev_power(
+                    excess_w=excess,
+                    min_power_w=self.ev_min_power_w,
+                    max_power_w=self.ev_max_power_w,
+                )
+                target_power = ev_result.target_power_w
+                reason = ev_result.reason
+                available_excess_w = ev_result.available_excess_w
 
             # Only send command if target changed (REST API entity, not a platform number)
             if target_power != self._last_ev_power_limit:

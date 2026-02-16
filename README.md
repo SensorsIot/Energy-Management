@@ -99,7 +99,7 @@ InfluxDB (HomeAssistant bucket) → Statistical Model → InfluxDB (load_forecas
 InfluxDB (pv_forecast + load_forecast) → Optimization → Battery/EV/Appliance Control
 ```
 
-**EV solar charging** uses total PV production minus house load (`excess = pv_power - load_power`) to determine available power for the EV. A battery protection check runs every minute: the EV only charges when the SOC forecast shows the battery reaching 80% before the next cheap tariff window. If the forecast drops, EV is paused and all PV returns to the battery.
+**EV solar charging** uses closed-loop grid meter feedback (`excess = -grid_power + wallbox_power`) to determine available power for the EV. Solar mode is always active — when there is genuine solar excess being exported to the grid, the EV captures it. The battery gets first priority via SUN2000's zero-export control. Battery protection status (forecast SOC at 21:00) is still computed and published to the dashboard for monitoring, but does not block solar charging.
 
 **Battery discharge blocking** uses two independent flags combined with OR logic. The battery optimizer blocks discharge when the SOC forecast is too low (protection flag), and the EV controller blocks discharge when the wallbox is actively charging in immediate or cheap mode (EV flag). This prevents SUN2000 from draining the battery to cover wallbox power that appears as household load via the DTSU correction path.
 

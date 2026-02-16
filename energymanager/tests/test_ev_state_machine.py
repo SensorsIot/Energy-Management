@@ -98,13 +98,15 @@ class TestNormalStays:
         out = sm.step(make_inputs(wallbox_available=False))
         assert out.state == EVState.NORMAL
 
-    def test_stays_solar_battery_protection_not_passed(self):
+    def test_n3_solar_enters_without_battery_protection(self):
+        """Solar enters even when battery_protection_passed=False."""
         sm = make_sm(EVState.NORMAL)
         out = sm.step(make_inputs(
             battery_protection_passed=False,
             battery_soc=70,
+            grid_power_w=-5000,
         ))
-        assert out.state == EVState.NORMAL
+        assert out.state == EVState.SOLAR
 
     def test_stays_solar_excess_below_min(self):
         sm = make_sm(EVState.NORMAL)
@@ -150,15 +152,16 @@ class TestNormalTransitions:
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 5000
 
-    def test_n3_solar_battery_full_overrides_protection(self):
-        """battery_soc >= 100 satisfies N3 even if protection not passed."""
+    def test_n3_solar_ignores_battery_protection(self):
+        """N3 enters SOLAR regardless of battery_protection_passed."""
         sm = make_sm(EVState.NORMAL)
         out = sm.step(make_inputs(
             battery_protection_passed=False,
-            battery_soc=100,
+            battery_soc=50,
             grid_power_w=-5000,
         ))
         assert out.state == EVState.SOLAR
+        assert out.target_power_w == 5000
 
     def test_n1_has_priority_over_n2(self):
         """N1 fires before N2 when both could match."""
@@ -185,11 +188,10 @@ class TestSolarStays:
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 1400  # min_power_w
 
-    def test_stays_during_minstay_even_battery_protection_fails(self):
-        """During first 15 min, S4 cannot fire."""
+    def test_stays_solar_without_battery_protection(self):
+        """Stays in SOLAR indefinitely regardless of protection status."""
         sm = make_sm(EVState.SOLAR, now=_T0)
-        # Still within 15 min
-        sm._time_fn = lambda: _T0 + MIN_STAY_S - 1
+        sm._time_fn = lambda: _T0 + MIN_STAY_S + 3600  # well past min-stay
         out = sm.step(make_inputs(
             battery_protection_passed=False, battery_soc=70,
         ))
@@ -197,7 +199,7 @@ class TestSolarStays:
 
 
 # ===================================================================
-# SOLAR → transitions (S1, S2, S3, S4)
+# SOLAR → transitions (S1, S2, S3)
 # ===================================================================
 
 class TestSolarTransitions:
@@ -235,23 +237,6 @@ class TestSolarTransitions:
         out = sm.step(make_inputs(charging_mode="cheap", is_cheap_tariff=False))
         assert out.state == EVState.CHEAP
         assert out.target_power_w == 0
-
-    def test_s4_battery_protection_after_minstay(self):
-        sm = make_sm(EVState.SOLAR, now=_T0)
-        sm._time_fn = lambda: _T0 + MIN_STAY_S
-        out = sm.step(make_inputs(
-            battery_protection_passed=False, battery_soc=70,
-        ))
-        assert out.state == EVState.NORMAL
-
-    def test_s4_battery_full_overrides_protection(self):
-        """battery_soc >= 100 prevents S4 from firing even after min-stay."""
-        sm = make_sm(EVState.SOLAR, now=_T0)
-        sm._time_fn = lambda: _T0 + MIN_STAY_S + 1
-        out = sm.step(make_inputs(
-            battery_protection_passed=False, battery_soc=100,
-        ))
-        assert out.state == EVState.SOLAR
 
     def test_s1_has_priority_over_s2(self):
         """S1 fires before S2 (car full beats mode switch)."""
@@ -414,24 +399,6 @@ class TestMaxTransitions:
 # ===================================================================
 
 class TestMinStayTimer:
-    def test_min_stay_prevents_s4(self):
-        """Battery protection cannot exit SOLAR during first 15 min."""
-        sm = make_sm(EVState.SOLAR, now=_T0)
-        # At 14 min 59 sec
-        sm._time_fn = lambda: _T0 + MIN_STAY_S - 1
-        out = sm.step(make_inputs(
-            battery_protection_passed=False, battery_soc=70,
-        ))
-        assert out.state == EVState.SOLAR
-
-    def test_s4_fires_at_exactly_15_min(self):
-        sm = make_sm(EVState.SOLAR, now=_T0)
-        sm._time_fn = lambda: _T0 + MIN_STAY_S
-        out = sm.step(make_inputs(
-            battery_protection_passed=False, battery_soc=70,
-        ))
-        assert out.state == EVState.NORMAL
-
     def test_hold_minimum_during_low_excess(self):
         """During min-stay with low excess, hold min_power_w."""
         sm = make_sm(EVState.SOLAR, now=_T0)
