@@ -109,7 +109,7 @@ Default fetch and calculation schedule:
 ## Related Add-ons
 
 - **LoadForecast**: Statistical load prediction for consumption forecasting
-- **EnergyManager**: (Coming soon) Combines PV and load forecasts for optimization
+- **EnergyManager**: Combines PV and load forecasts for energy optimization
 
 ## License
 

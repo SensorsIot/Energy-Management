@@ -97,7 +97,7 @@ Adjust the cron expression for more or less frequent updates:
 ## Related Add-ons
 
 - **SwissSolarForecast**: PV power forecast using MeteoSwiss weather data
-- **EnergyManager**: (Coming soon) Combines PV and load forecasts for optimization
+- **EnergyManager**: Combines PV and load forecasts for energy optimization
 
 ## License
 

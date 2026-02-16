@@ -98,6 +98,10 @@ Published as `sensor.appliance_signal`:
 - InfluxDB 2.x
 - Huawei inverter with battery (or compatible)
 
+## Specification
+
+See [Functional Specification Document](../Documents/EnergymanagementV2_fsd.md) for full design details.
+
 ## Related Add-ons
 
 - **SwissSolarForecast**: PV power forecast using MeteoSwiss weather data

@@ -77,6 +77,10 @@ All options are in the add-on **Configuration tab**:
 |--------|-------|-------------|
 | `number.wallbox_power_limit` | 0–11000 W | 0 = pause, >0 = charge |
 
+## Specification
+
+See [Functional Specification Document](docs/ocpp-server-fsd.md) for full design details.
+
 ## Related Add-ons
 
 - **EnergyManager**: Energy optimizer that writes wallbox power limits
