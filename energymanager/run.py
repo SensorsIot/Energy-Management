@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.17"
+__version__ = "1.6.18"
 
 import json
 import logging
@@ -596,6 +596,18 @@ class EnergyManager:
                 "friendly_name": "EV Charge Status",
                 "status_text": result.status_text,
                 "target_power_w": result.target_power_w,
+                "reason": result.reason,
+                "icon": "mdi:ev-station",
+            },
+        )
+
+        # Update target power sensor (dashboard display)
+        self.ha_client.set_sensor_state(
+            self.ev_target_power_entity,
+            int(result.target_power_w),
+            attributes={
+                "friendly_name": "EV Target Power",
+                "unit_of_measurement": "W",
                 "reason": result.reason,
                 "icon": "mdi:ev-station",
             },
