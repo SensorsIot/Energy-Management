@@ -4,11 +4,17 @@
 .claude-data/
 
 # AI agent files
+CLAUDE.md
 claude.md
 AGENTS.md
+agents.md
 .cursor/
+.cursorrules
 .aider/
 copilot.md
+COPILOT.md
+.github/copilot-instructions.md
+.windsurfrules
 
 # Secrets
 .secrets/
