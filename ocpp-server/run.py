@@ -377,6 +377,27 @@ class OCPPServer:
         self._pending_power_w = None
         logger.info(f"Sent power profile: {power_w}W")
 
+    async def _sync_ha_state(self):
+        """Re-publish current wallbox state to HA after entity recovery."""
+        cp = self.charge_point
+        connected = cp is not None
+        await self.ha.set_state(
+            "binary_sensor.wallbox_connected",
+            "on" if connected else "off",
+        )
+        await self.ha.set_state(
+            "binary_sensor.wallbox_single_phase_supported",
+            "on" if self.single_phase_supported else "off",
+        )
+        await self.ha.set_state("sensor.wallbox_phases", self._current_phases)
+        if cp:
+            await self.ha.set_state("sensor.wallbox_status", cp.current_status)
+            await self.ha.set_state("sensor.wallbox_power", cp.current_power_w)
+            await self.ha.set_state("sensor.wallbox_energy", cp.session_energy_wh)
+            txn = "charging" if cp.transaction_id is not None else "idle"
+            await self.ha.set_state("sensor.wallbox_transaction", txn)
+        logger.info(f"Synced HA state (connected={connected})")
+
     async def _watch_controls(self):
         """Poll HA control entities for changes from EnergyManager.
 
@@ -397,6 +418,7 @@ class OCPPServer:
                     # Entity lost (e.g. HA core restarted) — re-register all entities
                     logger.warning("Control entity missing, re-registering HA entities")
                     await self.ha.register_entities()
+                    await self._sync_ha_state()
                     await asyncio.sleep(5)
                     continue
 
