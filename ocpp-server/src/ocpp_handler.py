@@ -224,6 +224,16 @@ class ChargePointHandler(CP):
             f"Setting charging power: {power_w}W ({current_a:.1f}A, {num_phases}-phase, txn={self.transaction_id})"
         )
 
+        # Clear any stale TxProfile that might override our TxDefaultProfile
+        try:
+            clear_req = call.ClearChargingProfile(
+                charging_profile_purpose=ChargingProfilePurposeType.tx_profile,
+            )
+            clear_resp = await self.call(clear_req)
+            logger.debug(f"ClearChargingProfile (TxProfile): {clear_resp.status}")
+        except Exception:
+            pass  # Not critical if clear fails
+
         request = call.SetChargingProfile(
             connector_id=self.connector_id,
             cs_charging_profiles={
