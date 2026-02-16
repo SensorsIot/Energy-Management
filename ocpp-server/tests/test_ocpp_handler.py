@@ -69,6 +69,8 @@ class TestMeterValues:
         """Power meter value should update current_power_w."""
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
+        # Power is only accepted during an active transaction
+        handler.transaction_id = 1
 
         await handler.on_meter_values(
             connector_id=1,
