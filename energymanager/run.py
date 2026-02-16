@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.16"
+__version__ = "1.6.17"
 
 import json
 import logging
@@ -922,19 +922,19 @@ class EnergyManager:
             coalesce=True,
         )
 
-        # Schedule EV charging control (1-minute interval)
+        # Schedule EV charging control (10-second interval)
         if self.ev_charging_enabled:
             self.control_ev_charging()  # Run immediately
             self.scheduler.add_job(
                 self.control_ev_charging,
                 "interval",
-                minutes=1,
+                seconds=10,
                 id="ev_charging",
                 name="EV Charging Control",
                 max_instances=1,
                 coalesce=True,
             )
-            logger.info("EV charging control enabled (1-minute interval)")
+            logger.info("EV charging control enabled (10-second interval)")
 
         # Schedule Smart car SOC update (hourly)
         if self.smart_car_enabled:
