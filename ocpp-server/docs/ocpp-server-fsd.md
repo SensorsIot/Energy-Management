@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 2.3 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 2.4 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -75,7 +75,7 @@ This add-on is part of the Energy-Management project alongside:
 
 | Add-on | Role in EV Charging |
 |--------|---------------------|
-| **EnergyManager** (v1.5.11) | Reads wallbox sensors, sets `number.wallbox_power_limit`. See [Energymanagement_fsd.md Section 4.5](../../Documents/Energymanagement_fsd.md) |
+| **EnergyManager** (v1.6.18) | Reads wallbox sensors, sets `number.wallbox_power_limit`. Reads user power limit from `input_number.ev_power_limit`. See [Energymanagement_fsd.md Section 4.5](../../Documents/Energymanagement_fsd.md) |
 | **SwissSolarForecast** (v1.2.4) | Provides PV forecast used by EnergyManager to plan charging windows |
 | **LoadForecast** (v1.2.3) | Provides load forecast used by EnergyManager to calculate excess power |
 
@@ -92,7 +92,7 @@ EnergyManager reads:                    EnergyManager writes:
   binary_sensor.wallbox_single_phase_supported
 ```
 
-The EnergyManager decides charging power every minute based on:
+The EnergyManager decides charging power every 10 seconds based on:
 - Current PV production (from SwissSolarForecast sensors)
 - Current load (from LoadForecast sensors)
 - Grid power: M-Bus `sensor.grid_power` preferred (< 20 s fresh), DTSU `sensor.power_meter_active_power` fallback
@@ -115,7 +115,7 @@ Configured via HA add-on options (`/data/options.json`):
 | `max_current_a` | int | 16 | Maximum charging current |
 | `phase_switch_entity` | string? | `""` | HA switch entity for EARU relay (empty = disabled) |
 | `single_phase_supported` | bool | `false` | Wallbox supports 1-phase charging. Exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager to read. Requires `phase_switch_entity` to be set. |
-| `power_update_interval_s` | int | 60 | Minimum seconds between `SetChargingProfile` commands. When `number.wallbox_power_limit` changes within this interval, the new value is queued and sent when the interval expires. No exceptions — all changes throttled uniformly. |
+| `power_update_interval_s` | int | 60 | Throttle interval for rapid value changes. If the previous value change was ≥ this many seconds ago, the new value is sent immediately. If changes arrive faster (< interval), they are queued and the last value sent when the interval expires. This prevents oscillation during solar excess tracking while ensuring user-initiated changes take effect promptly. |
 
 ## 4. Functional Requirements
 
@@ -181,7 +181,7 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 
 When `number.wallbox_power_limit` changes:
 
-0. **Throttle check:** If less than `power_update_interval_s` seconds have passed since the last `SetChargingProfile`, queue the new value and send it when the interval expires. No exceptions — all changes are throttled uniformly to prevent oscillation.
+0. **Throttle check:** If the previous value change was less than `power_update_interval_s` seconds ago, queue the new value and send it when the interval expires. If the previous change was ≥ interval seconds ago, send immediately.
 1. **Auto-transaction management:**
    - Power 0 → >0 (no active transaction): send `SetChargingProfile` first, then `RemoteStartTransaction` (see Section 4.5)
    - Power >0 → 0: send `SetChargingProfile` with 0A (pause → `SuspendedEVSE`), transaction stays alive
@@ -193,7 +193,8 @@ When `number.wallbox_power_limit` changes:
    - Threshold = `min_current_a × 230 × 3` (default 6 × 230 × 3 = 4140 W)
 3. If phase change needed, execute safety sequence (see below)
 4. Convert power to current using calibrated lookup (3-phase, see Section 7) or naive formula (1-phase): `_calibrated_current(power_w, num_phases)`
-5. Clamp to `[min_current_a, max_current_a]` (from config)
+5. Round up to next integer amp (`math.ceil`) — the AcTec wallbox only accepts whole amps
+6. Clamp to `[min_current_a, max_current_a]` (from config)
 6. If power_w = 0: send profile with limit = 0 (pause charging)
 7. Send `SetChargingProfile` with `TxDefaultProfile`, `Absolute`, rate unit `Amps`
 
@@ -329,9 +330,11 @@ A `_setup_complete` event prevents `_watch_controls` from sending commands until
 | TC-14 | Wallbox reconnects after server restart | `StopTransaction` (reason=PowerLoss) received, previous session closed cleanly |
 | TC-15 | Server dies while charging | Wallbox continues charging autonomously, 0A profile needed to stop on reconnect |
 | TC-16 | Full charge cycle | Profile 6A → Start → Charging → Pause 0A → SuspendedEVSE → Resume 10A → Charging → Stop 0A → SuspendedEVSE |
-| TC-17 | Power limit changes within throttle interval | Only last value sent when interval expires. No intermediate `SetChargingProfile` commands. |
+| TC-17 | Rapid power limit changes (< 60s apart) | Only last value sent when interval expires. No intermediate `SetChargingProfile` commands. |
 | TC-18 | Power limit set to 0W during throttle interval | 0W queued, sent when interval expires (no bypass) |
 | TC-19 | Rapid 0W → >0W → 0W within throttle interval | Only final value (0W) sent when interval expires. Prevents oscillation. |
+| TC-20 | Power limit change after > 60s idle | New value sent immediately (no throttle delay). |
+| TC-21 | HA restart with active wallbox | Entities re-registered, wallbox state re-synced (`_sync_ha_state`). |
 
 ## 7. Calibration Data
 
@@ -386,7 +389,7 @@ ocpp-server/
 | OCPP message handling | ✅ Done | 7 incoming + 4 outgoing |
 | HA entity integration | ✅ Done | Supervisor REST API, auto-transaction management |
 | Phase switching | ✅ Done | EARU relay via ESPHome, auto based on power limit |
-| Unit tests | ✅ Done | 9 tests |
+| Unit tests | ✅ Done | 21 tests |
 | HA add-on deployment | ✅ Done | Tested on HA instance, s6-overlay service starts |
 | Wallbox integration test | ✅ Done | Full cycle verified with AcTec EV-AC22K (FW V1.17.9): start, pause (0A→SuspendedEVSE), resume, stop. Profile-first sequence confirmed. |
 
@@ -408,3 +411,4 @@ ocpp-server/
 | 2.1 | 2026-02-12 | Wallbox does not send MeterValues with 0W when paused. Server now zeros power on StatusNotification: SuspendedEVSE/SuspendedEV. |
 | 2.2 | 2026-02-15 | Added `single_phase_supported` config flag, exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager phase selection. |
 | 2.3 | 2026-02-15 | Added `power_update_interval_s` throttle (default 60s) to rate-limit `SetChargingProfile` commands. No exceptions — all changes throttled uniformly to prevent oscillation. |
+| 2.4 | 2026-02-16 | Integer amp rounding (`math.ceil`): AcTec only accepts whole amps. Throttle now based on time since last value change (not last send) — immediate send if previous change >60s ago, throttle only rapid consecutive changes. Removed `ChargePointMaxProfile` and `TxProfile` — only `TxDefaultProfile` per FSD. Added `_sync_ha_state` for HA restart recovery. Updated EnergyManager to 10s control loop. |

@@ -13,7 +13,7 @@ OCPP 1.6j WebSocket server for EV wallbox control via Home Assistant entities.
 - **HA Entity Bridge**: Wallbox state exposed as sensors, charging controlled via number entity
 - **Phase Switching**: Automatic 1-phase/3-phase switching via EARU relay
 - **Calibrated Current**: Measured power-to-current lookup table for accurate charging
-- **Power Throttling**: Rate-limits SetChargingProfile to prevent wallbox oscillation
+- **Smart Throttling**: Sends power changes immediately if idle >60s, throttles only rapid consecutive changes
 - **MQTT Integration**: Publishes wallbox power to ESP32 Modbus Proxy for grid meter correction
 
 ## How It Works
@@ -47,7 +47,7 @@ All options are in the add-on **Configuration tab**:
 | `max_current_a` | `16` | Maximum charging current (A) |
 | `phase_switch_entity` | `""` | HA switch entity for EARU relay (empty = disabled) |
 | `single_phase_supported` | `false` | Wallbox supports 1-phase charging |
-| `power_update_interval_s` | `60` | Throttle interval (s) for SetChargingProfile |
+| `power_update_interval_s` | `60` | Throttle interval (s) — immediate if last change >60s ago |
 | `mqtt_host` | `192.168.0.203` | MQTT broker host (optional) |
 | `mqtt_port` | `1883` | MQTT broker port (optional) |
 | `mqtt_topic` | `wallbox` | MQTT topic for Modbus Proxy (optional) |
