@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.15"
+__version__ = "0.9.16"
 
 import asyncio
 import json
@@ -192,7 +192,7 @@ class OCPPServer:
         self._last_power_limit: Optional[str] = None
 
         # Throttle state for SetChargingProfile rate-limiting
-        self._last_profile_sent_at: float = 0.0
+        self._last_change_at: float = 0.0  # When value last changed
         self._pending_power_w: float | None = None
 
         # Synchronization: _watch_controls waits until _post_connect_setup finishes
@@ -373,7 +373,6 @@ class OCPPServer:
             self.charge_point.current_power_w = 0
             self._on_status_change("power_w", 0)
 
-        self._last_profile_sent_at = time.monotonic()
         self._pending_power_w = None
         logger.info(f"Sent power profile: {power_w}W")
 
@@ -422,29 +421,30 @@ class OCPPServer:
                     await asyncio.sleep(5)
                     continue
 
-                # Detect change → send immediately or queue
+                # Detect change
                 if power_state != self._last_power_limit:
                     prev = self._last_power_limit
                     self._last_power_limit = power_state
                     if prev is not None:
                         try:
                             power_w = float(power_state)
-                            elapsed = time.monotonic() - self._last_profile_sent_at
-                            if elapsed >= self.power_update_interval_s:
-                                # Last send was long ago — send immediately
-                                logger.info(f"Power limit changed to {power_w}W (sending immediately)")
-                                self._pending_power_w = power_w
+                            since_last_change = time.monotonic() - self._last_change_at
+                            self._last_change_at = time.monotonic()
+                            if since_last_change >= self.power_update_interval_s:
+                                # No recent change — send immediately
+                                logger.info(f"Power limit changed to {power_w}W (sending immediately, {since_last_change:.0f}s since last change)")
+                                await self._send_power_to_wallbox(power_w)
                             else:
-                                # Recent send — queue for throttle
-                                logger.info(f"Power limit changed to {power_w}W (throttled, {elapsed:.0f}s since last send)")
+                                # Rapid change — queue, send when interval expires
+                                logger.info(f"Power limit changed to {power_w}W (throttled, {since_last_change:.0f}s since last change)")
                                 self._pending_power_w = power_w
                         except ValueError:
                             logger.warning(f"Invalid power limit value: {power_state}")
 
-                # Throttle: send pending value when interval has elapsed
+                # Send throttled value when interval expires
                 if self._pending_power_w is not None:
-                    elapsed = time.monotonic() - self._last_profile_sent_at
-                    if elapsed >= self.power_update_interval_s:
+                    since_last_change = time.monotonic() - self._last_change_at
+                    if since_last_change >= self.power_update_interval_s:
                         power_w = self._pending_power_w
                         await self._send_power_to_wallbox(power_w)
 
