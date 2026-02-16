@@ -546,6 +546,17 @@ class EnergyManager:
         now = datetime.now(timezone.utc)
         tariff = self.optimizer.get_tariff_periods(now)
 
+        # Read user-set power limit from HA slider; fall back to config max
+        # if slider is 0 (e.g. left over from solar pause)
+        current_limit = self.ha_client.get_sensor_value(
+            self.wallbox_power_limit_entity
+        )
+        max_power = (
+            current_limit
+            if current_limit and current_limit > 0
+            else self.ev_max_power_w
+        )
+
         result = calculate_charging_mode(
             ev_charging_mode=ev_mode,
             is_cheap_tariff=tariff.is_cheap_now,
@@ -554,7 +565,7 @@ class EnergyManager:
             wallbox_power_w=wallbox_power,
             idle_minutes=idle_minutes,
             auto_reset_timeout_min=self.ev_auto_reset_timeout_min,
-            max_power_w=self.ev_max_power_w,
+            max_power_w=max_power,
         )
 
         logger.info(f"EV {ev_mode} mode: {result.charge_status} — {result.reason}")
