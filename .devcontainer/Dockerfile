@@ -26,5 +26,6 @@ ENV PATH="/home/dev/.local/bin:${PATH}"
 
 USER dev
 
-# Set default working directory for SSH logins
+# Set default working directory for both docker exec and SSH logins
 WORKDIR /workspaces/Energy-Management
+RUN echo 'cd /workspaces/Energy-Management 2>/dev/null' >> /home/dev/.bashrc
