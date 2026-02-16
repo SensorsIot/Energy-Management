@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.14"
+__version__ = "0.9.15"
 
 import asyncio
 import json
@@ -422,19 +422,26 @@ class OCPPServer:
                     await asyncio.sleep(5)
                     continue
 
-                # Detect change → queue as pending
+                # Detect change → send immediately or queue
                 if power_state != self._last_power_limit:
                     prev = self._last_power_limit
                     self._last_power_limit = power_state
                     if prev is not None:
                         try:
                             power_w = float(power_state)
-                            logger.info(f"Power limit changed to {power_w}W (pending)")
-                            self._pending_power_w = power_w
+                            elapsed = time.monotonic() - self._last_profile_sent_at
+                            if elapsed >= self.power_update_interval_s:
+                                # Last send was long ago — send immediately
+                                logger.info(f"Power limit changed to {power_w}W (sending immediately)")
+                                self._pending_power_w = power_w
+                            else:
+                                # Recent send — queue for throttle
+                                logger.info(f"Power limit changed to {power_w}W (throttled, {elapsed:.0f}s since last send)")
+                                self._pending_power_w = power_w
                         except ValueError:
                             logger.warning(f"Invalid power limit value: {power_state}")
 
-                # Throttle: send pending value only when interval has elapsed
+                # Throttle: send pending value when interval has elapsed
                 if self._pending_power_w is not None:
                     elapsed = time.monotonic() - self._last_profile_sent_at
                     if elapsed >= self.power_update_interval_s:
