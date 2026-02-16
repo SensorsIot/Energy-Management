@@ -4,6 +4,7 @@ OCPP 1.6j message handler for wallbox communication.
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Optional, Callable
@@ -216,7 +217,7 @@ class ChargePointHandler(CP):
             num_phases: Number of phases (1 or 3)
         """
         current_a = self._calibrated_current(power_w, num_phases)
-        current_a = round(current_a, 1)  # OCPP requires multiple of 0.1
+        current_a = math.ceil(current_a)  # Round up: wallbox only accepts integer amps
         current_a = max(0, min(current_a, 32))  # Clamp to valid range
 
         logger.info(f"Setting charging power: {power_w}W ({current_a:.1f}A, {num_phases}-phase)")
