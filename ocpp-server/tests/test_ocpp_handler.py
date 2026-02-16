@@ -286,6 +286,57 @@ class TestThrottle:
         assert server._pending_power_w is None
 
     @pytest.mark.asyncio
+    async def test_ha_restart_resyncs_connected_state(self, server):
+        """After HA restart, re-registration should re-sync wallbox_connected.
+
+        Scenario: wallbox is connected (heartbeats flowing), HA core restarts,
+        OCPP server gets 502s during initial set_state. When HA recovers,
+        _watch_controls detects missing control entity, calls register_entities()
+        which resets binary sensors to off, then _sync_ha_state() must re-push
+        connected=on from the live charge_point.
+        """
+        # Wallbox is connected with active status
+        server.charge_point.current_status = "Charging"
+        server.charge_point.current_power_w = 5000
+        server.charge_point.session_energy_wh = 1200
+        server.charge_point.transaction_id = 42
+
+        # Simulate: register_entities resets connected to off (as it does)
+        await server.ha.set_state("binary_sensor.wallbox_connected", "off")
+        server.ha.set_state.reset_mock()
+
+        # Now _sync_ha_state should re-push correct state
+        await server._sync_ha_state()
+
+        # Verify connected was set to on
+        calls = {
+            args[0]: args[1]
+            for args, _ in [
+                (c.args, c.kwargs) for c in server.ha.set_state.call_args_list
+            ]
+        }
+        assert calls["binary_sensor.wallbox_connected"] == "on"
+        assert calls["sensor.wallbox_status"] == "Charging"
+        assert calls["sensor.wallbox_power"] == 5000
+        assert calls["sensor.wallbox_energy"] == 1200
+        assert calls["sensor.wallbox_transaction"] == "charging"
+
+    @pytest.mark.asyncio
+    async def test_ha_restart_no_wallbox_stays_disconnected(self, server):
+        """When wallbox is not connected, _sync_ha_state sets connected=off."""
+        server.charge_point = None
+
+        await server._sync_ha_state()
+
+        calls = {
+            args[0]: args[1]
+            for args, _ in [
+                (c.args, c.kwargs) for c in server.ha.set_state.call_args_list
+            ]
+        }
+        assert calls["binary_sensor.wallbox_connected"] == "off"
+
+    @pytest.mark.asyncio
     async def test_tc19_zero_nonzero_zero_only_final_sent(self, server):
         """TC-19: 0W → >0W → 0W within interval → only final 0W sent."""
         # Simulate sequence of HA changes within one interval
