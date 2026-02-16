@@ -220,26 +220,41 @@ class ChargePointHandler(CP):
         current_a = math.ceil(current_a)  # Round up: wallbox only accepts integer amps
         current_a = max(0, min(current_a, 32))  # Clamp to valid range
 
-        logger.info(f"Setting charging power: {power_w}W ({current_a:.1f}A, {num_phases}-phase)")
+        # Use TxProfile for active transaction, TxDefaultProfile otherwise
+        if self.transaction_id is not None:
+            purpose = ChargingProfilePurposeType.tx_profile
+            profile_id = 2
+        else:
+            purpose = ChargingProfilePurposeType.tx_default_profile
+            profile_id = 1
+
+        logger.info(
+            f"Setting charging power: {power_w}W ({current_a:.1f}A, {num_phases}-phase, "
+            f"{'TxProfile' if self.transaction_id else 'TxDefault'} txn={self.transaction_id})"
+        )
+
+        profile = {
+            "charging_profile_id": profile_id,
+            "stack_level": 0,
+            "charging_profile_purpose": purpose,
+            "charging_profile_kind": ChargingProfileKindType.absolute,
+            "charging_schedule": {
+                "charging_rate_unit": ChargingRateUnitType.amps,
+                "charging_schedule_period": [
+                    {
+                        "start_period": 0,
+                        "limit": current_a,
+                        "number_phases": num_phases,
+                    }
+                ],
+            },
+        }
+        if self.transaction_id is not None:
+            profile["transaction_id"] = self.transaction_id
 
         request = call.SetChargingProfile(
             connector_id=self.connector_id,
-            cs_charging_profiles={
-                "charging_profile_id": 1,
-                "stack_level": 0,
-                "charging_profile_purpose": ChargingProfilePurposeType.tx_default_profile,
-                "charging_profile_kind": ChargingProfileKindType.absolute,
-                "charging_schedule": {
-                    "charging_rate_unit": ChargingRateUnitType.amps,
-                    "charging_schedule_period": [
-                        {
-                            "start_period": 0,
-                            "limit": current_a,
-                            "number_phases": num_phases,
-                        }
-                    ],
-                },
-            },
+            cs_charging_profiles=profile,
         )
 
         response = await self.call(request)
