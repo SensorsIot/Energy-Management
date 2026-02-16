@@ -1,6 +1,5 @@
 # LoadForecast
 
-![Version](https://img.shields.io/badge/version-1.0.1-blue)
 ![Supports aarch64](https://img.shields.io/badge/aarch64-yes-green)
 ![Supports amd64](https://img.shields.io/badge/amd64-yes-green)
 ![Supports armv7](https://img.shields.io/badge/armv7-yes-green)

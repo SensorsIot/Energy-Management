@@ -6,14 +6,13 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.7"
+__version__ = "0.9.8"
 
 import asyncio
 import json
 import logging
 import os
 import signal
-import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -22,7 +21,7 @@ import aiohttp
 import aiomqtt
 import websockets
 
-from src.ha_entities import ALL_ENTITIES, BINARY_SENSORS, CONTROLS, SENSORS
+from src.ha_entities import BINARY_SENSORS, CONTROLS, SENSORS
 from src.ocpp_handler import ChargePointHandler
 
 # Configure logging
