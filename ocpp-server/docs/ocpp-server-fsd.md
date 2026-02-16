@@ -95,11 +95,13 @@ EnergyManager reads:                    EnergyManager writes:
 The EnergyManager decides charging power every minute based on:
 - Current PV production (from SwissSolarForecast sensors)
 - Current load (from LoadForecast sensors)
-- Grid power: `sensor.grid_power` — EBL smart meter via gPlug M-Bus bridge (not Huawei)
+- Grid power: M-Bus `sensor.grid_power` preferred (< 20 s fresh), DTSU `sensor.power_meter_active_power` fallback
 - Battery state (from Huawei inverter sensors)
 - Operating mode: opportunistic solar (default) or goal-based
 
-**Grid power data path:** The EBL smart meter is read via a gPlug M-Bus adapter on the remote provisioning server. The MQTT bridge forwards `B0-81-84-25-22-5C/SENSOR` to the local broker. An MQTT sensor in HA computes `(Po - Pi) × 1000` → `sensor.grid_power` (W, negative = importing). Note: `sensor.power_meter_active_power` is the separate Huawei DTSU meter at the inverter.
+**Grid power data path — M-Bus (preferred):** The EBL smart meter is read via a gPlug M-Bus adapter on the remote provisioning server. The MQTT bridge forwards `B0-81-84-25-22-5C/SENSOR` to the local broker. An MQTT sensor in HA computes `(Po - Pi) × 1000` → `sensor.grid_power` (W, negative = importing). EnergyManager config key: `sensors.mbus_grid_power`.
+
+**Grid power data path — DTSU (fallback):** `sensor.power_meter_active_power` is the Huawei DTSU666-H meter at the inverter, corrected by the ESP32 Modbus Proxy (`dtsu + wallbox_power`). Used when M-Bus reading is stale (> 20 s). EnergyManager config key: `sensors.dtsu_grid_power`.
 
 ## 3. Configuration
 
@@ -333,7 +335,7 @@ A `_setup_complete` event prevents `_watch_controls` from sending commands until
 
 ## 7. Calibration Data
 
-Measured 2026-02-11 with AcTec EV-AC22K (FW V1.17.9), 3-phase charging. Grid meters: EBL smart meter via gPlug M-Bus (`sensor.grid_power`), Huawei DTSU at inverter (`sensor.power_meter_active_power`).
+Measured 2026-02-11 with AcTec EV-AC22K (FW V1.17.9), 3-phase charging. Grid meters: M-Bus EBL smart meter (`sensor.grid_power`), DTSU Huawei meter at inverter (`sensor.power_meter_active_power`).
 
 | Req A | Req W | WB Total W | Meter Diff W | Delta W |
 |------:|------:|-----------:|-------------:|--------:|

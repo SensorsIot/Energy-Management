@@ -1963,7 +1963,7 @@ Computed by battery optimizer every 15 minutes. Forecasted excess energy (kWh) f
 | `ev_target_soc` | `sensor.ev_target_soc` | Target EV SOC (%) |
 | `charging_mode` | `input_select.ev_charging_mode` | `"solar"` / `"immediate"` / `"cheap"` |
 | `is_cheap_tariff` | Computed from tariff schedule (Section 4.1.4) | True during cheap tariff window |
-| `grid_power_w` | `sensor.grid_power` (preferred) or `sensor.power_meter_active_power` (fallback) | Grid power (W): positive = import, negative = export. Both include wallbox consumption — gPlug measures at the utility meter; DTSU is corrected by Modbus Proxy (`dtsu + wallbox_power`) before SUN2000 reports it. |
+| `grid_power_w` | M-Bus `sensor.grid_power` (preferred, freshness < 20 s) or DTSU `sensor.power_meter_active_power` (fallback) | Grid power (W): positive = import, negative = export. Both include wallbox consumption — gPlug measures at the utility meter; DTSU is corrected by Modbus Proxy (`dtsu + wallbox_power`) before SUN2000 reports it. Config keys: `sensors.mbus_grid_power`, `sensors.dtsu_grid_power`. |
 | `pv_power_w` | `sensor.solar_pv_total_ac_power` | Total PV AC output (Huawei + Enphase) (W) |
 | `household_load_w` | `sensor.phase_1_power` + `sensor.phase_2_power` + `sensor.phase_3_power` | Household consumption from Shelly 3EM (W) |
 | `forecasted_excess_kwh` | Computed by battery optimizer (every 15 min) | Forecasted excess energy (kWh) from now until next cheap tariff period. Derived from SOC simulation: energy that would be exported after battery reaches 100%. |
@@ -2808,8 +2808,8 @@ appliances:
 sensors:
   pv_power: "sensor.solar_pv_total_ac_power"
   load_power: "sensor.load_power"
-  grid_power: "sensor.grid_power"
-  huawei_grid_power: "sensor.power_meter_active_power"
+  mbus_grid_power: "sensor.grid_power"            # EBL smart meter via gPlug M-Bus (preferred, < 20s)
+  dtsu_grid_power: "sensor.power_meter_active_power"  # Huawei DTSU666-H at inverter (fallback)
 
 ev_charging:
   enabled: true
