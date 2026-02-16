@@ -38,7 +38,8 @@
   "sensors": {
     "pv_power": "sensor.solar_pv_total_ac_power",
     "load_power": "sensor.load_power",
-    "grid_power": "sensor.grid_power",
+    "mbus_grid_power": "sensor.grid_power",
+    "dtsu_grid_power": "sensor.power_meter_active_power",
     "appliance_signal": "sensor.appliance_signal"
   },
   "ev_charging": {

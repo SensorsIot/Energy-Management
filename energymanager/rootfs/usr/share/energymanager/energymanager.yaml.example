@@ -48,8 +48,8 @@ appliances:
 sensors:
   pv_power: "sensor.solar_pv_total_ac_power"
   load_power: "sensor.load_power"
-  grid_power: "sensor.grid_power"
-  huawei_grid_power: "sensor.power_meter_active_power"
+  mbus_grid_power: "sensor.grid_power"            # EBL smart meter via gPlug M-Bus
+  dtsu_grid_power: "sensor.power_meter_active_power"  # Huawei DTSU666-H at inverter
   appliance_signal: "sensor.appliance_signal"
 
 # EV charging settings (FSD 4.5)

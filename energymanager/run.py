@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.10"
+__version__ = "1.6.11"
 
 import json
 import logging
@@ -171,8 +171,8 @@ class EnergyManager:
         self.ev_charging_enabled = ev_opts.get("enabled", False)
         self.ev_min_power_w = ev_opts.get("min_power_w", 1400)
         self.ev_max_power_w = ev_opts.get("max_power_w", 11000)
-        self.grid_power_entity = sensors_opts.get("grid_power", "sensor.grid_power")
-        self.huawei_grid_power_entity = sensors_opts.get("huawei_grid_power", "sensor.power_meter_active_power")
+        self.mbus_grid_power_entity = sensors_opts.get("mbus_grid_power", "sensor.grid_power")
+        self.dtsu_grid_power_entity = sensors_opts.get("dtsu_grid_power", "sensor.power_meter_active_power")
         self.wallbox_power_entity = ev_opts.get("wallbox_power_entity", "sensor.wallbox_power")
         self.wallbox_connected_entity = ev_opts.get("wallbox_connected_entity", "binary_sensor.wallbox_connected")
         self.wallbox_power_limit_entity = ev_opts.get("wallbox_power_limit_entity", "number.wallbox_power_limit")
@@ -609,18 +609,18 @@ class EnergyManager:
         return True
 
     def _read_grid_power(self) -> float:
-        """Read grid power, preferring M-Bus smart meter if fresh (<30s)."""
-        state = self.ha_client.get_state(self.grid_power_entity)
+        """Read grid power, preferring M-Bus smart meter if fresh (<20s)."""
+        state = self.ha_client.get_state(self.mbus_grid_power_entity)
         if state:
             try:
                 updated = datetime.fromisoformat(state["last_updated"])
                 age = (datetime.now(timezone.utc) - updated).total_seconds()
-                if age < 30:
+                if age < 20:
                     return float(state["state"])
-                logger.debug(f"M-Bus stale ({age:.0f}s), falling back to Huawei")
+                logger.debug(f"M-Bus stale ({age:.0f}s), falling back to DTSU")
             except (ValueError, KeyError):
                 pass
-        return self.ha_client.get_sensor_value(self.huawei_grid_power_entity) or 0
+        return self.ha_client.get_sensor_value(self.dtsu_grid_power_entity) or 0
 
     def check_battery_protection(self) -> tuple[bool, float]:
         """Check if battery SOC at cheap tariff start meets protection target (FSD 4.5.6).
