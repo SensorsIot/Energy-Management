@@ -46,16 +46,25 @@ Forecasts are stored in InfluxDB for use by:
 
 ## Configuration
 
+### Secrets (Configuration tab)
+
+| Option | Description |
+|--------|-------------|
+| `influxdb_token` | InfluxDB 2.x API token |
+| `telegram_bot_token` | Telegram bot token for notifications (optional) |
+| `telegram_chat_id` | Telegram chat ID for notifications (optional) |
+
 ### InfluxDB Settings
 
 ```yaml
 influxdb:
   host: "192.168.0.203"
   port: 8087
-  token: "your-influxdb-token"
   org: "energymanagement"
   bucket: "pv_forecast"
 ```
+
+Note: The InfluxDB token is configured in the add-on Configuration tab, not in the YAML file.
 
 ### Location
 
@@ -78,23 +87,43 @@ panels:
     pdc0: 455
     gamma_pdc: -0.0035
 
+  - id: "Generic400"
+    model: "Generic 400W"
+    pdc0: 400
+    gamma_pdc: -0.0035
+
 plants:
   - name: "House"
     inverters:
-      - name: "East+West"
+      - name: "EastWest"
         max_power: 10000
-        efficiency: 0.82
+        efficiency: 0.95
         strings:
           - name: "East"
-            azimuth: 90
+            azimuth: 103.3
             tilt: 15
             panel: "AE455"
             count: 8
           - name: "West"
-            azimuth: 270
+            azimuth: 283.3
             tilt: 15
             panel: "AE455"
             count: 9
+
+      - name: "South"
+        max_power: 1500
+        efficiency: 0.96
+        strings:
+          - name: "SouthFront"
+            azimuth: 193.3
+            tilt: 70
+            panel: "Generic400"
+            count: 3
+          - name: "SouthBack"
+            azimuth: 193.3
+            tilt: 60
+            panel: "Generic400"
+            count: 2
 ```
 
 ### Schedule
@@ -104,6 +133,21 @@ schedule:
   ch1_cron: "30 2,5,8,11,14,17,20,23 * * *"  # UTC
   ch2_cron: "45 2,8,14,20 * * *"              # UTC
   calculator_interval_minutes: 15
+```
+
+### Storage
+
+```yaml
+storage:
+  data_path: "/share/swisssolarforecast"
+  max_storage_gb: 3.0
+  cleanup_old_runs: true
+```
+
+### Logging
+
+```yaml
+log_level: "info"   # debug, info, warning, error
 ```
 
 ### Shading Correction
