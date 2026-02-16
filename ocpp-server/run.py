@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.3"
+__version__ = "0.9.4"
 
 import asyncio
 import json
@@ -170,6 +170,8 @@ class OCPPServer:
         self.min_current_a = options.get("min_current_a", 6)
         self.max_current_a = options.get("max_current_a", 16)
         self.phase_switch_entity = options.get("phase_switch_entity", "")
+        self.single_phase_supported = options.get("single_phase_supported", False)
+        self.power_update_interval_s = options.get("power_update_interval_s", 60)
 
         self.charge_point: Optional[ChargePointHandler] = None
         self.ha = HAEntityManager()
@@ -189,6 +191,10 @@ class OCPPServer:
 
         # Track last-seen control states for change detection
         self._last_power_limit: Optional[str] = None
+
+        # Throttle state for SetChargingProfile rate-limiting
+        self._last_profile_sent_at: float = 0.0
+        self._pending_power_w: float | None = None
 
         # Synchronization: _watch_controls waits until _post_connect_setup finishes
         self._setup_complete = asyncio.Event()
@@ -317,8 +323,68 @@ class OCPPServer:
                 cp.current_power_w = 0
                 self._on_status_change("power_w", 0)
 
+    async def _send_power_to_wallbox(self, power_w: float):
+        """Send power limit to wallbox (phase switching, auto-start, SetChargingProfile).
+
+        This method contains the actual wallbox communication logic,
+        extracted from _watch_controls so it can be gated by the throttle.
+        """
+        if not self.charge_point:
+            logger.warning("No wallbox connected, ignoring power limit")
+            return
+
+        # Phase switching (before setting profile)
+        if power_w > 0 and self.phase_switch_entity:
+            if power_w < self._phase_threshold_w:
+                target_phases = 1
+            else:
+                target_phases = 3
+            await self._switch_phases(target_phases)
+
+        if power_w > 0 and self.charge_point.transaction_id is None:
+            # No transaction yet — send profile first, then start
+            logger.info("No active transaction, setting profile then starting")
+            await self.charge_point.set_charging_power(
+                power_w, num_phases=self._current_phases
+            )
+            await asyncio.sleep(3)
+            self.charge_point.transaction_started_event.clear()
+            ok = await self.charge_point.remote_start()
+            if ok:
+                try:
+                    await asyncio.wait_for(
+                        self.charge_point.transaction_started_event.wait(),
+                        timeout=15,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("StartTransaction not received after 15s")
+                    return
+            else:
+                logger.warning("RemoteStartTransaction not accepted")
+        else:
+            # Transaction active (or pausing) — just update profile
+            await self.charge_point.set_charging_power(
+                power_w, num_phases=self._current_phases
+            )
+
+        # When pausing (0W), reset reported power immediately
+        # Wallbox may not send MeterValues with 0W
+        if power_w == 0 and self.charge_point and self.charge_point.current_power_w > 0:
+            logger.info("Power limit set to 0W — resetting reported power")
+            self.charge_point.current_power_w = 0
+            self._on_status_change("power_w", 0)
+
+        self._last_profile_sent_at = time.monotonic()
+        self._pending_power_w = None
+        logger.info(f"Sent power profile: {power_w}W")
+
     async def _watch_controls(self):
-        """Poll HA control entities for changes from EnergyManager."""
+        """Poll HA control entities for changes from EnergyManager.
+
+        Detected changes are queued in _pending_power_w and only sent
+        to the wallbox when power_update_interval_s has elapsed since the
+        last SetChargingProfile, preventing wallbox oscillation.
+        """
         logger.info("Control watcher started")
         while self.running:
             await asyncio.sleep(1)
@@ -334,60 +400,25 @@ class OCPPServer:
                     await self.ha.register_entities()
                     await asyncio.sleep(5)
                     continue
-                if power_state is not None and power_state != self._last_power_limit:
+
+                # Detect change → queue as pending
+                if power_state != self._last_power_limit:
                     prev = self._last_power_limit
                     self._last_power_limit = power_state
                     if prev is not None:
-                        # Value changed — send to wallbox
                         try:
                             power_w = float(power_state)
-                            logger.info(f"Power limit changed to {power_w}W")
-                            if self.charge_point:
-                                # Auto-transaction: start when power requested, never auto-stop
-                                # (0W just pauses via SetChargingProfile 0A, transaction stays alive)
-                                # Phase switching (before setting profile)
-                                if power_w > 0 and self.phase_switch_entity:
-                                    if power_w < self._phase_threshold_w:
-                                        target_phases = 1
-                                    else:
-                                        target_phases = 3
-                                    await self._switch_phases(target_phases)
-
-                                if power_w > 0 and self.charge_point.transaction_id is None:
-                                    # No transaction yet — send profile first, then start
-                                    logger.info("No active transaction, setting profile then starting")
-                                    await self.charge_point.set_charging_power(
-                                        power_w, num_phases=self._current_phases
-                                    )
-                                    await asyncio.sleep(3)
-                                    self.charge_point.transaction_started_event.clear()
-                                    ok = await self.charge_point.remote_start()
-                                    if ok:
-                                        try:
-                                            await asyncio.wait_for(
-                                                self.charge_point.transaction_started_event.wait(),
-                                                timeout=15,
-                                            )
-                                        except asyncio.TimeoutError:
-                                            logger.warning("StartTransaction not received after 15s")
-                                            continue
-                                    else:
-                                        logger.warning("RemoteStartTransaction not accepted")
-                                else:
-                                    # Transaction active — just update profile
-                                    await self.charge_point.set_charging_power(
-                                        power_w, num_phases=self._current_phases
-                                    )
-                                # When pausing (0W), reset reported power immediately
-                                # Wallbox may not send MeterValues with 0W
-                                if power_w == 0 and self.charge_point.current_power_w > 0:
-                                    logger.info("Power limit set to 0W — resetting reported power")
-                                    self.charge_point.current_power_w = 0
-                                    self._on_status_change("power_w", 0)
-                            else:
-                                logger.warning("No wallbox connected, ignoring power limit")
+                            logger.info(f"Power limit changed to {power_w}W (pending)")
+                            self._pending_power_w = power_w
                         except ValueError:
                             logger.warning(f"Invalid power limit value: {power_state}")
+
+                # Throttle: send pending value only when interval has elapsed
+                if self._pending_power_w is not None:
+                    elapsed = time.monotonic() - self._last_profile_sent_at
+                    if elapsed >= self.power_update_interval_s:
+                        power_w = self._pending_power_w
+                        await self._send_power_to_wallbox(power_w)
 
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")
@@ -494,6 +525,13 @@ class OCPPServer:
         # Initialize HA entity manager
         await self.ha.start()
         await self.ha.register_entities()
+
+        # Set single_phase_supported from config
+        await self.ha.set_state(
+            "binary_sensor.wallbox_single_phase_supported",
+            "on" if self.single_phase_supported else "off",
+        )
+        logger.info(f"Single phase supported: {self.single_phase_supported}")
 
         # Read initial relay state to sync phase count
         if self.phase_switch_entity:

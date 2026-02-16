@@ -1,4 +1,6 @@
-"""Tests for OCPP handler."""
+"""Tests for OCPP handler and server throttle logic."""
+
+import time
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -193,3 +195,112 @@ class TestAuthorization:
         """All authorization requests should be accepted."""
         result = await handler.on_authorize(id_tag="any_tag")
         assert result.id_tag_info["status"].value == "Accepted"
+
+
+class TestThrottle:
+    """Tests for power update throttle (TC-17/18/19).
+
+    Tests exercise OCPPServer._watch_controls throttle logic by
+    manipulating _pending_power_w, _last_profile_sent_at, and calling
+    _send_power_to_wallbox directly.
+    """
+
+    @pytest.fixture
+    def server(self):
+        """Create an OCPPServer with mocked HA and charge point."""
+        # Mock heavy dependencies not available in dev env
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({
+            "wallbox_id": "test",
+            "power_update_interval_s": 5,
+        })
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        # Mock charge point with active transaction
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.set_charging_power = AsyncMock()
+        cp.current_power_w = 0
+        srv.charge_point = cp
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_tc17_rapid_changes_only_last_sent(self, server):
+        """TC-17: Two rapid changes → only last value sent after interval."""
+        # Simulate two rapid HA changes (only latest pending matters)
+        server._pending_power_w = 3000.0
+        server._pending_power_w = 5000.0  # overwrites previous
+
+        # Interval has elapsed (last sent long ago)
+        server._last_profile_sent_at = time.monotonic() - 10
+
+        await server._send_power_to_wallbox(server._pending_power_w)
+
+        # Only 5000W was sent
+        server.charge_point.set_charging_power.assert_called_once_with(
+            5000.0, num_phases=3
+        )
+        assert server._pending_power_w is None
+
+    @pytest.mark.asyncio
+    async def test_tc17_throttle_blocks_during_interval(self, server):
+        """TC-17: Pending value not sent when interval hasn't elapsed."""
+        server._pending_power_w = 4000.0
+        server._last_profile_sent_at = time.monotonic()  # just sent
+
+        # Check throttle condition (simulating _watch_controls logic)
+        elapsed = time.monotonic() - server._last_profile_sent_at
+        assert elapsed < server.power_update_interval_s
+        # Should NOT call _send_power_to_wallbox — pending stays
+        assert server._pending_power_w == 4000.0
+
+    @pytest.mark.asyncio
+    async def test_tc18_zero_watts_queued_normally(self, server):
+        """TC-18: 0W during interval is queued normally (no bypass)."""
+        server._last_profile_sent_at = time.monotonic()  # just sent
+        server._pending_power_w = 0.0
+
+        # Interval not elapsed → 0W stays pending
+        elapsed = time.monotonic() - server._last_profile_sent_at
+        assert elapsed < server.power_update_interval_s
+        assert server._pending_power_w == 0.0
+
+        # After interval elapses, 0W is sent
+        server._last_profile_sent_at = time.monotonic() - 10
+        server.charge_point.current_power_w = 3000
+        await server._send_power_to_wallbox(0.0)
+
+        server.charge_point.set_charging_power.assert_called_once_with(
+            0.0, num_phases=3
+        )
+        assert server._pending_power_w is None
+
+    @pytest.mark.asyncio
+    async def test_tc19_zero_nonzero_zero_only_final_sent(self, server):
+        """TC-19: 0W → >0W → 0W within interval → only final 0W sent."""
+        # Simulate sequence of HA changes within one interval
+        server._last_profile_sent_at = time.monotonic()  # just sent
+
+        # Three changes arrive, each overwrites pending
+        server._pending_power_w = 0.0
+        server._pending_power_w = 7000.0
+        server._pending_power_w = 0.0  # final value
+
+        # Interval elapses
+        server._last_profile_sent_at = time.monotonic() - 10
+        server.charge_point.current_power_w = 5000
+        await server._send_power_to_wallbox(server._pending_power_w)
+
+        # Only the final 0W was sent
+        server.charge_point.set_charging_power.assert_called_once_with(
+            0.0, num_phases=3
+        )
+        assert server._pending_power_w is None

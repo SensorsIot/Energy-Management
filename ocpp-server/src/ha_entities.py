@@ -57,6 +57,12 @@ BINARY_SENSORS = {
         "icon": "mdi:lan-connect",
         "initial_state": False,
     },
+    "binary_sensor.wallbox_single_phase_supported": {
+        "name": "Wallbox Single Phase Supported",
+        "unique_id": "ocpp_wallbox_single_phase_supported",
+        "icon": "mdi:lightning-bolt",
+        "initial_state": False,
+    },
 }
 
 # Control entities (HA → wallbox via OCPP)
