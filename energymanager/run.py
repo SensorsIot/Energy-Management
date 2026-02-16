@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.15"
+__version__ = "1.6.16"
 
 import json
 import logging
@@ -182,6 +182,9 @@ class EnergyManager:
         self._last_ev_power_limit = None
 
         # Charging mode config (FSD 4.5.4)
+        self.ev_power_limit_entity = ev_opts.get(
+            "power_limit_entity", "input_number.ev_power_limit"
+        )
         self.ev_charging_mode_entity = ev_opts.get(
             "mode_entity", "input_select.ev_charging_mode"
         )
@@ -546,14 +549,13 @@ class EnergyManager:
         now = datetime.now(timezone.utc)
         tariff = self.optimizer.get_tariff_periods(now)
 
-        # Read user-set power limit from HA slider; fall back to config max
-        # if slider is 0 (e.g. left over from solar pause)
-        current_limit = self.ha_client.get_sensor_value(
-            self.wallbox_power_limit_entity
+        # Read user-set power limit from input_number slider
+        user_limit = self.ha_client.get_sensor_value(
+            self.ev_power_limit_entity
         )
         max_power = (
-            current_limit
-            if current_limit and current_limit > 0
+            user_limit
+            if user_limit and user_limit > 0
             else self.ev_max_power_w
         )
 
