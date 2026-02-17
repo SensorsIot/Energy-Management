@@ -2152,9 +2152,29 @@ from(bucket: "energy_manager")
   |> filter(fn: (r) => r._field == "cumulative_wh")
 ```
 
-## 4.8 Dashboard Examples
+## 4.8 Dashboard
 
-### Kitchen Dashboard (Mushroom Cards)
+### 4.8.1 Wallbox Status Display
+
+The EV card on the kitchen dashboard maps the raw OCPP `sensor.wallbox_status` to user-friendly labels. The OCPP server publishes only raw status strings; the dashboard handles all display logic.
+
+| OCPP Status | Label | Background color |
+|-------------|-------|-----------------|
+| `Available` | "Not connected" | Default (no car) or orange (SOC < target) |
+| `Preparing` | "Connected" | Green |
+| `Charging` | "{power} W" | Green (or red if power mismatch) |
+| `SuspendedEVSE` | "0 W" | Green |
+| `SuspendedEV` | "0 W" | Green |
+| `Finishing` | "Finished" | Green |
+| `Faulted` | Raw status | Default |
+| SOC >= target | "Full" | Default |
+| Wallbox disconnected | "Offline" | Default |
+
+**SuspendedEVSE vs SuspendedEV:** EVSE = paused by charger (power limit = 0 A). EV = paused by car (car's BMS stopped drawing current).
+
+**Error indicator:** Background turns red when power limit > 0 but actual power deviates by > 1000 W and SOC < target (wallbox not responding to setpoint), or when power limit = 0 but actual power > 100 W (wallbox not stopping).
+
+### 4.8.2 Kitchen Dashboard (Mushroom Cards)
 
 ```yaml
 type: horizontal-stack
@@ -2953,9 +2973,10 @@ log_level: "info"
 
 **End of Document**
 
-*Version 2.20 - February 2026*
+*Version 2.21 - February 2026*
 
 **Changelog:**
+- v2.21: Added wallbox status display mapping table for dashboard (Section 4.8.1) — documents how raw OCPP status is shown to the user
 - v2.20: SOC poll on charging mode change — switching modes (e.g. solar → immediate) triggers immediate SOC refresh to prevent stale "car full" decisions (Section 4.6.1)
 - v2.19: Adaptive Smart car SOC polling — 1-minute during charging, immediate on car connection, hourly baseline; cached Hello Smart client reduces API calls from 6 to 2 per poll (Section 4.6)
 - v2.18: Removed battery protection gate from solar EV charging — solar mode always active when excess available; battery protection is now informational (dashboard only); removed S4 transition from SOLAR state; updated N3 condition (Section 4.5.6)
