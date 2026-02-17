@@ -20,7 +20,7 @@ Household energy optimizer for PV self-consumption, battery discharge control, E
 
 1. **Every 15 minutes**: Fetches PV and load forecasts from InfluxDB, simulates battery SOC forward, decides whether to block discharge, computes appliance signal
 2. **Every 60 seconds**: Reads grid power and wallbox state, calculates solar excess, adjusts wallbox power limit via closed-loop control
-3. **Every 60 minutes**: Reads Smart car SOC from Hello Smart API
+3. **Adaptive Smart car SOC polling**: Every 1 minute during active charging, immediately on car connection, every 60 minutes otherwise. Authenticated client is cached to reduce API calls (2 requests per cached poll vs 6 for full re-auth)
 
 ## Installation
 

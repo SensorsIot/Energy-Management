@@ -2048,6 +2048,39 @@ class EVOutput:
 | `state` | `sensor.ev_charge_status` | Current state for dashboard/logging |
 | `reason` | Logged to InfluxDB | Human-readable reason for current decision |
 
+## 4.6 Smart Car SOC Polling
+
+The EV battery SOC is read from the Hello Smart API and published as `sensor.smart_battery`. Polling frequency adapts to wallbox state to balance freshness against API rate limits.
+
+### 4.6.1 Polling Strategy
+
+| Trigger | Frequency | Condition |
+|---------|-----------|-----------|
+| Car connected | Once, immediately | Wallbox status transitions to `Preparing` from a disconnected state (`Available`, `Unknown`, or first poll) |
+| Active charging | Every 60 seconds | Wallbox status = `Charging` |
+| Idle / baseline | Every 60 minutes | Scheduled job (always running) |
+
+**Connected states** (no re-poll on transitions between these): `Preparing`, `Charging`, `SuspendedEV`, `SuspendedEVSE`, `Finishing`.
+
+### 4.6.2 Client Caching
+
+The `HelloSmartClient` session is cached across polls to avoid full re-authentication on every call.
+
+| Scenario | HTTP requests per poll |
+|----------|----------------------|
+| Cached client (normal) | 2 (session refresh + vehicle status) |
+| After error (re-auth) | 6 (full authentication flow) |
+| Hourly baseline | 6 (fresh client each hour) |
+
+On any API exception, the cached client is cleared (`self._smart_car_client = None`). The next poll creates a fresh client with full re-authentication.
+
+### 4.6.3 Implementation
+
+- **Adaptive polling** runs inside `control_ev_charging()` (10-second loop), checking wallbox status transitions
+- **Hourly baseline** is a separate APScheduler job (`id="smart_car_soc"`)
+- **Monotonic timestamps** (`time.monotonic()`) track poll intervals to avoid clock-skew issues
+- **Wallbox status tracking** via `_last_wallbox_status` detects connection events (transition to `Preparing`)
+
 ## 4.7 InfluxDB Storage
 
 **Bucket:** `energy_manager`
@@ -2916,9 +2949,10 @@ log_level: "info"
 
 **End of Document**
 
-*Version 2.18 - February 2026*
+*Version 2.19 - February 2026*
 
 **Changelog:**
+- v2.19: Adaptive Smart car SOC polling — 1-minute during charging, immediate on car connection, hourly baseline; cached Hello Smart client reduces API calls from 6 to 2 per poll (Section 4.6)
 - v2.18: Removed battery protection gate from solar EV charging — solar mode always active when excess available; battery protection is now informational (dashboard only); removed S4 transition from SOLAR state; updated N3 condition (Section 4.5.6)
 - v2.17: Two-flag battery discharge blocking — EV charging in immediate/cheap mode now independently blocks battery discharge (Section 4.3.2); prevents SUN2000 from draining battery to cover wallbox load via DTSU correction; 17 new tests (Appendix D.4)
 - v2.16: Added sections 4.7 (InfluxDB Storage), 4.8 (Dashboard Examples), 4.9 (Error Handling and Notifications), Chapter 5 (Forecast Accuracy Tracking), Appendix E (EnergyManager Configuration). Updated EV config for 4-state machine (phase-based min power, phase_threshold_kwh). Updated EV decision table to include EV charging forecast dependency.

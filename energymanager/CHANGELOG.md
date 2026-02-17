@@ -1,5 +1,15 @@
 # EnergyManager Changelog
 
+## [1.6.22] - 2026-02-17
+
+### Added
+- Adaptive Smart car SOC polling: every 1 minute during active charging,
+  immediately on car connection, hourly otherwise. Reduces SOC staleness
+  from up to 1 hour to 1 minute during charging for faster "car full" detection.
+- Cached Hello Smart API client: reuses authenticated session across polls,
+  reducing per-poll cost from 6 HTTP requests to 2. Client is cleared and
+  re-authenticated on any API error.
+
 ## [1.6.10] - 2026-02-13
 
 ### Changed
