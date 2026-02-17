@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.31"
+__version__ = "1.6.32"
 
 import json
 import logging
@@ -728,8 +728,13 @@ class EnergyManager:
                 self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
                 self._ev_idle_since = None
 
-            # Send power limit to OCPP (only when changed)
-            if output.target_power_w != self._last_ev_power_limit:
+            # Send power limit to OCPP (on change, or re-send if wallbox stuck)
+            resend = (
+                output.target_power_w > 0
+                and wallbox_power == 0
+                and wb_status == "SuspendedEVSE"
+            )
+            if output.target_power_w != self._last_ev_power_limit or resend:
                 success = self.ha_client.set_sensor_state(
                     self.wallbox_power_limit_entity,
                     int(output.target_power_w),
