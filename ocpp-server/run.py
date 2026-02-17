@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.18"
+__version__ = "0.9.19"
 
 import asyncio
 import json
@@ -44,7 +44,7 @@ STATUS_ENTITY_MAP = {
 
 # Friendly names for wallbox states shown on dashboard
 _STATUS_FRIENDLY = {
-    "Available": "Available — no car",
+    "Available": "No car",
     "Preparing": "Car connected",
     "Finishing": "Charge complete",
     "Faulted": "Fault",

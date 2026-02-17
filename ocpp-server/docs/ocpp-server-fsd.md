@@ -177,7 +177,7 @@ The `friendly_name` attribute on `sensor.wallbox_status` provides a dashboard-re
 
 | OCPP Status | `friendly_name` | Meaning |
 |-------------|-----------------|---------|
-| `Available` | Available — no car | No vehicle connected |
+| `Available` | No car | No vehicle connected |
 | `Preparing` | Car connected | Vehicle plugged in, not yet charging |
 | `Charging` | Charging — {power} W | Active power delivery |
 | `SuspendedEVSE` | SuspendedEVSE — {power} W | Paused by charger (we sent 0 A) |
