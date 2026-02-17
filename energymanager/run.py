@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.21"
+__version__ = "1.6.22"
 
 import json
 import logging
@@ -33,6 +33,9 @@ from src.smart_car import HelloSmartClient, get_soc
 
 # Swiss timezone for display
 SWISS_TZ = ZoneInfo("Europe/Zurich")
+
+# Adaptive SOC polling: 1 minute during charging, hourly otherwise
+CAR_SOC_CHARGING_INTERVAL_S = 60
 
 
 def swiss_time(dt: datetime) -> str:
@@ -214,6 +217,8 @@ class EnergyManager:
             "soc_entity", "sensor.smart_battery"
         )
         self._smart_car_client: HelloSmartClient | None = None
+        self._last_wallbox_status: str | None = None
+        self._last_car_soc_poll: float = 0.0
 
     def connect(self):
         """Connect to services."""
@@ -757,6 +762,33 @@ class EnergyManager:
                 logger.debug("Wallbox not connected, skipping EV control")
                 return
 
+            # Adaptive SOC polling: on connect + every 1 min while charging
+            if self.smart_car_enabled:
+                wb_status_state = self.ha_client.get_state(self.ev_wallbox_status_entity)
+                status = wb_status_state.get("state", "Unknown") if wb_status_state else "Unknown"
+                now_mono = time.monotonic()
+
+                # Car just connected (transition to Preparing from disconnected state)
+                if (
+                    status == "Preparing"
+                    and self._last_wallbox_status
+                    not in ("Preparing", "Charging", "SuspendedEV", "SuspendedEVSE", "Finishing")
+                ):
+                    logger.info("Smart car: car connected, polling SOC")
+                    self.update_car_soc()
+                    self._last_car_soc_poll = now_mono
+
+                # Every 1 min while charging
+                elif (
+                    status == "Charging"
+                    and (now_mono - self._last_car_soc_poll) >= CAR_SOC_CHARGING_INTERVAL_S
+                ):
+                    logger.info("Smart car: charging poll (1-min interval)")
+                    self.update_car_soc()
+                    self._last_car_soc_poll = now_mono
+
+                self._last_wallbox_status = status
+
             # Read wallbox power (needed by both goal mode and solar mode)
             wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity) or 0.0
 
@@ -838,19 +870,22 @@ class EnergyManager:
             return
 
         try:
-            # Re-authenticate each time (token expires, rate limits)
-            client = HelloSmartClient(self.smart_car_user, self.smart_car_password)
-            client.authenticate()
+            # Reuse cached client, re-auth only when needed
+            if self._smart_car_client is None:
+                self._smart_car_client = HelloSmartClient(
+                    self.smart_car_user, self.smart_car_password
+                )
+                self._smart_car_client.authenticate()
 
             vin = self.smart_car_vin
             if not vin:
-                vehicles = client.list_vehicles()
+                vehicles = self._smart_car_client.list_vehicles()
                 if not vehicles:
                     logger.error("Smart car: no vehicles found")
                     return
                 vin = vehicles[0]
 
-            soc = get_soc(client, vin)
+            soc = get_soc(self._smart_car_client, vin)
             logger.info(f"Smart car SOC: {soc}%")
 
             self.ha_client.set_sensor_state(
@@ -868,6 +903,7 @@ class EnergyManager:
 
         except Exception as e:
             logger.error(f"Smart car SOC update failed: {e}")
+            self._smart_car_client = None  # Force re-auth on next attempt
 
     def _query_last_value(self, entity_id: str) -> str | None:
         """Query InfluxDB for the last known value of an HA entity."""
