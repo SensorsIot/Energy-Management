@@ -2056,9 +2056,12 @@ The EV battery SOC is read from the Hello Smart API and published as `sensor.sma
 
 | Trigger | Frequency | Condition |
 |---------|-----------|-----------|
+| Mode changed | Once, immediately | `input_select.ev_charging_mode` value differs from previous cycle (e.g. solar → immediate). Ensures fresh SOC before any charging decision. |
 | Car connected | Once, immediately | Wallbox status transitions to `Preparing` from a disconnected state (`Available`, `Unknown`, or first poll) |
 | Active charging | Every 60 seconds | Wallbox status = `Charging` |
 | Idle / baseline | Every 60 minutes | Scheduled job (always running) |
+
+**Priority:** Mode change > car connected > charging interval (first matching trigger wins per cycle).
 
 **Connected states** (no re-poll on transitions between these): `Preparing`, `Charging`, `SuspendedEV`, `SuspendedEVSE`, `Finishing`.
 
@@ -2080,6 +2083,7 @@ On any API exception, the cached client is cleared (`self._smart_car_client = No
 - **Hourly baseline** is a separate APScheduler job (`id="smart_car_soc"`)
 - **Monotonic timestamps** (`time.monotonic()`) track poll intervals to avoid clock-skew issues
 - **Wallbox status tracking** via `_last_wallbox_status` detects connection events (transition to `Preparing`)
+- **Mode tracking** via `_last_ev_charging_mode` detects charging mode changes (skips first cycle to avoid false trigger on startup)
 
 ## 4.7 InfluxDB Storage
 
@@ -2949,9 +2953,10 @@ log_level: "info"
 
 **End of Document**
 
-*Version 2.19 - February 2026*
+*Version 2.20 - February 2026*
 
 **Changelog:**
+- v2.20: SOC poll on charging mode change — switching modes (e.g. solar → immediate) triggers immediate SOC refresh to prevent stale "car full" decisions (Section 4.6.1)
 - v2.19: Adaptive Smart car SOC polling — 1-minute during charging, immediate on car connection, hourly baseline; cached Hello Smart client reduces API calls from 6 to 2 per poll (Section 4.6)
 - v2.18: Removed battery protection gate from solar EV charging — solar mode always active when excess available; battery protection is now informational (dashboard only); removed S4 transition from SOLAR state; updated N3 condition (Section 4.5.6)
 - v2.17: Two-flag battery discharge blocking — EV charging in immediate/cheap mode now independently blocks battery discharge (Section 4.3.2); prevents SUN2000 from draining battery to cover wallbox load via DTSU correction; 17 new tests (Appendix D.4)

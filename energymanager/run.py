@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.22"
+__version__ = "1.6.23"
 
 import json
 import logging
@@ -218,6 +218,7 @@ class EnergyManager:
         )
         self._smart_car_client: HelloSmartClient | None = None
         self._last_wallbox_status: str | None = None
+        self._last_ev_charging_mode: str | None = None
         self._last_car_soc_poll: float = 0.0
 
     def connect(self):
@@ -762,14 +763,21 @@ class EnergyManager:
                 logger.debug("Wallbox not connected, skipping EV control")
                 return
 
-            # Adaptive SOC polling: on connect + every 1 min while charging
+            # Adaptive SOC polling: on connect, on mode change, every 1 min while charging
             if self.smart_car_enabled:
                 wb_status_state = self.ha_client.get_state(self.ev_wallbox_status_entity)
                 status = wb_status_state.get("state", "Unknown") if wb_status_state else "Unknown"
+                ev_mode = self.ha_client.get_input_select(self.ev_charging_mode_entity)
                 now_mono = time.monotonic()
 
+                # Charging mode changed — get fresh SOC before deciding
+                if ev_mode != self._last_ev_charging_mode and self._last_ev_charging_mode is not None:
+                    logger.info(f"Smart car: mode changed ({self._last_ev_charging_mode} → {ev_mode}), polling SOC")
+                    self.update_car_soc()
+                    self._last_car_soc_poll = now_mono
+
                 # Car just connected (transition to Preparing from disconnected state)
-                if (
+                elif (
                     status == "Preparing"
                     and self._last_wallbox_status
                     not in ("Preparing", "Charging", "SuspendedEV", "SuspendedEVSE", "Finishing")
@@ -788,6 +796,7 @@ class EnergyManager:
                     self._last_car_soc_poll = now_mono
 
                 self._last_wallbox_status = status
+                self._last_ev_charging_mode = ev_mode
 
             # Read wallbox power (needed by both goal mode and solar mode)
             wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity) or 0.0

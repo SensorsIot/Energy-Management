@@ -1,5 +1,12 @@
 # EnergyManager Changelog
 
+## [1.6.23] - 2026-02-17
+
+### Fixed
+- Poll Smart car SOC immediately on charging mode change (e.g. solar →
+  immediate). Prevents stale hourly SOC from incorrectly showing "car full"
+  when switching modes.
+
 ## [1.6.22] - 2026-02-17
 
 ### Added
