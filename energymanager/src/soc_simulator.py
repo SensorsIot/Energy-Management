@@ -10,7 +10,7 @@ Implements FSD Section 4.2: SOC Simulation
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Tuple, List
+from typing import Tuple
 
 import pandas as pd
 

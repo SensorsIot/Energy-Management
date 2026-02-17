@@ -6,7 +6,6 @@ import pytest
 
 from src.ev_state_machine import (
     EVInputs,
-    EVOutput,
     EVState,
     EVStateMachine,
     MIN_STAY_S,

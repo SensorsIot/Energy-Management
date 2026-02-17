@@ -8,7 +8,7 @@ The battery discharge is blocked when EITHER:
 These tests verify:
 1. _update_discharge_control() combines both flags correctly
 2. run_optimization() sets the protection flag
-3. control_ev_charging_mode() sets/clears the EV flag
+3. control_ev_charging() sets/clears the EV flag via state machine
 4. Switching to solar mode clears the EV flag
 """
 
@@ -20,7 +20,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from run import EnergyManager
-from src.ev_goal_mode import ChargingModeResult
 
 
 # ---------------------------------------------------------------------------
@@ -126,42 +125,68 @@ class TestUpdateDischargeControl:
 
 
 # ===================================================================
-# control_ev_charging_mode — EV flag management
+# Helpers — set up mocks so control_ev_charging() exercises the state machine
 # ===================================================================
 
-def _stub_charging_result(target_power_w: float, **kwargs) -> ChargingModeResult:
-    return ChargingModeResult(
-        target_power_w=target_power_w,
-        charge_status=kwargs.get("charge_status", "charging"),
-        status_text=kwargs.get("status_text", "test"),
-        reason=kwargs.get("reason", "test"),
-        revert_to_solar=kwargs.get("revert_to_solar", False),
-    )
+def _setup_ev_charging(manager, *, mode: str, wb_status: str = "Charging",
+                       is_cheap: bool = False):
+    """Configure mocks for a control_ev_charging() call via state machine.
 
+    The state machine will derive the target power from mode / tariff / excess.
+    """
+    # get_state returns different things depending on entity queried
+    def _fake_get_state(entity):
+        if entity == manager.wallbox_connected_entity:
+            return {"state": "on"}
+        if entity == manager.ev_wallbox_status_entity:
+            return {"state": wb_status}
+        return {"state": "unknown"}
 
-def _setup_immediate_mode(manager, target_power_w: float):
-    """Configure mocks so control_ev_charging_mode runs in immediate mode."""
-    manager.ha_client.get_input_select.return_value = "immediate"
-    manager.ha_client.get_state.return_value = {"state": "Charging"}
-    manager.ha_client.get_sensor_value.return_value = 11000  # user limit
+    manager.ha_client.get_state.side_effect = _fake_get_state
+    manager.ha_client.get_input_select.return_value = mode
+
+    # get_sensor_value: wallbox_power=0 by default, no dynamic min/max,
+    # battery_soc=50, no EV SOC, no user power limit
+    def _fake_sensor(entity):
+        if entity == manager.wallbox_power_entity:
+            return 0.0
+        if entity in ("sensor.wallbox_min_power_w", "sensor.wallbox_max_power_w"):
+            return None
+        if entity == manager.soc_entity:
+            return 50.0
+        if entity == manager.ev_power_limit_entity:
+            return None
+        return None
+
+    manager.ha_client.get_sensor_value.side_effect = _fake_sensor
     manager.ha_client.set_sensor_state.return_value = True
-    with patch("run.calculate_charging_mode", return_value=_stub_charging_result(target_power_w)):
-        manager.control_ev_charging_mode(wallbox_connected=True, wallbox_power=target_power_w)
+
+    # Tariff
+    manager.optimizer.get_tariff_periods.return_value = FakeTariff(is_cheap_now=is_cheap)
+
+    # Grid power = 0 (no excess)
+    manager._read_grid_power = MagicMock(return_value=0.0)
+    manager.check_battery_protection = MagicMock(return_value=(True, 80.0))
+
+    manager.control_ev_charging()
 
 
 class TestEVFlagOnCharging:
     """EV flag is set when immediate/cheap mode charges with power > 0."""
 
     def test_immediate_charging_blocks_discharge(self, manager):
+        """Immediate mode → state machine outputs max power → blocks discharge."""
         assert manager._discharge_blocked_by_ev is False
-        _setup_immediate_mode(manager, target_power_w=5000)
+        _setup_ev_charging(manager, mode="immediate")
         assert manager._discharge_blocked_by_ev is True
         manager.control_battery.assert_called_with(False)
 
     def test_immediate_zero_power_clears_flag(self, manager):
+        """Immediate mode with car not connected → 0W → clears flag."""
         manager._discharge_blocked_by_ev = True
         manager.last_discharge_allowed = False
-        _setup_immediate_mode(manager, target_power_w=0)
+        # wb_status=Available → wallbox_available=False → NORMAL state → 0W
+        _setup_ev_charging(manager, mode="immediate", wb_status="Available")
         assert manager._discharge_blocked_by_ev is False
         manager.control_battery.assert_called_with(True)
 
@@ -169,7 +194,7 @@ class TestEVFlagOnCharging:
         """No redundant control_battery calls when flag is already True."""
         manager._discharge_blocked_by_ev = True
         manager.last_discharge_allowed = False
-        _setup_immediate_mode(manager, target_power_w=5000)
+        _setup_ev_charging(manager, mode="immediate")
         # Flag already True, last_discharge_allowed already False → no call
         manager.control_battery.assert_not_called()
 
@@ -177,7 +202,8 @@ class TestEVFlagOnCharging:
         """No redundant control_battery calls when flag is already False."""
         manager._discharge_blocked_by_ev = False
         manager.last_discharge_allowed = True
-        _setup_immediate_mode(manager, target_power_w=0)
+        # wb_status=Available → 0W → flag stays False
+        _setup_ev_charging(manager, mode="immediate", wb_status="Available")
         # Flag already False, last_discharge_allowed already True → no call
         manager.control_battery.assert_not_called()
 
@@ -186,18 +212,17 @@ class TestSolarModeClearsEVFlag:
     """Switching to solar mode clears the EV discharge block."""
 
     def test_solar_mode_clears_ev_flag(self, manager):
+        """Solar mode with no excess → NORMAL → 0W → clears EV flag."""
         manager._discharge_blocked_by_ev = True
         manager.last_discharge_allowed = False
-        manager.ha_client.get_input_select.return_value = "solar"
-        manager.control_ev_charging_mode(wallbox_connected=True, wallbox_power=0)
+        _setup_ev_charging(manager, mode="solar")
         assert manager._discharge_blocked_by_ev is False
         manager.control_battery.assert_called_with(True)
 
     def test_solar_mode_noop_when_flag_already_clear(self, manager):
         manager._discharge_blocked_by_ev = False
         manager.last_discharge_allowed = True
-        manager.ha_client.get_input_select.return_value = "solar"
-        manager.control_ev_charging_mode(wallbox_connected=True, wallbox_power=0)
+        _setup_ev_charging(manager, mode="solar")
         assert manager._discharge_blocked_by_ev is False
         manager.control_battery.assert_not_called()
 
@@ -216,8 +241,8 @@ class TestCombinedBlocking:
         manager._discharge_blocked_by_ev = True
         manager.last_discharge_allowed = False
 
-        # EV stops → clears EV flag
-        _setup_immediate_mode(manager, target_power_w=0)
+        # wb_status=Available → 0W → clears EV flag
+        _setup_ev_charging(manager, mode="immediate", wb_status="Available")
         assert manager._discharge_blocked_by_ev is False
         assert manager._discharge_blocked_by_protection is True
         # Still blocked by protection → no call (unchanged)
@@ -252,7 +277,7 @@ class TestCombinedBlocking:
         manager._discharge_blocked_by_protection = True
         manager.last_discharge_allowed = False
 
-        _setup_immediate_mode(manager, target_power_w=5000)
+        _setup_ev_charging(manager, mode="immediate")
         assert manager._discharge_blocked_by_ev is True
         # Already blocked → no call
         manager.control_battery.assert_not_called()
@@ -263,30 +288,20 @@ class TestCombinedBlocking:
 # ===================================================================
 
 
-def _setup_cheap_mode(manager, target_power_w: float):
-    """Configure mocks so control_ev_charging_mode runs in cheap mode."""
-    manager.ha_client.get_input_select.return_value = "cheap"
-    manager.ha_client.get_state.return_value = {"state": "Charging"}
-    manager.ha_client.get_sensor_value.return_value = 11000  # user limit
-    manager.ha_client.set_sensor_state.return_value = True
-    with patch("run.calculate_charging_mode", return_value=_stub_charging_result(target_power_w)):
-        manager.control_ev_charging_mode(wallbox_connected=True, wallbox_power=target_power_w)
-
-
 class TestCheapModeBlocksDischarge:
     """IT-BATT-01: Cheap-mode EV charging blocks battery discharge."""
 
     def test_cheap_charging_blocks_discharge(self, manager):
-        """Cheap mode with power > 0 sets _discharge_blocked_by_ev = True."""
+        """Cheap mode + cheap tariff → max power → blocks discharge."""
         assert manager._discharge_blocked_by_ev is False
-        _setup_cheap_mode(manager, target_power_w=5000)
+        _setup_ev_charging(manager, mode="cheap", is_cheap=True)
         assert manager._discharge_blocked_by_ev is True
         manager.control_battery.assert_called_with(False)
 
     def test_cheap_zero_power_clears_flag(self, manager):
-        """Cheap mode with power = 0 clears _discharge_blocked_by_ev."""
+        """Cheap mode + expensive tariff → 0W → clears discharge block."""
         manager._discharge_blocked_by_ev = True
         manager.last_discharge_allowed = False
-        _setup_cheap_mode(manager, target_power_w=0)
+        _setup_ev_charging(manager, mode="cheap", is_cheap=False)
         assert manager._discharge_blocked_by_ev is False
         manager.control_battery.assert_called_with(True)

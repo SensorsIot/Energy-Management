@@ -13,7 +13,6 @@ The simulation passed to this module already accounts for battery efficiency.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 import pandas as pd

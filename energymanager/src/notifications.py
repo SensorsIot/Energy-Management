@@ -9,8 +9,6 @@ Configure via user config file or environment variables:
 import os
 import logging
 import requests
-from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

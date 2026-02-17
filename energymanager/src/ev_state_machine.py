@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
+from src.ev_charging import resolve_phase_gap
+
 logger = logging.getLogger(__name__)
 
 # Minimum time (seconds) to stay in SOLAR before allowing
@@ -79,10 +81,14 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(value, hi))
 
 
-def _solar_target(excess: float, min_power_w: float, max_power_w: float) -> float:
+def _solar_target(
+    excess: float, min_power_w: float, max_power_w: float,
+    battery_full: bool = False,
+) -> float:
     """Compute target power for SOLAR state."""
     if excess >= min_power_w:
-        return _round_to_step(_clamp(excess, min_power_w, max_power_w))
+        target = _round_to_step(_clamp(excess, min_power_w, max_power_w))
+        return resolve_phase_gap(target, battery_full)
     return min_power_w  # hold minimum during low-excess periods
 
 
@@ -146,7 +152,8 @@ class EVStateMachine:
             excess = -i.grid_power_w + i.wallbox_power_w
             if excess >= i.min_power_w:
                 self._set_state(EVState.SOLAR)
-                target = _solar_target(excess, i.min_power_w, i.max_power_w)
+                target = _solar_target(excess, i.min_power_w, i.max_power_w,
+                                       battery_full=(i.battery_soc >= 100))
                 return EVOutput(EVState.SOLAR, target,
                                 f"Solar charging {target:.0f}W "
                                 f"(excess {excess:.0f}W)")
@@ -185,7 +192,8 @@ class EVStateMachine:
             return EVOutput(EVState.CHEAP, power, reason)
 
         # Stay in SOLAR — compute power
-        target = _solar_target(excess, i.min_power_w, i.max_power_w)
+        target = _solar_target(excess, i.min_power_w, i.max_power_w,
+                               battery_full=(i.battery_soc >= 100))
         return EVOutput(EVState.SOLAR, target,
                         f"Solar charging {target:.0f}W "
                         f"(excess {excess:.0f}W)")

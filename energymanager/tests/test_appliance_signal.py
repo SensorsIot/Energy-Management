@@ -11,7 +11,7 @@ Test cases:
 
 import pytest
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from src.appliance_signal import (
     calculate_appliance_signal,

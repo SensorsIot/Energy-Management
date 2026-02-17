@@ -148,7 +148,7 @@ class HAClient:
                 response.raise_for_status()
                 logger.info(f"Set {entity_id} to {value}")
                 return True, ""
-            except requests.Timeout as e:
+            except requests.Timeout:
                 last_error = f"Timeout after 30s (attempt {attempt})"
                 logger.warning(f"Attempt {attempt}/{max_retries}: {last_error}")
             except requests.ConnectionError as e:

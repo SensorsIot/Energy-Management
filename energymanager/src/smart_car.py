@@ -420,6 +420,13 @@ def get_soc(client: HelloSmartClient, vin: str) -> tuple[int, int | None]:
         KeyError: If SOC field is missing from response
     """
     data = client.get_status(vin)
+    logger.debug(f"Smart car API response keys: {sorted(data.keys())}")
+    if "vehicleStatus" in data:
+        vs = data["vehicleStatus"]
+        logger.debug(f"vehicleStatus keys: {sorted(vs.keys())}")
+        avs = vs.get("additionalVehicleStatus", {})
+        evs = avs.get("electricVehicleStatus", {})
+        logger.debug(f"electricVehicleStatus: {evs}")
     vehicle_status = data.get("vehicleStatus", data)
     ev = vehicle_status.get("additionalVehicleStatus", {}).get("electricVehicleStatus", {})
     soc = ev.get("chargeLevel")

@@ -4,7 +4,7 @@ Read PV and Load forecasts from InfluxDB.
 
 import logging
 import warnings
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
