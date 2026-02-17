@@ -56,7 +56,6 @@ ev_charging:
   enabled: true
   min_power_w: 1400       # 1-phase 6A
   max_power_w: 11000      # 3-phase 16A
-  target_soc: 80
   battery_protection_soc: 80
 ```
 

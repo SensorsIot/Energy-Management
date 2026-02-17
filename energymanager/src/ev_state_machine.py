@@ -49,10 +49,9 @@ class EVInputs:
     wallbox_available: bool
     wallbox_power_w: float
     wallbox_status: str               # for OCPP status logging only
+    wallbox_idle: bool                 # wallbox idle >= timeout (car finished)
     battery_protection_passed: bool
     battery_soc: float
-    ev_soc: float | None
-    ev_target_soc: float
     charging_mode: str                # "solar" / "immediate" / "cheap"
     is_cheap_tariff: bool
     grid_power_w: float
@@ -166,15 +165,13 @@ class EVStateMachine:
     # -------------------------------------------------------------------
 
     def _step_solar(self, i: EVInputs) -> EVOutput:
-        excess = -i.grid_power_w + i.wallbox_power_w
-
-        # S1: car full
-        if i.ev_soc is not None and i.ev_soc >= i.ev_target_soc:
+        # S1: car finished — wallbox idle
+        if i.wallbox_idle:
             self._set_state(EVState.NORMAL)
-            soc_str = f"{i.ev_soc:.0f}"
             return EVOutput(EVState.NORMAL, 0,
-                            f"Car full: SOC {soc_str}% >= "
-                            f"target {i.ev_target_soc:.0f}%")
+                            "Car finished — wallbox idle")
+
+        excess = -i.grid_power_w + i.wallbox_power_w
 
         # S2: user switched to immediate
         if i.charging_mode == "immediate":
@@ -203,13 +200,11 @@ class EVStateMachine:
     # -------------------------------------------------------------------
 
     def _step_cheap(self, i: EVInputs) -> EVOutput:
-        # C1: car full
-        if i.ev_soc is not None and i.ev_soc >= i.ev_target_soc:
+        # C1: car finished — wallbox idle
+        if i.wallbox_idle:
             self._set_state(EVState.NORMAL)
-            soc_str = f"{i.ev_soc:.0f}"
             return EVOutput(EVState.NORMAL, 0,
-                            f"Car full: SOC {soc_str}% >= "
-                            f"target {i.ev_target_soc:.0f}%")
+                            "Car finished — wallbox idle")
 
         # C2: user deselected cheap mode
         if i.charging_mode != "cheap":
@@ -228,13 +223,11 @@ class EVStateMachine:
     # -------------------------------------------------------------------
 
     def _step_max(self, i: EVInputs) -> EVOutput:
-        # M1: car full
-        if i.ev_soc is not None and i.ev_soc >= i.ev_target_soc:
+        # M1: car finished — wallbox idle
+        if i.wallbox_idle:
             self._set_state(EVState.NORMAL)
-            soc_str = f"{i.ev_soc:.0f}"
             return EVOutput(EVState.NORMAL, 0,
-                            f"Car full: SOC {soc_str}% >= "
-                            f"target {i.ev_target_soc:.0f}%")
+                            "Car finished — wallbox idle")
 
         # M2: user deselected immediate mode
         if i.charging_mode != "immediate":

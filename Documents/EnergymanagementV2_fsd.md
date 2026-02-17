@@ -1960,7 +1960,7 @@ The machine stays in its current state unless one of the listed conditions trigg
 
 | # | Condition | → New State | Notes |
 |---|-----------|-------------|-------|
-| S1 | `ev_soc is not None AND ev_soc >= ev_target_soc` | NORMAL | Car full |
+| S1 | `wallbox_idle` | NORMAL | Car finished — wallbox idle for ≥ timeout |
 | S2 | `charging_mode == "immediate"` | IMMEDIATE | User switched mode |
 | S3 | `charging_mode == "cheap"` | CHEAP | User switched mode |
 
@@ -1989,7 +1989,7 @@ Power toggles internally: `max_power_w` when `is_cheap_tariff`, `0` when expensi
 
 | # | Condition | → New State | Notes |
 |---|-----------|-------------|-------|
-| C1 | `ev_soc is not None AND ev_soc >= ev_target_soc` | NORMAL | Car full |
+| C1 | `wallbox_idle` | NORMAL | Car finished — wallbox idle for ≥ timeout |
 | C2 | `charging_mode != "cheap"` | NORMAL | User deselected cheap mode |
 
 ---
@@ -2000,7 +2000,7 @@ Power toggles internally: `max_power_w` when `is_cheap_tariff`, `0` when expensi
 
 | # | Condition | → New State | Notes |
 |---|-----------|-------------|-------|
-| M1 | `ev_soc is not None AND ev_soc >= ev_target_soc` | NORMAL | Car full |
+| M1 | `wallbox_idle` | NORMAL | Car finished — wallbox idle for ≥ timeout |
 | M2 | `charging_mode != "immediate"` | NORMAL | User deselected immediate mode |
 
 ---
@@ -2033,10 +2033,9 @@ Computed by battery optimizer every 15 minutes. Forecasted excess energy (kWh) f
 | `wallbox_available` | Derived from `binary_sensor.wallbox_connected`, `sensor.wallbox_status` | Wallbox exists AND connected AND not faulted AND car plugged in |
 | `wallbox_power_w` | `sensor.wallbox_power` | Current wallbox charging power (W) |
 | `wallbox_status` | `sensor.wallbox_status` | OCPP status string (logging only) |
+| `wallbox_idle` | Computed in `run.py` | `True` when wallbox power = 0 and status ∈ {`Finishing`, `SuspendedEV`} for ≥ `auto_reset_timeout_min` (default 5 min). Signals the car has finished charging. |
 | `battery_protection_passed` | Computed upstream | Battery forecast module output (informational — published to dashboard, does not gate solar charging) |
 | `battery_soc` | `sensor.battery_state_of_capacity` | Battery state of charge (%) |
-| `ev_soc` | `sensor.smart_battery` | EV battery SOC (%), None if unavailable |
-| `ev_target_soc` | `sensor.ev_target_soc` | Target EV SOC (%) |
 | `charging_mode` | `input_select.ev_charging_mode` | `"solar"` / `"immediate"` / `"cheap"` |
 | `is_cheap_tariff` | Computed from tariff schedule (Section 4.1.4) | True during cheap tariff window |
 | `grid_power_w` | M-Bus `sensor.grid_power` (preferred, freshness < 20 s) or DTSU `sensor.power_meter_active_power` (fallback) | Grid power (W): positive = import, negative = export. Both include wallbox consumption — gPlug measures at the utility meter; DTSU is corrected by Modbus Proxy (`dtsu + wallbox_power`) before SUN2000 reports it. Config keys: `sensors.mbus_grid_power`, `sensors.dtsu_grid_power`. |
@@ -2843,9 +2842,9 @@ Test file: `energymanager/tests/test_ev_state_machine.py`
 | Category | # Tests | Transitions covered |
 |----------|---------|---------------------|
 | TestNormalTransitions | 7 | N1 (→ IMMEDIATE), N2 (→ CHEAP), N3 (→ SOLAR), wallbox blocks, battery protection ignored, priority |
-| TestSolarTransitions | 5 | S1 (car full), S2 (→ IMMEDIATE), S3 (→ CHEAP), ev_soc=None stays, priority |
-| TestCheapTransitions | 4 | C1 (car full), C2 (mode changed to solar/immediate), ev_soc=None stays |
-| TestMaxTransitions | 4 | M1 (car full), M2 (mode changed to solar/cheap), ev_soc=None stays |
+| TestSolarTransitions | 3 | S2 (→ IMMEDIATE), S3 (→ CHEAP, cheap/expensive tariff) |
+| TestCheapTransitions | 2 | C2 (mode changed to solar/immediate) |
+| TestMaxTransitions | 2 | M2 (mode changed to solar/cheap) |
 
 ### CHEAP power toggle tests
 
@@ -2857,7 +2856,7 @@ Test file: `energymanager/tests/test_ev_state_machine.py`
 
 | Category | # Tests | Description |
 |----------|---------|-------------|
-| TestMinStayTimer | 5 | Hold min_power_w during low excess, S1/S2 fire during min-stay, entered_at set/cleared |
+| TestMinStayTimer | 4 | Hold min_power_w during low excess, S2 fires during min-stay, entered_at set/cleared |
 
 ### Excess calculation & power clamping tests (SOLAR)
 
@@ -2871,7 +2870,7 @@ Test file: `energymanager/tests/test_ev_state_machine.py`
 
 | Category | # Tests | Scenarios |
 |----------|---------|-----------|
-| TestMultiStep | 3 | NORMAL → SOLAR → NORMAL (car full); full mode cycle (IMMEDIATE → NORMAL → CHEAP → NORMAL → SOLAR); SOLAR → IMMEDIATE → NORMAL → SOLAR |
+| TestMultiStep | 3 | NORMAL → SOLAR → NORMAL (mode change); full mode cycle (IMMEDIATE → NORMAL → CHEAP → NORMAL → SOLAR); SOLAR → IMMEDIATE → NORMAL → SOLAR |
 
 ### wallbox_available guard tests
 
@@ -3033,6 +3032,7 @@ Integration tests verify cross-module behavior — interactions between EV charg
 | IT-BATT-01 | Cheap mode blocks discharge | `ev_charging_mode = "cheap"`, power > 0 | `_discharge_blocked_by_ev = True` | ✅ `test_discharge_blocking.py::TestCheapModeBlocksDischarge` |
 | IT-BATT-02 | Battery protection blocks EV | Forecast SOC at 21:00 < 80% | `battery_protection_passed = False` (dashboard) | 🔮 Future — requires InfluxDB mock |
 | IT-BATT-03 | Tariff boundary transitions | 20:59 (expensive), 21:01 (cheap), 05:59 (cheap), 06:01 (expensive) | Correct `is_cheap_now` flag | ✅ `test_battery_optimizer.py::TestTariffBoundaryTransitions` |
+| IT-BATT-04 | Wallbox idle detection exits all modes | SOLAR/CHEAP/IMMEDIATE + `wallbox_idle=True` | State machine → NORMAL, 0 W | ✅ `test_ev_state_machine.py::TestIdleDetection` |
 
 ### D.6.5 Authorization & Transaction (Category E)
 
@@ -3114,12 +3114,13 @@ log_level: "info"
 
 **End of Document**
 
-*Version 2.22 - February 2026*
+*Version 2.23 - February 2026*
 
 **Changelog:**
+- v2.23: Wallbox idle detection exits all EV modes — added `wallbox_idle` input (Section 4.5.6); S1/C1/M1 transitions exit SOLAR/CHEAP/IMMEDIATE to NORMAL when car finishes charging (wallbox idle ≥ 5 min); idle timer extended from immediate/cheap to all modes; dashboard shows `idle_minutes` and `wallbox_idle` attributes; EC-16 passive integration test; IT-BATT-04 test catalogue entry
 - v2.22: Integration test catalogue (Appendix D.5/D.6) — 22 tests across 6 categories; 3 implemented (IT-PHASE-01, IT-BATT-01, IT-BATT-03), 19 documented as future; EV charging power tests documented (Appendix D.5)
 - v2.21: Added wallbox status display mapping table for dashboard (Section 4.8.1) — documents how raw OCPP status is shown to the user
-- v2.20: SOC poll on charging mode change — switching modes (e.g. solar → immediate) triggers immediate SOC refresh to prevent stale "car full" decisions (Section 4.6.1)
+- v2.20: SOC poll on charging mode change — switching modes (e.g. solar → immediate) triggers immediate SOC refresh for dashboard accuracy (Section 4.6.1)
 - v2.19: Adaptive Smart car SOC polling — 1-minute during charging, immediate on car connection, hourly baseline; cached Hello Smart client reduces API calls from 6 to 2 per poll (Section 4.6)
 - v2.18: Removed battery protection gate from solar EV charging — solar mode always active when excess available; battery protection is now informational (dashboard only); removed S4 transition from SOLAR state; updated N3 condition (Section 4.5.6)
 - v2.17: Two-flag battery discharge blocking — EV charging in immediate/cheap mode now independently blocks battery discharge (Section 4.3.2); prevents SUN2000 from draining battery to cover wallbox load via DTSU correction; 17 new tests (Appendix D.4)

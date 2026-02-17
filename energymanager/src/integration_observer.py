@@ -1,8 +1,8 @@
 """
 Passive integration-test observer for EV charging.
 
-Watches every 10 s control_ev_charging() cycle and checks off 27 test
-cases (12 normal operation, 15 edge cases) as they naturally occur during
+Watches every 10 s control_ev_charging() cycle and checks off 24 test
+cases (11 normal operation, 13 edge cases) as they naturally occur during
 daily operation.  Results are persisted to a JSON file and Telegram
 notifications are sent on status changes.
 """
@@ -75,7 +75,6 @@ _TEST_DEFS: list[_TestDef] = [
     _TestDef("NO-02", "NORMAL->SOLAR on excess>=min", "normal", "_detect_no02"),
     _TestDef("NO-03", "SOLAR power tracks excess", "normal", "_detect_no03"),
     _TestDef("NO-04", "SOLAR holds min when excess<min", "normal", "_detect_no04"),
-    _TestDef("NO-05", "SOLAR->NORMAL car full", "normal", "_detect_no05"),
     _TestDef("NO-06", "NORMAL->IMMEDIATE", "normal", "_detect_no06"),
     _TestDef("NO-07", "IMMEDIATE->NORMAL mode change", "normal", "_detect_no07"),
     _TestDef("NO-08", "Immediate->solar sends 0W", "normal", "_detect_no08"),
@@ -88,9 +87,6 @@ _TEST_DEFS: list[_TestDef] = [
     _TestDef("EC-02", "SOLAR does NOT block discharge", "edge", "_detect_ec02"),
     _TestDef("EC-03", "CHEAP blocks discharge when charging", "edge", "_detect_ec03"),
     _TestDef("EC-04", "CHEAP unblocks at expensive tariff", "edge", "_detect_ec04"),
-    _TestDef("EC-05", "CHEAP->NORMAL car full", "edge", "_detect_ec05"),
-    _TestDef("EC-06", "IMMEDIATE->NORMAL car full", "edge", "_detect_ec06"),
-    _TestDef("EC-07", "ev_soc=None never triggers car-full", "edge", "_detect_ec07"),
     _TestDef("EC-08", "SOLAR->IMMEDIATE", "edge", "_detect_ec08"),
     _TestDef("EC-09", "SOLAR->CHEAP", "edge", "_detect_ec09"),
     _TestDef("EC-10", "Phase-gap snap down (batt<100%)", "edge", "_detect_ec10"),
@@ -99,6 +95,7 @@ _TEST_DEFS: list[_TestDef] = [
     _TestDef("EC-13", "Auto-revert: mode resets to solar", "edge", "_detect_ec13"),
     _TestDef("EC-14", "Faulted/Unknown -> NORMAL", "edge", "_detect_ec14"),
     _TestDef("EC-15", "CHEAP->NORMAL clears discharge", "edge", "_detect_ec15"),
+    _TestDef("EC-16", "Idle detection exits to NORMAL", "edge", "_detect_ec16"),
 ]
 
 
@@ -203,7 +200,7 @@ class IntegrationObserver:
         return (
             f"state={o.state.value} prev={s.prev_state.value} "
             f"power={o.target_power_w:.0f}W mode={i.charging_mode} "
-            f"excess={s.excess_w:.0f}W ev_soc={i.ev_soc} "
+            f"excess={s.excess_w:.0f}W "
             f"blocked={s.discharge_blocked_by_ev} "
             f"last_sent={s.last_power_limit_sent}"
         )
@@ -305,15 +302,6 @@ class IntegrationObserver:
         if curr.excess_w >= i.min_power_w:
             return None
         return curr.output.target_power_w == i.min_power_w
-
-    def _detect_no05(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """NO-05: SOLAR->NORMAL car full."""
-        i = curr.inputs
-        if curr.prev_state != EVState.SOLAR:
-            return None
-        if i.ev_soc is None or i.ev_soc < i.ev_target_soc:
-            return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
 
     def _detect_no06(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """NO-06: NORMAL->IMMEDIATE."""
@@ -422,34 +410,6 @@ class IntegrationObserver:
             return None
         return curr.discharge_blocked_by_ev is False
 
-    def _detect_ec05(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """EC-05: CHEAP->NORMAL car full."""
-        i = curr.inputs
-        if curr.prev_state != EVState.CHEAP:
-            return None
-        if i.ev_soc is None or i.ev_soc < i.ev_target_soc:
-            return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
-
-    def _detect_ec06(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """EC-06: IMMEDIATE->NORMAL car full."""
-        i = curr.inputs
-        if curr.prev_state != EVState.IMMEDIATE:
-            return None
-        if i.ev_soc is None or i.ev_soc < i.ev_target_soc:
-            return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
-
-    def _detect_ec07(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """EC-07: ev_soc=None never triggers car-full exit."""
-        i = curr.inputs
-        if i.ev_soc is not None:
-            return None
-        if curr.output.state not in (EVState.SOLAR, EVState.CHEAP, EVState.IMMEDIATE):
-            return None
-        # Should stay in its current state (not exit to NORMAL via car-full)
-        return curr.output.state == curr.prev_state
-
     def _detect_ec08(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """EC-08: SOLAR->IMMEDIATE."""
         i = curr.inputs
@@ -538,3 +498,12 @@ class IntegrationObserver:
             and curr.output.target_power_w == 0
             and curr.discharge_blocked_by_ev is False
         )
+
+    def _detect_ec16(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
+        """EC-16: Idle detection exits to NORMAL."""
+        i = curr.inputs
+        if curr.prev_state not in (EVState.SOLAR, EVState.CHEAP, EVState.IMMEDIATE):
+            return None
+        if not i.wallbox_idle:
+            return None
+        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0

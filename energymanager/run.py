@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.30"
+__version__ = "1.6.31"
 
 import json
 import logging
@@ -184,8 +184,6 @@ class EnergyManager:
         self.wallbox_connected_entity = ev_opts.get("wallbox_connected_entity", "binary_sensor.wallbox_connected")
         self.wallbox_power_limit_entity = ev_opts.get("wallbox_power_limit_entity", "number.wallbox_power_limit")
         self.ev_target_power_entity = ev_opts.get("ev_target_power_entity", "sensor.ev_target_power")
-        self.ev_target_soc = ev_opts.get("target_soc", 80)
-        self.ev_target_soc_entity = ev_opts.get("target_soc_entity", "sensor.ev_target_soc")
         self._last_ev_power_limit = None
         self._ev_sm = EVStateMachine()
 
@@ -608,17 +606,6 @@ class EnergyManager:
             return
 
         try:
-            # Publish target SOC config value as display-only sensor
-            self.ha_client.set_sensor_state(
-                self.ev_target_soc_entity,
-                int(self.ev_target_soc),
-                attributes={
-                    "friendly_name": "EV Target SOC",
-                    "unit_of_measurement": "%",
-                    "icon": "mdi:battery-charging-80",
-                },
-            )
-
             # Check wallbox connectivity — skip everything if entity doesn't exist
             wb_state = self.ha_client.get_state(self.wallbox_connected_entity)
             if wb_state is None:
@@ -686,10 +673,6 @@ class EnergyManager:
             tariff = self.optimizer.get_tariff_periods(now)
             grid_power = self._read_grid_power()
             battery_soc = self.ha_client.get_sensor_value(self.soc_entity) or 0
-            ev_soc = (
-                self.ha_client.get_sensor_value(self.smart_car_soc_entity)
-                if self.smart_car_enabled else None
-            )
 
             # User power slider
             user_limit = self.ha_client.get_sensor_value(self.ev_power_limit_entity)
@@ -709,15 +692,25 @@ class EnergyManager:
 
             validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
 
+            # Compute wallbox idle state (all modes)
+            if wallbox_power == 0 and wb_status in ("Finishing", "SuspendedEV"):
+                if self._ev_idle_since is None:
+                    self._ev_idle_since = now
+                idle_minutes = (now - self._ev_idle_since).total_seconds() / 60
+                wallbox_idle = idle_minutes >= self.ev_auto_reset_timeout_min
+            else:
+                self._ev_idle_since = None
+                idle_minutes = 0.0
+                wallbox_idle = False
+
             # Build inputs and run state machine
             inputs = EVInputs(
                 wallbox_available=wallbox_available,
                 wallbox_power_w=wallbox_power,
                 wallbox_status=wb_status,
+                wallbox_idle=wallbox_idle,
                 battery_protection_passed=reaches_target,
                 battery_soc=battery_soc,
-                ev_soc=ev_soc,
-                ev_target_soc=self.ev_target_soc,
                 charging_mode=ev_mode,
                 is_cheap_tariff=tariff.is_cheap_now,
                 grid_power_w=grid_power,
@@ -729,19 +722,10 @@ class EnergyManager:
 
             logger.info(f"EV [{output.state.value}] {output.target_power_w:.0f}W — {output.reason}")
 
-            # Auto-revert: immediate/cheap idle timeout → switch back to solar
-            if ev_mode in ("immediate", "cheap"):
-                if wallbox_power == 0 and wb_status in ("Finishing", "SuspendedEV"):
-                    if self._ev_idle_since is None:
-                        self._ev_idle_since = datetime.now(timezone.utc)
-                    idle_minutes = (datetime.now(timezone.utc) - self._ev_idle_since).total_seconds() / 60
-                    if idle_minutes >= self.ev_auto_reset_timeout_min:
-                        logger.info("Charging complete — reverting mode to solar")
-                        self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
-                        self._ev_idle_since = None
-                else:
-                    self._ev_idle_since = None
-            else:
+            # Auto-revert: immediate/cheap idle timeout → switch mode back to solar
+            if wallbox_idle and ev_mode in ("immediate", "cheap"):
+                logger.info("Charging complete — reverting mode to solar")
+                self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
                 self._ev_idle_since = None
 
             # Send power limit to OCPP (only when changed)
@@ -791,6 +775,8 @@ class EnergyManager:
                     "friendly_name": "EV Charge Status",
                     "target_power_w": output.target_power_w,
                     "reason": output.reason,
+                    "idle_minutes": round(idle_minutes, 1),
+                    "wallbox_idle": wallbox_idle,
                     "icon": "mdi:ev-station",
                 },
             )
@@ -831,9 +817,8 @@ class EnergyManager:
                     return
                 vin = vehicles[0]
 
-            soc, target_soc = get_soc(self._smart_car_client, vin)
-            logger.info(f"Smart car SOC: {soc}%"
-                        + (f", target: {target_soc}%" if target_soc is not None else ""))
+            soc = get_soc(self._smart_car_client, vin)
+            logger.info(f"Smart car SOC: {soc}%")
 
             self.ha_client.set_sensor_state(
                 self.smart_car_soc_entity,
@@ -847,11 +832,6 @@ class EnergyManager:
                     "attribution": "Data provided by Hello Smart API",
                 },
             )
-
-            # Update target SOC from car if reported
-            if target_soc is not None and target_soc != self.ev_target_soc:
-                logger.info(f"Smart car target SOC updated: {self.ev_target_soc}% → {target_soc}%")
-                self.ev_target_soc = target_soc
 
         except Exception as e:
             logger.error(f"Smart car SOC update failed: {e}")
@@ -896,12 +876,6 @@ class EnergyManager:
     def _publish_initial_sensors(self):
         """Ensure all managed sensors exist in HA at startup."""
         try:
-            self._ensure_sensor_exists(
-                self.ev_target_soc_entity,
-                int(self.ev_target_soc),
-                {"friendly_name": "EV Target SOC", "unit_of_measurement": "%",
-                 "icon": "mdi:battery-charging-80"},
-            )
             self._ensure_sensor_exists(
                 self.ev_target_power_entity,
                 0,

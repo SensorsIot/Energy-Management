@@ -59,7 +59,6 @@ ev_charging:
   # Wallbox power limits (1-phase: 1400–3700, 3-phase: 4100–11000, switchable: 1400–11000)
   min_power_w: 1400
   max_power_w: 11000
-  target_soc: 80                    # Target SOC % (set to match car's target)
   battery_protection_soc: 80        # Block EV until battery forecast reaches this %
   auto_reset_timeout_min: 5         # Minutes of 0W before auto-revert to solar
 

@@ -26,10 +26,9 @@ def _make_inputs(**overrides) -> EVInputs:
         wallbox_available=True,
         wallbox_power_w=0,
         wallbox_status="Preparing",
+        wallbox_idle=False,
         battery_protection_passed=True,
         battery_soc=70.0,
-        ev_soc=50.0,
-        ev_target_soc=80.0,
         charging_mode="solar",
         is_cheap_tariff=False,
         grid_power_w=-5000.0,
@@ -76,8 +75,8 @@ def _make_snapshot(
 # ---------------------------------------------------------------------------
 
 class TestRegistration:
-    def test_all_27_tests_registered(self):
-        assert len(_TEST_DEFS) == 27
+    def test_all_24_tests_registered(self):
+        assert len(_TEST_DEFS) == 24
 
     def test_initial_status_pending(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "report.json"))
@@ -91,8 +90,8 @@ class TestRegistration:
     def test_categories(self):
         normal = [td for td in _TEST_DEFS if td.category == "normal"]
         edge = [td for td in _TEST_DEFS if td.category == "edge"]
-        assert len(normal) == 12
-        assert len(edge) == 15
+        assert len(normal) == 11
+        assert len(edge) == 13
 
 
 # ---------------------------------------------------------------------------
@@ -276,15 +275,6 @@ class TestDetectors:
         )
         assert obs._detect_no04(None, snap) is True
 
-    def test_no05_pass(self, tmp_path):
-        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
-        snap = _make_snapshot(
-            inputs=_make_inputs(ev_soc=85, ev_target_soc=80),
-            output=EVOutput(EVState.NORMAL, 0, "Car full"),
-            prev_state=EVState.SOLAR,
-        )
-        assert obs._detect_no05(None, snap) is True
-
     def test_ec02_pass(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
@@ -364,11 +354,21 @@ class TestDetectors:
         )
         assert obs._detect_ec13(prev, curr) is True
 
-    def test_ec07_soc_none_stays(self, tmp_path):
+    def test_ec16_idle_exits_solar(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
-            inputs=_make_inputs(ev_soc=None),
-            output=EVOutput(EVState.SOLAR, 5000, "Solar"),
+            inputs=_make_inputs(wallbox_idle=True),
+            output=EVOutput(EVState.NORMAL, 0, "Car finished"),
             prev_state=EVState.SOLAR,
         )
-        assert obs._detect_ec07(None, snap) is True
+        assert obs._detect_ec16(None, snap) is True
+
+    def test_ec16_skips_when_not_idle(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        snap = _make_snapshot(
+            inputs=_make_inputs(wallbox_idle=False),
+            output=EVOutput(EVState.SOLAR, 1400, "Solar"),
+            prev_state=EVState.SOLAR,
+        )
+        assert obs._detect_ec16(None, snap) is None
+
