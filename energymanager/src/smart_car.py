@@ -21,6 +21,7 @@ import logging
 import random
 import string
 import time
+from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
@@ -403,32 +404,56 @@ class HelloSmartClient:
         return data["data"]
 
 
-def get_soc(client: HelloSmartClient, vin: str) -> int:
-    """Get current battery SOC from vehicle.
+@dataclass(frozen=True)
+class EVStatus:
+    """Electric vehicle status from Smart car API."""
+    soc: int                    # chargeLevel (%)
+    charger_state: int          # 0=disconnected, 2=charging, 4=connected/not charging
+    charge_current_a: float     # chargeIAct (A)
+    time_to_full_min: int       # timeToFullyCharged (min, 2047=N/A)
+    range_km: int               # distanceToEmptyOnBatteryOnly (km)
+
+
+# chargerState mapping for dashboard display
+CHARGER_STATE_LABELS = {
+    0: "disconnected",
+    2: "charging",
+    4: "connected_idle",
+}
+
+
+def get_ev_status(client: HelloSmartClient, vin: str) -> EVStatus:
+    """Get EV status including SOC and charging state.
 
     Args:
         client: Authenticated HelloSmartClient instance
         vin: Vehicle identification number
 
     Returns:
-        SOC as integer percentage.
+        EVStatus with SOC, charger state, current, time-to-full, range.
 
     Raises:
         RuntimeError: If status query fails
-        KeyError: If SOC field is missing from response
+        KeyError: If chargeLevel is missing from response
     """
     data = client.get_status(vin)
-    logger.debug(f"Smart car API response keys: {sorted(data.keys())}")
-    if "vehicleStatus" in data:
-        vs = data["vehicleStatus"]
-        logger.debug(f"vehicleStatus keys: {sorted(vs.keys())}")
-        avs = vs.get("additionalVehicleStatus", {})
-        evs = avs.get("electricVehicleStatus", {})
-        logger.debug(f"electricVehicleStatus: {evs}")
     vehicle_status = data.get("vehicleStatus", data)
     ev = vehicle_status.get("additionalVehicleStatus", {}).get("electricVehicleStatus", {})
+    logger.debug(f"electricVehicleStatus: {ev}")
+
     soc = ev.get("chargeLevel")
     if soc is None:
         raise KeyError("chargeLevel not found in vehicle status")
 
-    return int(soc)
+    return EVStatus(
+        soc=int(soc),
+        charger_state=int(ev.get("chargerState", 0)),
+        charge_current_a=float(ev.get("chargeIAct", 0)),
+        time_to_full_min=int(ev.get("timeToFullyCharged", 2047)),
+        range_km=int(ev.get("distanceToEmptyOnBatteryOnly", 0)),
+    )
+
+
+def get_soc(client: HelloSmartClient, vin: str) -> int:
+    """Get current battery SOC from vehicle (convenience wrapper)."""
+    return get_ev_status(client, vin).soc

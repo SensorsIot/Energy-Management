@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.32"
+__version__ = "1.6.33"
 
 import json
 import logging
@@ -30,7 +30,7 @@ from src.influxdb_writer import SimulationWriter
 from src.integration_observer import CycleSnapshot, IntegrationObserver
 from src.notifications import init_telegram, notify_error
 from src.sanity import validate_power_readings
-from src.smart_car import HelloSmartClient, get_soc
+from src.smart_car import CHARGER_STATE_LABELS, HelloSmartClient, get_ev_status
 
 # Swiss timezone for display
 SWISS_TZ = ZoneInfo("Europe/Zurich")
@@ -822,12 +822,16 @@ class EnergyManager:
                     return
                 vin = vehicles[0]
 
-            soc = get_soc(self._smart_car_client, vin)
-            logger.info(f"Smart car SOC: {soc}%")
+            ev = get_ev_status(self._smart_car_client, vin)
+            logger.info(
+                f"Smart car SOC: {ev.soc}% "
+                f"charger={CHARGER_STATE_LABELS.get(ev.charger_state, ev.charger_state)} "
+                f"current={ev.charge_current_a}A"
+            )
 
             self.ha_client.set_sensor_state(
                 self.smart_car_soc_entity,
-                soc,
+                ev.soc,
                 attributes={
                     "state_class": "measurement",
                     "unit_of_measurement": "%",
@@ -835,6 +839,10 @@ class EnergyManager:
                     "icon": "mdi:car-battery",
                     "friendly_name": "Smart Battery",
                     "attribution": "Data provided by Hello Smart API",
+                    "charger_state": CHARGER_STATE_LABELS.get(ev.charger_state, str(ev.charger_state)),
+                    "charge_current_a": ev.charge_current_a,
+                    "time_to_full_min": ev.time_to_full_min if ev.time_to_full_min < 2047 else None,
+                    "range_km": ev.range_km,
                 },
             )
 
