@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.23"
+__version__ = "0.9.24"
 
 import asyncio
 import json
@@ -523,6 +523,21 @@ class OCPPServer:
                     if since_last_change >= self.power_update_interval_s:
                         power_w = self._pending_power_w
                         await self._send_power_to_wallbox(power_w)
+
+                # Re-send profile if wallbox stuck in SuspendedEVSE with power > 0
+                if (
+                    self._pending_power_w is None
+                    and self.charge_point
+                    and self.charge_point.current_status == "SuspendedEVSE"
+                    and self._last_sent_power_w > 0
+                ):
+                    since_last = time.monotonic() - self._last_change_at
+                    if since_last >= self.power_update_interval_s:
+                        logger.info(
+                            f"Wallbox stuck in SuspendedEVSE — re-sending "
+                            f"{self._last_sent_power_w}W profile"
+                        )
+                        await self._send_power_to_wallbox(self._last_sent_power_w)
 
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")
