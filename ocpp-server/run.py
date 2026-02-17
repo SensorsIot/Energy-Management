@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.20"
+__version__ = "0.9.21"
 
 import asyncio
 import json
@@ -198,6 +198,14 @@ class OCPPServer:
         # Synchronization: _watch_controls waits until _post_connect_setup finishes
         self._setup_complete = asyncio.Event()
 
+    async def _publish_power_limits(self):
+        """Publish min/max wallbox power based on current phase count."""
+        min_w = self.min_current_a * 230 * self._current_phases
+        max_w = self.max_current_a * 230 * self._current_phases
+        await self.ha.set_state("sensor.wallbox_min_power_w", min_w)
+        await self.ha.set_state("sensor.wallbox_max_power_w", max_w)
+        logger.info(f"Power limits: {min_w}–{max_w}W ({self._current_phases}-phase)")
+
     async def _mqtt_loop(self):
         """Maintain MQTT connection and reconnect on failure."""
         if not self._mqtt_host:
@@ -301,6 +309,7 @@ class OCPPServer:
         # Step 3: Update state
         self._current_phases = target_phases
         self._on_status_change("phases", target_phases)
+        await self._publish_power_limits()
         logger.info(f"Phase switch complete: now {target_phases}-phase")
 
     async def _meter_values_watchdog(self):
@@ -575,6 +584,9 @@ class OCPPServer:
                 f"Phase switch entity: {self.phase_switch_entity}, "
                 f"relay={relay_state}, phases={self._current_phases}"
             )
+
+        # Publish initial min/max power limits based on current phase count
+        await self._publish_power_limits()
 
         host = "0.0.0.0"
         port = self.options.get("ws_port", 8887)

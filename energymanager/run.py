@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.24"
+__version__ = "1.6.25"
 
 import json
 import logging
@@ -539,7 +539,8 @@ class EnergyManager:
             logger.error(f"Failed to calculate appliance signal: {e}")
 
     def control_ev_charging_mode(
-        self, wallbox_connected: bool, wallbox_power: float
+        self, wallbox_connected: bool, wallbox_power: float,
+        ev_max_power: int | None = None,
     ) -> bool:
         """Control EV charging based on selected mode (FSD 4.5.4).
 
@@ -583,10 +584,11 @@ class EnergyManager:
         user_limit = self.ha_client.get_sensor_value(
             self.ev_power_limit_entity
         )
+        fallback_max = ev_max_power if ev_max_power else self.ev_max_power_w
         max_power = (
             user_limit
             if user_limit and user_limit > 0
-            else self.ev_max_power_w
+            else fallback_max
         )
 
         result = calculate_charging_mode(
@@ -801,8 +803,14 @@ class EnergyManager:
             # Read wallbox power (needed by both goal mode and solar mode)
             wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity) or 0.0
 
+            # Dynamic min/max from OCPP server (falls back to config)
+            dyn_min = self.ha_client.get_sensor_value("sensor.wallbox_min_power_w")
+            dyn_max = self.ha_client.get_sensor_value("sensor.wallbox_max_power_w")
+            ev_min_power = int(dyn_min) if dyn_min and dyn_min > 0 else self.ev_min_power_w
+            ev_max_power = int(dyn_max) if dyn_max and dyn_max > 0 else self.ev_max_power_w
+
             # Priority: immediate/cheap mode > solar mode
-            if self.control_ev_charging_mode(wb_connected, wallbox_power):
+            if self.control_ev_charging_mode(wb_connected, wallbox_power, ev_max_power):
                 return
 
             # Step 1: Check preconditions
@@ -829,8 +837,8 @@ class EnergyManager:
 
                 ev_result = calculate_ev_power(
                     excess_w=excess,
-                    min_power_w=self.ev_min_power_w,
-                    max_power_w=self.ev_max_power_w,
+                    min_power_w=ev_min_power,
+                    max_power_w=ev_max_power,
                 )
                 target_power = ev_result.target_power_w
                 reason = ev_result.reason

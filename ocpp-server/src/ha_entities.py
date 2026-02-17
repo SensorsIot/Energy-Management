@@ -47,6 +47,22 @@ SENSORS = {
         "icon": "mdi:sine-wave",
         "initial_state": 3,
     },
+    "sensor.wallbox_min_power_w": {
+        "name": "Wallbox Min Power",
+        "unique_id": "ocpp_wallbox_min_power_w",
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "icon": "mdi:lightning-bolt-outline",
+        "initial_state": 0,
+    },
+    "sensor.wallbox_max_power_w": {
+        "name": "Wallbox Max Power",
+        "unique_id": "ocpp_wallbox_max_power_w",
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "icon": "mdi:lightning-bolt",
+        "initial_state": 0,
+    },
 }
 
 BINARY_SENSORS = {
