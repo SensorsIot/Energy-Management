@@ -99,15 +99,6 @@ def calculate_charging_mode(
             revert_to_solar=True,
         )
 
-    # Actively charging (any mode)
-    if wallbox_power_w > 0 and wallbox_status == "Charging":
-        return ChargingModeResult(
-            target_power_w=max_power_w,
-            charge_status="charging",
-            status_text=f"Charging at {wallbox_power_w:.0f}W",
-            reason=f"Active charging at {wallbox_power_w:.0f}W ({ev_charging_mode} mode)",
-        )
-
     # Immediate mode: full power regardless of tariff
     if ev_charging_mode == "immediate":
         return ChargingModeResult(
