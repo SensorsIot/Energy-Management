@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 2.4 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 2.5 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -197,6 +197,24 @@ When `number.wallbox_power_limit` changes:
 6. Clamp to `[min_current_a, max_current_a]` (from config)
 6. If power_w = 0: send profile with limit = 0 (pause charging)
 7. Send `SetChargingProfile` with `TxDefaultProfile`, `Absolute`, rate unit `Amps`
+
+**Wallbox states and phase switch safety:**
+
+Phase changes must only occur when no current is flowing through the contactor. The following table lists all OCPP 1.6 `ChargePointStatus` values and whether it is safe to toggle the EARU relay:
+
+| Status | Current flow | Phase switch allowed | Description |
+|--------|-------------|---------------------|-------------|
+| `Available` | No | Yes | No car connected |
+| `Preparing` | No | Yes | Car plugged in, not yet charging |
+| `Charging` | **Yes** | **No** | Active power delivery — current flowing |
+| `SuspendedEVSE` | No | Yes | Paused by charger (limit = 0 A) |
+| `SuspendedEV` | No | Yes | Paused by car |
+| `Finishing` | No | Yes | Transaction ending, car still plugged |
+| `Reserved` | No | No | Reserved — no car present, avoid unexpected state |
+| `Unavailable` | No | Yes | Charger offline / maintenance |
+| `Faulted` | No | **No** | Error state — do not touch hardware |
+
+The safety sequence below ensures the wallbox transitions to `SuspendedEVSE` (limit = 0 A) before the relay is toggled.
 
 **Phase switching safety sequence** (EARU latching relay via ESPHome):
 
@@ -412,3 +430,4 @@ ocpp-server/
 | 2.2 | 2026-02-15 | Added `single_phase_supported` config flag, exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager phase selection. |
 | 2.3 | 2026-02-15 | Added `power_update_interval_s` throttle (default 60s) to rate-limit `SetChargingProfile` commands. No exceptions — all changes throttled uniformly to prevent oscillation. |
 | 2.4 | 2026-02-16 | Integer amp rounding (`math.ceil`): AcTec only accepts whole amps. Throttle now based on time since last value change (not last send) — immediate send if previous change >60s ago, throttle only rapid consecutive changes. Removed `ChargePointMaxProfile` and `TxProfile` — only `TxDefaultProfile` per FSD. Added `_sync_ha_state` for HA restart recovery. Updated EnergyManager to 10s control loop. |
+| 2.5 | 2026-02-17 | Added wallbox state safety table for phase switching (Section 4.3.3): documents all OCPP 1.6 ChargePointStatus values and whether relay toggle is allowed. |
