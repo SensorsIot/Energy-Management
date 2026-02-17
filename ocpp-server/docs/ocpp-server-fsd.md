@@ -165,11 +165,29 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 |--------|------|------|-------------|
 | `sensor.wallbox_power` | sensor | W | Current charging power |
 | `sensor.wallbox_energy` | sensor | Wh | Session energy delivered |
-| `sensor.wallbox_status` | sensor | - | `Available` / `Preparing` / `Charging` / `SuspendedEVSE` / `Finishing` / `Faulted` |
+| `sensor.wallbox_status` | sensor | - | OCPP status (see display table below). `friendly_name` attribute shows power for active states. |
 | `binary_sensor.wallbox_connected` | binary_sensor | - | Wallbox WebSocket connected |
 | `sensor.wallbox_transaction` | sensor | - | `idle` / `charging` |
 | `sensor.wallbox_phases` | sensor | - | Active phase count: `1` or `3` |
 | `binary_sensor.wallbox_single_phase_supported` | binary_sensor | - | From config: wallbox supports 1-phase charging |
+
+**Wallbox status display:**
+
+The `friendly_name` attribute on `sensor.wallbox_status` provides a dashboard-ready label. For active states (current may be flowing or was recently flowing), the label includes the current power. For other states, a human-readable description is shown.
+
+| OCPP Status | `friendly_name` | Meaning |
+|-------------|-----------------|---------|
+| `Available` | Available — no car | No vehicle connected |
+| `Preparing` | Car connected | Vehicle plugged in, not yet charging |
+| `Charging` | Charging — {power} W | Active power delivery |
+| `SuspendedEVSE` | SuspendedEVSE — {power} W | Paused by charger (we sent 0 A) |
+| `SuspendedEV` | SuspendedEV — {power} W | Paused by car (car's BMS stopped drawing) |
+| `Finishing` | Charge complete | Transaction ending, car still plugged |
+| `Reserved` | Reserved | Connector reserved (not used in our system) |
+| `Unavailable` | Offline | Charger offline or maintenance |
+| `Faulted` | Fault | Hardware error |
+
+**SuspendedEVSE vs SuspendedEV:** EVSE = paused by the charger (our normal "paused" state when power limit = 0 A). EV = paused by the car itself (car's BMS decided to stop, e.g. reached its own charge limit or thermal protection).
 
 #### 4.3.2 Control Entities (set by EnergyManager)
 
@@ -430,4 +448,4 @@ ocpp-server/
 | 2.2 | 2026-02-15 | Added `single_phase_supported` config flag, exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager phase selection. |
 | 2.3 | 2026-02-15 | Added `power_update_interval_s` throttle (default 60s) to rate-limit `SetChargingProfile` commands. No exceptions — all changes throttled uniformly to prevent oscillation. |
 | 2.4 | 2026-02-16 | Integer amp rounding (`math.ceil`): AcTec only accepts whole amps. Throttle now based on time since last value change (not last send) — immediate send if previous change >60s ago, throttle only rapid consecutive changes. Removed `ChargePointMaxProfile` and `TxProfile` — only `TxDefaultProfile` per FSD. Added `_sync_ha_state` for HA restart recovery. Updated EnergyManager to 10s control loop. |
-| 2.5 | 2026-02-17 | Added wallbox state safety table for phase switching (Section 4.3.3): documents all OCPP 1.6 ChargePointStatus values and whether relay toggle is allowed. |
+| 2.5 | 2026-02-17 | Added wallbox state safety table for phase switching (Section 4.3.3). Added dashboard display table for `sensor.wallbox_status` with friendly names and power labels (Section 4.3.1). Documented SuspendedEVSE vs SuspendedEV distinction. |
