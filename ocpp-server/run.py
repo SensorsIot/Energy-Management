@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.19"
+__version__ = "0.9.20"
 
 import asyncio
 import json
@@ -41,18 +41,6 @@ STATUS_ENTITY_MAP = {
     "transaction": "sensor.wallbox_transaction",
     "phases": "sensor.wallbox_phases",
 }
-
-# Friendly names for wallbox states shown on dashboard
-_STATUS_FRIENDLY = {
-    "Available": "No car",
-    "Preparing": "Car connected",
-    "Finishing": "Charge complete",
-    "Faulted": "Fault",
-    "Reserved": "Reserved",
-    "Unavailable": "Offline",
-    "Unknown": "Unknown",
-}
-# Charging, SuspendedEVSE, SuspendedEV show power instead (see _wallbox_status_friendly)
 
 
 class HAEntityManager:
@@ -256,25 +244,6 @@ class OCPPServer:
         except Exception as e:
             logger.warning(f"MQTT publish failed: {e}")
 
-    def _wallbox_status_friendly(self) -> str:
-        """Build friendly name for wallbox_status showing power for active states."""
-        cp = self.charge_point
-        status = cp.current_status if cp else "Unknown"
-        if status in ("Charging", "SuspendedEVSE", "SuspendedEV"):
-            power = int(cp.current_power_w) if cp else 0
-            return f"{status} — {power} W"
-        return _STATUS_FRIENDLY.get(str(status), str(status))
-
-    def _update_wallbox_status_display(self):
-        """Update wallbox_status entity with friendly_name attribute."""
-        cp = self.charge_point
-        status = cp.current_status if cp else "Unknown"
-        friendly = self._wallbox_status_friendly()
-        asyncio.ensure_future(self.ha.set_state(
-            "sensor.wallbox_status", status,
-            attributes={"friendly_name": friendly, "icon": "mdi:ev-plug-type2"},
-        ))
-
     def _on_status_change(self, key: str, value):
         """Callback when wallbox status changes — update HA entity and MQTT."""
         entity_id = STATUS_ENTITY_MAP.get(key)
@@ -292,10 +261,6 @@ class OCPPServer:
             state = value
 
         asyncio.ensure_future(self.ha.set_state(entity_id, state))
-
-        # Update friendly_name on wallbox_status when status or power changes
-        if key in ("status", "power_w"):
-            self._update_wallbox_status_display()
 
         # Publish wallbox power to MQTT for ESP32 Modbus Proxy correction
         if key == "power_w":
@@ -425,7 +390,7 @@ class OCPPServer:
         )
         await self.ha.set_state("sensor.wallbox_phases", self._current_phases)
         if cp:
-            self._update_wallbox_status_display()
+            await self.ha.set_state("sensor.wallbox_status", cp.current_status)
             await self.ha.set_state("sensor.wallbox_power", cp.current_power_w)
             await self.ha.set_state("sensor.wallbox_energy", cp.session_energy_wh)
             txn = "charging" if cp.transaction_id is not None else "idle"

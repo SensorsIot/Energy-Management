@@ -92,16 +92,7 @@ EnergyManager reads:                    EnergyManager writes:
   binary_sensor.wallbox_single_phase_supported
 ```
 
-The EnergyManager decides charging power every 10 seconds based on:
-- Current PV production (from SwissSolarForecast sensors)
-- Current load (from LoadForecast sensors)
-- Grid power: M-Bus `sensor.grid_power` preferred (< 20 s fresh), DTSU `sensor.power_meter_active_power` fallback
-- Battery state (from Huawei inverter sensors)
-- Operating mode: opportunistic solar (default) or goal-based
-
-**Grid power data path — M-Bus (preferred):** The EBL smart meter is read via a gPlug M-Bus adapter on the remote provisioning server. The MQTT bridge forwards `B0-81-84-25-22-5C/SENSOR` to the local broker. An MQTT sensor in HA computes `(Po - Pi) × 1000` → `sensor.grid_power` (W, negative = importing). EnergyManager config key: `sensors.mbus_grid_power`.
-
-**Grid power data path — DTSU (fallback):** `sensor.power_meter_active_power` is the Huawei DTSU666-H meter at the inverter, corrected by the ESP32 Modbus Proxy (`dtsu + wallbox_power`). Used when M-Bus reading is stale (> 20 s). EnergyManager config key: `sensors.dtsu_grid_power`.
+The EnergyManager decides charging power and ocpp server executes it.
 
 ## 3. Configuration
 
@@ -109,7 +100,7 @@ Configured via HA add-on options (`/data/options.json`):
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `wallbox_id` | string | `AcTec001` | Expected chargepoint ID |
+| `wallbox_id` | string | `none` | Expected chargepoint ID |
 | `ws_port` | int | 8887 | WebSocket listen port |
 | `min_current_a` | int | 6 | Minimum charging current |
 | `max_current_a` | int | 16 | Maximum charging current |
@@ -171,21 +162,21 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 | `sensor.wallbox_phases` | sensor | - | Active phase count: `1` or `3` |
 | `binary_sensor.wallbox_single_phase_supported` | binary_sensor | - | From config: wallbox supports 1-phase charging |
 
-**Wallbox status display:**
+**Wallbox status reference:**
 
-The `friendly_name` attribute on `sensor.wallbox_status` provides a dashboard-ready label. For active states (current may be flowing or was recently flowing), the label includes the current power. For other states, a human-readable description is shown.
+The OCPP server publishes the raw OCPP `ChargePointStatus` string to `sensor.wallbox_status`. Display logic (friendly labels, power display) is the dashboard's responsibility, not the OCPP server's.
 
-| OCPP Status | `friendly_name` | Meaning |
-|-------------|-----------------|---------|
-| `Available` | No car | No vehicle connected |
-| `Preparing` | Car connected | Vehicle plugged in, not yet charging |
-| `Charging` | Charging — {power} W | Active power delivery |
-| `SuspendedEVSE` | SuspendedEVSE — {power} W | Paused by charger (we sent 0 A) |
-| `SuspendedEV` | SuspendedEV — {power} W | Paused by car (car's BMS stopped drawing) |
-| `Finishing` | Charge complete | Transaction ending, car still plugged |
-| `Reserved` | Reserved | Connector reserved (not used in our system) |
-| `Unavailable` | Offline | Charger offline or maintenance |
-| `Faulted` | Fault | Hardware error |
+| OCPP Status | Meaning | Dashboard label (reference) |
+|-------------|---------|----------------------------|
+| `Available` | No vehicle connected | No car |
+| `Preparing` | Vehicle plugged in, not yet charging | Car connected |
+| `Charging` | Active power delivery | {power} W |
+| `SuspendedEVSE` | Paused by charger (we sent 0 A) | 0 W |
+| `SuspendedEV` | Paused by car (car's BMS stopped drawing) | 0 W |
+| `Finishing` | Transaction ending, car still plugged | Charge complete |
+| `Reserved` | Connector reserved (not used in our system) | Reserved |
+| `Unavailable` | Charger offline or maintenance | Offline |
+| `Faulted` | Hardware error | Fault |
 
 **SuspendedEVSE vs SuspendedEV:** EVSE = paused by the charger (our normal "paused" state when power limit = 0 A). EV = paused by the car itself (car's BMS decided to stop, e.g. reached its own charge limit or thermal protection).
 
@@ -448,4 +439,4 @@ ocpp-server/
 | 2.2 | 2026-02-15 | Added `single_phase_supported` config flag, exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager phase selection. |
 | 2.3 | 2026-02-15 | Added `power_update_interval_s` throttle (default 60s) to rate-limit `SetChargingProfile` commands. No exceptions — all changes throttled uniformly to prevent oscillation. |
 | 2.4 | 2026-02-16 | Integer amp rounding (`math.ceil`): AcTec only accepts whole amps. Throttle now based on time since last value change (not last send) — immediate send if previous change >60s ago, throttle only rapid consecutive changes. Removed `ChargePointMaxProfile` and `TxProfile` — only `TxDefaultProfile` per FSD. Added `_sync_ha_state` for HA restart recovery. Updated EnergyManager to 10s control loop. |
-| 2.5 | 2026-02-17 | Added wallbox state safety table for phase switching (Section 4.3.3). Added dashboard display table for `sensor.wallbox_status` with friendly names and power labels (Section 4.3.1). Documented SuspendedEVSE vs SuspendedEV distinction. |
+| 2.5 | 2026-02-17 | Added wallbox state safety table for phase switching (Section 4.3.3). Added status reference table with dashboard labels (Section 4.3.1) — display logic is dashboard's responsibility, OCPP server publishes raw status only. Documented SuspendedEVSE vs SuspendedEV distinction. |
