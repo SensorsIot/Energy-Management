@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.25"
+__version__ = "1.6.26"
 
 import json
 import logging
@@ -29,6 +29,7 @@ from src.ev_charging import calculate_ev_power
 from src.ev_goal_mode import calculate_charging_mode
 from src.influxdb_writer import SimulationWriter
 from src.notifications import init_telegram, notify_error
+from src.sanity import validate_power_readings
 from src.smart_car import HelloSmartClient, get_soc
 
 # Swiss timezone for display
@@ -833,6 +834,7 @@ class EnergyManager:
 
                 # Closed-loop excess from grid meter — always calculate
                 grid_power = self._read_grid_power()
+                validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
                 excess = -grid_power + wallbox_power
 
                 ev_result = calculate_ev_power(

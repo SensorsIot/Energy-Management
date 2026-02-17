@@ -18,7 +18,7 @@ This document describes an intelligent energy management system that optimizes h
 
 - **PV Power Forecasting** - Probabilistic solar production forecasts (P10/P50/P90)
 - **Load Forecasting** - Statistical consumption predictions based on historical patterns
-- **Energy Optimization** - MPC-based control of battery, EV charging, and deferrable loads
+- **Energy Optimization** - Rolling forecast with rule-based control of battery, EV charging, and deferrable loads
 
 The system minimizes electricity costs while maximizing self-consumption and respecting device constraints.
 
@@ -189,7 +189,7 @@ Without correction: -4300 W  (SUN2000 would think grid is exporting)
 
 **Solar Production:**
 
-| Entity ID | Description | MPC Use |
+| Entity ID | Description | Controller Use |
 |-----------|-------------|---------|
 | `sensor.inverter_input_power` | DC input (both strings) | PV production |
 | `sensor.inverter_pv_1_power` | String 1 power | Per-string monitoring |
@@ -200,13 +200,13 @@ Without correction: -4300 W  (SUN2000 would think grid is exporting)
 
 **Battery:**
 
-| Entity ID | Description | MPC Use |
+| Entity ID | Description | Controller Use |
 |-----------|-------------|---------|
 | `sensor.battery_charge_discharge_power` | Charge/discharge power (+/-) | **Battery flow** |
 
 **Grid:**
 
-| Entity ID | Description | MPC Use |
+| Entity ID | Description | Controller Use |
 |-----------|-------------|---------|
 | `sensor.power_meter_active_power` | Grid power (neg=export) | **Critical: Grid flow** |
 | `sensor.power_meter_phase_a_active_power` | Phase A power | Load balancing |
@@ -215,7 +215,7 @@ Without correction: -4300 W  (SUN2000 would think grid is exporting)
 
 **Load (calculated):**
 
-| Entity ID | Description | MPC Use |
+| Entity ID | Description | Controller Use |
 |-----------|-------------|---------|
 | `sensor.load_power` | House consumption (calculated) | **Critical: Load input** |
 
@@ -280,14 +280,14 @@ load = solar_pv_total_ac_power - power_meter_active_power + battery_charge_disch
 
 **State:**
 
-| Entity ID | Description | Unit | MPC Use |
+| Entity ID | Description | Unit | Controller Use |
 |-----------|-------------|------|---------|
-| `sensor.battery_state_of_capacity` | State of charge | % | **Critical: SOC for MPC** |
+| `sensor.battery_state_of_capacity` | State of charge | % | **Critical: SOC for controller** |
 | `sensor.battery_bus_voltage` | Battery voltage | V | Health monitoring |
 
 **Control (Outputs):**
 
-| Entity ID | Description | Unit | MPC Use |
+| Entity ID | Description | Unit | Controller Use |
 |-----------|-------------|------|---------|
 | `number.battery_maximum_discharging_power` | Max discharge limit | W | **Night strategy control** |
 | `number.battery_maximum_charging_power` | Max charge limit | W | Charge limiting |
@@ -384,7 +384,37 @@ display_zero_lines:
   mode: show
 ```
 
-## 1.9 Design Principles
+## 1.9 Sign Conventions
+
+All power values follow a consistent sign convention. The canonical reference table below defines positive/negative meaning for every quantity used in the system.
+
+| Quantity | Entity | Positive (+) | Negative (−) | Typical range |
+|----------|--------|-------------|--------------|---------------|
+| Grid power | `sensor.power_meter_active_power` | Export (to grid) | Import (from grid) | −11 000 … +11 000 W |
+| Battery power | `sensor.battery_charge_discharge_power` | Discharge (to house) | Charge (from PV/grid) | −5 000 … +5 000 W |
+| PV production | `sensor.solar_pv_total_ac_power` | Generation | *(never negative)* | 0 … 12 000 W |
+| House load | `sensor.load_power` | Consumption | *(never negative)* | 0 … 10 000 W |
+| Wallbox power | `sensor.wallbox_power` | Consumption | *(never negative)* | 0 … 11 000 W |
+| Net energy (forecast) | calculated `net_energy_wh` | Surplus (PV > Load) | Deficit (PV < Load) | — |
+| Excess power (EV) | calculated | Available for EV | Grid import needed | — |
+
+### 1.9.1 Key Formulas with Sign Logic
+
+| Formula | Location | Logic |
+|---------|----------|-------|
+| `excess = −grid_power + wallbox_power` | run.py EV loop | Negates grid (export → available), adds back wallbox's own draw |
+| `net_energy_wh = pv_wh − load_wh` | forecast_reader.py | Positive = surplus to charge battery |
+| `excess_power = pv − load` | appliance_signal.py | Positive = surplus available for appliance |
+
+### 1.9.2 Sanity Invariants
+
+The following invariants should hold under normal operation. Runtime sanity checks in `energymanager/src/sanity.py` validate these and log warnings on violation (but never block control):
+
+1. **PV ≥ 0, Load ≥ 0, Wallbox ≥ 0** — always; negative values indicate sensor fault
+2. **At midday with PV > 2 000 W and no wallbox load** — grid should typically be negative (exporting)
+3. **|grid| should not exceed ~15 000 W** — above this suggests sensor fault (PV peak + battery max ≈ 17 kW)
+
+## 1.10 Design Principles
 
 1. **Deterministic Core Logic** - All numerical calculations produce identical results for identical inputs
 2. **Probabilistic Uncertainty** - P10/P50/P90 percentiles quantify forecast uncertainty
@@ -393,7 +423,7 @@ display_zero_lines:
 5. **Decoupled Components** - Each add-on operates independently with clear interfaces
 6. **Power for Storage, Energy for Calculations** - Forecasts stored as Power (W), converted to Energy (Wh) only when needed
 
-## 1.10 Data Units and Flow
+## 1.11 Data Units and Flow
 
 All forecasts are stored and displayed in **Power (W)**. Energy (Wh) is calculated internally when needed for simulations.
 
@@ -441,11 +471,11 @@ All forecasts are stored and displayed in **Power (W)**. Energy (Wh) is calculat
 - SOC changes require energy: `SOC += Wh × efficiency`
 - Cost calculations: `cost = kWh × price`
 
-## 1.11 Home Assistant Add-on Architecture
+## 1.12 Home Assistant Add-on Architecture
 
 This section describes the canonical Home Assistant add-on configuration architecture used by all add-ons in this project.
 
-### 1.11.1 Configuration Philosophy
+### 1.12.1 Configuration Philosophy
 
 Home Assistant add-ons follow a specific pattern for configuration management:
 
@@ -482,7 +512,7 @@ Home Assistant add-ons follow a specific pattern for configuration management:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 1.11.2 Secrets (HA Configuration UI)
+### 1.12.2 Secrets (HA Configuration UI)
 
 Secrets are sensitive values that should **never** be stored in YAML files.
 
@@ -531,7 +561,7 @@ fi
 exec python3 /app/run.py --config "/config/addon.yaml"
 ```
 
-### 1.11.3 Non-Secrets (Public Add-on Config)
+### 1.12.3 Non-Secrets (Public Add-on Config)
 
 All non-sensitive configuration is stored in user-editable YAML files.
 
@@ -577,7 +607,7 @@ tariff:
   weekday_cheap_end: "06:00"
 ```
 
-### 1.11.4 Templates and Defaults
+### 1.12.4 Templates and Defaults
 
 Each add-on ships with a template/example configuration.
 
@@ -608,7 +638,7 @@ fi
 cp "$TEMPLATE" "/config/energymanager.yaml.example"
 ```
 
-### 1.11.5 Configuration Merge Order
+### 1.12.5 Configuration Merge Order
 
 At runtime, configuration is assembled in this order:
 
@@ -648,7 +678,7 @@ def load_config(config_path: str) -> dict:
     return merged
 ```
 
-### 1.11.6 Add-on Configuration Files Summary
+### 1.12.6 Add-on Configuration Files Summary
 
 | Add-on | Secrets (Config UI) | Non-Secrets (YAML) |
 |--------|--------------------|--------------------|
@@ -656,7 +686,7 @@ def load_config(config_path: str) -> dict:
 | **SwissSolarForecast** | `influxdb_token`, `telegram_bot_token`, `telegram_chat_id` | `/config/swisssolarforecast.yaml` |
 | **LoadForecast** | `influxdb_token` | `/config/loadforecast.yaml` |
 
-### 1.11.7 User Workflow
+### 1.12.7 User Workflow
 
 **Initial Setup:**
 
@@ -675,7 +705,7 @@ def load_config(config_path: str) -> dict:
 4. Manually add desired new options to user config
 5. Restart add-on
 
-### 1.11.8 Best Practices Summary
+### 1.12.8 Best Practices Summary
 
 | Practice | Do | Don't |
 |----------|----|----- |
@@ -687,9 +717,9 @@ def load_config(config_path: str) -> dict:
 
 ---
 
-## 1.12 Complete Parameter Reference
+## 1.13 Complete Parameter Reference
 
-### 1.12.1 EnergyManager Parameters
+### 1.13.1 EnergyManager Parameters
 
 **Secrets (Configuration UI):**
 
@@ -738,7 +768,7 @@ def load_config(config_path: str) -> dict:
 | `home_assistant.url` | http://supervisor/core | HA API URL (via Supervisor) |
 | `home_assistant.token` | SUPERVISOR_TOKEN env | Auto-provided by HA |
 
-### 1.12.2 SwissSolarForecast Parameters
+### 1.13.2 SwissSolarForecast Parameters
 
 **Secrets (Configuration UI):**
 
@@ -764,7 +794,7 @@ def load_config(config_path: str) -> dict:
 | `plants[]` | - | Plant definitions (inverters, strings) |
 | `log_level` | info | Logging level |
 
-### 1.12.3 LoadForecast Parameters
+### 1.13.3 LoadForecast Parameters
 
 **Secrets (Configuration UI):**
 
@@ -1216,7 +1246,7 @@ LoadForecast generates statistical household load consumption forecasts using hi
 - **Statistical Profiling**: Time-of-day consumption profiles (96 daily slots)
 - **Historical Analysis**: Uses 90 days of consumption data
 - **Probabilistic Output**: P10/P50/P90 percentiles for uncertainty bands
-- **15-Minute Resolution**: Aligned with MPC optimization timestep
+- **15-Minute Resolution**: Aligned with EnergyManager optimization timestep
 - **48-Hour Horizon**: Sufficient for next-day planning
 
 ## 3.3 Architecture
@@ -1465,7 +1495,7 @@ The current SOC is **always read live** at the start of each simulation cycle. T
 
 Holidays: Read from calendar integration (future: HA calendar entity).
 
-**Why 48h forecast horizon:** The MPC must always see until tomorrow's 21:00 cheap tariff start. Worst case: at 06:00 (expensive tariff starts), we need to see until 21:00 the next day = 39 hours. The 48h horizon provides buffer for forecast update delays and ensures visibility across a full expensive→cheap→expensive cycle.
+**Why 48h forecast horizon:** The controller must always see until tomorrow's 21:00 cheap tariff start. Worst case: at 06:00 (expensive tariff starts), we need to see until 21:00 the next day = 39 hours. The 48h horizon provides buffer for forecast update delays and ensures visibility across a full expensive→cheap→expensive cycle.
 
 ---
 
@@ -1831,6 +1861,8 @@ EV charging optimization maximizes solar self-consumption while ensuring chargin
 
 3. **Power correction** (Wallbox → SUN2000 via Modbus Proxy):
    `Wallbox → MeterValues → OCPP Server → MQTT "wallbox" (every 10s) → ESP32 Modbus Proxy → RS485 → SUN2000`
+
+**Interface contract:** The full EnergyManager ↔ OCPP Server interface contract (control semantics, state semantics, responsibility split) is defined in [ocpp-server-fsd.md Section 4.6](../ocpp-server/docs/ocpp-server-fsd.md#46-energymanager--ocpp-server-contract). Key points: `number.wallbox_power_limit = 0` means "pause now" (unthrottled); `> 0` means "ensure charging" (throttled). EnergyManager reads dynamic `sensor.wallbox_min_power_w` / `sensor.wallbox_max_power_w` for phase-aware power limits.
 
 ### 4.5.3 Power Ranges
 
