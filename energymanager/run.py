@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.28"
+__version__ = "1.6.30"
 
 import json
 import logging
@@ -25,9 +25,9 @@ from src.forecast_reader import ForecastReader
 from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
 from src.appliance_signal import calculate_appliance_signal
-from src.ev_charging import calculate_ev_power
-from src.ev_goal_mode import calculate_charging_mode
+from src.ev_state_machine import EVStateMachine, EVInputs, EVState
 from src.influxdb_writer import SimulationWriter
+from src.integration_observer import CycleSnapshot, IntegrationObserver
 from src.notifications import init_telegram, notify_error
 from src.sanity import validate_power_readings
 from src.smart_car import HelloSmartClient, get_soc
@@ -187,6 +187,7 @@ class EnergyManager:
         self.ev_target_soc = ev_opts.get("target_soc", 80)
         self.ev_target_soc_entity = ev_opts.get("target_soc_entity", "sensor.ev_target_soc")
         self._last_ev_power_limit = None
+        self._ev_sm = EVStateMachine()
 
         # Charging mode config (FSD 4.5.4)
         self.ev_power_limit_entity = ev_opts.get(
@@ -204,6 +205,7 @@ class EnergyManager:
         self.ev_auto_reset_timeout_min = ev_opts.get("auto_reset_timeout_min", 5)
         self.ev_battery_protection_soc = ev_opts.get("battery_protection_soc", 80)
         self._ev_idle_since: datetime | None = None
+        self._observer = IntegrationObserver() if self.ev_charging_enabled else None
         self._last_mode_error_notified: str | None = None
         self._battery_reaches_target: bool = False
         self._battery_min_soc_forecast: float = 0.0
@@ -537,142 +539,6 @@ class EnergyManager:
         except Exception as e:
             logger.error(f"Failed to calculate appliance signal: {e}")
 
-    def control_ev_charging_mode(
-        self, wallbox_connected: bool, wallbox_power: float,
-        ev_max_power: int | None = None,
-    ) -> bool:
-        """Control EV charging based on selected mode (FSD 4.5.4).
-
-        Args:
-            wallbox_connected: Whether wallbox WebSocket is connected
-            wallbox_power: Current wallbox power in watts
-
-        Returns:
-            True if immediate/cheap mode handled charging (skip solar),
-            False if solar mode is active.
-        """
-        ev_mode = self.ha_client.get_input_select(self.ev_charging_mode_entity)
-
-        if ev_mode not in ("immediate", "cheap"):
-            # Solar mode — let solar excess logic handle it
-            if self._discharge_blocked_by_ev:
-                self._discharge_blocked_by_ev = False
-                self._update_discharge_control()
-            self._ev_idle_since = None
-            self._last_mode_error_notified = None
-            return False
-
-        # Read wallbox status
-        wb_status_state = self.ha_client.get_state(self.ev_wallbox_status_entity)
-        wb_status = wb_status_state.get("state", "Unknown") if wb_status_state else "Unknown"
-
-        # Track idle time for auto-revert
-        if wallbox_power == 0 and wb_status in ("Finishing", "SuspendedEV", "Available"):
-            if self._ev_idle_since is None:
-                self._ev_idle_since = datetime.now(timezone.utc)
-            idle_minutes = (datetime.now(timezone.utc) - self._ev_idle_since).total_seconds() / 60
-        else:
-            self._ev_idle_since = None
-            idle_minutes = 0
-
-        # Check tariff
-        now = datetime.now(timezone.utc)
-        tariff = self.optimizer.get_tariff_periods(now)
-
-        # Read user-set power limit from input_number slider
-        user_limit = self.ha_client.get_sensor_value(
-            self.ev_power_limit_entity
-        )
-        fallback_max = ev_max_power if ev_max_power else self.ev_max_power_w
-        max_power = (
-            user_limit
-            if user_limit and user_limit > 0
-            else fallback_max
-        )
-
-        result = calculate_charging_mode(
-            ev_charging_mode=ev_mode,
-            is_cheap_tariff=tariff.is_cheap_now,
-            wallbox_status=wb_status,
-            wallbox_connected=wallbox_connected,
-            wallbox_power_w=wallbox_power,
-            idle_minutes=idle_minutes,
-            auto_reset_timeout_min=self.ev_auto_reset_timeout_min,
-            max_power_w=max_power,
-        )
-
-        logger.info(f"EV {ev_mode} mode: {result.charge_status} — {result.reason}")
-
-        # Set wallbox power limit (REST API entity, not a platform number)
-        if result.target_power_w != self._last_ev_power_limit:
-            success = self.ha_client.set_sensor_state(
-                self.wallbox_power_limit_entity,
-                int(result.target_power_w),
-                attributes={
-                    "friendly_name": "Wallbox Power Limit",
-                    "unit_of_measurement": "W",
-                    "icon": "mdi:speedometer",
-                },
-            )
-            if success:
-                self._last_ev_power_limit = result.target_power_w
-            else:
-                logger.error("Failed to set wallbox power limit")
-
-        # Update status sensor
-        self.ha_client.set_sensor_state(
-            self.ev_charge_status_entity,
-            result.charge_status,
-            attributes={
-                "friendly_name": "EV Charge Status",
-                "status_text": result.status_text,
-                "target_power_w": result.target_power_w,
-                "reason": result.reason,
-                "icon": "mdi:ev-station",
-            },
-        )
-
-        # Update target power sensor (dashboard display)
-        self.ha_client.set_sensor_state(
-            self.ev_target_power_entity,
-            int(result.target_power_w),
-            attributes={
-                "friendly_name": "EV Target Power",
-                "unit_of_measurement": "W",
-                "reason": result.reason,
-                "icon": "mdi:ev-station",
-            },
-        )
-
-        # Block battery discharge while actively charging in immediate/cheap mode
-        if result.target_power_w > 0:
-            if not self._discharge_blocked_by_ev:
-                self._discharge_blocked_by_ev = True
-                self._update_discharge_control()
-        else:
-            if self._discharge_blocked_by_ev:
-                self._discharge_blocked_by_ev = False
-                self._update_discharge_control()
-
-        # Auto-revert: charging complete → switch back to solar
-        if result.revert_to_solar:
-            logger.info("Charging complete — reverting mode to solar")
-            self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
-            self._ev_idle_since = None
-            self._last_mode_error_notified = None
-
-        # Error notification (one-shot)
-        if result.charge_status == "error":
-            if self._last_mode_error_notified != result.status_text:
-                self._last_mode_error_notified = result.status_text
-                notify_error(
-                    title="EV Charging Error",
-                    message=f"{result.status_text}\n{result.reason}",
-                )
-        else:
-            self._last_mode_error_notified = None
-
-        return True
 
     def _read_grid_power(self) -> float:
         """Read grid power, preferring M-Bus smart meter if fresh (<20s)."""
@@ -737,7 +603,7 @@ class EnergyManager:
             return False, 0.0
 
     def control_ev_charging(self):
-        """Control EV charging based on solar excess (FSD 4.5)."""
+        """Control EV charging via state machine (FSD 4.5)."""
         if not self.ev_charging_enabled:
             return
 
@@ -765,21 +631,22 @@ class EnergyManager:
                 return
 
             # Adaptive SOC polling: on connect, on mode change, every 1 min while charging
+            wb_status_state = self.ha_client.get_state(self.ev_wallbox_status_entity)
+            wb_status = wb_status_state.get("state", "Unknown") if wb_status_state else "Unknown"
+
             if self.smart_car_enabled:
-                wb_status_state = self.ha_client.get_state(self.ev_wallbox_status_entity)
-                status = wb_status_state.get("state", "Unknown") if wb_status_state else "Unknown"
-                ev_mode = self.ha_client.get_input_select(self.ev_charging_mode_entity)
+                ev_mode_poll = self.ha_client.get_input_select(self.ev_charging_mode_entity)
                 now_mono = time.monotonic()
 
                 # Charging mode changed — get fresh SOC before deciding
-                if ev_mode != self._last_ev_charging_mode and self._last_ev_charging_mode is not None:
-                    logger.info(f"Smart car: mode changed ({self._last_ev_charging_mode} → {ev_mode}), polling SOC")
+                if ev_mode_poll != self._last_ev_charging_mode and self._last_ev_charging_mode is not None:
+                    logger.info(f"Smart car: mode changed ({self._last_ev_charging_mode} → {ev_mode_poll}), polling SOC")
                     self.update_car_soc()
                     self._last_car_soc_poll = now_mono
 
                 # Car just connected (transition to Preparing from disconnected state)
                 elif (
-                    status == "Preparing"
+                    wb_status == "Preparing"
                     and self._last_wallbox_status
                     not in ("Preparing", "Charging", "SuspendedEV", "SuspendedEVSE", "Finishing")
                 ):
@@ -789,17 +656,17 @@ class EnergyManager:
 
                 # Every 1 min while charging
                 elif (
-                    status == "Charging"
+                    wb_status == "Charging"
                     and (now_mono - self._last_car_soc_poll) >= CAR_SOC_CHARGING_INTERVAL_S
                 ):
                     logger.info("Smart car: charging poll (1-min interval)")
                     self.update_car_soc()
                     self._last_car_soc_poll = now_mono
 
-                self._last_wallbox_status = status
-                self._last_ev_charging_mode = ev_mode
+                self._last_wallbox_status = wb_status
+                self._last_ev_charging_mode = ev_mode_poll
 
-            # Read wallbox power (needed by both goal mode and solar mode)
+            # Read wallbox power
             wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity) or 0.0
 
             # Dynamic min/max from OCPP server (falls back to config)
@@ -808,49 +675,80 @@ class EnergyManager:
             ev_min_power = int(dyn_min) if dyn_min and dyn_min > 0 else self.ev_min_power_w
             ev_max_power = int(dyn_max) if dyn_max and dyn_max > 0 else self.ev_max_power_w
 
-            # Priority: immediate/cheap mode > solar mode
-            if self.control_ev_charging_mode(wb_connected, wallbox_power, ev_max_power):
-                return
+            # Wallbox available = connected AND status not idle/faulted
+            wallbox_available = wb_connected and wb_status not in (
+                "Available", "Faulted", "Unknown",
+            )
 
-            # Step 1: Check preconditions
-            ev_soc = self.ha_client.get_sensor_value(self.smart_car_soc_entity) if self.smart_car_enabled else None
-            available_excess_w = 0
+            # Read inputs for state machine
+            ev_mode = self.ha_client.get_input_select(self.ev_charging_mode_entity)
+            now = datetime.now(timezone.utc)
+            tariff = self.optimizer.get_tariff_periods(now)
+            grid_power = self._read_grid_power()
+            battery_soc = self.ha_client.get_sensor_value(self.soc_entity) or 0
+            ev_soc = (
+                self.ha_client.get_sensor_value(self.smart_car_soc_entity)
+                if self.smart_car_enabled else None
+            )
 
-            if ev_soc is not None and ev_soc >= self.ev_target_soc:
-                # Car is full
-                target_power = 0
-                reason = f"Car full: SOC {ev_soc:.0f}% >= target {self.ev_target_soc}%"
+            # User power slider
+            user_limit = self.ha_client.get_sensor_value(self.ev_power_limit_entity)
+            max_power = (
+                user_limit
+                if user_limit and user_limit > 0
+                else ev_max_power
+            )
+
+            # Battery protection — informational (for dashboard)
+            if battery_soc >= 100:
+                reaches_target, soc_at_target = True, 100.0
             else:
-                # Battery protection — informational only (for dashboard)
-                battery_soc = self.ha_client.get_sensor_value(self.soc_entity) or 0
-                if battery_soc >= 100:
-                    reaches_target, soc_at_target = True, 100.0
+                reaches_target, soc_at_target = self.check_battery_protection()
+            self._battery_reaches_target = reaches_target
+            self._battery_min_soc_forecast = soc_at_target
+
+            validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
+
+            # Build inputs and run state machine
+            inputs = EVInputs(
+                wallbox_available=wallbox_available,
+                wallbox_power_w=wallbox_power,
+                wallbox_status=wb_status,
+                battery_protection_passed=reaches_target,
+                battery_soc=battery_soc,
+                ev_soc=ev_soc,
+                ev_target_soc=self.ev_target_soc,
+                charging_mode=ev_mode,
+                is_cheap_tariff=tariff.is_cheap_now,
+                grid_power_w=grid_power,
+                min_power_w=ev_min_power,
+                max_power_w=max_power,
+            )
+            prev_ev_state = self._ev_sm.state
+            output = self._ev_sm.step(inputs)
+
+            logger.info(f"EV [{output.state.value}] {output.target_power_w:.0f}W — {output.reason}")
+
+            # Auto-revert: immediate/cheap idle timeout → switch back to solar
+            if ev_mode in ("immediate", "cheap"):
+                if wallbox_power == 0 and wb_status in ("Finishing", "SuspendedEV"):
+                    if self._ev_idle_since is None:
+                        self._ev_idle_since = datetime.now(timezone.utc)
+                    idle_minutes = (datetime.now(timezone.utc) - self._ev_idle_since).total_seconds() / 60
+                    if idle_minutes >= self.ev_auto_reset_timeout_min:
+                        logger.info("Charging complete — reverting mode to solar")
+                        self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
+                        self._ev_idle_since = None
                 else:
-                    reaches_target, soc_at_target = self.check_battery_protection()
-                self._battery_reaches_target = reaches_target
-                self._battery_min_soc_forecast = soc_at_target
+                    self._ev_idle_since = None
+            else:
+                self._ev_idle_since = None
 
-                # Closed-loop excess from grid meter — always calculate
-                grid_power = self._read_grid_power()
-                validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
-                excess = -grid_power + wallbox_power
-
-                ev_result = calculate_ev_power(
-                    excess_w=excess,
-                    min_power_w=ev_min_power,
-                    max_power_w=ev_max_power,
-                    battery_full=(battery_soc >= 100),
-                )
-                target_power = ev_result.target_power_w
-                reason = ev_result.reason
-                available_excess_w = ev_result.available_excess_w
-
-            # Only send command if target changed (REST API entity, not a platform number)
-            if target_power != self._last_ev_power_limit:
-                logger.info(f"EV charging: {reason} (wallbox={wallbox_power:.0f}W)")
+            # Send power limit to OCPP (only when changed)
+            if output.target_power_w != self._last_ev_power_limit:
                 success = self.ha_client.set_sensor_state(
                     self.wallbox_power_limit_entity,
-                    int(target_power),
+                    int(output.target_power_w),
                     attributes={
                         "friendly_name": "Wallbox Power Limit",
                         "unit_of_measurement": "W",
@@ -858,21 +756,51 @@ class EnergyManager:
                     },
                 )
                 if success:
-                    self._last_ev_power_limit = target_power
+                    self._last_ev_power_limit = output.target_power_w
                 else:
                     logger.error("Failed to set wallbox power limit")
-            else:
-                logger.debug(f"EV charging unchanged at {target_power:.0f}W")
 
-            # Update dashboard sensor
+            # Discharge blocking: block when IMMEDIATE/CHEAP and power > 0
+            should_block = (
+                output.state in (EVState.IMMEDIATE, EVState.CHEAP)
+                and output.target_power_w > 0
+            )
+            if should_block != self._discharge_blocked_by_ev:
+                self._discharge_blocked_by_ev = should_block
+                self._update_discharge_control()
+
+            # Integration test observer
+            if self._observer is not None:
+                self._observer.observe(CycleSnapshot(
+                    inputs=inputs,
+                    output=output,
+                    prev_state=prev_ev_state,
+                    discharge_blocked_by_ev=self._discharge_blocked_by_ev,
+                    last_power_limit_sent=self._last_ev_power_limit,
+                    wb_connected=wb_connected,
+                    idle_since=self._ev_idle_since,
+                    excess_w=-grid_power + wallbox_power,
+                    ts=datetime.now(timezone.utc),
+                ))
+
+            # Publish dashboard sensors
+            self.ha_client.set_sensor_state(
+                self.ev_charge_status_entity,
+                output.state.value,
+                attributes={
+                    "friendly_name": "EV Charge Status",
+                    "target_power_w": output.target_power_w,
+                    "reason": output.reason,
+                    "icon": "mdi:ev-station",
+                },
+            )
             self.ha_client.set_sensor_state(
                 self.ev_target_power_entity,
-                int(target_power),
+                int(output.target_power_w),
                 attributes={
                     "friendly_name": "EV Target Power",
                     "unit_of_measurement": "W",
-                    "available_excess_w": available_excess_w,
-                    "reason": reason,
+                    "reason": output.reason,
                     "battery_protection": not self._battery_reaches_target,
                     "battery_forecast_max_soc": self._battery_min_soc_forecast,
                     "icon": "mdi:ev-station",
