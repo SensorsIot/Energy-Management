@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.22"
+__version__ = "0.9.23"
 
 import asyncio
 import json
@@ -168,11 +168,13 @@ class OCPPServer:
         self.wallbox_id = options.get("wallbox_id", "wallbox1")
         self.min_current_a = options.get("min_current_a", 6)
         self.max_current_a = options.get("max_current_a", 16)
-        self.phase_switch_entity = options.get("phase_switch_entity", "")
-        self.single_phase_supported = options.get("single_phase_supported", False)
+        self.phase_switch_entity = options.get(
+            "phase_switch_entity", "switch.earu_breaker_wallbox_phase_switch"
+        )
+        self.single_phase_supported = options.get("single_phase_supported", True)
         self.power_update_interval_s = options.get("power_update_interval_s", 60)
         self.current_sensor_entity = options.get(
-            "current_sensor_entity", "sensor.earu_breaker_current"
+            "current_sensor_entity", "sensor.earu_breaker_bl0942_current"
         )
 
         self.charge_point: Optional[ChargePointHandler] = None
