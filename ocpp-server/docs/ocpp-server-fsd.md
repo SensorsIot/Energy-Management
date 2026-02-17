@@ -162,21 +162,19 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 | `sensor.wallbox_phases` | sensor | - | Active phase count: `1` or `3` |
 | `binary_sensor.wallbox_single_phase_supported` | binary_sensor | - | From config: wallbox supports 1-phase charging |
 
-**Wallbox status reference:**
+**OCPP ChargePointStatus values:**
 
-The OCPP server publishes the raw OCPP `ChargePointStatus` string to `sensor.wallbox_status`. Display logic (friendly labels, power display) is the dashboard's responsibility, not the OCPP server's.
-
-| OCPP Status | Meaning | Dashboard label (reference) |
-|-------------|---------|----------------------------|
-| `Available` | No vehicle connected | No car |
-| `Preparing` | Vehicle plugged in, not yet charging | Car connected |
-| `Charging` | Active power delivery | {power} W |
-| `SuspendedEVSE` | Paused by charger (we sent 0 A) | 0 W |
-| `SuspendedEV` | Paused by car (car's BMS stopped drawing) | 0 W |
-| `Finishing` | Transaction ending, car still plugged | Charge complete |
-| `Reserved` | Connector reserved (not used in our system) | Reserved |
-| `Unavailable` | Charger offline or maintenance | Offline |
-| `Faulted` | Hardware error | Fault |
+| Status | Meaning |
+|--------|---------|
+| `Available` | No vehicle connected |
+| `Preparing` | Vehicle plugged in, not yet charging |
+| `Charging` | Active power delivery |
+| `SuspendedEVSE` | Paused by charger (we sent 0 A) |
+| `SuspendedEV` | Paused by car (car's BMS stopped drawing) |
+| `Finishing` | Transaction ending, car still plugged |
+| `Reserved` | Connector reserved (not used in our system) |
+| `Unavailable` | Charger offline or maintenance |
+| `Faulted` | Hardware error |
 
 **SuspendedEVSE vs SuspendedEV:** EVSE = paused by the charger (our normal "paused" state when power limit = 0 A). EV = paused by the car itself (car's BMS decided to stop, e.g. reached its own charge limit or thermal protection).
 
