@@ -10,10 +10,10 @@ Test cases:
 
 import pytest
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from src.battery_optimizer import BatteryOptimizer, DischargeDecision, TariffPeriod
+from src.battery_optimizer import BatteryOptimizer, DischargeDecision
 
 SWISS_TZ = ZoneInfo("Europe/Zurich")
 
@@ -45,8 +45,8 @@ def make_forecast(
 
     # Convert power (W) to energy per 15-min period (Wh)
     pv_wh = [p * 0.25 for p in pv_extended]
-    load_wh = [l * 0.25 for l in load_extended]
-    net_wh = [p - l for p, l in zip(pv_wh, load_wh)]
+    load_wh = [val * 0.25 for val in load_extended]
+    net_wh = [p - ld for p, ld in zip(pv_wh, load_wh)]
 
     return pd.DataFrame({
         "pv_energy_wh": pv_wh,
@@ -415,6 +415,46 @@ class TestDecisionDataclass:
         assert decision.discharge_allowed is True
         assert decision.reason == "Test reason"
         assert decision.min_soc_percent == 50.0
+
+
+# ===================================================================
+# IT-BATT-03: Tariff boundary transitions
+# ===================================================================
+
+
+class TestTariffBoundaryTransitions:
+    """IT-BATT-03: Verify tariff boundaries at 21:00 and 06:00 Swiss time.
+
+    Default tariff: cheap 21:00–06:00, expensive 06:00–21:00 (weekdays).
+    """
+
+    def test_2059_is_expensive(self):
+        """20:59 Swiss → still expensive (cheap starts at 21:00)."""
+        optimizer = BatteryOptimizer()
+        now = datetime(2026, 1, 26, 20, 59, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        tariff = optimizer.get_tariff_periods(now)
+        assert tariff.is_cheap_now is False
+
+    def test_2101_is_cheap(self):
+        """21:01 Swiss → cheap (within cheap window)."""
+        optimizer = BatteryOptimizer()
+        now = datetime(2026, 1, 26, 21, 1, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        tariff = optimizer.get_tariff_periods(now)
+        assert tariff.is_cheap_now is True
+
+    def test_0559_is_cheap(self):
+        """05:59 Swiss → cheap (before 06:00 boundary)."""
+        optimizer = BatteryOptimizer()
+        now = datetime(2026, 1, 27, 5, 59, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        tariff = optimizer.get_tariff_periods(now)
+        assert tariff.is_cheap_now is True
+
+    def test_0601_is_expensive(self):
+        """06:01 Swiss → expensive (after 06:00 boundary)."""
+        optimizer = BatteryOptimizer()
+        now = datetime(2026, 1, 27, 6, 1, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        tariff = optimizer.get_tariff_periods(now)
+        assert tariff.is_cheap_now is False
 
 
 if __name__ == "__main__":

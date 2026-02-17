@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.18
+**Version:** 2.22
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -1875,6 +1875,15 @@ The wallbox supports phase switching for a wider usable power range:
 
 **Gap:** 3.7 - 4.1 kW is not achievable (hardware limitation)
 
+**Phase-gap handling (solar mode):** When the computed charging target falls inside the dead zone (3700 < target < 4140 W), the system snaps to an achievable power level:
+
+| Battery state | Action | Rationale |
+|---------------|--------|-----------|
+| Not full (SOC < 100%) | Snap down to 3700 W (1φ max) | Surplus feeds the battery via SUN2000 |
+| Full (SOC = 100%) | Snap up to 4140 W (3φ min) | No battery headroom — use power in EV rather than export |
+
+This rule is implemented in `resolve_phase_gap()` (`energymanager/src/ev_charging.py`) and applies only to the solar excess charging path. Immediate and cheap modes always send `max_power_w`.
+
 **Minimum charging power:** 1.4 kW (1-phase, 6A)
 
 **Maximum charging power:** 11 kW (3-phase, 16A)
@@ -2939,7 +2948,107 @@ Tests the two-flag discharge blocking logic (Section 4.3.2) where battery protec
 cd energymanager && python -m pytest tests/test_discharge_blocking.py -v
 ```
 
-**All 17 tests passing** (as of v1.6.19)
+**All 19 tests passing** (as of v1.6.28)
+
+---
+
+## D.5 EV Charging Power Tests
+
+Test file: `energymanager/tests/test_ev_charging.py`
+
+Tests the `calculate_ev_power()` pure function and `resolve_phase_gap()` logic (Section 4.5).
+
+#### `resolve_phase_gap()` — Dead Zone Handling
+
+| Test | Input | battery_full | Expected |
+|------|-------|-------------|----------|
+| `test_in_gap_battery_not_full_snaps_down` | 3900 W | False | 3700 W |
+| `test_in_gap_battery_full_snaps_up` | 3900 W | True | 4140 W |
+| `test_at_gap_lo_no_snap` | 3700 W | False | 3700 W (boundary exclusive) |
+| `test_at_gap_hi_no_snap` | 4140 W | True | 4140 W (boundary exclusive) |
+| `test_below_gap_unaffected` | 2000 W | False | 2000 W |
+| `test_above_gap_unaffected` | 7000 W | True | 7000 W |
+
+#### `calculate_ev_power()` — Solar Clamp + Gap
+
+| Test | Excess | Expected | Reason |
+|------|--------|----------|--------|
+| `test_below_min_pauses` | 1000 W | 0 W | Below 1400 W minimum |
+| `test_excess_in_gap_snaps_down` | 3900 W | 3700 W | Gap snap (battery not full) |
+| `test_excess_in_gap_battery_full_snaps_up` | 3900 W | 4140 W | Gap snap (battery full) |
+| `test_at_gap_hi_rounds_to_4100_stays` | 4140 W | 3700 W | Rounds to 4100 → in gap → snap |
+| `test_normal_excess_unaffected` | 7000 W | 7000 W | Normal pass-through |
+| `test_clamps_to_max` | 15000 W | 11000 W | Clamped to max_power_w |
+
+#### Phase-Gap Stability (IT-PHASE-01)
+
+| Test | Description | Expected |
+|------|-------------|----------|
+| `test_cloud_fluctuation_battery_not_full` | 20 excess values oscillating in gap (3750–4130 W) | All snap to 3700 W, zero phase switches |
+| `test_cloud_fluctuation_battery_full` | Same series, battery full | All snap to 4140 W, zero phase switches |
+
+**Run tests:**
+```bash
+cd energymanager && python -m pytest tests/test_ev_charging.py -v
+```
+
+**All 14 tests passing** (as of v1.6.28)
+
+---
+
+## D.6 Integration Tests
+
+Integration tests verify cross-module behavior — interactions between EV charging, battery optimizer, tariff boundaries, OCPP transactions, and fail-safes.
+
+### D.6.1 Staleness & Timing (Category A)
+
+| ID | Description | Setup | Expected | Status |
+|----|-------------|-------|----------|--------|
+| IT-STALE-01 | Stale M-Bus reading falls back to DTSU | Mock M-Bus `last_updated` > 20 s ago | `_read_grid_power()` returns DTSU value | 🔮 Future — requires HA client mock |
+| IT-STALE-02 | Both meters stale → safe default | Both sensors return None | EV power set to 0 (pause) | 🔮 Future — requires HA client mock |
+| IT-TIME-01 | Scheduler fires at 15-min boundaries | APScheduler mock with time steps | `run_optimization` called at :00, :15, :30, :45 | 🔮 Future — requires scheduler mock |
+| IT-TIME-02 | EV loop runs at 10 s interval | APScheduler mock | `control_ev_charging` called every 10 s | 🔮 Future — requires scheduler mock |
+
+### D.6.2 Fail-Safe & Watchdog (Category B)
+
+| ID | Description | Setup | Expected | Status |
+|----|-------------|-------|----------|--------|
+| IT-FAIL-01 | InfluxDB down → discharge allowed | `forecast_reader.get_combined_forecast` raises | Decision defaults to allow | 🔮 Future — requires InfluxDB mock |
+| IT-FAIL-02 | HA API down → no battery control | `ha_client.set_battery_discharge_power` fails 5× | Telegram notification sent | 🔮 Future — requires HA + Telegram mock |
+| IT-FAIL-03 | Smart car API timeout → stale SOC retained | `HelloSmartClient.authenticate` raises | Previous SOC entity unchanged | 🔮 Future — requires Smart car mock |
+| IT-FAIL-04 | Wallbox disconnects mid-charge → power limit reset | `wallbox_connected` transitions False | No power limit commands sent | 🔮 Future — requires OCPP mock |
+
+### D.6.3 Phase Switching & Gap (Category C)
+
+| ID | Description | Setup | Expected | Status |
+|----|-------------|-------|----------|--------|
+| IT-PHASE-01 | Cloud fluctuation stability | 20 excess values oscillating in gap | All snap to one side, zero phase switches | ✅ `test_ev_charging.py::TestPhaseGapStability` |
+| IT-PHASE-02 | Phase transition on battery-full change | Excess in gap, toggle `battery_full` | Output switches 3700↔4140 only on flag change | 🔮 Future — pure-logic (extend TestPhaseGapStability) |
+| IT-PHASE-03 | Wallbox confirms phase switch | OCPP `MeterValues` after gap-snap change | Measured power matches target phase | 🔮 Future — requires OCPP mock |
+
+### D.6.4 Battery ↔ EV Cross-Coupling (Category D)
+
+| ID | Description | Setup | Expected | Status |
+|----|-------------|-------|----------|--------|
+| IT-BATT-01 | Cheap mode blocks discharge | `ev_charging_mode = "cheap"`, power > 0 | `_discharge_blocked_by_ev = True` | ✅ `test_discharge_blocking.py::TestCheapModeBlocksDischarge` |
+| IT-BATT-02 | Battery protection blocks EV | Forecast SOC at 21:00 < 80% | `battery_protection_passed = False` (dashboard) | 🔮 Future — requires InfluxDB mock |
+| IT-BATT-03 | Tariff boundary transitions | 20:59 (expensive), 21:01 (cheap), 05:59 (cheap), 06:01 (expensive) | Correct `is_cheap_now` flag | ✅ `test_battery_optimizer.py::TestTariffBoundaryTransitions` |
+
+### D.6.5 Authorization & Transaction (Category E)
+
+| ID | Description | Setup | Expected | Status |
+|----|-------------|-------|----------|--------|
+| IT-OCPP-01 | RFID authorize → transaction start | OCPP `Authorize.req` with valid tag | `StartTransaction.conf` accepted, power flows | 🔮 Future — requires OCPP handler mock |
+| IT-OCPP-02 | Remote stop → transaction ends | `RemoteStopTransaction.req` during charge | Power → 0, `StopTransaction.req` sent | 🔮 Future — requires OCPP handler mock |
+
+### D.6.6 End-to-End Scenarios (Category F)
+
+| ID | Description | Setup | Expected | Status |
+|----|-------------|-------|----------|--------|
+| IT-E2E-01 | Full solar day: battery + EV + appliance | Sunny forecast, battery 50%, car connected | Battery fills, EV charges surplus, appliance GREEN | 🔮 Future — requires all mocks |
+| IT-E2E-02 | Cloudy day with cheap-mode EV | Low PV forecast, cheap mode at 21:30 | Discharge blocked, EV charges at max, battery holds | 🔮 Future — requires all mocks |
+
+**Legend:** ✅ Implemented and passing | 🔮 Future (prerequisite listed)
 
 ---
 
@@ -3005,9 +3114,10 @@ log_level: "info"
 
 **End of Document**
 
-*Version 2.21 - February 2026*
+*Version 2.22 - February 2026*
 
 **Changelog:**
+- v2.22: Integration test catalogue (Appendix D.5/D.6) — 22 tests across 6 categories; 3 implemented (IT-PHASE-01, IT-BATT-01, IT-BATT-03), 19 documented as future; EV charging power tests documented (Appendix D.5)
 - v2.21: Added wallbox status display mapping table for dashboard (Section 4.8.1) — documents how raw OCPP status is shown to the user
 - v2.20: SOC poll on charging mode change — switching modes (e.g. solar → immediate) triggers immediate SOC refresh to prevent stale "car full" decisions (Section 4.6.1)
 - v2.19: Adaptive Smart car SOC polling — 1-minute during charging, immediate on car connection, hourly baseline; cached Hello Smart client reduces API calls from 6 to 2 per poll (Section 4.6)

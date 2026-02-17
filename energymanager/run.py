@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.26"
+__version__ = "1.6.28"
 
 import json
 import logging
@@ -280,8 +280,6 @@ class EnergyManager:
             ts = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
             row = forecast.loc[t]
 
-            pv_wh = float(row.get("pv_energy_wh", 0))
-            load_wh = float(row.get("load_energy_wh", 0))
             net_wh = float(row.get("net_energy_wh", 0))
             cumulative_wh += net_wh
 
@@ -619,7 +617,7 @@ class EnergyManager:
             if success:
                 self._last_ev_power_limit = result.target_power_w
             else:
-                logger.error(f"Failed to set wallbox power limit")
+                logger.error("Failed to set wallbox power limit")
 
         # Update status sensor
         self.ha_client.set_sensor_state(
@@ -841,6 +839,7 @@ class EnergyManager:
                     excess_w=excess,
                     min_power_w=ev_min_power,
                     max_power_w=ev_max_power,
+                    battery_full=(battery_soc >= 100),
                 )
                 target_power = ev_result.target_power_w
                 reason = ev_result.reason
@@ -861,7 +860,7 @@ class EnergyManager:
                 if success:
                     self._last_ev_power_limit = target_power
                 else:
-                    logger.error(f"Failed to set wallbox power limit")
+                    logger.error("Failed to set wallbox power limit")
             else:
                 logger.debug(f"EV charging unchanged at {target_power:.0f}W")
 

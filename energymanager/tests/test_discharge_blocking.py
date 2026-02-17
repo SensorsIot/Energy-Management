@@ -256,3 +256,37 @@ class TestCombinedBlocking:
         assert manager._discharge_blocked_by_ev is True
         # Already blocked → no call
         manager.control_battery.assert_not_called()
+
+
+# ===================================================================
+# IT-BATT-01: Cheap mode blocks discharge
+# ===================================================================
+
+
+def _setup_cheap_mode(manager, target_power_w: float):
+    """Configure mocks so control_ev_charging_mode runs in cheap mode."""
+    manager.ha_client.get_input_select.return_value = "cheap"
+    manager.ha_client.get_state.return_value = {"state": "Charging"}
+    manager.ha_client.get_sensor_value.return_value = 11000  # user limit
+    manager.ha_client.set_sensor_state.return_value = True
+    with patch("run.calculate_charging_mode", return_value=_stub_charging_result(target_power_w)):
+        manager.control_ev_charging_mode(wallbox_connected=True, wallbox_power=target_power_w)
+
+
+class TestCheapModeBlocksDischarge:
+    """IT-BATT-01: Cheap-mode EV charging blocks battery discharge."""
+
+    def test_cheap_charging_blocks_discharge(self, manager):
+        """Cheap mode with power > 0 sets _discharge_blocked_by_ev = True."""
+        assert manager._discharge_blocked_by_ev is False
+        _setup_cheap_mode(manager, target_power_w=5000)
+        assert manager._discharge_blocked_by_ev is True
+        manager.control_battery.assert_called_with(False)
+
+    def test_cheap_zero_power_clears_flag(self, manager):
+        """Cheap mode with power = 0 clears _discharge_blocked_by_ev."""
+        manager._discharge_blocked_by_ev = True
+        manager.last_discharge_allowed = False
+        _setup_cheap_mode(manager, target_power_w=0)
+        assert manager._discharge_blocked_by_ev is False
+        manager.control_battery.assert_called_with(True)
