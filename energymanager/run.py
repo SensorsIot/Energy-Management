@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.23"
+__version__ = "1.6.24"
 
 import json
 import logging
@@ -894,8 +894,9 @@ class EnergyManager:
                     return
                 vin = vehicles[0]
 
-            soc = get_soc(self._smart_car_client, vin)
-            logger.info(f"Smart car SOC: {soc}%")
+            soc, target_soc = get_soc(self._smart_car_client, vin)
+            logger.info(f"Smart car SOC: {soc}%"
+                        + (f", target: {target_soc}%" if target_soc is not None else ""))
 
             self.ha_client.set_sensor_state(
                 self.smart_car_soc_entity,
@@ -909,6 +910,11 @@ class EnergyManager:
                     "attribution": "Data provided by Hello Smart API",
                 },
             )
+
+            # Update target SOC from car if reported
+            if target_soc is not None and target_soc != self.ev_target_soc:
+                logger.info(f"Smart car target SOC updated: {self.ev_target_soc}% → {target_soc}%")
+                self.ev_target_soc = target_soc
 
         except Exception as e:
             logger.error(f"Smart car SOC update failed: {e}")

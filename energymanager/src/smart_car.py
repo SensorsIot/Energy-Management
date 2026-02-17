@@ -382,7 +382,11 @@ class HelloSmartClient:
             raise RuntimeError(f"Update session failed: {data.get('message', data)}")
 
     def get_status(self, vin: str) -> dict:
-        """Get full vehicle status (tries update_session first)."""
+        """Get full vehicle status (tries update_session first).
+
+        Returns the full data envelope (contains vehicleStatus and
+        root-level fields like soc for charge target).
+        """
         try:
             self.update_session(vin)
         except RuntimeError as e:
@@ -397,26 +401,34 @@ class HelloSmartClient:
         if str(data.get("code")) != "1000":
             raise RuntimeError(f"Get status failed: {data.get('message', data)}")
 
-        return data["data"]["vehicleStatus"]
+        return data["data"]
 
 
-def get_soc(client: HelloSmartClient, vin: str) -> int:
-    """Get current battery SOC percentage for a vehicle.
+def get_soc(client: HelloSmartClient, vin: str) -> tuple[int, int | None]:
+    """Get current battery SOC and charge target from vehicle.
 
     Args:
         client: Authenticated HelloSmartClient instance
         vin: Vehicle identification number
 
     Returns:
-        SOC as integer percentage (0-100)
+        Tuple of (soc, target_soc) as integer percentages.
+        target_soc is None if the car doesn't report it.
 
     Raises:
         RuntimeError: If status query fails
         KeyError: If SOC field is missing from response
     """
-    status = client.get_status(vin)
-    ev = status.get("additionalVehicleStatus", {}).get("electricVehicleStatus", {})
+    data = client.get_status(vin)
+    vehicle_status = data.get("vehicleStatus", data)
+    ev = vehicle_status.get("additionalVehicleStatus", {}).get("electricVehicleStatus", {})
     soc = ev.get("chargeLevel")
     if soc is None:
         raise KeyError("chargeLevel not found in vehicle status")
-    return int(soc)
+
+    # Target SOC is at root level of data envelope (pySmartHashtag convention)
+    # Value is SOC × 10 (e.g. 830 = 83%)
+    raw_target = data.get("soc")
+    target_soc = int(float(raw_target) / 10) if raw_target is not None else None
+
+    return int(soc), target_soc
