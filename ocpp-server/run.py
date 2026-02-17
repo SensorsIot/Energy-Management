@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.21"
+__version__ = "0.9.22"
 
 import asyncio
 import json
@@ -171,6 +171,9 @@ class OCPPServer:
         self.phase_switch_entity = options.get("phase_switch_entity", "")
         self.single_phase_supported = options.get("single_phase_supported", False)
         self.power_update_interval_s = options.get("power_update_interval_s", 60)
+        self.current_sensor_entity = options.get(
+            "current_sensor_entity", "sensor.earu_breaker_current"
+        )
 
         self.charge_point: Optional[ChargePointHandler] = None
         self.ha = HAEntityManager()
@@ -187,6 +190,8 @@ class OCPPServer:
         # Phase switching state
         self._current_phases = 3
         self._phase_threshold_w = self.min_current_a * 230 * 3
+        self._phase_switching_disabled = False
+        self._last_sent_power_w: float = 0.0
 
         # Track last-seen control states for change detection
         self._last_power_limit: Optional[str] = None
@@ -274,29 +279,86 @@ class OCPPServer:
         if key == "power_w":
             asyncio.ensure_future(self._publish_mqtt_power(float(value)))
 
+    async def _abort_phase_switch(self, reason: str):
+        """Abort phase switch: disable single-phase, restore previous profile."""
+        logger.warning(f"Phase switch aborted: {reason}")
+        await self.ha.set_state(
+            "binary_sensor.wallbox_single_phase_supported", "off"
+        )
+        self._phase_switching_disabled = True
+        # If currently on 1-phase, force back to 3-phase
+        if self._current_phases == 1:
+            self._current_phases = 3
+            self._on_status_change("phases", 3)
+            await self._publish_power_limits()
+        # Resume previous power profile
+        if self._last_sent_power_w > 0 and self.charge_point:
+            await self.charge_point.set_charging_power(
+                self._last_sent_power_w, num_phases=self._current_phases
+            )
+
     async def _switch_phases(self, target_phases: int):
         """Switch between 1-phase and 3-phase charging via EARU relay.
 
-        Safety sequence:
-        1. Pause charging (set limit to 0 A)
-        2. Wait 2 s for current to drop
-        3. Toggle relay (ON = 3-phase, OFF = 1-phase)
-        4. Wait 3 s for relay to settle
-        5. (Caller resumes with new phase count)
+        Safety sequence with dual gates:
+        1. Check wallbox status — if already phase-switch-allowed, skip pause
+        2. If not allowed: send 0A profile, wait up to 5s for status change
+        3. Verify BL0942 current sensor < 0.5A
+        4. Abort if either gate fails
+        5. Toggle relay (ON = 3-phase, OFF = 1-phase)
+        6. Wait 3s for relay to settle
+        7. Update state + publish power limits
         """
+        if self._phase_switching_disabled:
+            return
         if target_phases == self._current_phases:
             return
         if not self.phase_switch_entity:
             return
 
+        ALLOWED_STATUSES = {
+            "Available", "Preparing", "SuspendedEVSE",
+            "SuspendedEV", "Finishing", "Unavailable",
+        }
+
         logger.info(f"Phase switch: {self._current_phases} → {target_phases}")
 
-        # Step 1: Pause charging
-        if self.charge_point:
-            await self.charge_point.set_charging_power(0, num_phases=self._current_phases)
-        await asyncio.sleep(2)
+        # Step 1-2: Check wallbox status, pause if needed
+        cp_status = self.charge_point.current_status if self.charge_point else None
+        if cp_status not in ALLOWED_STATUSES:
+            # Send 0A profile to pause
+            if self.charge_point:
+                await self.charge_point.set_charging_power(
+                    0, num_phases=self._current_phases
+                )
+            # Poll up to 5s for allowed status
+            for _ in range(10):
+                await asyncio.sleep(0.5)
+                cp_status = (
+                    self.charge_point.current_status if self.charge_point else None
+                )
+                if cp_status in ALLOWED_STATUSES:
+                    break
+            else:
+                await self._abort_phase_switch(
+                    f"status {cp_status} not phase-switch-allowed after 5s"
+                )
+                return
 
-        # Step 2: Toggle relay
+        # Step 3: Verify BL0942 current < 0.5A
+        current_str = await self.ha.get_state(self.current_sensor_entity)
+        try:
+            current_a = float(current_str) if current_str is not None else None
+        except (ValueError, TypeError):
+            current_a = None
+        if current_a is None or current_a >= 0.5:
+            await self._abort_phase_switch(
+                f"current sensor {self.current_sensor_entity} = {current_str} "
+                f"(expected < 0.5A)"
+            )
+            return
+
+        # Step 5: Toggle relay
         domain = self.phase_switch_entity.split(".")[0]
         service = "turn_on" if target_phases == 3 else "turn_off"
         entity_data = {"entity_id": self.phase_switch_entity}
@@ -304,9 +366,11 @@ class OCPPServer:
         if not ok:
             logger.error(f"Failed to switch relay to {target_phases}-phase")
             return
+
+        # Step 6: Wait for relay to settle
         await asyncio.sleep(3)
 
-        # Step 3: Update state
+        # Step 7: Update state
         self._current_phases = target_phases
         self._on_status_change("phases", target_phases)
         await self._publish_power_limits()
@@ -342,7 +406,7 @@ class OCPPServer:
             return
 
         # Phase switching (before setting profile)
-        if power_w > 0 and self.phase_switch_entity:
+        if power_w > 0 and self.phase_switch_entity and not self._phase_switching_disabled:
             if power_w < self._phase_threshold_w:
                 target_phases = 1
             else:
@@ -383,6 +447,7 @@ class OCPPServer:
             self._on_status_change("power_w", 0)
 
         self._pending_power_w = None
+        self._last_sent_power_w = power_w
         logger.info(f"Sent power profile: {power_w}W")
 
     async def _sync_ha_state(self):
@@ -439,8 +504,8 @@ class OCPPServer:
                             power_w = float(power_state)
                             since_last_change = time.monotonic() - self._last_change_at
                             self._last_change_at = time.monotonic()
-                            if since_last_change >= self.power_update_interval_s:
-                                # No recent change — send immediately
+                            if power_w == 0 or since_last_change >= self.power_update_interval_s:
+                                # 0W (pause) bypasses throttle — safety-critical
                                 logger.info(f"Power limit changed to {power_w}W (sending immediately, {since_last_change:.0f}s since last change)")
                                 await self._send_power_to_wallbox(power_w)
                             else:

@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 2.5 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 2.7 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -106,7 +106,8 @@ Configured via HA add-on options (`/data/options.json`):
 | `max_current_a` | int | 16 | Maximum charging current |
 | `phase_switch_entity` | string? | `""` | HA switch entity for EARU relay (empty = disabled) |
 | `single_phase_supported` | bool | `false` | Wallbox supports 1-phase charging. Exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager to read. Requires `phase_switch_entity` to be set. |
-| `power_update_interval_s` | int | 60 | Throttle interval for rapid value changes. If the previous value change was ≥ this many seconds ago, the new value is sent immediately. If changes arrive faster (< interval), they are queued and the last value sent when the interval expires. This prevents oscillation during solar excess tracking while ensuring user-initiated changes take effect promptly. |
+| `power_update_interval_s` | int | 60 | Throttle interval for rapid value changes. If the previous value change was ≥ this many seconds ago, the new value is sent immediately. If changes arrive faster (< interval), they are queued and the last value sent when the interval expires. **Exception:** 0W (pause) always bypasses the throttle — it is safety-critical. This prevents oscillation during solar excess tracking while ensuring user-initiated changes take effect promptly. |
+| `current_sensor_entity` | string? | `sensor.earu_breaker_current` | HA entity for the EARU BL0942 current sensor. Used as safety gate 2 during phase switching (must read < 0.5A before relay toggle). |
 
 ## 4. Functional Requirements
 
@@ -188,7 +189,7 @@ The add-on exposes wallbox state as native HA entities via the Supervisor API. T
 
 When `number.wallbox_power_limit` changes:
 
-0. **Throttle check:** If the previous value change was less than `power_update_interval_s` seconds ago, queue the new value and send it when the interval expires. If the previous change was ≥ interval seconds ago, send immediately.
+0. **Throttle check:** If the new value is 0W, send immediately (pause is safety-critical). Otherwise, if the previous value change was less than `power_update_interval_s` seconds ago, queue the new value and send it when the interval expires. If the previous change was ≥ interval seconds ago, send immediately.
 1. **Auto-transaction management:**
    - Power 0 → >0 (no active transaction): send `SetChargingProfile` first, then `RemoteStartTransaction` (see Section 4.5)
    - Power >0 → 0: send `SetChargingProfile` with 0A (pause → `SuspendedEVSE`), transaction stays alive
@@ -221,17 +222,31 @@ Phase changes must only occur when no current is flowing through the contactor. 
 | `Unavailable` | No | Yes | Charger offline / maintenance |
 | `Faulted` | No | **No** | Error state — do not touch hardware |
 
-The safety sequence below ensures the wallbox transitions to `SuspendedEVSE` (limit = 0 A) before the relay is toggled.
+The safety sequence below ensures no current is flowing before the relay is toggled. It uses both the OCPP status (from the table above) and the BL0942 current sensor as independent safety gates.
 
 **Phase switching safety sequence** (EARU latching relay via ESPHome):
 
 | Step | Action | Duration |
 |------|--------|----------|
 | 1 | Send `SetChargingProfile` with limit = 0 A (pause) | immediate |
-| 2 | Wait for current to drop | 2 s |
-| 3 | Call `switch.turn_on` (3φ) or `switch.turn_off` (1φ) on relay entity | immediate |
-| 4 | Wait for relay to settle | 3 s |
-| 5 | Send `SetChargingProfile` with target current and new phase count | immediate |
+| 2 | Wait for wallbox status to become phase-switch-allowed (see table above) | up to 5 s |
+| 3 | Verify BL0942 current sensor < 0.5 A | immediate |
+| 4 | **Abort if step 2 or 3 fails** — disable single-phase mode (`binary_sensor.wallbox_single_phase_supported` → off) so EnergyManager stays on 3-phase | — |
+| 5 | Call `switch.turn_on` (3φ) or `switch.turn_off` (1φ) on relay entity | immediate |
+| 6 | Wait for relay to settle | 3 s |
+| 7 | Send `SetChargingProfile` with target current and new phase count | immediate |
+
+**Safety gates (both must pass before toggling relay):**
+- **Gate 1 — OCPP status:** Wallbox must be in a phase-switch-allowed state (`Available`, `Preparing`, `SuspendedEVSE`, `SuspendedEV`, `Finishing`, or `Unavailable`).
+- **Gate 2 — BL0942 current:** The EARU breaker current sensor must read < 0.5 A, confirming no current is flowing through the contactor.
+
+If either gate fails, the phase switch is aborted and phase switching is disabled for the remainder of the session:
+1. Set `binary_sensor.wallbox_single_phase_supported` → off (signals EnergyManager).
+2. Internally disable phase switching so the OCPP server no longer attempts relay toggles.
+3. If currently on 1-phase, switch back to 3-phase (safe — no current flowing since gate 2 passed or we never toggled).
+4. Resume the previous charging profile.
+
+Phase switching re-enables on add-on restart (config is re-read).
 
 **Relay mapping:** ON = 3-phase, OFF = 1-phase
 
@@ -320,9 +335,49 @@ A `_setup_complete` event prevents `_watch_controls` from sending commands until
 #### 4.5.5 General Rules
 
 - Server assigns incrementing transaction IDs (starting from 1, not persisted across restarts)
+- The OCPP server does not track or recover transaction IDs across restarts. It accepts `StopTransaction` for any transaction ID. The `TxDefaultProfile` used for `SetChargingProfile` does not reference a transaction ID, so charging control works without it.
 - Only one transaction at a time
 - On wallbox disconnect: transaction state cleared, entities updated
 - Transaction ends only when the wallbox initiates `StopTransaction` (plug removed, PowerLoss) or on WebSocket disconnect
+
+### 4.6 EnergyManager ↔ OCPP Server Contract
+
+This section defines the interface contract between the EnergyManager add-on and the OCPP Server add-on. Both sides must conform to these semantics.
+
+#### 4.6.1 Control Semantics
+
+| `number.wallbox_power_limit` value | Meaning | Throttle behavior |
+|------------------------------------|---------|-------------------|
+| `0` | **Pause now** — stop charging immediately | Unthrottled (bypasses `power_update_interval_s`) |
+| `> 0` | **Ensure charging** at this power level | Throttled — rapid changes queued, last value sent when interval expires |
+
+EnergyManager may update the power limit as often as every 10 s. The OCPP server absorbs rapid changes via the throttle and only forwards the last value to the wallbox.
+
+#### 4.6.2 State Semantics
+
+| Entity | Direction | Type | Meaning |
+|--------|-----------|------|---------|
+| `number.wallbox_power_limit` | EM → OCPP | number (W) | Desired charging power (0 = pause) |
+| `sensor.wallbox_power` | OCPP → EM | sensor (W) | Actual charging power from wallbox MeterValues |
+| `sensor.wallbox_energy` | OCPP → EM | sensor (Wh) | Session energy delivered |
+| `sensor.wallbox_status` | OCPP → EM | sensor | Raw OCPP ChargePointStatus (see Section 4.3.1) |
+| `sensor.wallbox_transaction` | OCPP → EM | sensor | `idle` or `charging` |
+| `sensor.wallbox_phases` | OCPP → EM | sensor | Active phase count: `1` or `3` |
+| `binary_sensor.wallbox_connected` | OCPP → EM | binary_sensor | Wallbox WebSocket connected |
+| `binary_sensor.wallbox_single_phase_supported` | OCPP → EM | binary_sensor | Phase switching available (from config, disabled on abort) |
+| `sensor.wallbox_min_power_w` | OCPP → EM | sensor (W) | Minimum charging power for current phase count |
+| `sensor.wallbox_max_power_w` | OCPP → EM | sensor (W) | Maximum charging power for current phase count |
+
+#### 4.6.3 Responsibility Split
+
+| Responsibility | Owner | Details |
+|----------------|-------|---------|
+| Scheduling & policy | EnergyManager | Decides when to charge, which mode (solar/immediate/cheap), forecast-based decisions |
+| Power clamping | EnergyManager | Clamps requested power to `[wallbox_min_power_w, wallbox_max_power_w]` |
+| OCPP protocol | OCPP Server | Translates power (W) to current (A), manages SetChargingProfile, RemoteStart |
+| Safety & device quirks | OCPP Server | Phase switching safety gates, relay timing, AcTec-specific workarounds |
+| Throttle | OCPP Server | Rate-limits SetChargingProfile to prevent wallbox oscillation (except 0W) |
+| Transaction lifecycle | OCPP Server | Auto-starts on first >0W, keeps alive during pauses, ends on unplug |
 
 ## 5. Non-Functional Requirements
 
@@ -356,10 +411,11 @@ A `_setup_complete` event prevents `_watch_controls` from sending commands until
 | TC-15 | Server dies while charging | Wallbox continues charging autonomously, 0A profile needed to stop on reconnect |
 | TC-16 | Full charge cycle | Profile 6A → Start → Charging → Pause 0A → SuspendedEVSE → Resume 10A → Charging → Stop 0A → SuspendedEVSE |
 | TC-17 | Rapid power limit changes (< 60s apart) | Only last value sent when interval expires. No intermediate `SetChargingProfile` commands. |
-| TC-18 | Power limit set to 0W during throttle interval | 0W queued, sent when interval expires (no bypass) |
-| TC-19 | Rapid 0W → >0W → 0W within throttle interval | Only final value (0W) sent when interval expires. Prevents oscillation. |
+| TC-18 | Power limit set to 0W during throttle interval | 0W sent immediately (bypasses throttle), pending queue cleared |
+| TC-19 | Rapid 0W → >0W → 0W within throttle interval | First 0W sent immediately, >0W queued, final 0W sent immediately |
 | TC-20 | Power limit change after > 60s idle | New value sent immediately (no throttle delay). |
 | TC-21 | HA restart with active wallbox | Entities re-registered, wallbox state re-synced (`_sync_ha_state`). |
+| TC-22 | Rapid >0W → 0W → >0W within throttle interval | 0W sent immediately, >0W queued and sent when interval expires |
 
 ## 7. Calibration Data
 
@@ -438,3 +494,5 @@ ocpp-server/
 | 2.3 | 2026-02-15 | Added `power_update_interval_s` throttle (default 60s) to rate-limit `SetChargingProfile` commands. No exceptions — all changes throttled uniformly to prevent oscillation. |
 | 2.4 | 2026-02-16 | Integer amp rounding (`math.ceil`): AcTec only accepts whole amps. Throttle now based on time since last value change (not last send) — immediate send if previous change >60s ago, throttle only rapid consecutive changes. Removed `ChargePointMaxProfile` and `TxProfile` — only `TxDefaultProfile` per FSD. Added `_sync_ha_state` for HA restart recovery. Updated EnergyManager to 10s control loop. |
 | 2.5 | 2026-02-17 | Added wallbox state safety table for phase switching (Section 4.3.3). Added status reference table with dashboard labels (Section 4.3.1) — display logic is dashboard's responsibility, OCPP server publishes raw status only. Documented SuspendedEVSE vs SuspendedEV distinction. |
+| 2.6 | 2026-02-17 | Phase switching safety sequence now uses dual safety gates: OCPP status must be phase-switch-allowed AND BL0942 current < 0.5 A before toggling relay. Abort with profile restore on failure. |
+| 2.7 | 2026-02-17 | 0W (pause) bypasses throttle — safety-critical. Added `current_sensor_entity` config. Transaction ID note in Section 4.5.5. Added Section 4.6: EnergyManager ↔ OCPP Server contract (control semantics, state semantics, responsibility split). |

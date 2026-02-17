@@ -265,24 +265,20 @@ class TestThrottle:
         assert server._pending_power_w == 4000.0
 
     @pytest.mark.asyncio
-    async def test_tc18_zero_watts_queued_normally(self, server):
-        """TC-18: 0W during interval is queued normally (no bypass)."""
-        server._last_profile_sent_at = time.monotonic()  # just sent
-        server._pending_power_w = 0.0
+    async def test_tc18_zero_watts_bypasses_throttle(self, server):
+        """TC-18: 0W sent immediately (bypasses throttle), pending queue cleared."""
+        # Queue a pending value
+        server._pending_power_w = 5000.0
+        server._last_change_at = time.monotonic()  # just changed
 
-        # Interval not elapsed → 0W stays pending
-        elapsed = time.monotonic() - server._last_profile_sent_at
-        assert elapsed < server.power_update_interval_s
-        assert server._pending_power_w == 0.0
-
-        # After interval elapses, 0W is sent
-        server._last_profile_sent_at = time.monotonic() - 10
-        server.charge_point.current_power_w = 3000
+        # 0W bypasses throttle — send immediately
+        server.charge_point.current_power_w = 5000
         await server._send_power_to_wallbox(0.0)
 
         server.charge_point.set_charging_power.assert_called_once_with(
             0.0, num_phases=3
         )
+        # Pending queue cleared by _send_power_to_wallbox
         assert server._pending_power_w is None
 
     @pytest.mark.asyncio
@@ -337,23 +333,53 @@ class TestThrottle:
         assert calls["binary_sensor.wallbox_connected"] == "off"
 
     @pytest.mark.asyncio
-    async def test_tc19_zero_nonzero_zero_only_final_sent(self, server):
-        """TC-19: 0W → >0W → 0W within interval → only final 0W sent."""
-        # Simulate sequence of HA changes within one interval
-        server._last_profile_sent_at = time.monotonic()  # just sent
+    async def test_tc19_first_zero_immediate_nonzero_queued_final_zero_immediate(self, server):
+        """TC-19: First 0W sent immediately, >0W queued, final 0W sent immediately."""
+        server._last_change_at = time.monotonic() - 10  # interval elapsed
 
-        # Three changes arrive, each overwrites pending
-        server._pending_power_w = 0.0
-        server._pending_power_w = 7000.0
-        server._pending_power_w = 0.0  # final value
-
-        # Interval elapses
-        server._last_profile_sent_at = time.monotonic() - 10
+        # First 0W — sent immediately (bypass)
         server.charge_point.current_power_w = 5000
-        await server._send_power_to_wallbox(server._pending_power_w)
+        await server._send_power_to_wallbox(0.0)
+        assert server.charge_point.set_charging_power.call_count == 1
+        server.charge_point.set_charging_power.assert_called_with(0.0, num_phases=3)
 
-        # Only the final 0W was sent
-        server.charge_point.set_charging_power.assert_called_once_with(
-            0.0, num_phases=3
+        # >0W within interval — queued (not sent)
+        server._last_change_at = time.monotonic()
+        server._pending_power_w = 7000.0
+        # Don't call _send — this simulates the throttle holding it
+
+        # Final 0W — sent immediately (bypass), clears pending
+        server.charge_point.current_power_w = 0
+        await server._send_power_to_wallbox(0.0)
+        assert server.charge_point.set_charging_power.call_count == 2
+        assert server._pending_power_w is None
+
+    @pytest.mark.asyncio
+    async def test_tc22_rapid_nonzero_zero_nonzero(self, server):
+        """TC-22: Rapid >0W → 0W → >0W: 0W sent immediately, >0W queued."""
+        server._last_change_at = time.monotonic() - 10  # interval elapsed
+
+        # >0W — sent immediately (interval elapsed)
+        await server._send_power_to_wallbox(5000.0)
+        assert server.charge_point.set_charging_power.call_count == 1
+        server.charge_point.set_charging_power.assert_called_with(
+            5000.0, num_phases=3
         )
+
+        # 0W within interval — sent immediately (bypass)
+        server._last_change_at = time.monotonic()
+        server.charge_point.current_power_w = 5000
+        await server._send_power_to_wallbox(0.0)
+        assert server.charge_point.set_charging_power.call_count == 2
+
+        # >0W within interval — queued (not sent)
+        server._pending_power_w = 7000.0
+        assert server._pending_power_w == 7000.0
+        # set_charging_power still at 2 calls (not sent yet)
+        assert server.charge_point.set_charging_power.call_count == 2
+
+        # After interval elapses, pending is sent
+        server._last_change_at = time.monotonic() - 10
+        await server._send_power_to_wallbox(server._pending_power_w)
+        assert server.charge_point.set_charging_power.call_count == 3
         assert server._pending_power_w is None

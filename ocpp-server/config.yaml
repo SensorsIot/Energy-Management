@@ -1,5 +1,5 @@
 name: "OCPP Server"
-version: "0.9.21"
+version: "0.9.22"
 slug: "ocpp-server"
 description: "OCPP 1.6j server for EV wallbox control via HA entities"
 url: "https://github.com/SensorsIot/Energy-Management"
@@ -36,6 +36,7 @@ options:
   mqtt_topic: "wallbox"
   single_phase_supported: false
   power_update_interval_s: 60
+  current_sensor_entity: "sensor.earu_breaker_current"
 
 schema:
   wallbox_id: str
@@ -48,3 +49,4 @@ schema:
   mqtt_topic: str?
   single_phase_supported: "bool?"
   power_update_interval_s: "int?"
+  current_sensor_entity: "str?"

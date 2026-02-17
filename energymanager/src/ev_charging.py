@@ -4,12 +4,21 @@ EV charging power calculation for opportunistic solar mode.
 Clamps excess power to wallbox min/max limits:
   excess >= min_power_w → charge at min(excess, max_power_w)
   excess <  min_power_w → pause (0W, transaction stays alive)
+
+Phase-gap handling:
+  The wallbox has a dead zone between 1φ max (3700 W) and 3φ min (4140 W).
+  If the target lands in this gap it is snapped to the nearest achievable power.
 """
+
+from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+_PHASE_GAP_LO = 3700  # single-phase maximum (W)
+_PHASE_GAP_HI = 4140  # three-phase minimum (W)
 
 
 @dataclass
@@ -20,10 +29,22 @@ class EVChargingResult:
     reason: str
 
 
+def resolve_phase_gap(target_w: float, battery_full: bool) -> float:
+    """Snap target out of the 1φ/3φ dead zone (3700–4140 W).
+
+    Battery not full → prefer 1φ (3700) so surplus charges battery.
+    Battery full     → prefer 3φ (4140) to use power in car.
+    """
+    if _PHASE_GAP_LO < target_w < _PHASE_GAP_HI:
+        return _PHASE_GAP_HI if battery_full else _PHASE_GAP_LO
+    return target_w
+
+
 def calculate_ev_power(
     excess_w: float,
     min_power_w: float = 1400,
     max_power_w: float = 11000,
+    battery_full: bool = False,
 ) -> EVChargingResult:
     """
     Calculate target EV charging power from solar excess.
@@ -39,6 +60,7 @@ def calculate_ev_power(
     if excess_w >= min_power_w:
         target = min(excess_w, max_power_w)
         target = _round_to_step(target)
+        target = resolve_phase_gap(target, battery_full)
         return EVChargingResult(
             target_power_w=target,
             available_excess_w=excess_w,
