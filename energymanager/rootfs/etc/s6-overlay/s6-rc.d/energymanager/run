@@ -29,15 +29,6 @@ if bashio::config.exists 'telegram_chat_id' && bashio::config.has_value 'telegra
   bashio::log.info "Telegram chat ID loaded from configuration"
 fi
 
-if bashio::config.exists 'smart_user' && bashio::config.has_value 'smart_user'; then
-  export SMART_USER="$(bashio::config 'smart_user')"
-  bashio::log.info "Smart car user loaded from configuration"
-fi
-
-if bashio::config.exists 'smart_password' && bashio::config.has_value 'smart_password'; then
-  export SMART_PASSWORD="$(bashio::config 'smart_password')"
-  bashio::log.info "Smart car password loaded from configuration"
-fi
 
 # ==============================================================================
 # First-run bootstrap: copy template if user config doesn't exist

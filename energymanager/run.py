@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.33"
+__version__ = "1.6.34"
 
 import json
 import logging
@@ -30,7 +30,6 @@ from src.influxdb_writer import SimulationWriter
 from src.integration_observer import CycleSnapshot, IntegrationObserver
 from src.notifications import init_telegram, notify_error
 from src.sanity import validate_power_readings
-from src.smart_car import CHARGER_STATE_LABELS, HelloSmartClient, get_ev_status
 
 # Swiss timezone for display
 SWISS_TZ = ZoneInfo("Europe/Zurich")
@@ -211,13 +210,9 @@ class EnergyManager:
         # Smart car config (FSD 4.5 Step 2 — hourly SOC readback)
         smart_opts = options.get("smart_car", {})
         self.smart_car_enabled = smart_opts.get("enabled", False)
-        self.smart_car_user = smart_opts.get("user", "")
-        self.smart_car_password = smart_opts.get("password", "")
-        self.smart_car_vin = smart_opts.get("vin", "")
         self.smart_car_soc_entity = smart_opts.get(
             "soc_entity", "sensor.smart_battery"
         )
-        self._smart_car_client: HelloSmartClient | None = None
         self._last_wallbox_status: str | None = None
         self._last_ev_charging_mode: str | None = None
         self._last_car_soc_poll: float = 0.0
@@ -802,53 +797,34 @@ class EnergyManager:
             logger.error(f"EV charging control failed: {e}", exc_info=True)
 
     def update_car_soc(self):
-        """Read SOC from Smart car API and update HA sensor."""
+        """Read SOC and charging state from smarthashtag HA entities."""
         if not self.smart_car_enabled:
             return
 
         try:
-            # Reuse cached client, re-auth only when needed
-            if self._smart_car_client is None:
-                self._smart_car_client = HelloSmartClient(
-                    self.smart_car_user, self.smart_car_password
-                )
-                self._smart_car_client.authenticate()
+            soc_raw = self.ha_client.get_sensor_value(self.smart_car_soc_entity)
+            if soc_raw is None:
+                return
 
-            vin = self.smart_car_vin
-            if not vin:
-                vehicles = self._smart_car_client.list_vehicles()
-                if not vehicles:
-                    logger.error("Smart car: no vehicles found")
-                    return
-                vin = vehicles[0]
+            charger_status = self.ha_client.get_state("sensor.smart_charging_status")
+            charging_current = self.ha_client.get_state("sensor.smart_charging_current")
+            time_remaining = self.ha_client.get_state("sensor.smart_charging_time_remaining")
+            range_state = self.ha_client.get_state("sensor.smart_range")
 
-            ev = get_ev_status(self._smart_car_client, vin)
+            charger_str = charger_status.get("state", "unknown") if charger_status else "unknown"
+            current_a = float(charging_current.get("state", 0)) if charging_current else 0.0
+            time_raw = time_remaining.get("state", "unknown") if time_remaining else "unknown"
+            time_min = int(float(time_raw)) if time_raw not in ("unknown", "unavailable") else None
+            range_km = int(float(range_state.get("state", 0))) if range_state else 0
+
             logger.info(
-                f"Smart car SOC: {ev.soc}% "
-                f"charger={CHARGER_STATE_LABELS.get(ev.charger_state, ev.charger_state)} "
-                f"current={ev.charge_current_a}A"
-            )
-
-            self.ha_client.set_sensor_state(
-                self.smart_car_soc_entity,
-                ev.soc,
-                attributes={
-                    "state_class": "measurement",
-                    "unit_of_measurement": "%",
-                    "device_class": "battery",
-                    "icon": "mdi:car-battery",
-                    "friendly_name": "Smart Battery",
-                    "attribution": "Data provided by Hello Smart API",
-                    "charger_state": CHARGER_STATE_LABELS.get(ev.charger_state, str(ev.charger_state)),
-                    "charge_current_a": ev.charge_current_a,
-                    "time_to_full_min": ev.time_to_full_min if ev.time_to_full_min < 2047 else None,
-                    "range_km": ev.range_km,
-                },
+                f"Smart car SOC: {soc_raw}% charger={charger_str} "
+                f"current={current_a}A range={range_km}km"
+                + (f" time_remaining={time_min}min" if time_min is not None else "")
             )
 
         except Exception as e:
             logger.error(f"Smart car SOC update failed: {e}")
-            self._smart_car_client = None  # Force re-auth on next attempt
 
     def _query_last_value(self, entity_id: str) -> str | None:
         """Query InfluxDB for the last known value of an HA entity."""
@@ -901,14 +877,6 @@ class EnergyManager:
                 {"friendly_name": "EV Charge Status",
                  "status_text": "Waiting for first update", "icon": "mdi:ev-station"},
             )
-            if self.smart_car_enabled:
-                self._ensure_sensor_exists(
-                    self.smart_car_soc_entity,
-                    "unknown",
-                    {"state_class": "measurement", "unit_of_measurement": "%",
-                     "device_class": "battery", "icon": "mdi:car-battery",
-                     "friendly_name": "Smart Battery"},
-                )
             logger.info("Initial sensor check complete")
         except Exception as e:
             logger.warning(f"Failed to check initial sensors: {e}")
@@ -1046,17 +1014,6 @@ def load_config(config_path: str = None) -> dict:
         logger.info("InfluxDB token loaded from environment")
     else:
         logger.warning("InfluxDB token not set - configure it in the add-on Configuration tab")
-
-    smart_user = os.environ.get("SMART_USER")
-    smart_password = os.environ.get("SMART_PASSWORD")
-    if smart_user or smart_password:
-        if "smart_car" not in merged:
-            merged["smart_car"] = {}
-        if smart_user:
-            merged["smart_car"]["user"] = smart_user
-        if smart_password:
-            merged["smart_car"]["password"] = smart_password
-        logger.info("Smart car credentials loaded from environment")
 
     telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")

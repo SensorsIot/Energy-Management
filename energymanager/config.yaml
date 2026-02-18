@@ -1,5 +1,5 @@
 name: "EnergyManager"
-version: "1.6.33"
+version: "1.6.34"
 slug: "energymanager"
 description: "Energy optimization using PV and load forecasts"
 url: "https://github.com/SensorsIot/Energy-Management"
@@ -27,12 +27,8 @@ options:
   influxdb_token: ""
   telegram_bot_token: ""
   telegram_chat_id: ""
-  smart_user: ""
-  smart_password: ""
 
 schema:
   influxdb_token: password
   telegram_bot_token: password?
   telegram_chat_id: str?
-  smart_user: str?
-  smart_password: password?

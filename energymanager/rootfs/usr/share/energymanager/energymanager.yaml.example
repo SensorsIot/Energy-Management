@@ -67,12 +67,10 @@ ev_charging:
   # charge_status_entity: "sensor.ev_charge_status"
   # wallbox_status_entity: "sensor.wallbox_status"
 
-# Smart # car API (hourly SOC readback via Hello Smart API)
-# NOTE: Password is configured in the add-on Configuration tab (not here)
+# Smart car SOC (reads from smarthashtag HA custom integration)
+# Requires: https://github.com/DasBasti/SmartHashtag installed in HA
 smart_car:
   enabled: true
-  user: ""                           # Your Hello Smart login email
-  vin: ""                           # Auto-detects if empty
   soc_entity: "sensor.smart_battery"
 
 # Schedule settings
