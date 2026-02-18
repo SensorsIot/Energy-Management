@@ -140,6 +140,9 @@ def _setup_ev_charging(manager, *, mode: str, wb_status: str = "Charging",
             return {"state": "on"}
         if entity == manager.ev_wallbox_status_entity:
             return {"state": wb_status}
+        if entity == manager.car_ready_entity:
+            # car_ready is on for Preparing/Charging/SuspendedEVSE
+            return {"state": "on" if wb_status not in ("Available", "Faulted", "Unknown") else "off"}
         return {"state": "unknown"}
 
     manager.ha_client.get_state.side_effect = _fake_get_state

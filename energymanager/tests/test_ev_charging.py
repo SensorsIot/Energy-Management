@@ -10,14 +10,14 @@ from src.ev_charging import calculate_ev_power, resolve_phase_gap
 
 class TestResolvePhaseGap:
     def test_in_gap_battery_not_full_snaps_down(self):
-        assert resolve_phase_gap(3900, battery_full=False) == 3700
+        assert resolve_phase_gap(3900, battery_full=False) == 3680
 
     def test_in_gap_battery_full_snaps_up(self):
         assert resolve_phase_gap(3900, battery_full=True) == 4140
 
     def test_at_gap_lo_no_snap(self):
-        """Boundary is exclusive — exactly 3700 stays."""
-        assert resolve_phase_gap(3700, battery_full=False) == 3700
+        """Boundary is exclusive — exactly 3680 stays."""
+        assert resolve_phase_gap(3680, battery_full=False) == 3680
 
     def test_at_gap_hi_no_snap(self):
         """Boundary is exclusive — exactly 4140 stays."""
@@ -39,9 +39,9 @@ class TestCalculateEvPower:
         assert result.target_power_w == 0
 
     def test_excess_in_gap_snaps_down(self):
-        """3900 W rounds to 3900, then gap snaps to 3700."""
+        """3900 W rounds to 3900, then gap snaps to 3680."""
         result = calculate_ev_power(excess_w=3900, battery_full=False)
-        assert result.target_power_w == 3700
+        assert result.target_power_w == 3680
 
     def test_excess_in_gap_battery_full_snaps_up(self):
         """3900 W rounds to 3900, then gap snaps to 4140."""
@@ -49,9 +49,9 @@ class TestCalculateEvPower:
         assert result.target_power_w == 4140
 
     def test_at_gap_hi_rounds_to_4100_stays(self):
-        """4140 W rounds to 4100, which is in gap → snaps to 3700 (default battery not full)."""
+        """4140 W rounds to 4100, which is in gap → snaps to 3680 (default battery not full)."""
         result = calculate_ev_power(excess_w=4140, battery_full=False)
-        assert result.target_power_w == 3700
+        assert result.target_power_w == 3680
 
     def test_normal_excess_unaffected(self):
         result = calculate_ev_power(excess_w=7000)
@@ -69,7 +69,7 @@ class TestPhaseGapStability:
     """Verify that excess values oscillating around the phase gap
     produce stable output without phase-switching flaps (IT-PHASE-01).
 
-    The wallbox dead zone is 3700–4140 W.  Cloud fluctuations that
+    The wallbox dead zone is 3680–4140 W.  Cloud fluctuations that
     repeatedly cross this band should snap to one side consistently
     so the wallbox never flip-flops between 1φ and 3φ.
     """
@@ -85,16 +85,16 @@ class TestPhaseGapStability:
     ]
 
     def test_cloud_fluctuation_battery_not_full(self):
-        """All gap values snap to 3700 W (1φ max) — no phase switches."""
+        """All gap values snap to 3680 W (1φ max) — no phase switches."""
         results = [
             calculate_ev_power(excess_w=e, battery_full=False)
             for e in self._CLOUD_EXCESS_SERIES
         ]
         powers = [r.target_power_w for r in results]
 
-        # Every output should be exactly 3700 (snapped down)
-        assert all(p == 3700 for p in powers), (
-            f"Expected all 3700, got {powers}"
+        # Every output should be exactly 3680 (snapped down)
+        assert all(p == 3680 for p in powers), (
+            f"Expected all 3680, got {powers}"
         )
 
     def test_cloud_fluctuation_battery_full(self):

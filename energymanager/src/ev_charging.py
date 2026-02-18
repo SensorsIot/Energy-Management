@@ -6,7 +6,7 @@ Clamps excess power to wallbox min/max limits:
   excess <  min_power_w → pause (0W, transaction stays alive)
 
 Phase-gap handling:
-  The wallbox has a dead zone between 1φ max (3700 W) and 3φ min (4140 W).
+  The wallbox has a dead zone between 1φ max (3680 W) and 3φ min (4140 W).
   If the target lands in this gap it is snapped to the nearest achievable power.
 """
 
@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-_PHASE_GAP_LO = 3700  # single-phase maximum (W)
+_PHASE_GAP_LO = 3680  # single-phase maximum (W) — 16A × 230V
 _PHASE_GAP_HI = 4140  # three-phase minimum (W)
 
 
@@ -30,9 +30,9 @@ class EVChargingResult:
 
 
 def resolve_phase_gap(target_w: float, battery_full: bool) -> float:
-    """Snap target out of the 1φ/3φ dead zone (3700–4140 W).
+    """Snap target out of the 1φ/3φ dead zone (3680–4140 W).
 
-    Battery not full → prefer 1φ (3700) so surplus charges battery.
+    Battery not full → prefer 1φ (3680) so surplus charges battery.
     Battery full     → prefer 3φ (4140) to use power in car.
     """
     if _PHASE_GAP_LO < target_w < _PHASE_GAP_HI:

@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.34"
+__version__ = "1.6.35"
 
 import json
 import logging
@@ -198,6 +198,9 @@ class EnergyManager:
         )
         self.ev_wallbox_status_entity = ev_opts.get(
             "wallbox_status_entity", "sensor.wallbox_status"
+        )
+        self.car_ready_entity = ev_opts.get(
+            "car_ready_entity", "binary_sensor.car_ready"
         )
         self.ev_auto_reset_timeout_min = ev_opts.get("auto_reset_timeout_min", 5)
         self.ev_battery_protection_soc = ev_opts.get("battery_protection_soc", 80)
@@ -657,9 +660,11 @@ class EnergyManager:
             ev_min_power = int(dyn_min) if dyn_min and dyn_min > 0 else self.ev_min_power_w
             ev_max_power = int(dyn_max) if dyn_max and dyn_max > 0 else self.ev_max_power_w
 
-            # Wallbox available = connected AND status not idle/faulted
-            wallbox_available = wb_connected and wb_status not in (
-                "Available", "Faulted", "Unknown",
+            # Wallbox available = car_ready binary sensor from OCPP server
+            car_ready_state = self.ha_client.get_state(self.car_ready_entity)
+            wallbox_available = (
+                car_ready_state is not None
+                and car_ready_state.get("state") == "on"
             )
 
             # Read inputs for state machine
@@ -723,13 +728,8 @@ class EnergyManager:
                 self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
                 self._ev_idle_since = None
 
-            # Send power limit to OCPP (on change, or re-send if wallbox stuck)
-            resend = (
-                output.target_power_w > 0
-                and wallbox_power == 0
-                and wb_status == "SuspendedEVSE"
-            )
-            if output.target_power_w != self._last_ev_power_limit or resend:
+            # Send power limit to OCPP (on change only; OCPP server handles re-sends)
+            if output.target_power_w != self._last_ev_power_limit:
                 success = self.ha_client.set_sensor_state(
                     self.wallbox_power_limit_entity,
                     int(output.target_power_w),
