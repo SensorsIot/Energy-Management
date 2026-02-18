@@ -1,21 +1,20 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 2.7 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 3.1 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
-Home Assistant add-on providing an OCPP 1.6J Central System that bridges EV charging stations to Home Assistant. The add-on exposes wallbox state as HA entities and accepts control via HA services — no MQTT required between the add-on and EnergyManager.
+Home Assistant add-on providing an OCPP 1.6J Central System that bridges EV charging stations to Home Assistant. Exposes wallbox state as HA entities and accepts control via a single power limit entity.
 
 ### 1.1 Scope
 
 | In Scope | Out of Scope |
 |----------|-------------|
-| OCPP 1.6J WebSocket server | Captive portal (HA handles config) |
-| HA entity integration (sensors, services) | OTA firmware updates (Docker handles this) |
-| Charging profile management | Dual-network isolation |
-| Authorization | |
-| Transaction management | |
-| Phase switching (via EARU latching relay) | |
+| OCPP 1.6J WebSocket server | OTA firmware updates |
+| HA entity integration | Captive portal |
+| Charging profile management | |
+| Authorization, transaction management | |
+| Phase switching (EARU latching relay) | |
 
 ## 2. Architecture
 
@@ -27,9 +26,10 @@ Home Assistant add-on providing an OCPP 1.6J Central System that bridges EV char
 │  │ EnergyManager│──HA states──►│  OCPP Server Add-on   │    │
 │  │              │  & services  │                       │    │
 │  │  reads:      │              │  • WebSocket :8887    │    │
-│  │  sensors     │              │  • OCPP 1.6J handler  │    │
-│  │  calls:      │              │  • HA entity provider │    │
-│  │  services    │              │  • Phase switch ctrl  │    │
+│  │  car_ready   │              │  • OCPP 1.6J handler  │    │
+│  │  power/energy│              │  • Phase switch ctrl  │    │
+│  │  writes:     │              │                       │    │
+│  │  power_limit │              │                       │    │
 │  └──────────────┘              └───┬───────────┬───────┘    │
 │                                    │           │            │
 │  ┌─────────────────────┐          │           │            │
@@ -40,21 +40,12 @@ Home Assistant add-on providing an OCPP 1.6J Central System that bridges EV char
 │  │ ON=3φ  OFF=1φ       │                       │            │
 │  └─────────┬───────────┘                       │            │
 │            │ relay                              │            │
-│  Exposed HA entities:                          │            │
-│  • sensor.wallbox_power (W)                    │            │
-│  • sensor.wallbox_energy (Wh)                  │            │
-│  • sensor.wallbox_status                       │            │
-│  • sensor.wallbox_phases (1 or 3)              │            │
-│  • binary_sensor.wallbox_connected             │            │
-│  • number.wallbox_power_limit (W)              │            │
-│  • sensor.wallbox_transaction                  │            │
 └────────────┼───────────────────────────────────┼────────────┘
              │ L1/L2/L3 switching                │ OCPP 1.6J
              │                                   │ WebSocket
              │                         ┌─────────┴─────────┐
-             │                         │     Wallbox        │
-             └────────────────────────►│  (AcTec / OCPP)    │
-                                       │  • OCPP 1.6J client│
+             └────────────────────────►│     Wallbox        │
+                                       │  (AcTec / OCPP)    │
                                        └────────────────────┘
 ```
 
@@ -65,38 +56,67 @@ Home Assistant add-on providing an OCPP 1.6J Central System that bridges EV char
 | Language | Python 3.11+ |
 | OCPP library | `ocpp` (Python) |
 | WebSocket | `websockets` |
-| HA integration | `homeassistant_api` (REST API from add-on) |
+| HA integration | REST API (Supervisor) |
 | Phase switch | EARU breaker: BK7231N (LibreTiny/ESPHome) + BL0942 energy meter |
 | Deployment | HA add-on (Docker, s6-overlay) |
 
-### 2.2 Integration with Project Components
+### 2.2 Wallbox States
 
-This add-on is part of the Energy-Management project alongside:
+The wallbox reports its state via OCPP `StatusNotification`. These states drive all server decisions.
 
-| Add-on | Role in EV Charging |
-|--------|---------------------|
-| **EnergyManager** (v1.6.18) | Reads wallbox sensors, sets `number.wallbox_power_limit`. Reads user power limit from `input_number.ev_power_limit`. See [Energymanagement_fsd.md Section 4.5](../../Documents/Energymanagement_fsd.md) |
-| **SwissSolarForecast** (v1.2.4) | Provides PV forecast used by EnergyManager to plan charging windows |
-| **LoadForecast** (v1.2.3) | Provides load forecast used by EnergyManager to calculate excess power |
+#### 2.2.1 State Reference
 
-**EnergyManager interaction (Section 4.5 of Energymanagement_fsd.md):**
+| Status | Car plugged | Current flowing | Transaction | Description |
+|--------|:-----------:|:---------------:|:-----------:|-------------|
+| `Available` | No | No | No | Connector free |
+| `Preparing` | Yes | No | No | Car plugged in, onboard charger initializing (up to 7 min cold start) |
+| `Charging` | Yes | Yes | Yes | Active power delivery, MeterValues every ~60s |
+| `SuspendedEVSE` | Yes | No | Yes | Paused by charger (0A profile sent). After AcTec correction: always charger-initiated. |
+| `SuspendedEV` | Yes | No | Yes | Car refusing to charge. **Synthesized** by OCPP server — AcTec never reports this natively (see Section 3.6.1). |
+| `Finishing` | Yes | No | No | Transaction ended, car still plugged |
+
+#### 2.2.2 Observed Transitions (AcTec EV-AC22K + Smart #5)
 
 ```
-EnergyManager reads:                    EnergyManager writes:
-  sensor.wallbox_power          →         number.wallbox_power_limit
-  sensor.wallbox_energy
-  sensor.wallbox_status
-  binary_sensor.wallbox_connected
-  sensor.wallbox_transaction
-  sensor.wallbox_phases
-  binary_sensor.wallbox_single_phase_supported
+                    plug in                    RemoteStart + car ready
+  Available ──────────────► Preparing ──────────────────────────────► Charging
+      ▲                         ▲                                     │  ▲
+      │ unplug                  │ car wakes                 0A profile│  │ >0A profile
+      │                         │                                     ▼  │
+  Finishing ◄───────────── Finishing                          SuspendedEVSE
+                           (StopTxn)                         ▲    │
+                                                     raw≠25  │    │ cloud: raw=25/4
+                                                              │    ▼
+                                                          SuspendedEV
 ```
 
-The EnergyManager decides charging power and ocpp server executes it.
+#### 2.2.3 Server Behavior per State
 
-## 3. Configuration
+| Status | `car_ready` | Power | Phase switch | Re-send | Cloud check |
+|--------|:-----------:|:-----:|:------------:|:-------:|:-----------:|
+| `Available` | off | Zeroed | Allowed | — | — |
+| `Preparing` | on | Zeroed | Allowed | — | — |
+| `Charging` | on | MeterValues | **Blocked** | — | — |
+| `SuspendedEVSE` | on | Zeroed | Allowed | **Throttled** | **Poll** → if raw=25/4 → SuspendedEV |
+| `SuspendedEV` | off | Zeroed | Allowed | Stopped | **Poll** → if raw≠25/4 → SuspendedEVSE |
+| `Finishing` | off | Zeroed | Allowed | — | — |
 
-Configured via HA add-on options (`/data/options.json`):
+**Power zeroing:** On any status ≠ `Charging`, the server sets `sensor.wallbox_power` to 0W (wallbox does not send 0W MeterValues when paused).
+
+**Re-send logic:** In `SuspendedEVSE` with last sent > 0W, retries at 10s, 30s, 60s intervals. Cloud check runs in parallel — if car-initiated stop confirmed, corrects to `SuspendedEV` and stops retries.
+
+## 3. Functional Requirements
+
+### 3.1 WebSocket Server
+
+| Property | Value |
+|----------|-------|
+| Port | 8887 (configurable) |
+| Path | `/{chargePointId}` |
+| Subprotocol | `ocpp1.6` |
+| Max connections | 1 |
+
+### 3.2 Configuration
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -105,321 +125,260 @@ Configured via HA add-on options (`/data/options.json`):
 | `min_current_a` | int | 6 | Minimum charging current |
 | `max_current_a` | int | 16 | Maximum charging current |
 | `phase_switch_entity` | string? | `""` | HA switch entity for EARU relay (empty = disabled) |
-| `single_phase_supported` | bool | `false` | Wallbox supports 1-phase charging. Exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager to read. Requires `phase_switch_entity` to be set. |
-| `power_update_interval_s` | int | 60 | Throttle interval for rapid value changes. If the previous value change was ≥ this many seconds ago, the new value is sent immediately. If changes arrive faster (< interval), they are queued and the last value sent when the interval expires. **Exception:** 0W (pause) always bypasses the throttle — it is safety-critical. This prevents oscillation during solar excess tracking while ensuring user-initiated changes take effect promptly. |
-| `current_sensor_entity` | string? | `sensor.earu_breaker_current` | HA entity for the EARU BL0942 current sensor. Used as safety gate 2 during phase switching (must read < 0.5A before relay toggle). |
+| `single_phase_supported` | bool | `false` | Wallbox supports 1-phase charging |
+| `power_update_interval_s` | int | 60 | Throttle interval for SetChargingProfile. 0W bypasses (safety-critical). |
+| `current_sensor_entity` | string? | `sensor.earu_breaker_current` | EARU BL0942 current sensor (safety gate for phase switching) |
 
-## 4. Functional Requirements
+### 3.3 OCPP Messages
 
-### 4.1 WebSocket Server
-
-| Property | Value |
-|----------|-------|
-| Port | 8887 (configurable) |
-| Path | `/{chargePointId}` (e.g., `/AcTec001`) |
-| Subprotocol | `ocpp1.6` |
-| Max connections | 1 |
-| Bind | `0.0.0.0` |
-
-The server extracts the chargepoint ID from the WebSocket connection path.
-
-### 4.2 OCPP 1.6J Messages
-
-#### 4.2.1 Incoming (Wallbox → Server)
+**Incoming (Wallbox → Server):**
 
 | Message | Action |
 |---------|--------|
-| `BootNotification` | Accept, set 60s heartbeat interval |
-| `Heartbeat` | Return current UTC time |
-| `StatusNotification` | Update status → `sensor.wallbox_status` |
+| `BootNotification` | Accept, set 60s heartbeat |
+| `Heartbeat` | Return UTC time |
+| `StatusNotification` | Update `sensor.wallbox_status` |
 | `Authorize` | Accept all tags |
-| `StartTransaction` | Assign transaction ID → update entities |
-| `StopTransaction` | Clear transaction → update entities |
-| `MeterValues` | Extract power/energy → update sensor entities |
+| `StartTransaction` | Assign transaction ID |
+| `StopTransaction` | Clear transaction |
+| `MeterValues` | Sum per-phase power → `sensor.wallbox_power` |
 
-#### 4.2.2 Outgoing (Server → Wallbox)
+**Outgoing (Server → Wallbox):**
 
 | Message | Trigger |
 |---------|---------|
-| `SetChargingProfile` | `number.wallbox_power_limit` changed, or before `RemoteStartTransaction` |
-| `RemoteStartTransaction` | Auto: after `SetChargingProfile`, when no active transaction |
+| `SetChargingProfile` | Power limit changed, or before RemoteStart |
+| `RemoteStartTransaction` | After SetChargingProfile, when no active transaction |
 | `TriggerMessage` (MeterValues) | On connect (sync state) |
 
-**Not used:** `RemoteStopTransaction` (causes Finishing state), `Reset` (causes disruptive reboot and stale Finishing state).
+**Not used:** `RemoteStopTransaction` (causes Finishing), `Reset` (causes reboot + stale Finishing).
 
-### 4.3 HA Entity Interface
+### 3.4 Authorization
 
-The add-on exposes wallbox state as native HA entities via the Supervisor API. The EnergyManager (or any automation) reads sensors and calls services — no MQTT needed.
+Accept all tags. Future: configurable whitelist.
 
-#### 4.3.1 Sensor Entities (read by EnergyManager)
+### 3.5 Transaction Management
+
+Transactions are fully automatic — EnergyManager only sets `number.wallbox_power_limit`.
+
+**Start sequence** (order critical for AcTec):
+
+| Step | Command | Notes |
+|------|---------|-------|
+| 1 | `SetChargingProfile` (target amps, TxDefaultProfile) | Must precede RemoteStart |
+| 2 | Wait 3s | Let wallbox apply profile |
+| 3 | `RemoteStartTransaction` (idTag, connector_id=1) | Rejected without prior profile |
+
+**Pause:** SetChargingProfile 0A → SuspendedEVSE. Transaction stays alive.
+
+**Resume:** SetChargingProfile target amps → Charging. No new RemoteStart needed.
+
+**Stop:** 0A profile → SuspendedEVSE. Transaction ends only on car unplug (StopTransaction from wallbox).
+
+**Connection/reconnect:**
+- Wallbox may not send BootNotification on reconnect (only on power-up)
+- On reconnect after server restart: `StopTransaction` with `reason=PowerLoss`
+- If server dies while charging, wallbox continues autonomously with last profile
+
+**General rules:**
+- Transaction IDs increment from 1, not persisted across restarts
+- `TxDefaultProfile` does not reference transaction ID — charging control works without recovery
+- One transaction at a time
+- On disconnect: transaction cleared, entities updated
+
+### 3.6 External Interface
+
+The OCPP server exposes HA entities as its external interface. All OCPP details, phase switching, transactions, and device quirks are hidden.
+
+#### 3.6.1 OCPP Server → Consumers (read-only)
+
+**Static values** — from configuration, do not change during operation:
+
+| Wallbox type | `min_power_w` | `max_power_w` |
+|-------------|-------------:|-------------:|
+| 1-phase only | 1380W | 3680W |
+| 3-phase only | 4140W | 11040W |
+| Switchable (1+3) | 1380W | 11040W |
+
+**Dynamic values:**
 
 | Entity | Type | Unit | Description |
-|--------|------|------|-------------|
-| `sensor.wallbox_power` | sensor | W | Current charging power |
-| `sensor.wallbox_energy` | sensor | Wh | Session energy delivered |
-| `sensor.wallbox_status` | sensor | - | OCPP status (see display table below). `friendly_name` attribute shows power for active states. |
-| `binary_sensor.wallbox_connected` | binary_sensor | - | Wallbox WebSocket connected |
-| `sensor.wallbox_transaction` | sensor | - | `idle` / `charging` |
-| `sensor.wallbox_phases` | sensor | - | Active phase count: `1` or `3` |
-| `binary_sensor.wallbox_single_phase_supported` | binary_sensor | - | From config: wallbox supports 1-phase charging |
+|--------|------|:----:|-------------|
+| `binary_sensor.car_ready` | binary | — | Can I charge? on = car plugged + system ready + server synced |
+| `sensor.wallbox_power` | sensor | W | Actual power (0 when not charging) |
+| `sensor.wallbox_energy` | sensor | Wh | Session energy since transaction start |
 
-**OCPP ChargePointStatus values:**
+**`car_ready` derivation:**
 
-| Status | Meaning |
-|--------|---------|
-| `Available` | No vehicle connected |
-| `Preparing` | Vehicle plugged in, not yet charging |
-| `Charging` | Active power delivery |
-| `SuspendedEVSE` | Paused by charger (we sent 0 A) |
-| `SuspendedEV` | Paused by car (car's BMS stopped drawing) |
-| `Finishing` | Transaction ending, car still plugged |
-| `Reserved` | Connector reserved (not used in our system) |
-| `Unavailable` | Charger offline or maintenance |
-| `Faulted` | Hardware error |
+| Wallbox state | `car_ready` | Reason |
+|--------------|:-----------:|--------|
+| Server initializing | off | Not yet synced |
+| `Available` | off | No car |
+| `Preparing` | on | Car plugged in, ready |
+| `Charging` | on | Active charging |
+| `SuspendedEVSE` | on | Paused by us, can resume |
+| `SuspendedEV` | off | Car refusing to charge |
+| `Finishing` | off | Transaction ended |
 
-**SuspendedEVSE vs SuspendedEV:** EVSE = paused by the charger (our normal "paused" state when power limit = 0 A). EV = paused by the car itself (car's BMS decided to stop, e.g. reached its own charge limit or thermal protection).
+**AcTec SuspendedEVSE correction:** AcTec reports `SuspendedEVSE` for both charger- and car-initiated stops (firmware bug). The server corrects this:
 
-#### 4.3.2 Control Entities (set by EnergyManager)
+1. `SuspendedEVSE` + last sent 0W → genuine pause → stays `SuspendedEVSE`
+2. `SuspendedEVSE` + last sent > 0W → poll `sensor.smart_charging_status_raw_value`:
+   - Raw 25 (user-stopped) or 4 (complete) → correct to `SuspendedEV`, stop retries
+   - Otherwise → continue retries
+3. In `SuspendedEV` → keep polling. If raw changes (no longer 25/4) → back to `SuspendedEVSE`
 
-| Entity | Type | Description |
-|--------|------|-------------|
-| `number.wallbox_power_limit` | number | Target power in W (min/max from config). The OCPP server auto-starts transactions: setting power >0 sends a charging profile first, then `RemoteStartTransaction` if no transaction is active. Setting power to 0 sends a 0A profile to pause charging (→ `SuspendedEVSE`), keeping the transaction alive. |
+Cloud lags 3–10 min behind OCPP — throttled retries bridge the gap.
 
-#### 4.3.3 SetChargingProfile and Phase Switching
+**Dashboard-only entities** (not part of control interface):
 
-When `number.wallbox_power_limit` changes:
+| Entity | Description |
+|--------|-------------|
+| `sensor.wallbox_status` | OCPP status (with AcTec correction) |
+| `sensor.wallbox_transaction` | `idle` or `charging` |
+| `sensor.wallbox_phases` | `1` or `3` |
+| `binary_sensor.wallbox_connected` | WebSocket alive |
 
-0. **Throttle check:** If the new value is 0W, send immediately (pause is safety-critical). Otherwise, if the previous value change was less than `power_update_interval_s` seconds ago, queue the new value and send it when the interval expires. If the previous change was ≥ interval seconds ago, send immediately.
-1. **Auto-transaction management:**
-   - Power 0 → >0 (no active transaction): send `SetChargingProfile` first, then `RemoteStartTransaction` (see Section 4.5)
-   - Power >0 → 0: send `SetChargingProfile` with 0A (pause → `SuspendedEVSE`), transaction stays alive
-   - Power change (active transaction): send `SetChargingProfile` only, no start/stop needed
-2. Determine target phases (if `phase_switch_entity` configured):
-   - 0 W → keep current phases (pause only)
-   - 1–4139 W → 1-phase (relay OFF)
-   - ≥ 4140 W → 3-phase (relay ON)
-   - Threshold = `min_current_a × 230 × 3` (default 6 × 230 × 3 = 4140 W)
-3. If phase change needed, execute safety sequence (see below)
-4. Convert power to current using calibrated lookup (3-phase, see Section 7) or naive formula (1-phase): `_calibrated_current(power_w, num_phases)`
-5. Round up to next integer amp (`math.ceil`) — the AcTec wallbox only accepts whole amps
-6. Clamp to `[min_current_a, max_current_a]` (from config)
-6. If power_w = 0: send profile with limit = 0 (pause charging)
-7. Send `SetChargingProfile` with `TxDefaultProfile`, `Absolute`, rate unit `Amps`
+#### 3.6.2 Consumers → OCPP Server (write)
 
-**Wallbox states and phase switch safety:**
+| Entity | Type | Unit | Range |
+|--------|------|:----:|-------|
+| `number.wallbox_power_limit` | number | W | 0 to max_power_w |
 
-Phase changes must only occur when no current is flowing through the contactor. The following table lists all OCPP 1.6 `ChargePointStatus` values and whether it is safe to toggle the EARU relay:
+| Value | Action |
+|-------|--------------------|
+| `0` | Pause immediately (bypasses throttle) |
+| `min–max` | Charge — server selects phases, converts to amps, manages transaction |
+| Gap (3681–4139W) | Stay on current phase, clamp to nearest boundary |
 
-| Status | Current flow | Phase switch allowed | Description |
-|--------|-------------|---------------------|-------------|
-| `Available` | No | Yes | No car connected |
-| `Preparing` | No | Yes | Car plugged in, not yet charging |
-| `Charging` | **Yes** | **No** | Active power delivery — current flowing |
-| `SuspendedEVSE` | No | Yes | Paused by charger (limit = 0 A) |
-| `SuspendedEV` | No | Yes | Paused by car |
-| `Finishing` | No | Yes | Transaction ending, car still plugged |
-| `Reserved` | No | No | Reserved — no car present, avoid unexpected state |
-| `Unavailable` | No | Yes | Charger offline / maintenance |
-| `Faulted` | No | **No** | Error state — do not touch hardware |
+#### 3.6.3 Initialization Sequence
 
-The safety sequence below ensures no current is flowing before the relay is toggled. It uses both the OCPP status (from the table above) and the BL0942 current sensor as independent safety gates.
+`car_ready` stays off until wallbox state is confirmed. EnergyManager sees off and skips EV control.
 
-**Phase switching safety sequence** (EARU latching relay via ESPHome):
+| Phase | What happens | `car_ready` |
+|-------|-------------|:-----------:|
+| **1. Init** | Read last-known state from HA entities | off |
+| **2a. State sync** | Wait for StatusNotification from wallbox | off |
+| **2b. Inner sync** | Only if Charging: wait for MeterValues to recover power/energy/transaction | off |
+| **3. Active** | Derive car_ready from status, accept power commands | per table |
 
-| Step | Action | Duration |
-|------|--------|----------|
-| 1 | Send `SetChargingProfile` with limit = 0 A (pause) | immediate |
-| 2 | Wait for wallbox status to become phase-switch-allowed (see table above) | up to 5 s |
-| 3 | Verify BL0942 current sensor < 0.5 A | immediate |
-| 4 | **Abort if step 2 or 3 fails** — disable single-phase mode (`binary_sensor.wallbox_single_phase_supported` → off) so EnergyManager stays on 3-phase | — |
-| 5 | Call `switch.turn_on` (3φ) or `switch.turn_off` (1φ) on relay entity | immediate |
-| 6 | Wait for relay to settle | 3 s |
-| 7 | Send `SetChargingProfile` with target current and new phase count | immediate |
+#### 3.6.4 Phase Switching
 
-**Safety gates (both must pass before toggling relay):**
-- **Gate 1 — OCPP status:** Wallbox must be in a phase-switch-allowed state (`Available`, `Preparing`, `SuspendedEVSE`, `SuspendedEV`, `Finishing`, or `Unavailable`).
-- **Gate 2 — BL0942 current:** The EARU breaker current sensor must read < 0.5 A, confirming no current is flowing through the contactor.
+Fully managed by OCPP server. Consumer sends power; server decides phases.
 
-If either gate fails, the phase switch is aborted and phase switching is disabled for the remainder of the session:
-1. Set `binary_sensor.wallbox_single_phase_supported` → off (signals EnergyManager).
-2. Internally disable phase switching so the OCPP server no longer attempts relay toggles.
-3. If currently on 1-phase, switch back to 3-phase (safe — no current flowing since gate 2 passed or we never toggled).
-4. Resume the previous charging profile.
+**Power ranges** (6A min, 16A max, 230V):
 
-Phase switching re-enables on add-on restart (config is re-read).
+| Phases | Min | Max |
+|:------:|----:|----:|
+| 1-phase | 1380W | 3680W |
+| 3-phase | 4140W | 11040W |
+| Gap | 3681W | 4139W |
 
-**Relay mapping:** ON = 3-phase, OFF = 1-phase
+Non-overlapping ranges provide natural hysteresis.
 
-If `phase_switch_entity` is empty (default), phase switching is disabled and the add-on assumes 3-phase. On startup, the add-on reads the relay state from HA to initialize `sensor.wallbox_phases`.
+**Decision table:**
 
-#### 4.3.4 EARU Breaker Hardware
+| Requested | Current | Action |
+|-----------|:-------:|--------|
+| 0W | any | Pause, stay on current phase |
+| 1380–3680W | 1φ | Stay |
+| 1380–3680W | 3φ | Switch to 1φ (if time lock allows) |
+| Gap | any | Stay, clamp to current phase boundary |
+| 4140–11040W | 3φ | Stay |
+| 4140–11040W | 1φ | Switch to 3φ (if time lock allows) |
 
-The EARU breaker is an ESPHome device with two key components:
+**Time lock:** 5 min after phase switch. During lock, clamp to current phase range. Battery/grid absorb mismatch.
 
-| Component | Chip | Interface | Function |
-|-----------|------|-----------|----------|
-| MCU | BK7231N ([LibreTiny](https://esphome.io/components/libretiny/)) | WiFi / ESPHome native API | Runs ESPHome, exposes entities to HA |
-| Energy meter | [BL0942](https://esphome.io/components/sensor/bl0942/) | UART (4800 baud) | Measures V, A, W, kWh, Hz on wallbox feed |
-| Relay | Latching relay | GPIO | Switches L2/L3 for 1φ/3φ |
+**Safety sequence** (before relay toggle):
 
-The BL0942 exposes the following ESPHome sensor entities to HA (names depend on user's ESPHome YAML):
+| Step | Action |
+|------|--------|
+| 1 | Send 0A profile (pause) |
+| 2 | Wait for phase-switch-allowed status (up to 5s) |
+| 3 | Verify BL0942 current < 0.5A |
+| 4 | Abort if step 2 or 3 fails — disable single-phase for session |
+| 5 | Toggle relay (ON=3φ, OFF=1φ) |
+| 6 | Wait 3s for relay settle |
+| 7 | Send target profile with new phase count |
 
-| ESPHome sensor | Unit | HA entity example |
-|---------------|------|-------------------|
-| Voltage | V | `sensor.earu_breaker_voltage` |
-| Current | A | `sensor.earu_breaker_current` |
-| Power | W | `sensor.earu_breaker_power` |
-| Energy | kWh | `sensor.earu_breaker_energy` |
-| Frequency | Hz | `sensor.earu_breaker_frequency` |
+#### 3.6.5 Internal Responsibilities
 
-These sensors are **not consumed by the OCPP Server add-on** — the add-on gets power/energy from the wallbox via OCPP MeterValues. However, the EARU sensors are available in HA for independent verification, dashboards, or EnergyManager use.
+| Responsibility | Details |
+|----------------|---------|
+| OCPP protocol | W→A conversion via calibration table, SetChargingProfile, RemoteStart |
+| Transactions | Auto-start on >0W, keep alive during pause, end on unplug |
+| Re-send | Throttled retries (10s, 30s, 60s) in SuspendedEVSE |
+| Phase switching | Phase selection, relay safety sequence, time lock |
+| Throttle | Rate-limit SetChargingProfile (0W bypasses) |
+| Device quirks | AcTec: SuspendedEVSE bug, integer-only amps, profile-before-start |
 
-### 4.4 Authorization
+## 4. EARU Breaker Hardware
 
-Current implementation: accept all tags. Future: configurable whitelist.
+| Component | Chip | Function |
+|-----------|------|----------|
+| MCU | BK7231N (LibreTiny/ESPHome) | WiFi, exposes entities to HA |
+| Energy meter | BL0942 (UART 4800 baud) | V, A, W, kWh on wallbox feed |
+| Relay | Latching relay (GPIO) | Switches L2/L3 for 1φ/3φ |
 
-### 4.5 Transaction Management
+BL0942 sensors are available in HA for dashboards but **not consumed by the OCPP server** — power/energy comes from OCPP MeterValues.
 
-Transactions are managed automatically by the OCPP server — no external start/stop commands needed. EnergyManager only sets `number.wallbox_power_limit`.
+## 5. Observed Behavior
 
-#### 4.5.1 AcTec Wallbox Behavior (verified 2026-02-12)
+### 5.1 Smart #5 Car Timing (verified 2026-02-18)
 
-The AcTec EV-AC22K (FW V1.17.9) requires a specific command sequence. Deviating from this sequence causes the wallbox to reject commands or enter stuck states.
+| Event | Timing |
+|-------|--------|
+| Cold start (Preparing → Charging) | ~7 min |
+| Warm resume (SuspendedEVSE → Charging) | ~4s |
+| Power ramp to full | ~60s after Charging |
+| Pause (0A → SuspendedEVSE) | ~2s |
 
-**Start charging sequence** (order is critical):
+`RemoteStartTransaction` rejected in `Finishing` state — wait for `Preparing`.
 
-| Step | Command | Response | Notes |
-|------|---------|----------|-------|
-| 1 | `SetChargingProfile` (target amps, `TxDefaultProfile`) | Accepted | Must be sent **before** RemoteStart |
-| 2 | Wait 3 s | — | Let wallbox apply the profile |
-| 3 | `RemoteStartTransaction` (idTag, connector_id=1) | Accepted | Rejected if no profile is set first |
-| 4 | — | `Authorize` (from wallbox) | Server accepts |
-| 5 | — | `StatusNotification`: Charging | ~6 s after RemoteStart |
-| 6 | — | `StartTransaction` | Server assigns transaction ID |
+### 5.2 Smart Cloud API vs OCPP
 
-**Pause charging:** `SetChargingProfile` with 0A → wallbox reports `SuspendedEVSE`. Transaction stays alive. Wallbox does **not** send MeterValues with 0W when paused — the server must zero `sensor.wallbox_power` on `StatusNotification: SuspendedEVSE`.
-
-**Resume charging:** `SetChargingProfile` with target amps → wallbox reports `Charging`. No new `RemoteStartTransaction` needed.
-
-**Stop charging:** `SetChargingProfile` with 0A → `SuspendedEVSE`. Transaction stays alive until car is unplugged (`StopTransaction` from wallbox).
-
-**MeterValues:** Sent periodically (~60 s) during active transactions. Per-phase power values (L1, L2, L3) must be summed for total power. Not sent when paused (`SuspendedEVSE`).
-
-#### 4.5.2 Commands NOT to use
-
-| Command | Reason |
+| Finding | Detail |
 |---------|--------|
-| `RemoteStopTransaction` | Causes wallbox to enter `Finishing` state — connector is blocked until cable is physically unplugged |
-| `Reset` | Forces wallbox reboot, interrupts active transactions, leaves connector in `Finishing` state |
-| `RemoteStartTransaction` without prior `SetChargingProfile` | Wallbox rejects the command |
+| Cloud lag | 3–10 min behind OCPP |
+| Short pauses | Invisible to cloud |
+| SOC updates | Slower than status |
+| Stop detection | ~3–4 min to recognize car stopped |
+| Rate limiting | 30s polling causes auth failures; use 60s+ |
 
-#### 4.5.3 Connection and Reconnect Behavior
+**Cloud `charging_status_raw_value` mapping:**
 
-- The wallbox may or may not send `BootNotification` on reconnect (only on fresh power-up). The server accepts any first message (Boot, StatusNotification, or Heartbeat) as proof the wallbox is alive.
-- On reconnect after server restart, the wallbox sends `StopTransaction` with `reason=PowerLoss` to close the previous session.
-- If the server process dies while charging, the wallbox continues charging autonomously with the last profile. To stop it, reconnect and send a 0A profile.
-- Killing a stale TCP connection (e.g., via socat proxy) may be needed to force the wallbox to reconnect.
+| Raw | Label | Meaning |
+|-----|-------|---------|
+| 2 | charging | Actively AC charging |
+| 4 | complete | Target SOC reached |
+| 25 | unknown | User-stopped or idle |
 
-#### 4.5.4 Post-connect Setup
+**smarthashtag polling** (HA → Settings → Integrations → Smart → Configure):
 
-On wallbox connect, the server waits for the first message (Boot, StatusNotification, or Heartbeat), then triggers MeterValues to sync state. It does **not** start a transaction — that only happens when EnergyManager requests power via `number.wallbox_power_limit`.
+| Setting | Default | Recommended |
+|---------|---------|-------------|
+| `scan_interval` | 300s | 300s |
+| `charging_interval` | 30s | 60s |
+| `driving_interval` | 60s | 60s |
 
-| Wallbox status | Action |
-|----------------|--------|
-| `Charging` / `SuspendedEV` / `SuspendedEVSE` | Recover `transaction_id` from MeterValues, resume control via `SetChargingProfile` |
-| `Preparing` | Log "car present", wait for EnergyManager to request power (which triggers start sequence in `_watch_controls`) |
-| `Available` | Log "no car", wait for plug-in |
+Manual refresh: `homeassistant.update_entity` on any smarthashtag entity.
 
-A `_setup_complete` event prevents `_watch_controls` from sending commands until post-connect setup finishes, avoiding race conditions.
+### 5.3 AcTec SuspendedEVSE Bug
 
-#### 4.5.5 General Rules
+AcTec always reports `SuspendedEVSE` regardless of whether the charger or car initiated the stop. The OCPP server corrects this using cloud status (see Section 3.6.1).
 
-- Server assigns incrementing transaction IDs (starting from 1, not persisted across restarts)
-- The OCPP server does not track or recover transaction IDs across restarts. It accepts `StopTransaction` for any transaction ID. The `TxDefaultProfile` used for `SetChargingProfile` does not reference a transaction ID, so charging control works without it.
-- Only one transaction at a time
-- On wallbox disconnect: transaction state cleared, entities updated
-- Transaction ends only when the wallbox initiates `StopTransaction` (plug removed, PowerLoss) or on WebSocket disconnect
-
-### 4.6 EnergyManager ↔ OCPP Server Contract
-
-This section defines the interface contract between the EnergyManager add-on and the OCPP Server add-on. Both sides must conform to these semantics.
-
-#### 4.6.1 Control Semantics
-
-| `number.wallbox_power_limit` value | Meaning | Throttle behavior |
-|------------------------------------|---------|-------------------|
-| `0` | **Pause now** — stop charging immediately | Unthrottled (bypasses `power_update_interval_s`) |
-| `> 0` | **Ensure charging** at this power level | Throttled — rapid changes queued, last value sent when interval expires |
-
-EnergyManager may update the power limit as often as every 10 s. The OCPP server absorbs rapid changes via the throttle and only forwards the last value to the wallbox.
-
-#### 4.6.2 State Semantics
-
-| Entity | Direction | Type | Meaning |
-|--------|-----------|------|---------|
-| `number.wallbox_power_limit` | EM → OCPP | number (W) | Desired charging power (0 = pause) |
-| `sensor.wallbox_power` | OCPP → EM | sensor (W) | Actual charging power from wallbox MeterValues |
-| `sensor.wallbox_energy` | OCPP → EM | sensor (Wh) | Session energy delivered |
-| `sensor.wallbox_status` | OCPP → EM | sensor | Raw OCPP ChargePointStatus (see Section 4.3.1) |
-| `sensor.wallbox_transaction` | OCPP → EM | sensor | `idle` or `charging` |
-| `sensor.wallbox_phases` | OCPP → EM | sensor | Active phase count: `1` or `3` |
-| `binary_sensor.wallbox_connected` | OCPP → EM | binary_sensor | Wallbox WebSocket connected |
-| `binary_sensor.wallbox_single_phase_supported` | OCPP → EM | binary_sensor | Phase switching available (from config, disabled on abort) |
-| `sensor.wallbox_min_power_w` | OCPP → EM | sensor (W) | Minimum charging power for current phase count |
-| `sensor.wallbox_max_power_w` | OCPP → EM | sensor (W) | Maximum charging power for current phase count |
-
-#### 4.6.3 Responsibility Split
-
-| Responsibility | Owner | Details |
-|----------------|-------|---------|
-| Scheduling & policy | EnergyManager | Decides when to charge, which mode (solar/immediate/cheap), forecast-based decisions |
-| Power clamping | EnergyManager | Clamps requested power to `[wallbox_min_power_w, wallbox_max_power_w]` |
-| OCPP protocol | OCPP Server | Translates power (W) to current (A), manages SetChargingProfile, RemoteStart |
-| Safety & device quirks | OCPP Server | Phase switching safety gates, relay timing, AcTec-specific workarounds |
-| Throttle | OCPP Server | Rate-limits SetChargingProfile to prevent wallbox oscillation (except 0W) |
-| Transaction lifecycle | OCPP Server | Auto-starts on first >0W, keeps alive during pauses, ends on unplug |
-
-## 5. Non-Functional Requirements
+## 6. Non-Functional Requirements
 
 | Metric | Target |
 |--------|--------|
-| Startup time | < 5 seconds |
-| OCPP response | < 1 second |
+| Startup time | < 5s |
+| OCPP response | < 1s |
 | Entity update latency | < 500ms |
 | Memory | < 100MB RSS |
-| Uptime | Match HA uptime |
-
-## 6. Test Cases
-
-| ID | Test | Expected |
-|----|------|----------|
-| TC-01 | Wallbox connects via WebSocket | First message accepted (Boot, StatusNotification, or Heartbeat), `wallbox_connected` = on |
-| TC-02a | Wallbox connects (car plugged in, status=Preparing) | Post-connect: TriggerMessage(MeterValues) sent, no transaction started. Waits for EnergyManager to set power limit. |
-| TC-02b | Power limit 0 → >0 (no transaction) | `SetChargingProfile` (target amps) → wait 3s → `RemoteStartTransaction` → Charging |
-| TC-03 | Power limit >0 → 0 (active transaction) | `SetChargingProfile` 0A → `SuspendedEVSE`, transaction stays alive, `sensor.wallbox_power` = 0 immediately |
-| TC-04 | Power limit change (transaction active) | `SetChargingProfile` sent only, no start/stop |
-| TC-05 | MeterValues received during transaction | Per-phase power values summed → `sensor.wallbox_power`, energy → `sensor.wallbox_energy` |
-| TC-06 | Wallbox disconnect | `wallbox_connected` = off, transaction cleared |
-| TC-07 | Power limit = 0 (no transaction) | Profile set to 0A, no `RemoteStopTransaction` |
-| TC-08 | Invalid power limit | Clamped to min/max, no crash |
-| TC-09 | Multiple wallbox connect attempts | Only one connection active |
-| TC-10 | Power limit < 4140 W with phase_switch_entity set | Relay OFF, 1-phase charging, `sensor.wallbox_phases` = 1 |
-| TC-11 | Power limit ≥ 4140 W with phase_switch_entity set | Relay ON, 3-phase charging, `sensor.wallbox_phases` = 3 |
-| TC-12 | Phase switch safety: pause → relay → resume | SetChargingProfile(0A) sent before relay toggle, 2s + 3s delays observed |
-| TC-13 | phase_switch_entity empty (default) | No relay calls, 3-phase assumed, no `_switch_phases` invoked |
-| TC-14 | Wallbox reconnects after server restart | `StopTransaction` (reason=PowerLoss) received, previous session closed cleanly |
-| TC-15 | Server dies while charging | Wallbox continues charging autonomously, 0A profile needed to stop on reconnect |
-| TC-16 | Full charge cycle | Profile 6A → Start → Charging → Pause 0A → SuspendedEVSE → Resume 10A → Charging → Stop 0A → SuspendedEVSE |
-| TC-17 | Rapid power limit changes (< 60s apart) | Only last value sent when interval expires. No intermediate `SetChargingProfile` commands. |
-| TC-18 | Power limit set to 0W during throttle interval | 0W sent immediately (bypasses throttle), pending queue cleared |
-| TC-19 | Rapid 0W → >0W → 0W within throttle interval | First 0W sent immediately, >0W queued, final 0W sent immediately |
-| TC-20 | Power limit change after > 60s idle | New value sent immediately (no throttle delay). |
-| TC-21 | HA restart with active wallbox | Entities re-registered, wallbox state re-synced (`_sync_ha_state`). |
-| TC-22 | Rapid >0W → 0W → >0W within throttle interval | 0W sent immediately, >0W queued and sent when interval expires |
 
 ## 7. Calibration Data
 
-Measured 2026-02-11 with AcTec EV-AC22K (FW V1.17.9), 3-phase charging. Grid meters: M-Bus EBL smart meter (`sensor.grid_power`), DTSU Huawei meter at inverter (`sensor.power_meter_active_power`).
+Measured 2026-02-11 with AcTec EV-AC22K (FW V1.17.9), 3-phase.
 
 | Req A | Req W | WB Total W | Meter Diff W | Delta W |
 |------:|------:|-----------:|-------------:|--------:|
@@ -435,64 +394,64 @@ Measured 2026-02-11 with AcTec EV-AC22K (FW V1.17.9), 3-phase charging. Grid met
 |     7 |  4830 |       4311 |         3863 |    -448 |
 |     6 |  4140 |       3970 |         4094 |    +124 |
 
-**Columns:** Req = requested via SetChargingProfile, WB Total = wallbox OCPP MeterValues sum of 3 phases, Meter Diff = abs(EBL grid meter − Huawei DTSU) ≈ wallbox load, Delta = Meter Diff − WB Total (cable losses + background loads).
+Wallbox draws ~1A less than requested. Delta ~100–190W (cable losses + background load). 7A outlier: solar transient during measurement.
 
-**Observations:**
-- Wallbox draws ~1A less than requested consistently
-- Delta is typically +100–190W (cable losses + house background load)
-- 7A outlier: DTSU transient (-512W) caused by solar/load fluctuation during measurement
-- At 6A minimum, wallbox delivers ~3970W on 3-phase
+## 8. Test Cases
 
-## 8. File Structure
+| ID | Test | Expected |
+|----|------|----------|
+| TC-01 | Wallbox connects via WebSocket | First message accepted, `wallbox_connected` = on |
+| TC-02 | Power limit 0→>0 (no transaction) | SetChargingProfile → 3s → RemoteStart → Charging |
+| TC-03 | Power limit >0→0 (active transaction) | 0A profile → SuspendedEVSE, transaction alive, power=0 |
+| TC-04 | Power limit change (transaction active) | SetChargingProfile only |
+| TC-05 | MeterValues during transaction | Per-phase power summed → wallbox_power |
+| TC-06 | Wallbox disconnect | connected=off, transaction cleared |
+| TC-07 | Phase switch: <4140W | Relay OFF, 1-phase, phases=1 |
+| TC-08 | Phase switch: ≥4140W | Relay ON, 3-phase, phases=3 |
+| TC-09 | Phase switch safety | 0A → wait status → verify BL0942 < 0.5A → toggle relay |
+| TC-10 | Rapid power changes (<60s) | Only last value sent when interval expires |
+| TC-11 | 0W during throttle | Sent immediately, queue cleared |
+| TC-12 | Reconnect after server restart | StopTransaction(PowerLoss), previous session closed |
+| TC-13 | Full charge cycle | Start → Charge → Pause → Resume → Stop |
+| TC-14 | HA restart with active wallbox | Entities re-registered, state re-synced |
+
+## 9. File Structure
 
 ```
 ocpp-server/
 ├── config.yaml              # HA add-on manifest
-├── Dockerfile               # Container build
-├── requirements.txt         # Python dependencies
+├── Dockerfile
+├── requirements.txt
 ├── run.py                   # Entry point: OCPPServer class
 ├── src/
-│   ├── ha_entities.py       # HA entity definitions (sensors, controls)
-│   └── ocpp_handler.py      # ChargePointHandler (OCPP message handlers)
-├── rootfs/
-│   └── etc/s6-overlay/...   # s6 service definition
+│   ├── ha_entities.py       # HA entity definitions
+│   └── ocpp_handler.py      # OCPP message handlers
+├── rootfs/                  # s6 service definition
 ├── tests/
-│   └── test_ocpp_handler.py # Unit tests
+│   └── test_ocpp_handler.py
 └── docs/
     └── this file
 ```
 
-## 9. Implementation Status
+## 10. Implementation Status
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| WebSocket server | ✅ Done | Port 8887, ocpp1.6 subprotocol |
-| OCPP message handling | ✅ Done | 7 incoming + 4 outgoing |
-| HA entity integration | ✅ Done | Supervisor REST API, auto-transaction management |
-| Phase switching | ✅ Done | EARU relay via ESPHome, auto based on power limit |
-| Unit tests | ✅ Done | 21 tests |
-| HA add-on deployment | ✅ Done | Tested on HA instance, s6-overlay service starts |
-| Wallbox integration test | ✅ Done | Full cycle verified with AcTec EV-AC22K (FW V1.17.9): start, pause (0A→SuspendedEVSE), resume, stop. Profile-first sequence confirmed. |
+| Component | Status |
+|-----------|--------|
+| WebSocket server | Done |
+| OCPP message handling | Done |
+| HA entity integration | Done |
+| Phase switching | Done |
+| Unit tests (21) | Done |
+| Wallbox integration test | Done |
 
-## 10. Revision History
+## 11. Revision History
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.0 | 2026-02-10 | Initial FSD |
-| 1.1 | 2026-02-10 | Replaced MQTT interface with native HA entities and services |
-| 1.2 | 2026-02-10 | Added Section 2.2: integration with EnergyManager, SwissSolarForecast, LoadForecast |
-| 1.3 | 2026-02-10 | Added phase switching via EARU breaker: config, sensor, safety sequence, test cases |
-| 1.4 | 2026-02-11 | Removed button entities, auto-transaction management (start/stop driven by power limit) |
-| 1.5 | 2026-02-11 | Fix: 0W pauses charging (0A profile) instead of stopping transaction. Tested with real AcTec wallbox. |
-| 1.6 | 2026-02-11 | Added calibration data (Section 7): 16A–6A sweep with wallbox and grid meter comparison. Documented EBL M-Bus grid power data path. |
-| 1.7 | 2026-02-11 | Calibrated power-to-current conversion: linear interpolation on 3-phase calibration table replaces naive formula. |
-| 1.8 | 2026-02-11 | Post-connect setup: auto-start transaction and pause (0A) on wallbox connection so charging is instantly available. |
-| 1.9 | 2026-02-12 | Verified AcTec wallbox behavior via direct testing. Corrected start sequence: SetChargingProfile MUST precede RemoteStartTransaction. Removed Reset and RemoteStopTransaction. Documented reconnect behavior, autonomous charging, per-phase MeterValues summing. Updated test cases. |
-| 2.0 | 2026-02-12 | Post-connect no longer auto-starts transactions. Transactions start only when EnergyManager requests power. Added `_setup_complete` event to prevent race between post-connect setup and control watcher. |
-| 2.1 | 2026-02-12 | Wallbox does not send MeterValues with 0W when paused. Server now zeros power on StatusNotification: SuspendedEVSE/SuspendedEV. |
-| 2.2 | 2026-02-15 | Added `single_phase_supported` config flag, exposed as `binary_sensor.wallbox_single_phase_supported` for EnergyManager phase selection. |
-| 2.3 | 2026-02-15 | Added `power_update_interval_s` throttle (default 60s) to rate-limit `SetChargingProfile` commands. No exceptions — all changes throttled uniformly to prevent oscillation. |
-| 2.4 | 2026-02-16 | Integer amp rounding (`math.ceil`): AcTec only accepts whole amps. Throttle now based on time since last value change (not last send) — immediate send if previous change >60s ago, throttle only rapid consecutive changes. Removed `ChargePointMaxProfile` and `TxProfile` — only `TxDefaultProfile` per FSD. Added `_sync_ha_state` for HA restart recovery. Updated EnergyManager to 10s control loop. |
-| 2.5 | 2026-02-17 | Added wallbox state safety table for phase switching (Section 4.3.3). Added status reference table with dashboard labels (Section 4.3.1) — display logic is dashboard's responsibility, OCPP server publishes raw status only. Documented SuspendedEVSE vs SuspendedEV distinction. |
-| 2.6 | 2026-02-17 | Phase switching safety sequence now uses dual safety gates: OCPP status must be phase-switch-allowed AND BL0942 current < 0.5 A before toggling relay. Abort with profile restore on failure. |
-| 2.7 | 2026-02-17 | 0W (pause) bypasses throttle — safety-critical. Added `current_sensor_entity` config. Transaction ID note in Section 4.5.5. Added Section 4.6: EnergyManager ↔ OCPP Server contract (control semantics, state semantics, responsibility split). |
+| 1.0–1.9 | 2026-02-10–12 | Initial FSD through AcTec wallbox verification |
+| 2.0–2.4 | 2026-02-12–16 | Post-connect setup, throttle, integer amps, HA restart recovery |
+| 2.5–2.7 | 2026-02-17 | Phase switching safety (dual gate), 0W bypass, EnergyManager contract |
+| 2.8–2.9 | 2026-02-18 | Smart #5 live session data, cloud API timing, raw value mapping |
+| 2.10 | 2026-02-18 | Wallbox state reference table, transitions diagram |
+| 3.0 | 2026-02-18 | Major interface redesign: car_ready, static min/max, initialization sequence, phase switching with time lock |
+| 3.1 | 2026-02-18 | Simplified FSD: removed duplicate sections, condensed session logs, consolidated entity interface |

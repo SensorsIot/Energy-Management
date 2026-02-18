@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.22
+**Version:** 2.24
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -3112,11 +3112,227 @@ log_level: "info"
 
 ---
 
+# Appendix F: Smart Car API — Raw Data & HA Entity Mapping
+
+## F.1 API Endpoint
+
+```
+GET /remote-control/vehicle/status/{vin}?latest=true&target=&userId={userId}
+Host: api.ecloudeu.com  (Smart #1/#3)  or  apiv2.ecloudeu.com  (Smart #5)
+```
+
+Requires HMAC-signed request with app token (see `smart_car.py` for auth flow).
+
+## F.2 Raw `electricVehicleStatus` Object
+
+The status response is nested under `data.vehicleStatus.additionalVehicleStatus.electricVehicleStatus`.
+Below is a representative snapshot (Smart #5, February 2026):
+
+```json
+{
+  "chargeLevel": 85,
+  "chargerState": 2,
+  "statusOfChargerConnection": 2,
+  "chargeSts": 0,
+  "dcChargeSts": 0,
+  "chargeIAct": 15.5,
+  "chargeUAct": 402.0,
+  "dcChargeIAct": 0.0,
+  "timeToFullyCharged": 110,
+  "timeToTargetDisCharged": 2047,
+  "distanceToEmptyOnBatteryOnly": 459,
+  "distanceToEmptyOnBattery100Soc": 429,
+  "distanceToEmptyOnBattery20Soc": 85,
+  "batteryTemperature": 22,
+  "chargeMode": 0,
+  "chargePHV": 0,
+  "chargeLidAcStatus": 2,
+  "chargeLidDcAcStatus": 1,
+  "disChargeUAct": 0.0,
+  "disChargeIAct": 0.0,
+  "disChargeSts": 0,
+  "disChargeConnectStatus": 0,
+  "dcDcActvd": 1,
+  "dcDcConnectStatus": 0,
+  "bookChargeSts": 0,
+  "wptFineAlignt": 0,
+  "ptReady": 0,
+  "averPowerConsumption": -86.3,
+  "indPowerConsumption": 0.0,
+  "energyConsumed": 0,
+  "energyRegenerated": 0
+}
+```
+
+### Field Reference — Charging
+
+| API Field | Type | Description |
+|-----------|------|-------------|
+| `chargeLevel` | int | Battery SOC in % (0–100) |
+| `chargerState` | int | High-level charging state machine (see F.2.1) |
+| `statusOfChargerConnection` | int | Physical cable connection state (see F.2.2) |
+| `chargeSts` | int | AC charge status flag: 0 = not AC charging, 3 = AC charging active |
+| `dcChargeSts` | int | DC charge status flag: 0 = not DC charging |
+| `chargeIAct` | float | AC charging current (A). 0 when not AC charging |
+| `chargeUAct` | float | Charging voltage (V). Battery-side DC voltage during AC charging (e.g. 402V), not AC mains. pySmartHashtag uses < 260V to detect single-phase |
+| `dcChargeIAct` | float | DC fast charging current (A). Negative = charging (e.g. −102.6A). 0 when not DC charging |
+| `timeToFullyCharged` | int | Minutes to full charge; 2047 = N/A |
+| `timeToTargetDisCharged` | int | Minutes to V2L discharge target; 2047 = N/A |
+| `chargeMode` | int | Charge mode (0 = normal/auto) |
+| `bookChargeSts` | int | Scheduled/booked charge status: 0 = none active |
+
+### Field Reference — Physical / Lids
+
+| API Field | Type | Description |
+|-----------|------|-------------|
+| `chargeLidAcStatus` | int | AC charge port lid: 1 = open, 2 = closed |
+| `chargeLidDcAcStatus` | int | DC charge port lid: 1 = open, 2 = closed |
+| `dcDcActvd` | int | 12V DC-DC converter: 0 = inactive, 1 = active |
+| `dcDcConnectStatus` | int | DC-DC connector: 0 = not connected, 3 = connected |
+| `wptFineAlignt` | int | Wireless charging alignment (0 = N/A, not equipped) |
+| `ptReady` | int | Powertrain ready: 0 = off |
+
+### Field Reference — V2L (Vehicle-to-Load)
+
+| API Field | Type | Description |
+|-----------|------|-------------|
+| `disChargeUAct` | float | V2L discharge voltage (V). 0 when inactive |
+| `disChargeIAct` | float | V2L discharge current (A). 0 when inactive |
+| `disChargeSts` | int | V2L status: 0 = not discharging |
+| `disChargeConnectStatus` | int | V2L connection: 0 = not connected, 1/3 = connected |
+
+### Field Reference — Range & Energy
+
+| API Field | Type | Description |
+|-----------|------|-------------|
+| `distanceToEmptyOnBatteryOnly` | int | Remaining range (km) at current SOC |
+| `distanceToEmptyOnBattery100Soc` | int | Estimated range (km) at 100% SOC |
+| `distanceToEmptyOnBattery20Soc` | int | Estimated range (km) at 20% SOC |
+| `batteryTemperature` | int | HV battery pack temperature (°C) |
+| `averPowerConsumption` | float | Average power consumption (Wh/km, negative convention) |
+| `indPowerConsumption` | float | Instantaneous power consumption |
+| `energyConsumed` | int | Trip energy consumed |
+| `energyRegenerated` | int | Trip energy regenerated (regen braking) |
+| `chargePHV` | int | Plug-in hybrid voltage (0 for BEV) |
+
+### F.2.1 `chargerState` Values
+
+Full enum from pySmartHashtag (`ChargingState` array, indexed by value):
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| 0 | `NOT_CHARGING` | Not charging, no charger activity |
+| 1 | `DEFAULT` | Default/idle state |
+| 2 | `CHARGING` | AC charging active |
+| 3 | `ERROR` | Charging error |
+| 4 | `COMPLETE` | Charge complete |
+| 5 | `FULLY_CHARGED` | Fully charged |
+| 6 | `FINISHED_FULLY_CHARGED` | Finished, fully charged |
+| 7 | `FINISHED_NOT_FULL` | Finished, not fully charged (target SOC reached or user stopped) |
+| 8 | `INVALID` | Invalid state |
+| 9 | `PLUGGED_IN` | Plugged in but not charging |
+| 10 | `WAITING_FOR_CHARGING` | Waiting for scheduled charge |
+| 11 | `TARGET_REACHED` | Target SOC reached |
+| 12–14 | `UNKNOWN` | Reserved / unknown |
+| 15 | `DC_CHARGING` | DC fast charging active |
+
+**Observed in our system:** 0 (NOT_CHARGING), 2 (CHARGING), 4 (COMPLETE).
+
+**Idle detection relevance:** Values 4, 5, 6, 7, 9, 11 all indicate "plugged in, not charging" — any of these could signal that the car has finished and the energy manager should exit to NORMAL.
+
+Sources: [pySmartHashtag](https://github.com/DasBasti/pySmartHashtag) `vehicle/battery.py`, [evcc](https://github.com/evcc-io/evcc) `vehicle/smart/hello/provider.go`, [ioBroker.smart-eq](https://github.com/TA2k/ioBroker.smart-eq).
+
+### F.2.2 `statusOfChargerConnection` Values
+
+Physical cable connection state (used by evcc for charge detection):
+
+| Value | evcc Mapping | Meaning |
+|-------|-------------|---------|
+| 0 | Status A | No cable connected (disconnected) |
+| 1 | Status B | Cable connected, not charging |
+| 2 | Status C | Cable connected, actively charging |
+| 3 | Status B | Cable connected, not charging |
+
+Note: During DC fast charging (`chargerState=15`), `statusOfChargerConnection` is `1` (not `2`) because the AC connection sensor doesn't detect DC charging.
+
+## F.3 Mapping to HA Entity
+
+All fields are stored on a single entity: **`sensor.smart_battery`**
+
+| API Field | HA Entity / Attribute | Transform |
+|-----------|----------------------|-----------|
+| `chargeLevel` | `sensor.smart_battery` (state) | `int(value)` — SOC % |
+| `chargerState` | attr: `charger_state` | Mapped via `CHARGER_STATE_LABELS` to human-readable string |
+| `chargeIAct` | attr: `charge_current_a` | `float(value)` — Amps |
+| `timeToFullyCharged` | attr: `time_to_full_min` | `int(value)`, set to `null` if 2047 (N/A) |
+| `distanceToEmptyOnBatteryOnly` | attr: `range_km` | `int(value)` — km |
+| `statusOfChargerConnection` | — | Not stored (could complement `chargerState` for cable detection) |
+| `chargeSts` | — | Not stored (low-level AC flag, redundant with `chargerState`) |
+| `dcChargeSts` | — | Not stored |
+| `dcChargeIAct` | — | Not stored (relevant only for DC fast charging) |
+| `chargeUAct` | — | Not stored (battery-side voltage, not AC mains) |
+| `batteryTemperature` | — | Not stored (potential future use for cold-weather charging limits) |
+| `chargeMode` | — | Not stored |
+| `chargePHV` | — | Not stored (always 0 for BEV) |
+| `energyConsumed` | — | Not stored |
+| `energyRegenerated` | — | Not stored |
+| `distanceToEmptyOnBattery100Soc` | — | Not stored |
+
+### Entity Attributes (full example)
+
+```json
+{
+  "state": "85",
+  "attributes": {
+    "state_class": "measurement",
+    "unit_of_measurement": "%",
+    "device_class": "battery",
+    "icon": "mdi:car-battery",
+    "friendly_name": "Smart Battery",
+    "attribution": "Data provided by Hello Smart API",
+    "charger_state": "charging",
+    "charge_current_a": 15.5,
+    "time_to_full_min": 110,
+    "range_km": 459
+  }
+}
+```
+
+## F.4 Other `vehicleStatus` Sections
+
+Beyond `electricVehicleStatus`, the full API response contains:
+
+| Section | Path | Key Fields |
+|---------|------|------------|
+| **Basic** | `vehicleStatus.basicVehicleStatus` | `engineStatus`, `position` (lat/lon/alt), `speed`, `direction`, `distanceToEmpty`, `usageMode` |
+| **Maintenance** | `additionalVehicleStatus.maintenanceStatus` | `odometer`, `daysToService`, `distanceToService`, `mainBatteryStatus` (12V: voltage, SOC, health), tyre pressures & temps |
+| **Climate** | `additionalVehicleStatus.climateStatus` | `preClimateActive`, `interiorTemp`, `exteriorTemp`, window positions, sunroof, seat heating/ventilation per seat |
+| **Safety** | `additionalVehicleStatus.drivingSafetyStatus` | Door locks & positions, `centralLockingStatus`, `trunkLockStatus`/`OpenStatus`, `engineHoodOpenStatus`, `electricParkBrakeStatus`, seat belts, alarm |
+| **Running** | `additionalVehicleStatus.runningStatus` | All exterior lights (hi/lo beam, fog, DRL, indicators), `tripMeter1`/`2`, `avgSpeed` |
+| **Pollution** | `additionalVehicleStatus.pollutionStatus` | `interiorPM25`, `exteriorPM25Level`, `relHumSts` (humidity %) |
+| **Driving** | `additionalVehicleStatus.drivingBehaviourStatus` | `gearAutoStatus`, `engineSpeed` |
+| **HV Status** | `additionalVehicleStatus.chargeHvSts` | Top-level int (1 = HV system available) |
+
+These sections are **not currently used** by the energy manager but are available for future features (e.g. pre-conditioning before cheap-tariff charging, GPS-based home detection).
+
+## F.5 Poll Frequency
+
+| Condition | Interval | Rationale |
+|-----------|----------|-----------|
+| Car charging (`charger_state` = charging) | 1 min | Track SOC progress for dashboard |
+| Car just connected (wallbox `Preparing`) | Immediate | Show SOC on dashboard quickly |
+| Baseline (idle / disconnected) | 60 min | Avoid unnecessary API calls |
+
+See Section 4.6 for adaptive polling logic.
+
+---
+
 **End of Document**
 
-*Version 2.23 - February 2026*
+*Version 2.24 - February 2026*
 
 **Changelog:**
+- v2.24: Appendix F — Comprehensive Smart Car API reference: full `electricVehicleStatus` field catalogue with all 16 `chargerState` values (from pySmartHashtag/evcc/ioBroker), `statusOfChargerConnection` physical cable states, V2L fields, charging lids, DC charging fields; HA entity mapping table; other `vehicleStatus` sections (climate, doors, maintenance, GPS, 12V battery); poll frequency table
 - v2.23: Wallbox idle detection exits all EV modes — added `wallbox_idle` input (Section 4.5.6); S1/C1/M1 transitions exit SOLAR/CHEAP/IMMEDIATE to NORMAL when car finishes charging (wallbox idle ≥ 5 min); idle timer extended from immediate/cheap to all modes; dashboard shows `idle_minutes` and `wallbox_idle` attributes; EC-16 passive integration test; IT-BATT-04 test catalogue entry
 - v2.22: Integration test catalogue (Appendix D.5/D.6) — 22 tests across 6 categories; 3 implemented (IT-PHASE-01, IT-BATT-01, IT-BATT-03), 19 documented as future; EV charging power tests documented (Appendix D.5)
 - v2.21: Added wallbox status display mapping table for dashboard (Section 4.8.1) — documents how raw OCPP status is shown to the user
