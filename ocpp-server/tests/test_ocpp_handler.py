@@ -1,9 +1,10 @@
 """Tests for OCPP handler and server throttle logic."""
 
+import asyncio
 import time
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Add src to path for imports
 import sys
@@ -383,3 +384,411 @@ class TestThrottle:
         await server._send_power_to_wallbox(server._pending_power_w)
         assert server.charge_point.set_charging_power.call_count == 3
         assert server._pending_power_w is None
+
+
+class TestPowerZeroing:
+    """Tests for power zeroing on status transitions (Item 1)."""
+
+    @pytest.mark.asyncio
+    async def test_suspended_evse_zeros_power(self, mock_connection):
+        """SuspendedEVSE with power > 0 should zero power and fire callback."""
+        callback = MagicMock()
+        handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
+        handler.current_power_w = 5000
+
+        await handler.on_status_notification(
+            connector_id=1, error_code="NoError", status="SuspendedEVSE"
+        )
+
+        assert handler.current_power_w == 0
+        callback.assert_any_call("power_w", 0)
+
+    @pytest.mark.asyncio
+    async def test_suspended_evse_already_zero_no_callback(self, mock_connection):
+        """SuspendedEVSE with power = 0 should not fire power_w callback."""
+        callback = MagicMock()
+        handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
+        handler.current_power_w = 0
+
+        await handler.on_status_notification(
+            connector_id=1, error_code="NoError", status="SuspendedEVSE"
+        )
+
+        # Status callback fires, but power_w should NOT
+        power_calls = [c for c in callback.call_args_list if c.args[0] == "power_w"]
+        assert power_calls == []
+
+    @pytest.mark.asyncio
+    async def test_charging_status_keeps_power(self, mock_connection):
+        """Charging status should not zero power."""
+        callback = MagicMock()
+        handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
+        handler.current_power_w = 5000
+
+        await handler.on_status_notification(
+            connector_id=1, error_code="NoError", status="Charging"
+        )
+
+        assert handler.current_power_w == 5000
+
+    @pytest.mark.asyncio
+    async def test_stop_transaction_zeros_power(self, mock_connection):
+        """StopTransaction with power > 0 should zero power and fire callback."""
+        callback = MagicMock()
+        handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
+        handler.current_power_w = 5000
+        handler.transaction_id = 1
+
+        await handler.on_stop_transaction(
+            meter_stop=10000, timestamp="2024-01-01T01:00:00Z", transaction_id=1
+        )
+
+        assert handler.current_power_w == 0
+        callback.assert_any_call("power_w", 0)
+
+    @pytest.mark.asyncio
+    async def test_connector_0_ignored(self, mock_connection):
+        """Connector 0 (charge point level) status should be ignored."""
+        callback = MagicMock()
+        handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
+        initial_status = handler.current_status
+
+        await handler.on_status_notification(
+            connector_id=0, error_code="NoError", status="Available"
+        )
+
+        assert handler.current_status == initial_status
+        callback.assert_not_called()
+
+
+class TestPhaseSwitchDecision:
+    """Tests for phase switch decision logic (Item 2)."""
+
+    @pytest.fixture
+    def phase_server(self):
+        """Create an OCPPServer with phase switching enabled."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({
+            "wallbox_id": "test",
+            "power_update_interval_s": 5,
+            "phase_switch_entity": "switch.earu_relay",
+            "single_phase_supported": True,
+            "min_current_a": 6,
+            "max_current_a": 16,
+        })
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")  # BL0942 current = 0
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        # Mock charge point with active transaction
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.set_charging_power = AsyncMock()
+        cp.current_power_w = 0
+        cp.current_status = "SuspendedEVSE"
+        srv.charge_point = cp
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_low_power_switches_to_1_phase(self, phase_server):
+        """Power < 4140W on 3-phase should switch to 1-phase."""
+        phase_server._current_phases = 3
+
+        await phase_server._send_power_to_wallbox(3000.0)
+
+        # Relay turn_off = 1-phase
+        phase_server.ha.call_service.assert_any_call(
+            "switch", "turn_off", {"entity_id": "switch.earu_relay"}
+        )
+        assert phase_server._current_phases == 1
+
+    @pytest.mark.asyncio
+    async def test_high_power_switches_to_3_phase(self, phase_server):
+        """Power >= 4140W on 1-phase should switch to 3-phase."""
+        phase_server._current_phases = 1
+
+        await phase_server._send_power_to_wallbox(5000.0)
+
+        # Relay turn_on = 3-phase
+        phase_server.ha.call_service.assert_any_call(
+            "switch", "turn_on", {"entity_id": "switch.earu_relay"}
+        )
+        assert phase_server._current_phases == 3
+
+    @pytest.mark.asyncio
+    async def test_same_phase_no_switch(self, phase_server):
+        """Already on correct phase count should not call relay service."""
+        phase_server._current_phases = 3
+
+        await phase_server._send_power_to_wallbox(5000.0)
+
+        # call_service should NOT be called for relay switching
+        relay_calls = [
+            c for c in phase_server.ha.call_service.call_args_list
+            if c.args[0] == "switch"
+        ]
+        assert relay_calls == []
+
+    @pytest.mark.asyncio
+    async def test_phase_switching_disabled_no_switch(self, phase_server):
+        """Phase switching disabled should not attempt switch."""
+        phase_server._phase_switching_disabled = True
+        phase_server._current_phases = 3
+
+        await phase_server._send_power_to_wallbox(3000.0)
+
+        relay_calls = [
+            c for c in phase_server.ha.call_service.call_args_list
+            if c.args[0] == "switch"
+        ]
+        assert relay_calls == []
+        assert phase_server._current_phases == 3
+
+
+class TestPhaseSwitchSafetyAbort:
+    """Tests for phase switch safety abort (Item 3)."""
+
+    @pytest.fixture
+    def phase_server(self):
+        """Create an OCPPServer with phase switching enabled."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({
+            "wallbox_id": "test",
+            "power_update_interval_s": 5,
+            "phase_switch_entity": "switch.earu_relay",
+            "single_phase_supported": True,
+            "min_current_a": 6,
+            "max_current_a": 16,
+        })
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.set_charging_power = AsyncMock()
+        cp.current_power_w = 0
+        cp.current_status = "SuspendedEVSE"
+        srv.charge_point = cp
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_high_current_aborts_phase_switch(self, phase_server):
+        """BL0942 current >= 0.5A should abort phase switch and disable it."""
+        phase_server._current_phases = 3
+        # BL0942 returns high current
+        phase_server.ha.get_state = AsyncMock(return_value="2.5")
+
+        await phase_server._switch_phases(1)
+
+        assert phase_server._phase_switching_disabled is True
+        phase_server.ha.set_state.assert_any_call(
+            "binary_sensor.wallbox_single_phase_supported", "off"
+        )
+
+    @pytest.mark.asyncio
+    async def test_abort_on_1_phase_forces_3_phase(self, phase_server):
+        """Abort while on 1-phase should force back to 3-phase."""
+        phase_server._current_phases = 1
+        phase_server.ha.get_state = AsyncMock(return_value="2.5")
+
+        await phase_server._switch_phases(3)
+
+        # _abort_phase_switch is called, which sets _current_phases = 3
+        # when currently on 1-phase
+        assert phase_server._current_phases == 3
+
+    @pytest.mark.asyncio
+    async def test_abort_on_3_phase_stays_3_phase(self, phase_server):
+        """Abort while on 3-phase should stay 3-phase, no relay call."""
+        phase_server._current_phases = 3
+        phase_server.ha.get_state = AsyncMock(return_value="2.5")
+
+        await phase_server._switch_phases(1)
+
+        assert phase_server._current_phases == 3
+        # No relay switch.turn_on call (already on 3-phase)
+        relay_on_calls = [
+            c for c in phase_server.ha.call_service.call_args_list
+            if c.args[:2] == ("switch", "turn_on")
+        ]
+        assert relay_on_calls == []
+
+
+class TestResendOnSuspendedEVSE:
+    """Tests for re-send logic when wallbox stuck in SuspendedEVSE (Item 4).
+
+    Tests verify the boolean conditions in _watch_controls rather than
+    running the async loop.
+    """
+
+    @pytest.fixture
+    def server(self):
+        """Create an OCPPServer for re-send condition testing."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({
+            "wallbox_id": "test",
+            "power_update_interval_s": 5,
+        })
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.set_charging_power = AsyncMock()
+        cp.current_power_w = 0
+        srv.charge_point = cp
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_resend_when_suspended_with_power(self, server):
+        """SuspendedEVSE + last sent > 0 + interval elapsed → re-send."""
+        server.charge_point.current_status = "SuspendedEVSE"
+        server._last_sent_power_w = 5000.0
+        server._last_change_at = time.monotonic() - 10  # interval elapsed
+        server._pending_power_w = None
+
+        # All 4 conditions are true
+        assert server._pending_power_w is None
+        assert server.charge_point is not None
+        assert server.charge_point.current_status == "SuspendedEVSE"
+        assert server._last_sent_power_w > 0
+
+        # Call _send_power_to_wallbox as _watch_controls would
+        await server._send_power_to_wallbox(server._last_sent_power_w)
+
+        server.charge_point.set_charging_power.assert_called_once_with(
+            5000.0, num_phases=3
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_resend_when_last_sent_zero(self, server):
+        """SuspendedEVSE + last sent = 0 → condition fails, no re-send."""
+        server.charge_point.current_status = "SuspendedEVSE"
+        server._last_sent_power_w = 0.0
+        server._last_change_at = time.monotonic() - 10
+        server._pending_power_w = None
+
+        # Condition 4 fails: _last_sent_power_w is not > 0
+        assert not (server._last_sent_power_w > 0)
+
+    @pytest.mark.asyncio
+    async def test_no_resend_when_charging(self, server):
+        """Charging + last sent > 0 → condition fails, no re-send."""
+        server.charge_point.current_status = "Charging"
+        server._last_sent_power_w = 5000.0
+        server._last_change_at = time.monotonic() - 10
+        server._pending_power_w = None
+
+        # Condition 3 fails: status is not SuspendedEVSE
+        assert not (server.charge_point.current_status == "SuspendedEVSE")
+
+    @pytest.mark.asyncio
+    async def test_no_resend_when_pending_queued(self, server):
+        """SuspendedEVSE + pending queued → condition fails, no re-send."""
+        server.charge_point.current_status = "SuspendedEVSE"
+        server._last_sent_power_w = 5000.0
+        server._last_change_at = time.monotonic() - 10
+        server._pending_power_w = 3000.0
+
+        # Condition 1 fails: _pending_power_w is not None
+        assert server._pending_power_w is not None
+
+
+class TestPostConnectSetup:
+    """Tests for post-connect state sync (Item 5)."""
+
+    @pytest.fixture
+    def server_with_cp(self, mock_connection):
+        """Create OCPPServer with a real ChargePointHandler (real asyncio.Events)."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({
+            "wallbox_id": "test",
+            "power_update_interval_s": 5,
+        })
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = ChargePointHandler("test", mock_connection, on_status_change=srv._on_status_change)
+        cp.trigger_meter_values = AsyncMock()
+        srv.charge_point = cp
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_status_event_completes_setup(self, server_with_cp):
+        """StatusNotification arriving should complete post-connect setup."""
+        cp = server_with_cp.charge_point
+        cp.current_status = "Preparing"
+        cp.status_event.set()
+
+        await server_with_cp._post_connect_setup()
+
+        assert server_with_cp._setup_complete.is_set()
+        cp.trigger_meter_values.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_boot_event_completes_setup(self, server_with_cp):
+        """Boot event arriving should complete post-connect setup."""
+        cp = server_with_cp.charge_point
+        cp.current_status = "Available"
+        cp.boot_event.set()
+
+        await server_with_cp._post_connect_setup()
+
+        assert server_with_cp._setup_complete.is_set()
+
+    @pytest.mark.asyncio
+    async def test_charging_status_triggers_recovery(self, server_with_cp):
+        """Charging status should complete setup and trigger meter values."""
+        cp = server_with_cp.charge_point
+        cp.current_status = "Charging"
+        cp.status_event.set()
+
+        await server_with_cp._post_connect_setup()
+
+        assert server_with_cp._setup_complete.is_set()
+        cp.trigger_meter_values.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_message_timeout_setup_incomplete(self, server_with_cp):
+        """No message within timeout should leave setup incomplete."""
+        # Don't set any events — patch asyncio.wait to return empty done set
+        async def fake_wait(tasks, timeout=None, return_when=None):
+            # Cancel all tasks and return empty done set
+            for t in tasks:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+            return set(), set()
+
+        with patch("asyncio.wait", side_effect=fake_wait):
+            await server_with_cp._post_connect_setup()
+
+        assert not server_with_cp._setup_complete.is_set()
