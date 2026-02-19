@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.24"
+__version__ = "0.9.25"
 
 import asyncio
 import json
@@ -40,6 +40,16 @@ STATUS_ENTITY_MAP = {
     "connected": "binary_sensor.wallbox_connected",
     "transaction": "sensor.wallbox_transaction",
     "phases": "sensor.wallbox_phases",
+}
+
+# Wallbox status → car_ready binary sensor mapping
+CAR_READY_MAP = {
+    "Available": False,
+    "Preparing": True,
+    "Charging": True,
+    "SuspendedEVSE": True,
+    "SuspendedEV": False,
+    "Finishing": False,
 }
 
 
@@ -83,7 +93,9 @@ class HAEntityManager:
             "attributes": attributes or {},
         }
         try:
-            async with self._session.post(url, headers=self._headers, json=data) as resp:
+            async with self._session.post(
+                url, headers=self._headers, json=data
+            ) as resp:
                 if resp.status not in (200, 201):
                     text = await resp.text()
                     logger.error(f"Failed to set {entity_id}: {resp.status} {text}")
@@ -119,13 +131,17 @@ class HAEntityManager:
             return False
         url = f"{self.url}/services/{domain}/{service}"
         try:
-            async with self._session.post(url, headers=self._headers, json=data) as resp:
+            async with self._session.post(
+                url, headers=self._headers, json=data
+            ) as resp:
                 if resp.status == 200:
                     logger.debug(f"Called {domain}.{service}: {data}")
                     return True
                 else:
                     text = await resp.text()
-                    logger.error(f"Failed to call {domain}.{service}: {resp.status} {text}")
+                    logger.error(
+                        f"Failed to call {domain}.{service}: {resp.status} {text}"
+                    )
                     return False
         except Exception as e:
             logger.error(f"Error calling {domain}.{service}: {e}")
@@ -187,13 +203,17 @@ class OCPPServer:
         self._mqtt_port = options.get("mqtt_port", 1883)
         self._mqtt_topic = options.get("mqtt_topic", "wallbox")
         self._mqtt_client: Optional[aiomqtt.Client] = None
-        self._last_mqtt_power: float = 0.0  # re-publish periodically to prevent staleness
+        self._last_mqtt_power: float = (
+            0.0  # re-publish periodically to prevent staleness
+        )
 
         # Phase switching state
         self._current_phases = 3
         self._phase_threshold_w = self.min_current_a * 230 * 3
         self._phase_switching_disabled = False
         self._last_sent_power_w: float = 0.0
+        self._last_phase_switch_time: float = 0.0
+        self.PHASE_SWITCH_LOCK_S = 300  # 5-minute time lock after phase switch
 
         # Track last-seen control states for change detection
         self._last_power_limit: Optional[str] = None
@@ -201,6 +221,15 @@ class OCPPServer:
         # Throttle state for SetChargingProfile rate-limiting
         self._last_change_at: float = 0.0  # When value last changed
         self._pending_power_w: float | None = None
+
+        # Escalating re-send intervals for SuspendedEVSE
+        self._resend_retry_count: int = 0
+        self.RESEND_INTERVALS = [10, 30, 60]
+
+        # SuspendedEV cloud correction
+        self._cloud_charging_entity: str = options.get("cloud_charging_entity", "")
+        self._cloud_poll_task: Optional[asyncio.Task] = None
+        self._synthesized_suspended_ev: bool = False
 
         # Synchronization: _watch_controls waits until _post_connect_setup finishes
         self._setup_complete = asyncio.Event()
@@ -212,6 +241,56 @@ class OCPPServer:
         await self.ha.set_state("sensor.wallbox_min_power_w", min_w)
         await self.ha.set_state("sensor.wallbox_max_power_w", max_w)
         logger.info(f"Power limits: {min_w}–{max_w}W ({self._current_phases}-phase)")
+
+    @property
+    def _current_resend_interval(self) -> int:
+        """Return current re-send interval based on retry count."""
+        idx = min(self._resend_retry_count, len(self.RESEND_INTERVALS) - 1)
+        return self.RESEND_INTERVALS[idx]
+
+    async def _update_car_ready(self):
+        """Update binary_sensor.car_ready from wallbox status."""
+        if not self._setup_complete.is_set():
+            await self.ha.set_state("binary_sensor.car_ready", "off")
+            return
+        status = self.charge_point.current_status if self.charge_point else None
+        ready = CAR_READY_MAP.get(status, False)
+        await self.ha.set_state("binary_sensor.car_ready", "on" if ready else "off")
+
+    async def _cloud_poll_suspended_ev(self):
+        """Poll cloud charging entity to detect SuspendedEV (car full).
+
+        The wallbox reports SuspendedEVSE when the car stops drawing current,
+        but cannot distinguish EVSE-side pause from car-side pause. The cloud
+        entity (e.g. Smart car API) provides ground truth.
+        """
+        try:
+            while True:
+                await asyncio.sleep(60)
+                if not self._cloud_charging_entity:
+                    continue
+                raw = await self.ha.get_state(self._cloud_charging_entity)
+                if raw in ("25", "4"):
+                    # Car reports charging complete / not charging
+                    if not self._synthesized_suspended_ev:
+                        logger.info(
+                            f"Cloud entity {self._cloud_charging_entity}={raw} "
+                            f"→ synthesizing SuspendedEV"
+                        )
+                        self._synthesized_suspended_ev = True
+                        await self.ha.set_state("sensor.wallbox_status", "SuspendedEV")
+                        await self._update_car_ready()
+                elif self._synthesized_suspended_ev:
+                    # Cloud state changed — revert to SuspendedEVSE
+                    logger.info(
+                        f"Cloud entity {self._cloud_charging_entity}={raw} "
+                        f"→ reverting to SuspendedEVSE"
+                    )
+                    self._synthesized_suspended_ev = False
+                    await self.ha.set_state("sensor.wallbox_status", "SuspendedEVSE")
+                    await self._update_car_ready()
+        except asyncio.CancelledError:
+            pass
 
     async def _mqtt_loop(self):
         """Maintain MQTT connection and reconnect on failure."""
@@ -281,12 +360,32 @@ class OCPPServer:
         if key == "power_w":
             asyncio.ensure_future(self._publish_mqtt_power(float(value)))
 
+        if key == "status":
+            asyncio.ensure_future(self._update_car_ready())
+
+            # Reset escalating re-send counter when leaving SuspendedEVSE
+            if value != "SuspendedEVSE":
+                self._resend_retry_count = 0
+
+            # SuspendedEV cloud correction: start/stop polling
+            if value == "SuspendedEVSE" and self._last_sent_power_w > 0:
+                if self._cloud_charging_entity and (
+                    self._cloud_poll_task is None or self._cloud_poll_task.done()
+                ):
+                    self._cloud_poll_task = asyncio.ensure_future(
+                        self._cloud_poll_suspended_ev()
+                    )
+            else:
+                # Cancel cloud poll on any other status
+                if self._cloud_poll_task and not self._cloud_poll_task.done():
+                    self._cloud_poll_task.cancel()
+                    self._cloud_poll_task = None
+                self._synthesized_suspended_ev = False
+
     async def _abort_phase_switch(self, reason: str):
         """Abort phase switch: disable single-phase, restore previous profile."""
         logger.warning(f"Phase switch aborted: {reason}")
-        await self.ha.set_state(
-            "binary_sensor.wallbox_single_phase_supported", "off"
-        )
+        await self.ha.set_state("binary_sensor.wallbox_single_phase_supported", "off")
         self._phase_switching_disabled = True
         # If currently on 1-phase, force back to 3-phase
         if self._current_phases == 1:
@@ -319,8 +418,12 @@ class OCPPServer:
             return
 
         ALLOWED_STATUSES = {
-            "Available", "Preparing", "SuspendedEVSE",
-            "SuspendedEV", "Finishing", "Unavailable",
+            "Available",
+            "Preparing",
+            "SuspendedEVSE",
+            "SuspendedEV",
+            "Finishing",
+            "Unavailable",
         }
 
         logger.info(f"Phase switch: {self._current_phases} → {target_phases}")
@@ -374,6 +477,7 @@ class OCPPServer:
 
         # Step 7: Update state
         self._current_phases = target_phases
+        self._last_phase_switch_time = time.monotonic()
         self._on_status_change("phases", target_phases)
         await self._publish_power_limits()
         logger.info(f"Phase switch complete: now {target_phases}-phase")
@@ -407,8 +511,37 @@ class OCPPServer:
             logger.warning("No wallbox connected, ignoring power limit")
             return
 
+        # Gap clamping: 3681–4139W is unreachable (above 1φ max, below 3φ min)
+        if 3681 <= power_w <= 4139:
+            if self._current_phases == 1:
+                power_w = 3680
+                logger.info("Gap clamping: 1-phase → clamped to 3680W")
+            else:
+                power_w = 4140
+                logger.info("Gap clamping: 3-phase → clamped to 4140W")
+
+        # Phase switch time lock: prevent switching within 5 minutes
+        phase_lock_active = (
+            self._last_phase_switch_time > 0
+            and (time.monotonic() - self._last_phase_switch_time)
+            < self.PHASE_SWITCH_LOCK_S
+        )
+
+        if phase_lock_active and power_w > 0:
+            if self._current_phases == 1 and power_w > 3680:
+                power_w = 3680
+                logger.info("Phase time lock: clamping to 3680W (1-phase locked)")
+            elif self._current_phases == 3 and power_w < 4140:
+                power_w = 4140
+                logger.info("Phase time lock: clamping to 4140W (3-phase locked)")
+
         # Phase switching (before setting profile)
-        if power_w > 0 and self.phase_switch_entity and not self._phase_switching_disabled:
+        if (
+            power_w > 0
+            and self.phase_switch_entity
+            and not self._phase_switching_disabled
+            and not phase_lock_active
+        ):
             if power_w < self._phase_threshold_w:
                 target_phases = 1
             else:
@@ -471,6 +604,7 @@ class OCPPServer:
             await self.ha.set_state("sensor.wallbox_energy", cp.session_energy_wh)
             txn = "charging" if cp.transaction_id is not None else "idle"
             await self.ha.set_state("sensor.wallbox_transaction", txn)
+        await self._update_car_ready()
         logger.info(f"Synced HA state (connected={connected})")
 
     async def _watch_controls(self):
@@ -506,13 +640,20 @@ class OCPPServer:
                             power_w = float(power_state)
                             since_last_change = time.monotonic() - self._last_change_at
                             self._last_change_at = time.monotonic()
-                            if power_w == 0 or since_last_change >= self.power_update_interval_s:
+                            if (
+                                power_w == 0
+                                or since_last_change >= self.power_update_interval_s
+                            ):
                                 # 0W (pause) bypasses throttle — safety-critical
-                                logger.info(f"Power limit changed to {power_w}W (sending immediately, {since_last_change:.0f}s since last change)")
+                                logger.info(
+                                    f"Power limit changed to {power_w}W (sending immediately, {since_last_change:.0f}s since last change)"
+                                )
                                 await self._send_power_to_wallbox(power_w)
                             else:
                                 # Rapid change — queue, send when interval expires
-                                logger.info(f"Power limit changed to {power_w}W (throttled, {since_last_change:.0f}s since last change)")
+                                logger.info(
+                                    f"Power limit changed to {power_w}W (throttled, {since_last_change:.0f}s since last change)"
+                                )
                                 self._pending_power_w = power_w
                         except ValueError:
                             logger.warning(f"Invalid power limit value: {power_state}")
@@ -530,14 +671,18 @@ class OCPPServer:
                     and self.charge_point
                     and self.charge_point.current_status == "SuspendedEVSE"
                     and self._last_sent_power_w > 0
+                    and not self._synthesized_suspended_ev
                 ):
                     since_last = time.monotonic() - self._last_change_at
-                    if since_last >= self.power_update_interval_s:
+                    if since_last >= self._current_resend_interval:
                         logger.info(
                             f"Wallbox stuck in SuspendedEVSE — re-sending "
-                            f"{self._last_sent_power_w}W profile"
+                            f"{self._last_sent_power_w}W profile "
+                            f"(retry {self._resend_retry_count}, "
+                            f"interval {self._current_resend_interval}s)"
                         )
                         await self._send_power_to_wallbox(self._last_sent_power_w)
+                        self._resend_retry_count += 1
 
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")
@@ -589,19 +734,33 @@ class OCPPServer:
 
         if ws in ALREADY_ACTIVE:
             logger.info(f"Wallbox already active ({ws}), recovering transaction state")
+            # Wait for MeterValues response to sync power/energy/transaction
+            if hasattr(self.charge_point, "meter_values_event"):
+                try:
+                    await asyncio.wait_for(
+                        self.charge_point.meter_values_event.wait(), timeout=10
+                    )
+                    logger.info("Post-connect: MeterValues received for inner sync")
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Post-connect: MeterValues timeout (10s), continuing anyway"
+                    )
         elif ws in CAR_PRESENT:
-            logger.info(f"Car present ({ws}), waiting for EnergyManager to request power")
+            logger.info(
+                f"Car present ({ws}), waiting for EnergyManager to request power"
+            )
         else:
             logger.info(f"Post-connect: no car ({ws}), waiting for plug-in")
 
         self._setup_complete.set()
+        await self._update_car_ready()
         logger.info("Post-connect setup complete")
 
     async def handle_websocket(self, websocket):
         """Handle incoming WebSocket connection from wallbox."""
         # Extract charge point ID from path (e.g., /AcTec001)
         # websockets v11+: path is on the request object
-        path = websocket.request.path if hasattr(websocket, 'request') else "/"
+        path = websocket.request.path if hasattr(websocket, "request") else "/"
         cp_id = path.strip("/").split("/")[-1] if path.strip("/") else self.wallbox_id
         logger.info(f"Wallbox connecting: id={cp_id}, path={path}")
 
@@ -638,6 +797,14 @@ class OCPPServer:
                 self._on_status_change("power_w", 0)
                 self._on_status_change("transaction", "stopped")
                 self.charge_point = None
+                # Cancel cloud poll task on disconnect
+                if self._cloud_poll_task and not self._cloud_poll_task.done():
+                    self._cloud_poll_task.cancel()
+                    self._cloud_poll_task = None
+                self._synthesized_suspended_ev = False
+                asyncio.ensure_future(
+                    self.ha.set_state("binary_sensor.car_ready", "off")
+                )
 
     async def start_server(self):
         """Start WebSocket server and HA integration."""

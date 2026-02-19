@@ -31,8 +31,16 @@ SENSORS = {
         "unique_id": "ocpp_wallbox_status",
         "icon": "mdi:ev-plug-type2",
         "initial_state": "Unknown",
-        "options": ["Available", "Preparing", "Charging", "SuspendedEV",
-                     "SuspendedEVSE", "Finishing", "Faulted", "Unknown"],
+        "options": [
+            "Available",
+            "Preparing",
+            "Charging",
+            "SuspendedEV",
+            "SuspendedEVSE",
+            "Finishing",
+            "Faulted",
+            "Unknown",
+        ],
     },
     "sensor.wallbox_transaction": {
         "name": "Wallbox Transaction",
@@ -79,6 +87,12 @@ BINARY_SENSORS = {
         "icon": "mdi:lightning-bolt",
         "initial_state": False,
     },
+    "binary_sensor.car_ready": {
+        "name": "Car Ready",
+        "unique_id": "ocpp_car_ready",
+        "icon": "mdi:car-electric",
+        "initial_state": False,
+    },
 }
 
 # Control entities (HA → wallbox via OCPP)
@@ -89,8 +103,8 @@ CONTROLS = {
         "device_class": "power",
         "unit_of_measurement": "W",
         "icon": "mdi:speedometer",
-        "min": 0,           # 0 = pause charging
-        "max": 11000,       # 3-phase × 16A × 230V
+        "min": 0,  # 0 = pause charging
+        "max": 11000,  # 3-phase × 16A × 230V
         "step": 100,
         "initial_state": 0,
         "mode": "slider",

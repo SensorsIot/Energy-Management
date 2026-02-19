@@ -612,7 +612,7 @@ Custom components installed in `/config/custom_components/`:
 - Zigbee2MQTT is not configured inside HA OS (runs on IOTstack at 192.168.0.203)
 
 ### 7.8 Templates and sensors
-- `templates.yaml`: inverter power, load totals, power meter net energy, wallbox power.
+- `templates.yaml`: inverter power, load totals (direct from Shelly 3EM phases), power meter net energy, wallbox power, lab sub-metering (desk/bench/rest).
 - `templates/1_Sensors.yaml`: battery/grid/panel power, PV energy, calendar status sensors, mail sensor.
 - `templates/HomeAssistantSolarCalculations.yaml`: duplicate solar/load templates (legacy).
 - `sensors.yaml`: time_date + forecast sums + power_phase1 adjustments.
@@ -905,6 +905,8 @@ mqtt:
 ### 7.10 Dashboards and UI
 - Lovelace dashboards (storage mode): AmazonFire, Map, Portainer, Zigbee2MQTT, Grafana.
 - Panel iframes migrated (panel_iframe storage entry present).
+- AmazonFire overview chart uses `sensor.load_power` (consolidated 2026-02-19, previously `sensor.load_w`).
+- AmazonFire includes weight sensor `sensor.mi_smart_scale_32c7_mass` (Xiaomi BLE scale).
 
 ### 7.11 ESPHome
 - YAML nodes: `earu-breaker`, `esphome-water-meter`, `liliane-mailbox`, `p1s-mains`, `esp32-bluetooth-proxy`, multiple `esphome-web-*`, `iphoneswitch`, `tabletswitch`.
@@ -2160,10 +2162,13 @@ The following table shows the mapping between Home Assistant entity IDs and thei
 | phase_1_energy | load_phase_1_energy | Energy | - | Phase 1 load energy |
 | phase_2_energy | shelly_phase_2_energy | Energy | - | Phase 2 load energy |
 | phase_3_energy | load_phase_3_energy | Energy | - | Phase 3 load energy |
-| load_power (template) | load_total_power | Power | Load_W | Total load power |
-| load_energy (template) | load_total_energy | Energy | Load_kWh | Total load energy |
+| load_power (template) | load_total_power | Power | Load_W | Total load power (sum of 3 phases) |
+| load_energy (template) | load_total_energy | Energy | Load_kWh | Total load energy (sum of 3 phases) |
 | load_bench_power | load_bench_power | Power | - | Lab bench power (renamed from shelly_2pm_white_switch_0_power) |
 | load_desk_power | load_desk_power | Power | - | Lab desk power (renamed from shelly_2pm_white_switch_1_power) |
+| load_1_rest (template) | - | Power | - | Phase 1 minus desk minus bench (remaining load) |
+
+**Load consolidation (2026-02-19):** Removed redundant template sensors `load_1x`, `load_2x`, `load_3x` (copies of Shelly phase sensors), `load_wx` (duplicate sum identical to `load_power`), and `load_w` (applied a 2% correction factor that was no longer needed). The canonical total load entity is `sensor.load_power` (`Load Total Power`), used by the EnergyManager, InfluxDB transfer task, Grafana dashboards, and the AmazonFire dashboard. `load_1_rest` was updated to reference `sensor.load_phase_1_power` directly.
 
 #### Enphase Entities (MQTT)
 

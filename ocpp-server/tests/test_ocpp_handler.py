@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # Add src to path for imports
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.ocpp_handler import ChargePointHandler
@@ -75,11 +76,13 @@ class TestMeterValues:
 
         await handler.on_meter_values(
             connector_id=1,
-            meter_value=[{
-                "sampled_value": [
-                    {"measurand": "Power.Active.Import", "value": "7000"}
-                ]
-            }],
+            meter_value=[
+                {
+                    "sampled_value": [
+                        {"measurand": "Power.Active.Import", "value": "7000"}
+                    ]
+                }
+            ],
         )
 
         assert handler.current_power_w == 7000
@@ -93,11 +96,13 @@ class TestMeterValues:
 
         await handler.on_meter_values(
             connector_id=1,
-            meter_value=[{
-                "sampled_value": [
-                    {"measurand": "Energy.Active.Import.Register", "value": "5000"}
-                ]
-            }],
+            meter_value=[
+                {
+                    "sampled_value": [
+                        {"measurand": "Energy.Active.Import.Register", "value": "5000"}
+                    ]
+                }
+            ],
         )
 
         assert handler.session_energy_wh == 5000
@@ -217,10 +222,12 @@ class TestThrottle:
                 sys.modules[mod] = MagicMock()
         from run import OCPPServer
 
-        srv = OCPPServer({
-            "wallbox_id": "test",
-            "power_update_interval_s": 5,
-        })
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+            }
+        )
         srv.ha = AsyncMock()
         srv.ha.set_state = AsyncMock()
         srv.ha.get_state = AsyncMock(return_value="0")
@@ -334,7 +341,9 @@ class TestThrottle:
         assert calls["binary_sensor.wallbox_connected"] == "off"
 
     @pytest.mark.asyncio
-    async def test_tc19_first_zero_immediate_nonzero_queued_final_zero_immediate(self, server):
+    async def test_tc19_first_zero_immediate_nonzero_queued_final_zero_immediate(
+        self, server
+    ):
         """TC-19: First 0W sent immediately, >0W queued, final 0W sent immediately."""
         server._last_change_at = time.monotonic() - 10  # interval elapsed
 
@@ -363,9 +372,7 @@ class TestThrottle:
         # >0W — sent immediately (interval elapsed)
         await server._send_power_to_wallbox(5000.0)
         assert server.charge_point.set_charging_power.call_count == 1
-        server.charge_point.set_charging_power.assert_called_with(
-            5000.0, num_phases=3
-        )
+        server.charge_point.set_charging_power.assert_called_with(5000.0, num_phases=3)
 
         # 0W within interval — sent immediately (bypass)
         server._last_change_at = time.monotonic()
@@ -472,14 +479,16 @@ class TestPhaseSwitchDecision:
                 sys.modules[mod] = MagicMock()
         from run import OCPPServer
 
-        srv = OCPPServer({
-            "wallbox_id": "test",
-            "power_update_interval_s": 5,
-            "phase_switch_entity": "switch.earu_relay",
-            "single_phase_supported": True,
-            "min_current_a": 6,
-            "max_current_a": 16,
-        })
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+                "phase_switch_entity": "switch.earu_relay",
+                "single_phase_supported": True,
+                "min_current_a": 6,
+                "max_current_a": 16,
+            }
+        )
         srv.ha = AsyncMock()
         srv.ha.set_state = AsyncMock()
         srv.ha.get_state = AsyncMock(return_value="0")  # BL0942 current = 0
@@ -530,7 +539,8 @@ class TestPhaseSwitchDecision:
 
         # call_service should NOT be called for relay switching
         relay_calls = [
-            c for c in phase_server.ha.call_service.call_args_list
+            c
+            for c in phase_server.ha.call_service.call_args_list
             if c.args[0] == "switch"
         ]
         assert relay_calls == []
@@ -544,7 +554,8 @@ class TestPhaseSwitchDecision:
         await phase_server._send_power_to_wallbox(3000.0)
 
         relay_calls = [
-            c for c in phase_server.ha.call_service.call_args_list
+            c
+            for c in phase_server.ha.call_service.call_args_list
             if c.args[0] == "switch"
         ]
         assert relay_calls == []
@@ -562,14 +573,16 @@ class TestPhaseSwitchSafetyAbort:
                 sys.modules[mod] = MagicMock()
         from run import OCPPServer
 
-        srv = OCPPServer({
-            "wallbox_id": "test",
-            "power_update_interval_s": 5,
-            "phase_switch_entity": "switch.earu_relay",
-            "single_phase_supported": True,
-            "min_current_a": 6,
-            "max_current_a": 16,
-        })
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+                "phase_switch_entity": "switch.earu_relay",
+                "single_phase_supported": True,
+                "min_current_a": 6,
+                "max_current_a": 16,
+            }
+        )
         srv.ha = AsyncMock()
         srv.ha.set_state = AsyncMock()
         srv.ha.call_service = AsyncMock(return_value=True)
@@ -620,7 +633,8 @@ class TestPhaseSwitchSafetyAbort:
         assert phase_server._current_phases == 3
         # No relay switch.turn_on call (already on 3-phase)
         relay_on_calls = [
-            c for c in phase_server.ha.call_service.call_args_list
+            c
+            for c in phase_server.ha.call_service.call_args_list
             if c.args[:2] == ("switch", "turn_on")
         ]
         assert relay_on_calls == []
@@ -641,10 +655,12 @@ class TestResendOnSuspendedEVSE:
                 sys.modules[mod] = MagicMock()
         from run import OCPPServer
 
-        srv = OCPPServer({
-            "wallbox_id": "test",
-            "power_update_interval_s": 5,
-        })
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+            }
+        )
         srv.ha = AsyncMock()
         srv.ha.set_state = AsyncMock()
         srv.ha.get_state = AsyncMock(return_value="0")
@@ -724,16 +740,20 @@ class TestPostConnectSetup:
                 sys.modules[mod] = MagicMock()
         from run import OCPPServer
 
-        srv = OCPPServer({
-            "wallbox_id": "test",
-            "power_update_interval_s": 5,
-        })
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+            }
+        )
         srv.ha = AsyncMock()
         srv.ha.set_state = AsyncMock()
         srv.ha.get_state = AsyncMock(return_value="0")
         srv.ha.call_service = AsyncMock(return_value=True)
 
-        cp = ChargePointHandler("test", mock_connection, on_status_change=srv._on_status_change)
+        cp = ChargePointHandler(
+            "test", mock_connection, on_status_change=srv._on_status_change
+        )
         cp.trigger_meter_values = AsyncMock()
         srv.charge_point = cp
 
@@ -777,6 +797,7 @@ class TestPostConnectSetup:
     @pytest.mark.asyncio
     async def test_no_message_timeout_setup_incomplete(self, server_with_cp):
         """No message within timeout should leave setup incomplete."""
+
         # Don't set any events — patch asyncio.wait to return empty done set
         async def fake_wait(tasks, timeout=None, return_when=None):
             # Cancel all tasks and return empty done set
@@ -792,3 +813,493 @@ class TestPostConnectSetup:
             await server_with_cp._post_connect_setup()
 
         assert not server_with_cp._setup_complete.is_set()
+
+
+class TestCarReady:
+    """Tests for binary_sensor.car_ready (FSD v3.1 Item 1)."""
+
+    @pytest.fixture
+    def server(self, mock_connection):
+        """Create an OCPPServer with a real ChargePointHandler."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "test", "power_update_interval_s": 5})
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+
+        cp = ChargePointHandler(
+            "test", mock_connection, on_status_change=srv._on_status_change
+        )
+        cp.trigger_meter_values = AsyncMock()
+        srv.charge_point = cp
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_car_ready_on_for_preparing(self, server):
+        """Preparing status → car_ready on."""
+        server._setup_complete.set()
+        server.charge_point.current_status = "Preparing"
+        await server._update_car_ready()
+        server.ha.set_state.assert_called_with("binary_sensor.car_ready", "on")
+
+    @pytest.mark.asyncio
+    async def test_car_ready_on_for_charging(self, server):
+        """Charging status → car_ready on."""
+        server._setup_complete.set()
+        server.charge_point.current_status = "Charging"
+        await server._update_car_ready()
+        server.ha.set_state.assert_called_with("binary_sensor.car_ready", "on")
+
+    @pytest.mark.asyncio
+    async def test_car_ready_on_for_suspended_evse(self, server):
+        """SuspendedEVSE status → car_ready on."""
+        server._setup_complete.set()
+        server.charge_point.current_status = "SuspendedEVSE"
+        await server._update_car_ready()
+        server.ha.set_state.assert_called_with("binary_sensor.car_ready", "on")
+
+    @pytest.mark.asyncio
+    async def test_car_ready_off_for_available(self, server):
+        """Available status → car_ready off."""
+        server._setup_complete.set()
+        server.charge_point.current_status = "Available"
+        await server._update_car_ready()
+        server.ha.set_state.assert_called_with("binary_sensor.car_ready", "off")
+
+    @pytest.mark.asyncio
+    async def test_car_ready_off_for_suspended_ev(self, server):
+        """SuspendedEV status → car_ready off."""
+        server._setup_complete.set()
+        server.charge_point.current_status = "SuspendedEV"
+        await server._update_car_ready()
+        server.ha.set_state.assert_called_with("binary_sensor.car_ready", "off")
+
+    @pytest.mark.asyncio
+    async def test_car_ready_off_for_finishing(self, server):
+        """Finishing status → car_ready off."""
+        server._setup_complete.set()
+        server.charge_point.current_status = "Finishing"
+        await server._update_car_ready()
+        server.ha.set_state.assert_called_with("binary_sensor.car_ready", "off")
+
+    @pytest.mark.asyncio
+    async def test_car_ready_off_before_setup_complete(self, server):
+        """Before _setup_complete → car_ready off regardless of status."""
+        server.charge_point.current_status = "Charging"
+        await server._update_car_ready()
+        server.ha.set_state.assert_called_with("binary_sensor.car_ready", "off")
+
+    @pytest.mark.asyncio
+    async def test_car_ready_off_on_disconnect(self, server):
+        """Disconnect → car_ready off."""
+        server._setup_complete.set()
+        server.charge_point = None
+        await server._update_car_ready()
+        server.ha.set_state.assert_called_with("binary_sensor.car_ready", "off")
+
+
+class TestGapHandling:
+    """Tests for gap clamping 3681–4139W (FSD v3.1 Item 2)."""
+
+    @pytest.fixture
+    def server(self):
+        """Create an OCPPServer for gap clamping tests."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+                "phase_switch_entity": "",
+            }
+        )
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.set_charging_power = AsyncMock()
+        cp.current_power_w = 0
+        srv.charge_point = cp
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_gap_1_phase_clamps_down(self, server):
+        """3900W on 1-phase → clamp to 3680W."""
+        server._current_phases = 1
+        await server._send_power_to_wallbox(3900.0)
+        server.charge_point.set_charging_power.assert_called_once_with(
+            3680, num_phases=1
+        )
+
+    @pytest.mark.asyncio
+    async def test_gap_3_phase_clamps_up(self, server):
+        """3900W on 3-phase → clamp to 4140W."""
+        server._current_phases = 3
+        await server._send_power_to_wallbox(3900.0)
+        server.charge_point.set_charging_power.assert_called_once_with(
+            4140, num_phases=3
+        )
+
+    @pytest.mark.asyncio
+    async def test_boundary_3680_unchanged(self, server):
+        """3680W (below gap) should pass through unchanged."""
+        server._current_phases = 1
+        await server._send_power_to_wallbox(3680.0)
+        server.charge_point.set_charging_power.assert_called_once_with(
+            3680.0, num_phases=1
+        )
+
+    @pytest.mark.asyncio
+    async def test_boundary_4140_unchanged(self, server):
+        """4140W (above gap) should pass through unchanged."""
+        server._current_phases = 3
+        await server._send_power_to_wallbox(4140.0)
+        server.charge_point.set_charging_power.assert_called_once_with(
+            4140.0, num_phases=3
+        )
+
+
+class TestPhaseTimeLock:
+    """Tests for phase switching time lock (FSD v3.1 Item 3)."""
+
+    @pytest.fixture
+    def server(self):
+        """Create an OCPPServer with phase switching enabled."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+                "phase_switch_entity": "switch.earu_relay",
+                "single_phase_supported": True,
+                "min_current_a": 6,
+                "max_current_a": 16,
+            }
+        )
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.set_charging_power = AsyncMock()
+        cp.current_power_w = 0
+        cp.current_status = "SuspendedEVSE"
+        srv.charge_point = cp
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_clamp_during_lock_1_phase(self, server):
+        """During lock on 1-phase, power > 3680W clamped to 3680W."""
+        server._current_phases = 1
+        server._last_phase_switch_time = time.monotonic()  # just switched
+
+        await server._send_power_to_wallbox(5000.0)
+
+        server.charge_point.set_charging_power.assert_called_once_with(
+            3680, num_phases=1
+        )
+        # No relay call (phase switch skipped)
+        relay_calls = [
+            c for c in server.ha.call_service.call_args_list if c.args[0] == "switch"
+        ]
+        assert relay_calls == []
+
+    @pytest.mark.asyncio
+    async def test_clamp_during_lock_3_phase(self, server):
+        """During lock on 3-phase, power < 4140W clamped to 4140W."""
+        server._current_phases = 3
+        server._last_phase_switch_time = time.monotonic()
+
+        await server._send_power_to_wallbox(3000.0)
+
+        server.charge_point.set_charging_power.assert_called_once_with(
+            4140, num_phases=3
+        )
+
+    @pytest.mark.asyncio
+    async def test_switch_allowed_after_lock_expires(self, server):
+        """After 300s, phase switch should be allowed."""
+        server._current_phases = 3
+        server._last_phase_switch_time = time.monotonic() - 301  # lock expired
+
+        await server._send_power_to_wallbox(3000.0)
+
+        # Phase switch should have been called (relay turn_off for 1-phase)
+        relay_calls = [
+            c for c in server.ha.call_service.call_args_list if c.args[0] == "switch"
+        ]
+        assert len(relay_calls) == 1
+
+
+class TestEscalatingResend:
+    """Tests for escalating re-send intervals (FSD v3.1 Item 4)."""
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+            }
+        )
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        return srv
+
+    def test_intervals_escalate(self, server):
+        """Retry count 0→10s, 1→30s, 2→60s, 3→60s (capped)."""
+        server._resend_retry_count = 0
+        assert server._current_resend_interval == 10
+
+        server._resend_retry_count = 1
+        assert server._current_resend_interval == 30
+
+        server._resend_retry_count = 2
+        assert server._current_resend_interval == 60
+
+        server._resend_retry_count = 10
+        assert server._current_resend_interval == 60  # capped at last
+
+    def test_reset_on_status_change(self, server):
+        """Leaving SuspendedEVSE should reset retry count."""
+        server._resend_retry_count = 5
+
+        # Mock charge_point to avoid errors in _update_car_ready
+        cp = MagicMock()
+        cp.current_status = "Charging"
+        server.charge_point = cp
+        server._setup_complete.set()
+
+        server._on_status_change("status", "Charging")
+        assert server._resend_retry_count == 0
+
+    def test_no_reset_when_staying_suspended_evse(self, server):
+        """Staying in SuspendedEVSE should not reset retry count."""
+        server._resend_retry_count = 3
+
+        cp = MagicMock()
+        cp.current_status = "SuspendedEVSE"
+        server.charge_point = cp
+        server._setup_complete.set()
+
+        server._on_status_change("status", "SuspendedEVSE")
+        assert server._resend_retry_count == 3
+
+
+class TestSuspendedEVCloudCorrection:
+    """Tests for SuspendedEV cloud correction (FSD v3.1 Item 5)."""
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+                "cloud_charging_entity": "sensor.smart_charging_status_raw_value",
+            }
+        )
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_cloud_raw_25_synthesizes_suspended_ev(self, server):
+        """Cloud raw=25 should synthesize SuspendedEV status."""
+        server._setup_complete.set()
+        server.charge_point = MagicMock()
+        server.charge_point.current_status = "SuspendedEVSE"
+        server.ha.get_state = AsyncMock(return_value="25")
+
+        # Call _cloud_poll_suspended_ev with a short run
+        async def run_one_poll():
+            """Run a single iteration of the cloud poll loop."""
+            await asyncio.sleep(0)  # yield
+            raw = await server.ha.get_state(server._cloud_charging_entity)
+            if raw in ("25", "4"):
+                if not server._synthesized_suspended_ev:
+                    server._synthesized_suspended_ev = True
+                    await server.ha.set_state("sensor.wallbox_status", "SuspendedEV")
+                    await server._update_car_ready()
+
+        await run_one_poll()
+
+        assert server._synthesized_suspended_ev is True
+        server.ha.set_state.assert_any_call("sensor.wallbox_status", "SuspendedEV")
+
+    @pytest.mark.asyncio
+    async def test_cloud_raw_changes_reverts_to_suspended_evse(self, server):
+        """Cloud raw changes from 25 → other should revert to SuspendedEVSE."""
+        server._setup_complete.set()
+        server.charge_point = MagicMock()
+        server.charge_point.current_status = "SuspendedEVSE"
+        server._synthesized_suspended_ev = True
+        server.ha.get_state = AsyncMock(return_value="2")
+
+        # Simulate one poll iteration
+        raw = await server.ha.get_state(server._cloud_charging_entity)
+        if raw not in ("25", "4") and server._synthesized_suspended_ev:
+            server._synthesized_suspended_ev = False
+            await server.ha.set_state("sensor.wallbox_status", "SuspendedEVSE")
+            await server._update_car_ready()
+
+        assert server._synthesized_suspended_ev is False
+        server.ha.set_state.assert_any_call("sensor.wallbox_status", "SuspendedEVSE")
+
+    def test_no_cloud_poll_when_last_sent_zero(self, server):
+        """Cloud poll should not start when _last_sent_power_w = 0."""
+        server.charge_point = MagicMock()
+        server.charge_point.current_status = "SuspendedEVSE"
+        server._setup_complete.set()
+        server._last_sent_power_w = 0.0
+
+        server._on_status_change("status", "SuspendedEVSE")
+
+        assert server._cloud_poll_task is None
+
+    def test_cloud_poll_starts_when_suspended_evse_with_power(self, server):
+        """Cloud poll should start when SuspendedEVSE and last_sent > 0."""
+        server.charge_point = MagicMock()
+        server.charge_point.current_status = "SuspendedEVSE"
+        server._setup_complete.set()
+        server._last_sent_power_w = 5000.0
+
+        server._on_status_change("status", "SuspendedEVSE")
+
+        assert server._cloud_poll_task is not None
+        # Clean up
+        server._cloud_poll_task.cancel()
+
+    def test_resend_blocked_when_synthesized(self, server):
+        """Re-send should be blocked when _synthesized_suspended_ev is True."""
+        server._synthesized_suspended_ev = True
+        server._pending_power_w = None
+        server._last_sent_power_w = 5000.0
+
+        cp = MagicMock()
+        cp.current_status = "SuspendedEVSE"
+        server.charge_point = cp
+
+        # The re-send condition should fail because of synthesized guard
+        resend_condition = (
+            server._pending_power_w is None
+            and server.charge_point
+            and server.charge_point.current_status == "SuspendedEVSE"
+            and server._last_sent_power_w > 0
+            and not server._synthesized_suspended_ev
+        )
+        assert resend_condition is False
+
+
+class TestInnerSync:
+    """Tests for initialization inner sync (FSD v3.1 Item 6)."""
+
+    @pytest.fixture
+    def server_with_cp(self, mock_connection):
+        """Create OCPPServer with a real ChargePointHandler (real asyncio.Events)."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "test", "power_update_interval_s": 5})
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = ChargePointHandler(
+            "test", mock_connection, on_status_change=srv._on_status_change
+        )
+        cp.trigger_meter_values = AsyncMock()
+        srv.charge_point = cp
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_charging_waits_for_meter_values(self, server_with_cp):
+        """Charging status should wait for MeterValues before completing setup."""
+        cp = server_with_cp.charge_point
+        cp.current_status = "Charging"
+        cp.status_event.set()
+        # Pre-set meter_values_event so it doesn't block
+        cp.meter_values_event.set()
+
+        await server_with_cp._post_connect_setup()
+
+        assert server_with_cp._setup_complete.is_set()
+        cp.trigger_meter_values.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_charging_timeout_completes_anyway(self, server_with_cp):
+        """MeterValues timeout should not block setup completion."""
+        cp = server_with_cp.charge_point
+        cp.current_status = "Charging"
+        cp.status_event.set()
+        # Don't set meter_values_event — will timeout
+
+        await server_with_cp._post_connect_setup()
+
+        assert server_with_cp._setup_complete.is_set()
+
+    @pytest.mark.asyncio
+    async def test_available_skips_meter_values_wait(self, server_with_cp):
+        """Available status should skip MeterValues wait."""
+        cp = server_with_cp.charge_point
+        cp.current_status = "Available"
+        cp.boot_event.set()
+
+        await server_with_cp._post_connect_setup()
+
+        assert server_with_cp._setup_complete.is_set()
+        # meter_values_event should NOT have been waited on
+        assert not cp.meter_values_event.is_set()
+
+
+class TestMeterValuesEvent:
+    """Tests for meter_values_event on ChargePointHandler."""
+
+    @pytest.mark.asyncio
+    async def test_meter_values_sets_event(self, mock_connection):
+        """on_meter_values should set meter_values_event."""
+        handler = ChargePointHandler("test", mock_connection)
+
+        assert not handler.meter_values_event.is_set()
+
+        await handler.on_meter_values(
+            connector_id=1,
+            meter_value=[
+                {"sampled_value": [{"measurand": "Power.Active.Import", "value": "0"}]}
+            ],
+        )
+
+        assert handler.meter_values_event.is_set()

@@ -37,11 +37,21 @@ class ChargePointHandler(CP):
     # Measured 2026-02-11 on AcTec EV-AC22K, grid meter = EBL M-Bus via gPlug.
     # 7A excluded (unreliable DTSU transient during measurement).
     CALIBRATION_3P = [
-        (6, 4094), (8, 5137), (9, 5835), (10, 6445),
-        (11, 7245), (12, 7852), (13, 8545), (14, 9321), (15, 10007), (16, 10623),
+        (6, 4094),
+        (8, 5137),
+        (9, 5835),
+        (10, 6445),
+        (11, 7245),
+        (12, 7852),
+        (13, 8545),
+        (14, 9321),
+        (15, 10007),
+        (16, 10623),
     ]
 
-    def __init__(self, id: str, connection, on_status_change: Optional[Callable] = None):
+    def __init__(
+        self, id: str, connection, on_status_change: Optional[Callable] = None
+    ):
         super().__init__(id, connection)
         self.on_status_change = on_status_change
         self.current_status = ChargePointStatus.available
@@ -54,12 +64,17 @@ class ChargePointHandler(CP):
         self.status_event = asyncio.Event()
         self.heartbeat_event = asyncio.Event()
         self.transaction_started_event = asyncio.Event()
-        self.last_meter_values_time: float = 0  # monotonic timestamp of last MeterValues
+        self.last_meter_values_time: float = (
+            0  # monotonic timestamp of last MeterValues
+        )
+        self.meter_values_event = asyncio.Event()
 
     # ========== Incoming messages from wallbox ==========
 
     @on(Action.boot_notification)
-    async def on_boot_notification(self, charge_point_vendor: str, charge_point_model: str, **kwargs):
+    async def on_boot_notification(
+        self, charge_point_vendor: str, charge_point_model: str, **kwargs
+    ):
         """Wallbox connected and sent boot notification."""
         logger.info(f"Wallbox connected: {charge_point_vendor} {charge_point_model}")
         self.boot_event.set()
@@ -82,7 +97,9 @@ class ChargePointHandler(CP):
         self, connector_id: int, error_code: str, status: str, **kwargs
     ):
         """Wallbox status changed."""
-        logger.info(f"Status: connector={connector_id}, status={status}, error={error_code}")
+        logger.info(
+            f"Status: connector={connector_id}, status={status}, error={error_code}"
+        )
         # Only track status from our connector (connector 0 = charge point level, ignore)
         if connector_id == self.connector_id:
             self.current_status = status
@@ -91,7 +108,9 @@ class ChargePointHandler(CP):
                 self.on_status_change("status", status)
             # Zero power when wallbox is not actively charging
             if status != "Charging" and self.current_power_w > 0:
-                logger.info(f"Status {status}: resetting power from {self.current_power_w}W to 0W")
+                logger.info(
+                    f"Status {status}: resetting power from {self.current_power_w}W to 0W"
+                )
                 self.current_power_w = 0
                 if self.on_status_change:
                     self.on_status_change("power_w", 0)
@@ -110,7 +129,9 @@ class ChargePointHandler(CP):
                 self.transaction_started_event.set()
                 logger.info(f"Recovered transaction_id={txn_id} from MeterValues")
             else:
-                logger.info(f"Ignoring stale transaction_id={txn_id} from MeterValues (status={self.current_status})")
+                logger.info(
+                    f"Ignoring stale transaction_id={txn_id} from MeterValues (status={self.current_status})"
+                )
 
         total_power = 0.0
         for mv in meter_value:
@@ -126,6 +147,7 @@ class ChargePointHandler(CP):
                         self.on_status_change("energy_wh", value)
 
         self.last_meter_values_time = time.monotonic()
+        self.meter_values_event.set()
 
         # Only accept power readings during an active transaction
         # Wallbox may return stale cached MeterValues when triggered outside a transaction
@@ -135,9 +157,13 @@ class ChargePointHandler(CP):
                 if self.on_status_change:
                     self.on_status_change("power_w", total_power)
         elif total_power > 0:
-            logger.info(f"Ignoring MeterValues power {total_power}W — no active transaction")
+            logger.info(
+                f"Ignoring MeterValues power {total_power}W — no active transaction"
+            )
 
-        logger.debug(f"MeterValues: power={self.current_power_w}W, energy={self.session_energy_wh}Wh")
+        logger.debug(
+            f"MeterValues: power={self.current_power_w}W, energy={self.session_energy_wh}Wh"
+        )
         return call_result.MeterValues()
 
     @on(Action.start_transaction)
@@ -148,7 +174,9 @@ class ChargePointHandler(CP):
         self._transaction_counter += 1
         self.transaction_id = self._transaction_counter
         self.transaction_started_event.set()
-        logger.info(f"Transaction started: id={self.transaction_id}, connector={connector_id}")
+        logger.info(
+            f"Transaction started: id={self.transaction_id}, connector={connector_id}"
+        )
         if self.on_status_change:
             self.on_status_change("transaction", "started")
         return call_result.StartTransaction(
@@ -165,7 +193,9 @@ class ChargePointHandler(CP):
         self.transaction_id = None
         # Reset power to 0 — no more MeterValues will arrive after transaction ends
         if self.current_power_w > 0:
-            logger.info(f"Transaction ended: resetting power from {self.current_power_w}W to 0W")
+            logger.info(
+                f"Transaction ended: resetting power from {self.current_power_w}W to 0W"
+            )
             self.current_power_w = 0
             if self.on_status_change:
                 self.on_status_change("power_w", 0)
@@ -269,4 +299,3 @@ class ChargePointHandler(CP):
         response = await self.call(request)
         logger.info(f"TriggerMessage response: {response.status}")
         return response.status == "Accepted"
-

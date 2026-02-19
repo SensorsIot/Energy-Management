@@ -1,5 +1,5 @@
 name: "OCPP Server"
-version: "0.9.24"
+version: "0.9.25"
 slug: "ocpp-server"
 description: "OCPP 1.6j server for EV wallbox control via HA entities"
 url: "https://github.com/SensorsIot/Energy-Management"
@@ -37,6 +37,7 @@ options:
   single_phase_supported: true
   power_update_interval_s: 60
   current_sensor_entity: "sensor.earu_breaker_bl0942_current"
+  cloud_charging_entity: "sensor.smart_charging_status_raw_value"
 
 schema:
   wallbox_id: str
@@ -50,3 +51,4 @@ schema:
   single_phase_supported: "bool?"
   power_update_interval_s: "int?"
   current_sensor_entity: "str?"
+  cloud_charging_entity: "str?"
