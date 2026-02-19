@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.35"
+__version__ = "1.6.36"
 
 import json
 import logging
@@ -690,6 +690,9 @@ class EnergyManager:
             self._battery_reaches_target = reaches_target
             self._battery_min_soc_forecast = soc_at_target
 
+            pv_power = self.ha_client.get_sensor_value(self.pv_power_entity) or 0.0
+            load_power = self.ha_client.get_sensor_value(self.load_power_entity) or 0.0
+
             validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
 
             # Compute wallbox idle state (all modes)
@@ -714,6 +717,8 @@ class EnergyManager:
                 charging_mode=ev_mode,
                 is_cheap_tariff=tariff.is_cheap_now,
                 grid_power_w=grid_power,
+                pv_power_w=pv_power,
+                load_power_w=load_power,
                 min_power_w=ev_min_power,
                 max_power_w=max_power,
             )
@@ -763,7 +768,7 @@ class EnergyManager:
                     last_power_limit_sent=self._last_ev_power_limit,
                     wb_connected=wb_connected,
                     idle_since=self._ev_idle_since,
-                    excess_w=-grid_power + wallbox_power,
+                    excess_w=(pv_power - load_power) if battery_soc < 100 else (-grid_power + wallbox_power),
                     ts=datetime.now(timezone.utc),
                 ))
 

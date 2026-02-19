@@ -103,6 +103,9 @@ _TEST_DEFS: list[_TestDef] = [
 # Observer
 # ---------------------------------------------------------------------------
 
+_REPORT_VERSION = "2"  # bump to invalidate stale results after formula changes
+
+
 class IntegrationObserver:
     """Passive observer that checks off integration tests as they occur."""
 
@@ -215,7 +218,7 @@ class IntegrationObserver:
             pending = sum(1 for tr in self._results.values() if tr.status == "pending")
             report = {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
-                "version": "1",
+                "version": _REPORT_VERSION,
                 "summary": {
                     "total": len(self._results),
                     "passed": passed,
@@ -243,6 +246,12 @@ class IntegrationObserver:
             if not self._report_path.exists():
                 return
             data = json.loads(self._report_path.read_text())
+            if data.get("version") != _REPORT_VERSION:
+                logger.info(
+                    "Report version mismatch (got %s, want %s) — starting fresh",
+                    data.get("version"), _REPORT_VERSION,
+                )
+                return
             for tid, saved in data.get("tests", {}).items():
                 if tid in self._results:
                     tr = self._results[tid]

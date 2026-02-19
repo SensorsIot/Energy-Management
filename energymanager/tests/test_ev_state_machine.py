@@ -9,6 +9,7 @@ from src.ev_state_machine import (
     EVState,
     EVStateMachine,
     MIN_STAY_S,
+    _compute_excess,
     _round_to_step,
     _solar_target,
 )
@@ -19,7 +20,13 @@ from src.ev_state_machine import (
 # ---------------------------------------------------------------------------
 
 def make_inputs(**overrides) -> EVInputs:
-    """Create EVInputs with sensible defaults for solar-mode happy path."""
+    """Create EVInputs with sensible defaults for solar-mode happy path.
+
+    Defaults produce consistent excess of 5000W via both formulas:
+      open-loop:  pv_power_w(8000) - load_power_w(3000) = 5000
+      closed-loop: -grid_power_w(-5000) + wallbox_power_w(0) = 5000
+    battery_soc defaults to 70 → open-loop path.
+    """
     defaults = dict(
         wallbox_available=True,
         wallbox_power_w=0,
@@ -29,7 +36,9 @@ def make_inputs(**overrides) -> EVInputs:
         battery_soc=70.0,
         charging_mode="solar",
         is_cheap_tariff=False,
-        grid_power_w=-5000.0,          # excess = -(-5000) + 0 = 5000
+        grid_power_w=-5000.0,
+        pv_power_w=8000.0,
+        load_power_w=3000.0,
         min_power_w=1400.0,
         max_power_w=11000.0,
     )
@@ -78,6 +87,74 @@ class TestInit:
 
 
 # ===================================================================
+# Dual excess formula (_compute_excess)
+# ===================================================================
+
+class TestDualExcessFormula:
+    def test_battery_full_uses_closed_loop(self):
+        """SOC >= 100 → excess = -grid_power_w + wallbox_power_w."""
+        i = make_inputs(
+            battery_soc=100,
+            grid_power_w=-3000, wallbox_power_w=2000,
+            pv_power_w=9000, load_power_w=1000,
+        )
+        assert _compute_excess(i) == 5000  # -(-3000) + 2000
+
+    def test_battery_charging_uses_open_loop(self):
+        """SOC < 100 → excess = pv_power_w - load_power_w."""
+        i = make_inputs(
+            battery_soc=70,
+            grid_power_w=-200, wallbox_power_w=0,
+            pv_power_w=7000, load_power_w=2000,
+        )
+        assert _compute_excess(i) == 5000  # 7000 - 2000
+
+    def test_n3_entry_uses_open_loop_when_battery_charging(self):
+        """N3 entry decision uses open-loop when SOC < 100."""
+        sm = make_sm(EVState.NORMAL)
+        out = sm.step(make_inputs(
+            battery_soc=70,
+            grid_power_w=-200, wallbox_power_w=0,   # closed-loop: 200 (too low)
+            pv_power_w=8000, load_power_w=3000,      # open-loop: 5000 (enough)
+        ))
+        assert out.state == EVState.SOLAR
+        assert out.target_power_w == 5000
+
+    def test_n3_entry_uses_closed_loop_when_battery_full(self):
+        """N3 entry decision uses closed-loop when SOC >= 100."""
+        sm = make_sm(EVState.NORMAL)
+        out = sm.step(make_inputs(
+            battery_soc=100,
+            grid_power_w=-5000, wallbox_power_w=0,   # closed-loop: 5000
+            pv_power_w=1000, load_power_w=500,        # open-loop: 500 (too low)
+        ))
+        assert out.state == EVState.SOLAR
+        assert out.target_power_w == 5000
+
+    def test_solar_ongoing_uses_open_loop(self):
+        """Staying in SOLAR with SOC < 100 uses open-loop."""
+        sm = make_sm(EVState.SOLAR)
+        out = sm.step(make_inputs(
+            battery_soc=70,
+            grid_power_w=-100, wallbox_power_w=1400,  # closed-loop: 1500
+            pv_power_w=7000, load_power_w=1000,        # open-loop: 6000
+        ))
+        assert out.state == EVState.SOLAR
+        assert out.target_power_w == 6000
+
+    def test_solar_ongoing_switches_to_closed_loop(self):
+        """Battery fills up mid-session → switches to closed-loop."""
+        sm = make_sm(EVState.SOLAR)
+        out = sm.step(make_inputs(
+            battery_soc=100,
+            grid_power_w=-3000, wallbox_power_w=2000,  # closed-loop: 5000
+            pv_power_w=1000, load_power_w=500,          # open-loop: 500
+        ))
+        assert out.state == EVState.SOLAR
+        assert out.target_power_w == 5000
+
+
+# ===================================================================
 # NORMAL — stays
 # ===================================================================
 
@@ -102,13 +179,15 @@ class TestNormalStays:
         out = sm.step(make_inputs(
             battery_protection_passed=False,
             battery_soc=70,
-            grid_power_w=-5000,
         ))
         assert out.state == EVState.SOLAR
 
     def test_stays_solar_excess_below_min(self):
         sm = make_sm(EVState.NORMAL)
-        out = sm.step(make_inputs(grid_power_w=0, wallbox_power_w=0))
+        out = sm.step(make_inputs(
+            pv_power_w=1000, load_power_w=1000,  # open-loop: 0
+            grid_power_w=0, wallbox_power_w=0,
+        ))
         assert out.state == EVState.NORMAL
 
 
@@ -144,9 +223,7 @@ class TestNormalTransitions:
 
     def test_n3_solar_with_excess(self):
         sm = make_sm(EVState.NORMAL)
-        out = sm.step(make_inputs(
-            grid_power_w=-5000, wallbox_power_w=0,
-        ))
+        out = sm.step(make_inputs())  # open-loop: 8000-3000 = 5000
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 5000
 
@@ -156,7 +233,6 @@ class TestNormalTransitions:
         out = sm.step(make_inputs(
             battery_protection_passed=False,
             battery_soc=50,
-            grid_power_w=-5000,
         ))
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 5000
@@ -175,14 +251,14 @@ class TestNormalTransitions:
 class TestSolarStays:
     def test_stays_with_excess(self):
         sm = make_sm(EVState.SOLAR)
-        out = sm.step(make_inputs(grid_power_w=-5000))
+        out = sm.step(make_inputs())  # open-loop: 5000
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 5000
 
     def test_stays_with_low_excess_holds_minimum(self):
         """When excess < min_power_w, output min_power_w (hold minimum)."""
         sm = make_sm(EVState.SOLAR)
-        out = sm.step(make_inputs(grid_power_w=-500, wallbox_power_w=0))
+        out = sm.step(make_inputs(pv_power_w=1500, load_power_w=1200))  # open-loop: 300
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 1400  # min_power_w
 
@@ -347,7 +423,7 @@ class TestMinStayTimer:
         sm = make_sm(EVState.SOLAR, now=_T0)
         sm._time_fn = lambda: _T0 + 60  # 1 min in
         out = sm.step(make_inputs(
-            grid_power_w=-500, wallbox_power_w=0,  # excess = 500 < 1400
+            pv_power_w=1500, load_power_w=1200,  # open-loop: 300 < 1400
         ))
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 1400
@@ -363,7 +439,7 @@ class TestMinStayTimer:
         """Timestamp is recorded when entering SOLAR."""
         t = [_T0]
         sm = EVStateMachine(time_fn=lambda: t[0])
-        sm.step(make_inputs(grid_power_w=-5000))
+        sm.step(make_inputs())
         assert sm.state == EVState.SOLAR
         assert sm._entered_solar_at == _T0
 
@@ -381,45 +457,49 @@ class TestMinStayTimer:
 class TestSolarPower:
     def test_clamp_to_min(self):
         sm = make_sm(EVState.SOLAR)
-        out = sm.step(make_inputs(grid_power_w=-1400, wallbox_power_w=0))
+        out = sm.step(make_inputs(pv_power_w=4400, load_power_w=3000))  # open-loop: 1400
         assert out.target_power_w == 1400
 
     def test_clamp_to_max(self):
         sm = make_sm(EVState.SOLAR)
-        out = sm.step(make_inputs(grid_power_w=-15000, wallbox_power_w=0))
+        out = sm.step(make_inputs(pv_power_w=18000, load_power_w=3000))  # open-loop: 15000
         assert out.target_power_w == 11000
 
     def test_round_to_step(self):
         sm = make_sm(EVState.SOLAR)
-        # excess = 1680 → round(1680/100)*100 = 1700
-        out = sm.step(make_inputs(grid_power_w=-1680, wallbox_power_w=0))
-        assert out.target_power_w == 1700
+        # open-loop: 4680 → round(4680/100)*100 = 4700
+        out = sm.step(make_inputs(pv_power_w=7680, load_power_w=3000))
+        assert out.target_power_w == 4700
 
-    def test_excess_includes_wallbox_power(self):
-        """excess = -grid_power_w + wallbox_power_w."""
+    def test_excess_includes_wallbox_power_closed_loop(self):
+        """Closed-loop: excess = -grid_power_w + wallbox_power_w."""
         sm = make_sm(EVState.SOLAR)
         # grid=-2000, wallbox=3000 → excess = 2000+3000 = 5000
-        out = sm.step(make_inputs(grid_power_w=-2000, wallbox_power_w=3000))
+        out = sm.step(make_inputs(
+            battery_soc=100,
+            grid_power_w=-2000, wallbox_power_w=3000,
+        ))
         assert out.target_power_w == 5000
 
     def test_low_excess_holds_minimum(self):
         sm = make_sm(EVState.SOLAR)
-        out = sm.step(make_inputs(grid_power_w=-500, wallbox_power_w=0))
+        out = sm.step(make_inputs(pv_power_w=3500, load_power_w=3200))  # open-loop: 300
         assert out.target_power_w == 1400
 
     def test_custom_min(self):
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(
-            grid_power_w=-2000, wallbox_power_w=0, min_power_w=2500,
+            pv_power_w=5000, load_power_w=3000, min_power_w=2500,
         ))
-        # excess=2000 < min=2500 → hold minimum
+        # open-loop: 2000 < min=2500 → hold minimum
         assert out.target_power_w == 2500
 
     def test_custom_max(self):
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(
-            grid_power_w=-10000, wallbox_power_w=0, max_power_w=8000,
+            pv_power_w=15000, load_power_w=3000, max_power_w=8000,
         ))
+        # open-loop: 12000, clamped to 8000
         assert out.target_power_w == 8000
 
 
@@ -465,18 +545,20 @@ class TestMultiStep:
         t = [_T0]
         sm = EVStateMachine(time_fn=lambda: t[0])
 
-        # Start NORMAL
-        out = sm.step(make_inputs(grid_power_w=0))  # no excess
+        # Start NORMAL — no excess
+        out = sm.step(make_inputs(pv_power_w=1000, load_power_w=1000))
         assert out.state == EVState.NORMAL
 
         # Excess appears → SOLAR
-        out = sm.step(make_inputs(grid_power_w=-5000))
+        out = sm.step(make_inputs())
         assert out.state == EVState.SOLAR
 
         # Mode change to cheap → CHEAP → mode back to solar → NORMAL
         out = sm.step(make_inputs(charging_mode="cheap"))
         assert out.state == EVState.CHEAP
-        out = sm.step(make_inputs(charging_mode="solar", grid_power_w=0))
+        out = sm.step(make_inputs(
+            charging_mode="solar", pv_power_w=1000, load_power_w=1000,
+        ))
         assert out.state == EVState.NORMAL
 
     def test_full_mode_cycle(self):
@@ -500,7 +582,7 @@ class TestMultiStep:
         assert out.state == EVState.NORMAL
 
         # NORMAL → SOLAR
-        out = sm.step(make_inputs(grid_power_w=-5000))
+        out = sm.step(make_inputs())
         assert out.state == EVState.SOLAR
 
     def test_solar_to_immediate_and_back(self):
@@ -508,7 +590,7 @@ class TestMultiStep:
         sm = EVStateMachine(time_fn=lambda: t[0])
 
         # → SOLAR
-        out = sm.step(make_inputs(grid_power_w=-5000))
+        out = sm.step(make_inputs())
         assert out.state == EVState.SOLAR
 
         # → IMMEDIATE
@@ -520,7 +602,7 @@ class TestMultiStep:
         assert out.state == EVState.NORMAL
 
         # → SOLAR again (excess available)
-        out = sm.step(make_inputs(grid_power_w=-5000))
+        out = sm.step(make_inputs())
         assert out.state == EVState.SOLAR
 
 

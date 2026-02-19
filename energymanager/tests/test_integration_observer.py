@@ -13,6 +13,7 @@ from src.ev_state_machine import EVInputs, EVOutput, EVState
 from src.integration_observer import (
     CycleSnapshot,
     IntegrationObserver,
+    _REPORT_VERSION,
     _TEST_DEFS,
 )
 
@@ -32,6 +33,8 @@ def _make_inputs(**overrides) -> EVInputs:
         charging_mode="solar",
         is_cheap_tariff=False,
         grid_power_w=-5000.0,
+        pv_power_w=8000.0,
+        load_power_w=3000.0,
         min_power_w=1400.0,
         max_power_w=11000.0,
     )
@@ -124,6 +127,38 @@ class TestPersistence:
         path = str(tmp_path / "nonexistent" / "report.json")
         obs = IntegrationObserver(report_path=path)
         assert obs._results["NO-01"].status == "pending"
+
+    def test_version_mismatch_resets_results(self, tmp_path):
+        """Old report with different version is ignored — all tests start pending."""
+        path = tmp_path / "report.json"
+        old_report = {
+            "version": "0-stale",
+            "summary": {"total": 24, "passed": 10, "failed": 0, "pending": 14},
+            "tests": {
+                "NO-01": {"test_id": "NO-01", "name": "x", "category": "normal",
+                          "status": "passed", "pass_count": 42},
+            },
+        }
+        path.write_text(json.dumps(old_report))
+        obs = IntegrationObserver(report_path=str(path))
+        assert obs._results["NO-01"].status == "pending"
+        assert obs._results["NO-01"].pass_count == 0
+
+    def test_current_version_loads_normally(self, tmp_path):
+        """Report with matching version is loaded."""
+        path = tmp_path / "report.json"
+        report = {
+            "version": _REPORT_VERSION,
+            "summary": {"total": 24, "passed": 1, "failed": 0, "pending": 23},
+            "tests": {
+                "NO-01": {"test_id": "NO-01", "name": "x", "category": "normal",
+                          "status": "passed", "pass_count": 5},
+            },
+        }
+        path.write_text(json.dumps(report))
+        obs = IntegrationObserver(report_path=str(path))
+        assert obs._results["NO-01"].status == "passed"
+        assert obs._results["NO-01"].pass_count == 5
 
 
 # ---------------------------------------------------------------------------

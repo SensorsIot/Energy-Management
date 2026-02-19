@@ -55,6 +55,8 @@ class EVInputs:
     charging_mode: str                # "solar" / "immediate" / "cheap"
     is_cheap_tariff: bool
     grid_power_w: float
+    pv_power_w: float                 # current PV production (W)
+    load_power_w: float               # current household load (W)
     min_power_w: float                # default 1400W
     max_power_w: float                # default 11000W
 
@@ -78,6 +80,13 @@ def _round_to_step(value: float, step: float = 100) -> float:
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(value, hi))
+
+
+def _compute_excess(i: EVInputs) -> float:
+    """Dual excess formula: closed-loop when battery full, open-loop otherwise."""
+    if i.battery_soc >= 100:
+        return -i.grid_power_w + i.wallbox_power_w      # closed-loop
+    return i.pv_power_w - i.load_power_w                 # open-loop
 
 
 def _solar_target(
@@ -148,7 +157,7 @@ class EVStateMachine:
 
         # N3: solar mode
         if i.charging_mode == "solar" and i.wallbox_available:
-            excess = -i.grid_power_w + i.wallbox_power_w
+            excess = _compute_excess(i)
             if excess >= i.min_power_w:
                 self._set_state(EVState.SOLAR)
                 target = _solar_target(excess, i.min_power_w, i.max_power_w,
@@ -171,7 +180,7 @@ class EVStateMachine:
             return EVOutput(EVState.NORMAL, 0,
                             "Car finished — wallbox idle")
 
-        excess = -i.grid_power_w + i.wallbox_power_w
+        excess = _compute_excess(i)
 
         # S2: user switched to immediate
         if i.charging_mode == "immediate":
