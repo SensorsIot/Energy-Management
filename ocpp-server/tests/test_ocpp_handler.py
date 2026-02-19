@@ -148,51 +148,38 @@ class TestTransactions:
         assert handler.transaction_id is None
 
 
-class TestCalibratedCurrent:
-    """Tests for calibrated power-to-current conversion."""
+class TestSetChargingPowerWatts:
+    """Tests for SetChargingProfile using watts directly."""
 
-    def test_zero_power(self, handler):
-        """0W should return 0A."""
-        assert handler._calibrated_current(0, 3) == 0.0
+    @pytest.mark.asyncio
+    async def test_sends_watts_directly(self, handler):
+        """SetChargingProfile should send power in watts, not amps."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            result = await handler.set_charging_power(6400, 3)
+            assert result is True
+            profile = mock_call.call_args[0][0].cs_charging_profiles
+            schedule = profile["charging_schedule"]
+            assert schedule["charging_rate_unit"] == "W"
+            assert schedule["charging_schedule_period"][0]["limit"] == 6400
 
-    def test_negative_power(self, handler):
-        """Negative power should return 0A."""
-        assert handler._calibrated_current(-100, 3) == 0.0
+    @pytest.mark.asyncio
+    async def test_zero_power(self, handler):
+        """0W should send limit=0."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            await handler.set_charging_power(0, 3)
+            profile = mock_call.call_args[0][0].cs_charging_profiles
+            assert profile["charging_schedule"]["charging_schedule_period"][0]["limit"] == 0
 
-    def test_exact_calibration_point(self, handler):
-        """Power matching a calibration point exactly should return that current."""
-        # 10A → 6445W
-        assert handler._calibrated_current(6445, 3) == 10.0
-
-    def test_interpolation_mid_range(self, handler):
-        """Power between calibration points should interpolate."""
-        # 4800W between 6A→4094W and 8A→5137W
-        # ratio = (4800-4094)/(5137-4094) = 706/1043 ≈ 0.677
-        # current = 6.0 + 0.677 * 2.0 ≈ 7.354
-        result = handler._calibrated_current(4800, 3)
-        assert 7.3 < result < 7.5
-
-    def test_below_min_calibration(self, handler):
-        """Power below lowest calibration point should return min current (6A)."""
-        assert handler._calibrated_current(2000, 3) == 6.0
-
-    def test_above_max_calibration(self, handler):
-        """Power above highest calibration point should return max current (16A)."""
-        assert handler._calibrated_current(12000, 3) == 16.0
-
-    def test_single_phase_uses_naive_formula(self, handler):
-        """1-phase should use naive formula (no calibration data)."""
-        # 3680W / (230 * 1) = 16A
-        result = handler._calibrated_current(3680, 1)
-        assert abs(result - 16.0) < 0.01
-
-    def test_interpolation_upper_range(self, handler):
-        """Interpolation in upper range (14A-15A)."""
-        # 9321W→14A, 10007W→15A, midpoint 9664W
-        # ratio = (9664-9321)/(10007-9321) = 343/686 = 0.5
-        # current = 14.0 + 0.5 * 1.0 = 14.5
-        result = handler._calibrated_current(9664, 3)
-        assert abs(result - 14.5) < 0.01
+    @pytest.mark.asyncio
+    async def test_negative_power_clamped_to_zero(self, handler):
+        """Negative power should be clamped to 0."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            await handler.set_charging_power(-500, 3)
+            profile = mock_call.call_args[0][0].cs_charging_profiles
+            assert profile["charging_schedule"]["charging_schedule_period"][0]["limit"] == 0
 
 
 class TestAuthorization:

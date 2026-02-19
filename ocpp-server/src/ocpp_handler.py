@@ -242,16 +242,17 @@ class ChargePointHandler(CP):
         """
         Set charging power limit via SetChargingProfile.
 
+        Sends power directly in watts (OCPP 1.6 chargingRateUnit=W).
+        The wallbox converts internally — no amps calibration needed.
+
         Args:
             power_w: Target power in watts
             num_phases: Number of phases (1 or 3)
         """
-        current_a = self._calibrated_current(power_w, num_phases)
-        current_a = math.ceil(current_a)  # Round up: wallbox only accepts integer amps
-        current_a = max(0, min(current_a, 32))  # Clamp to valid range
+        limit_w = max(0, power_w)
 
         logger.info(
-            f"Setting charging power: {power_w}W ({current_a:.1f}A, {num_phases}-phase)"
+            f"Setting charging power: {limit_w:.0f}W ({num_phases}-phase)"
         )
 
         request = call.SetChargingProfile(
@@ -262,11 +263,11 @@ class ChargePointHandler(CP):
                 "charging_profile_purpose": ChargingProfilePurposeType.tx_default_profile,
                 "charging_profile_kind": ChargingProfileKindType.absolute,
                 "charging_schedule": {
-                    "charging_rate_unit": ChargingRateUnitType.amps,
+                    "charging_rate_unit": ChargingRateUnitType.watts,
                     "charging_schedule_period": [
                         {
                             "start_period": 0,
-                            "limit": current_a,
+                            "limit": limit_w,
                             "number_phases": num_phases,
                         }
                     ],
