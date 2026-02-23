@@ -155,8 +155,11 @@ class EVStateMachine:
                       else "Cheap mode — waiting for cheap tariff")
             return EVOutput(EVState.CHEAP, power, reason)
 
-        # N3: solar mode
+        # N3: solar mode — only enter if battery protection allows it
         if i.charging_mode == "solar" and i.wallbox_available:
+            if not i.battery_protection_passed:
+                return EVOutput(EVState.NORMAL, 0,
+                                "Solar — battery protection blocks EV")
             excess = _compute_excess(i)
             if excess >= i.min_power_w:
                 self._set_state(EVState.SOLAR)
@@ -180,15 +183,21 @@ class EVStateMachine:
             return EVOutput(EVState.NORMAL, 0,
                             "Car finished — wallbox idle")
 
+        # S2: battery protection failed — exit after grace period
+        if not i.battery_protection_passed and self._time_in_solar() >= MIN_STAY_S:
+            self._set_state(EVState.NORMAL)
+            return EVOutput(EVState.NORMAL, 0,
+                            "Solar — battery protection blocks EV")
+
         excess = _compute_excess(i)
 
-        # S2: user switched to immediate
+        # S3: user switched to immediate
         if i.charging_mode == "immediate":
             self._set_state(EVState.IMMEDIATE)
             return EVOutput(EVState.IMMEDIATE, i.max_power_w,
                             "Immediate mode — charge at max power")
 
-        # S3: user switched to cheap
+        # S4: user switched to cheap
         if i.charging_mode == "cheap":
             self._set_state(EVState.CHEAP)
             power = i.max_power_w if i.is_cheap_tariff else 0

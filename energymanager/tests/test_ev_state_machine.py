@@ -173,14 +173,16 @@ class TestNormalStays:
         out = sm.step(make_inputs(wallbox_available=False))
         assert out.state == EVState.NORMAL
 
-    def test_n3_solar_enters_without_battery_protection(self):
-        """Solar enters even when battery_protection_passed=False."""
+    def test_n3_solar_blocked_by_battery_protection(self):
+        """Solar does NOT enter when battery_protection_passed=False."""
         sm = make_sm(EVState.NORMAL)
         out = sm.step(make_inputs(
             battery_protection_passed=False,
             battery_soc=70,
         ))
-        assert out.state == EVState.SOLAR
+        assert out.state == EVState.NORMAL
+        assert out.target_power_w == 0
+        assert "battery protection" in out.reason.lower()
 
     def test_stays_solar_excess_below_min(self):
         sm = make_sm(EVState.NORMAL)
@@ -227,15 +229,16 @@ class TestNormalTransitions:
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 5000
 
-    def test_n3_solar_ignores_battery_protection(self):
-        """N3 enters SOLAR regardless of battery_protection_passed."""
+    def test_n3_solar_blocked_by_battery_protection(self):
+        """N3 does NOT enter SOLAR when battery_protection_passed=False."""
         sm = make_sm(EVState.NORMAL)
         out = sm.step(make_inputs(
             battery_protection_passed=False,
             battery_soc=50,
         ))
-        assert out.state == EVState.SOLAR
-        assert out.target_power_w == 5000
+        assert out.state == EVState.NORMAL
+        assert out.target_power_w == 0
+        assert "battery protection" in out.reason.lower()
 
     def test_n1_has_priority_over_n2(self):
         """N1 fires before N2 when both could match."""
@@ -262,10 +265,20 @@ class TestSolarStays:
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 1400  # min_power_w
 
-    def test_stays_solar_without_battery_protection(self):
-        """Stays in SOLAR indefinitely regardless of protection status."""
+    def test_exits_solar_on_battery_protection_after_grace(self):
+        """Exits SOLAR when battery_protection_passed=False after MIN_STAY_S."""
         sm = make_sm(EVState.SOLAR, now=_T0)
-        sm._time_fn = lambda: _T0 + MIN_STAY_S + 3600  # well past min-stay
+        sm._time_fn = lambda: _T0 + MIN_STAY_S + 1
+        out = sm.step(make_inputs(
+            battery_protection_passed=False, battery_soc=70,
+        ))
+        assert out.state == EVState.NORMAL
+        assert "battery protection" in out.reason.lower()
+
+    def test_stays_solar_on_battery_protection_during_grace(self):
+        """Stays in SOLAR when battery_protection_passed=False within MIN_STAY_S."""
+        sm = make_sm(EVState.SOLAR, now=_T0)
+        sm._time_fn = lambda: _T0 + MIN_STAY_S - 60  # still in grace period
         out = sm.step(make_inputs(
             battery_protection_passed=False, battery_soc=70,
         ))
