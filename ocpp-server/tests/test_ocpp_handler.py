@@ -148,20 +148,21 @@ class TestTransactions:
         assert handler.transaction_id is None
 
 
-class TestSetChargingPowerWatts:
-    """Tests for SetChargingProfile using watts directly."""
+class TestSetChargingPowerAmps:
+    """Tests for SetChargingProfile converting watts to decimal amps."""
 
     @pytest.mark.asyncio
-    async def test_sends_watts_directly(self, handler):
-        """SetChargingProfile should send power in watts, not amps."""
+    async def test_sends_amps_from_watts(self, handler):
+        """SetChargingProfile should convert watts to decimal amps."""
         with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
             mock_call.return_value = type("R", (), {"status": "Accepted"})()
             result = await handler.set_charging_power(6400, 3)
             assert result is True
             profile = mock_call.call_args[0][0].cs_charging_profiles
             schedule = profile["charging_schedule"]
-            assert schedule["charging_rate_unit"] == "W"
-            assert schedule["charging_schedule_period"][0]["limit"] == 6400
+            assert schedule["charging_rate_unit"] == "A"
+            # 6400 / (3 * 230) = 9.275... → rounded to 9.3
+            assert schedule["charging_schedule_period"][0]["limit"] == 9.3
 
     @pytest.mark.asyncio
     async def test_zero_power(self, handler):

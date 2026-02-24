@@ -444,6 +444,36 @@ ocpp-server/
 | Unit tests (21) | Done |
 | Wallbox integration test | Done |
 
+## Appendix A — Wallbox Power Calibration (AcTec EV-AC22K)
+
+Measured 2026-02-19, OCPP `chargingRateUnit=W`, 3-phase, firmware v0.9.26.
+
+The wallbox accepts watts in `SetChargingProfile` but internally converts to integer amps by flooring `demand_w / 3 / 230`. This creates a staircase response where different demand values map to the same output.
+
+| Demand (W) | Wallbox meter (W) | Car meter (W) | Car (A) | Internal A |
+|-----------|------------------|--------------|--------|-----------|
+| 4000 | 3931 | 4182 | 5.9 | 6 |
+| 4500 | 3934 | 4185 | 5.9 | 6 |
+| 5000 | 4313 | 4613 | 6.5 | 7 |
+| 5500 | 4316 | 4536 | 6.4 | 7 |
+| 6000 | 5108 | 5236 | 7.4 | 8 |
+| 6500 | 5696 | 6007 | 8.5 | 9 |
+| 7000 | 6418 | 6646 | 9.4 | 10 |
+| 7500 | 6368 | 6626 | 9.4 | 10 |
+| 8000 | — | 7402 | 10.5 | 11 |
+| 8500 | — | 8117 | 11.5 | 12 |
+| 9000 | 8471 | 8735 | 12.4 | 13 |
+| 9500 | 8475 | 8724 | 12.4 | 13 |
+| 10000 | 9176 | 9486 | 13.5 | 14 |
+| 10500 | 9860 | 10227 | 14.5 | 15 |
+| 11000 | 9869 | 10164 | 14.4 | 15 |
+
+**Notes:**
+- Wallbox meter reads ~5–8% lower than car meter (Smart #1 onboard charger losses).
+- 8000/8500W wallbox meter readings were anomalous (caught during meter transition).
+- Max effective current is 15A. To reach 16A, demand must be ≥ 11040W (`16 × 3 × 230`).
+- Adjacent demand values landing on the same integer amp produce identical output.
+
 ## 11. Revision History
 
 | Version | Date | Changes |
