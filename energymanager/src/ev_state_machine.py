@@ -26,9 +26,10 @@ logger = logging.getLogger(__name__)
 # battery-protection or low-excess exits.
 MIN_STAY_S = 15 * 60
 
-# When battery is full, allow solar charging to start at this power
-# even without enough PV excess — the battery covers the gap.
-BATTERY_FULL_START_W = 4140
+# When battery is full, start solar charging once excess reaches this
+# threshold, and charge at 3-phase minimum (4140W). Battery covers the gap.
+BATTERY_FULL_EXCESS_THRESHOLD_W = 3500
+BATTERY_FULL_CHARGE_W = 4140
 
 
 # ---------------------------------------------------------------------------
@@ -98,12 +99,14 @@ def _solar_target(
     battery_full: bool = False,
 ) -> float:
     """Compute target power for SOLAR state."""
+    # Battery full + excess in threshold–CHARGE range: lock to 3-phase min
+    if (battery_full
+            and excess >= BATTERY_FULL_EXCESS_THRESHOLD_W
+            and excess < BATTERY_FULL_CHARGE_W):
+        return BATTERY_FULL_CHARGE_W
     if excess >= min_power_w:
         target = _round_to_step(_clamp(excess, min_power_w, max_power_w))
         return resolve_phase_gap(target, battery_full)
-    # Battery full: hold BATTERY_FULL_START_W instead of min_power_w
-    if battery_full:
-        return BATTERY_FULL_START_W
     return min_power_w  # hold minimum during low-excess periods
 
 
@@ -170,21 +173,20 @@ class EVStateMachine:
             excess = _compute_excess(i)
             battery_full = i.battery_soc >= 100
 
-            # Battery full: start at BATTERY_FULL_START_W even without
-            # enough PV excess — the battery discharges to cover the gap.
-            if battery_full and excess < i.min_power_w:
-                self._set_state(EVState.SOLAR)
-                return EVOutput(EVState.SOLAR, BATTERY_FULL_START_W,
-                                f"Solar+battery charging {BATTERY_FULL_START_W}W "
-                                f"(excess {excess:.0f}W, battery full)")
+            # Entry threshold: 3500W when battery full, min_power_w otherwise
+            threshold = (BATTERY_FULL_EXCESS_THRESHOLD_W
+                         if battery_full else i.min_power_w)
 
-            if excess >= i.min_power_w:
+            if excess >= threshold:
                 self._set_state(EVState.SOLAR)
                 target = _solar_target(excess, i.min_power_w, i.max_power_w,
                                        battery_full=battery_full)
-                return EVOutput(EVState.SOLAR, target,
-                                f"Solar charging {target:.0f}W "
-                                f"(excess {excess:.0f}W)")
+                reason = (f"Solar+battery charging {target:.0f}W "
+                          f"(excess {excess:.0f}W, battery full)"
+                          if battery_full and excess < BATTERY_FULL_CHARGE_W
+                          else f"Solar charging {target:.0f}W "
+                               f"(excess {excess:.0f}W)")
+                return EVOutput(EVState.SOLAR, target, reason)
 
         # Stay NORMAL
         return EVOutput(EVState.NORMAL, 0, "No EV charging")
