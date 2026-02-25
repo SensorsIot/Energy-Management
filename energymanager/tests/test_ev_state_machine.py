@@ -5,6 +5,7 @@ Tests for 4-state EV charging state machine.
 import pytest
 
 from src.ev_state_machine import (
+    BATTERY_FULL_START_W,
     EVInputs,
     EVState,
     EVStateMachine,
@@ -191,6 +192,64 @@ class TestNormalStays:
             grid_power_w=0, wallbox_power_w=0,
         ))
         assert out.state == EVState.NORMAL
+
+
+# ===================================================================
+# Battery-full start (NORMAL → SOLAR at BATTERY_FULL_START_W)
+# ===================================================================
+
+class TestBatteryFullStart:
+    """When battery is full, start solar charging even without PV excess."""
+
+    def test_battery_full_no_excess_starts_solar(self):
+        """Battery full + no excess → enter SOLAR at BATTERY_FULL_START_W."""
+        sm = make_sm(EVState.NORMAL)
+        out = sm.step(make_inputs(
+            battery_soc=100, grid_power_w=4000, wallbox_power_w=0,
+        ))
+        # closed-loop excess: -4000 + 0 = -4000 (negative)
+        assert out.state == EVState.SOLAR
+        assert out.target_power_w == BATTERY_FULL_START_W
+        assert "battery full" in out.reason.lower()
+
+    def test_battery_not_full_no_excess_stays_normal(self):
+        """Battery not full + no excess → stay NORMAL (no change)."""
+        sm = make_sm(EVState.NORMAL)
+        out = sm.step(make_inputs(
+            battery_soc=70, pv_power_w=1000, load_power_w=3000,
+        ))
+        assert out.state == EVState.NORMAL
+        assert out.target_power_w == 0
+
+    def test_battery_full_with_excess_uses_normal_path(self):
+        """Battery full + enough excess → use normal solar target, not fixed."""
+        sm = make_sm(EVState.NORMAL)
+        out = sm.step(make_inputs(
+            battery_soc=100, grid_power_w=-5000, wallbox_power_w=0,
+        ))
+        # closed-loop excess: 5000 → normal solar path
+        assert out.state == EVState.SOLAR
+        assert out.target_power_w == 5000
+
+    def test_solar_state_holds_battery_full_start_on_low_excess(self):
+        """Already in SOLAR + battery full + low excess → hold BATTERY_FULL_START_W."""
+        sm = make_sm(EVState.SOLAR)
+        out = sm.step(make_inputs(
+            battery_soc=100, grid_power_w=3000, wallbox_power_w=500,
+        ))
+        # closed-loop excess: -3000 + 500 = -2500
+        assert out.state == EVState.SOLAR
+        assert out.target_power_w == BATTERY_FULL_START_W
+
+    def test_solar_target_battery_full_low_excess(self):
+        """_solar_target returns BATTERY_FULL_START_W when battery full and low excess."""
+        result = _solar_target(500, 1400, 11000, battery_full=True)
+        assert result == BATTERY_FULL_START_W
+
+    def test_solar_target_battery_not_full_low_excess(self):
+        """_solar_target returns min_power_w when battery not full and low excess."""
+        result = _solar_target(500, 1400, 11000, battery_full=False)
+        assert result == 1400
 
 
 # ===================================================================

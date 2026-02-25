@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 # battery-protection or low-excess exits.
 MIN_STAY_S = 15 * 60
 
+# When battery is full, allow solar charging to start at this power
+# even without enough PV excess — the battery covers the gap.
+BATTERY_FULL_START_W = 3500
+
 
 # ---------------------------------------------------------------------------
 # States
@@ -97,6 +101,9 @@ def _solar_target(
     if excess >= min_power_w:
         target = _round_to_step(_clamp(excess, min_power_w, max_power_w))
         return resolve_phase_gap(target, battery_full)
+    # Battery full: hold BATTERY_FULL_START_W instead of min_power_w
+    if battery_full:
+        return BATTERY_FULL_START_W
     return min_power_w  # hold minimum during low-excess periods
 
 
@@ -161,10 +168,20 @@ class EVStateMachine:
                 return EVOutput(EVState.NORMAL, 0,
                                 "Solar — battery protection blocks EV")
             excess = _compute_excess(i)
+            battery_full = i.battery_soc >= 100
+
+            # Battery full: start at BATTERY_FULL_START_W even without
+            # enough PV excess — the battery discharges to cover the gap.
+            if battery_full and excess < i.min_power_w:
+                self._set_state(EVState.SOLAR)
+                return EVOutput(EVState.SOLAR, BATTERY_FULL_START_W,
+                                f"Solar+battery charging {BATTERY_FULL_START_W}W "
+                                f"(excess {excess:.0f}W, battery full)")
+
             if excess >= i.min_power_w:
                 self._set_state(EVState.SOLAR)
                 target = _solar_target(excess, i.min_power_w, i.max_power_w,
-                                       battery_full=(i.battery_soc >= 100))
+                                       battery_full=battery_full)
                 return EVOutput(EVState.SOLAR, target,
                                 f"Solar charging {target:.0f}W "
                                 f"(excess {excess:.0f}W)")
