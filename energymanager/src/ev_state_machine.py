@@ -28,7 +28,7 @@ MIN_STAY_S = 15 * 60
 
 # When battery is full, allow solar charging to start at this power
 # even without enough PV excess — the battery covers the gap.
-BATTERY_FULL_START_W = 3500
+BATTERY_FULL_START_W = 4140
 
 
 # ---------------------------------------------------------------------------
