@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.35"
+__version__ = "0.9.36"
 
 import asyncio
 import json
@@ -187,7 +187,8 @@ class OCPPServer:
         self.phase_switch_entity = options.get(
             "phase_switch_entity", "switch.earu_breaker_wallbox_phase_switch"
         )
-        self.single_phase_supported = options.get("single_phase_supported", True)
+        self.wallbox_type = options.get("wallbox_type", "three_phase")
+        self.single_phase_supported = self.wallbox_type != "three_phase"
         self.power_update_interval_s = options.get("power_update_interval_s", 60)
         self.current_sensor_entity = options.get(
             "current_sensor_entity", "sensor.earu_breaker_bl0942_current"
@@ -387,6 +388,8 @@ class OCPPServer:
 
     async def _abort_phase_switch(self, reason: str):
         """Abort phase switch: disable single-phase, restore previous profile."""
+        if self.wallbox_type != "external_breaker":
+            return
         logger.warning(f"Phase switch aborted: {reason}")
         await self.ha.set_state("binary_sensor.wallbox_single_phase_supported", "off")
         self._phase_switching_disabled = True
@@ -541,19 +544,32 @@ class OCPPServer:
         # Phase switching (before setting profile)
         if (
             power_w > 0
-            and self.phase_switch_entity
             and not self._phase_switching_disabled
             and not phase_lock_active
         ):
-            if power_w < self._phase_threshold_w:
-                target_phases = 1
-            else:
-                target_phases = 3
-            await self._switch_phases(target_phases)
+            target_phases = 1 if power_w < self._phase_threshold_w else 3
+
+            if self.wallbox_type == "external_breaker" and self.phase_switch_entity:
+                # DIY: toggle relay (existing _switch_phases logic)
+                await self._switch_phases(target_phases)
+            elif (
+                self.wallbox_type == "universal"
+                and target_phases != self._current_phases
+            ):
+                # Built-in: track requested phases, wallbox handles switching
+                logger.info(
+                    f"Phase request: {self._current_phases} → {target_phases} "
+                    f"(built-in)"
+                )
+                self._current_phases = target_phases
+                self._on_status_change("phases", target_phases)
+                await self._publish_power_limits()
+                self._last_phase_switch_time = time.monotonic()
+            # three_phase: no phase switching, _current_phases stays 3
 
         # 3-phase only: below minimum (6A × 3 × 230V = 4140W) → pause
         min_power_w = self.min_current_a * 230 * self._current_phases
-        if power_w > 0 and power_w < min_power_w and not self.single_phase_supported:
+        if power_w > 0 and power_w < min_power_w and self.wallbox_type == "three_phase":
             logger.info(
                 f"Below minimum {min_power_w}W (3-phase only) → pausing (0W)"
             )
@@ -849,15 +865,15 @@ class OCPPServer:
         await self.ha.start()
         await self.ha.register_entities()
 
-        # Set single_phase_supported from config
+        # Set single_phase_supported from wallbox_type
         await self.ha.set_state(
             "binary_sensor.wallbox_single_phase_supported",
             "on" if self.single_phase_supported else "off",
         )
-        logger.info(f"Single phase supported: {self.single_phase_supported}")
+        logger.info(f"Wallbox type: {self.wallbox_type} (single_phase_supported={self.single_phase_supported})")
 
-        # Read initial relay state to sync phase count
-        if self.phase_switch_entity:
+        # Read initial relay state to sync phase count (external_breaker only)
+        if self.wallbox_type == "external_breaker" and self.phase_switch_entity:
             relay_state = await self.ha.get_state(self.phase_switch_entity)
             if relay_state == "on":
                 self._current_phases = 3

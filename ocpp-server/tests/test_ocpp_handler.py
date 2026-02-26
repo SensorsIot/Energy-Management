@@ -472,7 +472,7 @@ class TestPhaseSwitchDecision:
                 "wallbox_id": "test",
                 "power_update_interval_s": 5,
                 "phase_switch_entity": "switch.earu_relay",
-                "single_phase_supported": True,
+                "wallbox_type": "external_breaker",
                 "min_current_a": 6,
                 "max_current_a": 16,
             }
@@ -566,7 +566,7 @@ class TestPhaseSwitchSafetyAbort:
                 "wallbox_id": "test",
                 "power_update_interval_s": 5,
                 "phase_switch_entity": "switch.earu_relay",
-                "single_phase_supported": True,
+                "wallbox_type": "external_breaker",
                 "min_current_a": 6,
                 "max_current_a": 16,
             }
@@ -974,7 +974,7 @@ class TestPhaseTimeLock:
                 "wallbox_id": "test",
                 "power_update_interval_s": 5,
                 "phase_switch_entity": "switch.earu_relay",
-                "single_phase_supported": True,
+                "wallbox_type": "external_breaker",
                 "min_current_a": 6,
                 "max_current_a": 16,
             }
@@ -1291,3 +1291,171 @@ class TestMeterValuesEvent:
         )
 
         assert handler.meter_values_event.is_set()
+
+
+class TestThreePhaseOnly:
+    """Tests for wallbox_type='three_phase' — no phase switching, below-min → 0W."""
+
+    @pytest.fixture
+    def server(self):
+        """Create an OCPPServer with three_phase wallbox type."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+                "wallbox_type": "three_phase",
+                "min_current_a": 6,
+                "max_current_a": 16,
+            }
+        )
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.set_charging_power = AsyncMock()
+        cp.current_power_w = 0
+        cp.current_status = "SuspendedEVSE"
+        srv.charge_point = cp
+
+        return srv
+
+    def test_single_phase_not_supported(self, server):
+        """three_phase type should report single_phase_supported=False."""
+        assert server.single_phase_supported is False
+
+    @pytest.mark.asyncio
+    async def test_below_minimum_pauses(self, server):
+        """Power below 4140W (6A×3×230V) should be clamped to 0W."""
+        await server._send_power_to_wallbox(3000.0)
+
+        server.charge_point.set_charging_power.assert_awaited()
+        # Should have sent 0W (paused)
+        call_args = server.charge_point.set_charging_power.call_args
+        assert call_args.args[0] == 0 or call_args.kwargs.get("power_w") == 0
+
+    @pytest.mark.asyncio
+    async def test_above_minimum_sends_power(self, server):
+        """Power >= 4140W should be sent as-is."""
+        await server._send_power_to_wallbox(5000.0)
+
+        server.charge_point.set_charging_power.assert_awaited_with(
+            5000.0, num_phases=3
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_phase_switching(self, server):
+        """three_phase should never call relay service."""
+        server._current_phases = 3
+
+        await server._send_power_to_wallbox(2000.0)
+
+        relay_calls = [
+            c
+            for c in server.ha.call_service.call_args_list
+            if c.args[0] == "switch"
+        ]
+        assert relay_calls == []
+        assert server._current_phases == 3
+
+    @pytest.mark.asyncio
+    async def test_abort_phase_switch_noop(self, server):
+        """_abort_phase_switch should be a no-op for three_phase."""
+        server._current_phases = 1  # hypothetical
+        await server._abort_phase_switch("test reason")
+
+        # Should not have changed anything (guard returns early)
+        assert server._phase_switching_disabled is False
+
+
+class TestUniversalWallbox:
+    """Tests for wallbox_type='universal' — built-in phase switching."""
+
+    @pytest.fixture
+    def server(self):
+        """Create an OCPPServer with universal wallbox type."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+                "wallbox_type": "universal",
+                "min_current_a": 6,
+                "max_current_a": 16,
+            }
+        )
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.set_charging_power = AsyncMock()
+        cp.current_power_w = 0
+        cp.current_status = "SuspendedEVSE"
+        srv.charge_point = cp
+
+        return srv
+
+    def test_single_phase_supported(self, server):
+        """universal type should report single_phase_supported=True."""
+        assert server.single_phase_supported is True
+
+    @pytest.mark.asyncio
+    async def test_low_power_tracks_1_phase(self, server):
+        """Power < threshold should track 1-phase without relay toggle."""
+        server._current_phases = 3
+
+        await server._send_power_to_wallbox(3000.0)
+
+        assert server._current_phases == 1
+        # No relay service call
+        relay_calls = [
+            c
+            for c in server.ha.call_service.call_args_list
+            if c.args[0] == "switch"
+        ]
+        assert relay_calls == []
+
+    @pytest.mark.asyncio
+    async def test_high_power_tracks_3_phase(self, server):
+        """Power >= threshold should track 3-phase without relay toggle."""
+        server._current_phases = 1
+
+        await server._send_power_to_wallbox(5000.0)
+
+        assert server._current_phases == 3
+        relay_calls = [
+            c
+            for c in server.ha.call_service.call_args_list
+            if c.args[0] == "switch"
+        ]
+        assert relay_calls == []
+
+    @pytest.mark.asyncio
+    async def test_same_phase_no_update(self, server):
+        """Already on correct phase count should not re-publish."""
+        server._current_phases = 3
+        server.ha.set_state.reset_mock()
+
+        await server._send_power_to_wallbox(5000.0)
+
+        # Should not have published phases (no change)
+        phase_calls = [
+            c
+            for c in server.ha.set_state.call_args_list
+            if c.args[0] == "sensor.wallbox_phases"
+        ]
+        assert phase_calls == []
