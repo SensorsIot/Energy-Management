@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.28"
+__version__ = "0.9.27"
 
 import asyncio
 import json
@@ -21,7 +21,7 @@ import aiohttp
 import aiomqtt
 import websockets
 
-from src.ha_entities import BINARY_SENSORS, BUTTONS, CONTROLS, SENSORS
+from src.ha_entities import BINARY_SENSORS, CONTROLS, SENSORS
 from src.ocpp_handler import ChargePointHandler
 
 # Configure logging
@@ -172,11 +172,6 @@ class HAEntityManager:
             existing = await self.get_state(entity_id)
             state = existing if existing is not None else defn.get("initial_state", 0)
             await self.set_state(entity_id, state, attrs)
-
-        # Buttons (input_boolean): always reset to off
-        for entity_id, defn in BUTTONS.items():
-            attrs = {k: v for k, v in defn.items() if k not in ("initial_state",)}
-            await self.set_state(entity_id, "off", attrs)
 
         logger.info("Registered HA entities (preserved existing sensor states)")
 
@@ -688,21 +683,6 @@ class OCPPServer:
                         )
                         await self._send_power_to_wallbox(self._last_sent_power_w)
                         self._resend_retry_count += 1
-
-                # Stop transaction button (input_boolean — toggle on to fire)
-                stop_state = await self.ha.get_state(
-                    "input_boolean.wallbox_stop_transaction"
-                )
-                if stop_state == "on" and self.charge_point:
-                    logger.info("Stop transaction button pressed")
-                    await self.ha.set_state(
-                        "input_boolean.wallbox_stop_transaction", "off"
-                    )
-                    ok = await self.charge_point.remote_stop()
-                    if ok:
-                        logger.info("RemoteStopTransaction accepted by wallbox")
-                    else:
-                        logger.warning("RemoteStopTransaction rejected by wallbox")
 
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")
