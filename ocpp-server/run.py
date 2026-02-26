@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.27"
+__version__ = "0.9.29"
 
 import asyncio
 import json
@@ -230,6 +230,9 @@ class OCPPServer:
         self._cloud_charging_entity: str = options.get("cloud_charging_entity", "")
         self._cloud_poll_task: Optional[asyncio.Task] = None
         self._synthesized_suspended_ev: bool = False
+
+        # Keep-alive pulse for paused transactions
+        self._keepalive_last_pulse: float = 0.0
 
         # Synchronization: _watch_controls waits until _post_connect_setup finishes
         self._setup_complete = asyncio.Event()
@@ -583,6 +586,8 @@ class OCPPServer:
 
         self._pending_power_w = None
         self._last_sent_power_w = power_w
+        if power_w > 0:
+            self._keepalive_last_pulse = 0.0
         logger.info(f"Sent power profile: {power_w}W")
 
     async def _sync_ha_state(self):
@@ -683,6 +688,30 @@ class OCPPServer:
                         )
                         await self._send_power_to_wallbox(self._last_sent_power_w)
                         self._resend_retry_count += 1
+
+                # Keep-alive pulse: briefly charge to keep transaction alive while paused
+                if (
+                    self._last_sent_power_w == 0
+                    and self.charge_point
+                    and self.charge_point.transaction_id is not None
+                    and (time.monotonic() - self._keepalive_last_pulse) >= 60
+                ):
+                    min_power_w = self.min_current_a * 230 * self._current_phases
+                    logger.info(
+                        f"Keep-alive pulse: sending {min_power_w}W for 10s"
+                    )
+                    await self.charge_point.set_charging_power(
+                        min_power_w, num_phases=self._current_phases
+                    )
+                    await asyncio.sleep(10)
+                    await self.charge_point.set_charging_power(
+                        0, num_phases=self._current_phases
+                    )
+                    if self.charge_point:
+                        self.charge_point.current_power_w = 0
+                        self._on_status_change("power_w", 0)
+                    self._keepalive_last_pulse = time.monotonic()
+                    logger.info("Keep-alive pulse complete, reverted to 0W")
 
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")
