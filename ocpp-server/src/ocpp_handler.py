@@ -292,6 +292,21 @@ class ChargePointHandler(CP):
         logger.info(f"RemoteStartTransaction response: {response.status}")
         return response.status == "Accepted"
 
+    async def remote_stop(self):
+        """Stop charging remotely (experimental — test wallbox behavior)."""
+        if self.transaction_id is None:
+            logger.warning("RemoteStopTransaction: no active transaction")
+            return False
+        logger.info(
+            f"Sending RemoteStopTransaction (transaction_id={self.transaction_id})"
+        )
+        request = call.RemoteStopTransaction(
+            transaction_id=self.transaction_id,
+        )
+        response = await self.call(request)
+        logger.info(f"RemoteStopTransaction response: {response.status}")
+        return response.status == "Accepted"
+
     async def trigger_meter_values(self):
         """Request immediate MeterValues from wallbox."""
         logger.info("Sending TriggerMessage for MeterValues")

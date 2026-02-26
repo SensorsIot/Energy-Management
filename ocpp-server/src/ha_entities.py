@@ -112,9 +112,19 @@ CONTROLS = {
     },
 }
 
+BUTTONS = {
+    "input_boolean.wallbox_stop_transaction": {
+        "name": "Wallbox Stop Transaction",
+        "unique_id": "ocpp_wallbox_stop_transaction",
+        "icon": "mdi:stop-circle-outline",
+        "initial_state": False,
+    },
+}
+
 # All entities grouped for registration
 ALL_ENTITIES = {
     "sensors": SENSORS,
     "binary_sensors": BINARY_SENSORS,
     "controls": CONTROLS,
+    "buttons": BUTTONS,
 }
