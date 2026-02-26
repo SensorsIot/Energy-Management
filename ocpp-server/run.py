@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.33"
+__version__ = "0.9.34"
 
 import asyncio
 import json
@@ -698,11 +698,11 @@ class OCPPServer:
                         self._resend_retry_count += 1
                         self._last_change_at = time.monotonic()
 
-                # Keep-alive pulse: briefly charge to keep transaction alive while paused
+                # Keep-alive pulse: briefly charge to keep session alive while paused
                 if (
                     self._last_sent_power_w == 0
                     and self.charge_point
-                    and self.charge_point.transaction_id is not None
+                    and self.charge_point.current_status == "SuspendedEVSE"
                     and (time.monotonic() - self._keepalive_last_pulse) >= 60
                 ):
                     min_power_w = self.min_current_a * 230 * self._current_phases
