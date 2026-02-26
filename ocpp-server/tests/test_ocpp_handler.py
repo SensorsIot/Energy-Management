@@ -161,8 +161,8 @@ class TestSetChargingPowerAmps:
             profile = mock_call.call_args[0][0].cs_charging_profiles
             schedule = profile["charging_schedule"]
             assert schedule["charging_rate_unit"] == "A"
-            # 6400 / (3 * 230) = 9.2753... → rounded to 9.28
-            assert schedule["charging_schedule_period"][0]["limit"] == 9.28
+            # 6400 / (3 * 230) = 9.2753... → rounded to 9.3 (OCPP requires 0.1 multiple)
+            assert schedule["charging_schedule_period"][0]["limit"] == 9.3
 
     @pytest.mark.asyncio
     async def test_zero_power(self, handler):
