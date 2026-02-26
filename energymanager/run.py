@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.40"
+__version__ = "1.6.41"
 
 import json
 import logging
@@ -677,8 +677,8 @@ class EnergyManager:
             # User power slider
             user_limit = self.ha_client.get_sensor_value(self.ev_power_limit_entity)
             max_power = (
-                user_limit
-                if user_limit and user_limit > 0
+                int(user_limit)
+                if user_limit is not None
                 else ev_max_power
             )
 
