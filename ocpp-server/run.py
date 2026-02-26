@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.30"
+__version__ = "0.9.31"
 
 import asyncio
 import json
@@ -550,6 +550,14 @@ class OCPPServer:
             else:
                 target_phases = 3
             await self._switch_phases(target_phases)
+
+        # 3-phase only: below minimum (6A × 3 × 230V = 4140W) → pause
+        min_power_w = self.min_current_a * 230 * self._current_phases
+        if power_w > 0 and power_w < min_power_w and not self.single_phase_supported:
+            logger.info(
+                f"Below minimum {min_power_w}W (3-phase only) → pausing (0W)"
+            )
+            power_w = 0
 
         if power_w > 0 and self.charge_point.transaction_id is None:
             # No transaction yet — send profile first, then start

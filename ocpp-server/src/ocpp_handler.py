@@ -250,7 +250,7 @@ class ChargePointHandler(CP):
             num_phases: Number of phases (1 or 3)
         """
         limit_w = max(0, power_w)
-        limit_a = round(limit_w / (num_phases * 230), 1)
+        limit_a = limit_w / (num_phases * 230)
 
         logger.info(
             f"Setting charging power: {limit_w:.0f}W → {limit_a:.1f}A "
