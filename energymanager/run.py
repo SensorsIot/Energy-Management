@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.42"
+__version__ = "1.6.43"
 
 import json
 import logging
@@ -26,6 +26,7 @@ from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
 from src.appliance_signal import calculate_appliance_signal
 from src.ev_state_machine import EVStateMachine, EVInputs, EVState
+from src.ev_strategy import EVChargingStrategy
 from src.influxdb_writer import SimulationWriter
 from src.integration_observer import CycleSnapshot, IntegrationObserver
 from src.notifications import init_telegram, notify_error
@@ -186,6 +187,15 @@ class EnergyManager:
         self.ev_target_power_entity = ev_opts.get("ev_target_power_entity", "sensor.ev_target_power")
         self._last_ev_power_limit = None
         self._ev_sm = EVStateMachine()
+        self._ev_strategy = EVChargingStrategy(optimizer=self.optimizer)
+        self._ev_strategy_power_w: float = 0.0
+        self.ev_min_solar_power_entity = ev_opts.get(
+            "min_solar_power_entity", "input_number.ev_min_solar_power"
+        )
+        self.ev_phases = ev_opts.get("phases", 3)
+        self.ev_min_amps = ev_opts.get("min_current_a", 6)
+        self.ev_max_amps = ev_opts.get("max_current_a", 16)
+        self.ev_protection_soc = ev_opts.get("protection_soc_percent", 80)
 
         # Charging mode config (FSD 4.5.4)
         self.ev_power_limit_entity = ev_opts.get(
@@ -477,6 +487,24 @@ class EnergyManager:
             # (checks if battery has enough energy to run appliance without grid import)
             self.calculate_appliance_signal(current_soc, sim_no_strategy)
 
+            # EV charging strategy (FSD 4.5.7)
+            if self.ev_charging_enabled:
+                min_solar = self.ha_client.get_sensor_value(self.ev_min_solar_power_entity) or 3500
+                result = self._ev_strategy.calculate(
+                    current_soc=current_soc,
+                    forecast=forecast,
+                    now=now,
+                    min_solar_power_w=min_solar,
+                    min_amps=self.ev_min_amps,
+                    max_amps=self.ev_max_amps,
+                    phases=self.ev_phases,
+                    protection_soc_percent=self.ev_protection_soc,
+                )
+                self._ev_strategy_power_w = result.power_w
+                logger.info(
+                    f"EV strategy: {result.power_w:.0f}W ({result.amps}A) — {result.reason}"
+                )
+
         except Exception as e:
             logger.error(f"Optimization failed: {e}", exc_info=True)
 
@@ -724,6 +752,7 @@ class EnergyManager:
                 load_power_w=load_power,
                 min_power_w=ev_min_power,
                 max_power_w=max_power,
+                ev_strategy_power_w=self._ev_strategy_power_w,
             )
             prev_ev_state = self._ev_sm.state
             output = self._ev_sm.step(inputs)

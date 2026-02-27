@@ -18,18 +18,11 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
-from src.ev_charging import resolve_phase_gap
-
 logger = logging.getLogger(__name__)
 
 # Minimum time (seconds) to stay in SOLAR before allowing
 # battery-protection or low-excess exits.
 MIN_STAY_S = 15 * 60
-
-# When battery is full, start solar charging once excess reaches this
-# threshold, and charge at 3-phase minimum (4140W). Battery covers the gap.
-BATTERY_FULL_EXCESS_THRESHOLD_W = 3500
-BATTERY_FULL_CHARGE_W = 4140
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +58,7 @@ class EVInputs:
     load_power_w: float               # current household load (W)
     min_power_w: float                # default 1400W
     max_power_w: float                # default 11000W
+    ev_strategy_power_w: float = 0.0  # from EVChargingStrategy (0 = don't charge)
 
 
 @dataclass
@@ -73,42 +67,6 @@ class EVOutput:
     state: EVState
     target_power_w: float
     reason: str
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _round_to_step(value: float, step: float = 100) -> float:
-    """Round to nearest step (matches wallbox_power_limit step size)."""
-    return round(value / step) * step
-
-
-def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(lo, min(value, hi))
-
-
-def _compute_excess(i: EVInputs) -> float:
-    """Dual excess formula: closed-loop when battery full, open-loop otherwise."""
-    if i.battery_soc >= 100:
-        return -i.grid_power_w + i.wallbox_power_w      # closed-loop
-    return i.surplus_power_w                              # open-loop
-
-
-def _solar_target(
-    excess: float, min_power_w: float, max_power_w: float,
-    battery_full: bool = False,
-) -> float:
-    """Compute target power for SOLAR state."""
-    # Battery full + excess in threshold–CHARGE range: lock to 3-phase min
-    if (battery_full
-            and excess >= BATTERY_FULL_EXCESS_THRESHOLD_W
-            and excess < BATTERY_FULL_CHARGE_W):
-        return BATTERY_FULL_CHARGE_W
-    if excess >= min_power_w:
-        target = _round_to_step(_clamp(excess, min_power_w, max_power_w))
-        return resolve_phase_gap(target, battery_full)
-    return min_power_w  # hold minimum during low-excess periods
 
 
 # ---------------------------------------------------------------------------
@@ -171,23 +129,10 @@ class EVStateMachine:
             if not i.battery_protection_passed:
                 return EVOutput(EVState.NORMAL, 0,
                                 "Solar — battery protection blocks EV")
-            excess = _compute_excess(i)
-            battery_full = i.battery_soc >= 100
-
-            # Entry threshold: 3500W when battery full, min_power_w otherwise
-            threshold = (BATTERY_FULL_EXCESS_THRESHOLD_W
-                         if battery_full else i.min_power_w)
-
-            if excess >= threshold:
+            if i.ev_strategy_power_w > 0:
                 self._set_state(EVState.SOLAR)
-                target = _solar_target(excess, i.min_power_w, i.max_power_w,
-                                       battery_full=battery_full)
-                reason = (f"Solar+battery charging {target:.0f}W "
-                          f"(excess {excess:.0f}W, battery full)"
-                          if battery_full and excess < BATTERY_FULL_CHARGE_W
-                          else f"Solar charging {target:.0f}W "
-                               f"(excess {excess:.0f}W)")
-                return EVOutput(EVState.SOLAR, target, reason)
+                return EVOutput(EVState.SOLAR, i.ev_strategy_power_w,
+                                f"Solar charging {i.ev_strategy_power_w:.0f}W (strategy)")
 
         # Stay NORMAL
         return EVOutput(EVState.NORMAL, 0, "No EV charging")
@@ -209,8 +154,6 @@ class EVStateMachine:
             return EVOutput(EVState.NORMAL, 0,
                             "Solar — battery protection blocks EV")
 
-        excess = _compute_excess(i)
-
         # S3: user switched to immediate
         if i.charging_mode == "immediate":
             self._set_state(EVState.IMMEDIATE)
@@ -226,12 +169,13 @@ class EVStateMachine:
                       else "Cheap mode — waiting for cheap tariff")
             return EVOutput(EVState.CHEAP, power, reason)
 
-        # Stay in SOLAR — compute power
-        target = _solar_target(excess, i.min_power_w, i.max_power_w,
-                               battery_full=(i.battery_soc >= 100))
-        return EVOutput(EVState.SOLAR, target,
-                        f"Solar charging {target:.0f}W "
-                        f"(excess {excess:.0f}W)")
+        # Stay in SOLAR — use strategy power
+        if i.ev_strategy_power_w > 0:
+            return EVOutput(EVState.SOLAR, i.ev_strategy_power_w,
+                            f"Solar charging {i.ev_strategy_power_w:.0f}W (strategy)")
+        else:
+            self._set_state(EVState.NORMAL)
+            return EVOutput(EVState.NORMAL, 0, "Solar — strategy says stop")
 
     # -------------------------------------------------------------------
     # CHEAP

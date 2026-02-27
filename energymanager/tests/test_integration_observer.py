@@ -38,6 +38,7 @@ def _make_inputs(**overrides) -> EVInputs:
         load_power_w=3000.0,
         min_power_w=1400.0,
         max_power_w=11000.0,
+        ev_strategy_power_w=0.0,
     )
     defaults.update(overrides)
     return EVInputs(**defaults)
