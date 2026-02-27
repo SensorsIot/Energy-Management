@@ -25,7 +25,7 @@ def make_inputs(**overrides) -> EVInputs:
     """Create EVInputs with sensible defaults for solar-mode happy path.
 
     Defaults produce consistent excess of 5000W via both formulas:
-      open-loop:  pv_power_w(8000) - load_power_w(3000) = 5000
+      open-loop:  surplus_power_w(5000) = 5000
       closed-loop: -grid_power_w(-5000) + wallbox_power_w(0) = 5000
     battery_soc defaults to 70 → open-loop path.
     """
@@ -39,6 +39,7 @@ def make_inputs(**overrides) -> EVInputs:
         charging_mode="solar",
         is_cheap_tariff=False,
         grid_power_w=-5000.0,
+        surplus_power_w=5000.0,
         pv_power_w=8000.0,
         load_power_w=3000.0,
         min_power_w=1400.0,
@@ -139,7 +140,8 @@ class TestDualExcessFormula:
         out = sm.step(make_inputs(
             battery_soc=70,
             grid_power_w=-100, wallbox_power_w=1400,  # closed-loop: 1500
-            pv_power_w=7000, load_power_w=1000,        # open-loop: 6000
+            surplus_power_w=6000,                        # open-loop: 6000
+            pv_power_w=7000, load_power_w=1000,
         ))
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 6000
@@ -189,6 +191,7 @@ class TestNormalStays:
     def test_stays_solar_excess_below_min(self):
         sm = make_sm(EVState.NORMAL)
         out = sm.step(make_inputs(
+            surplus_power_w=0,
             pv_power_w=1000, load_power_w=1000,  # open-loop: 0
             grid_power_w=0, wallbox_power_w=0,
         ))
@@ -226,7 +229,8 @@ class TestBatteryFullStart:
         """Battery not full + 3600W excess → stay NORMAL (below min_power_w=4140 on 3-phase)."""
         sm = make_sm(EVState.NORMAL)
         out = sm.step(make_inputs(
-            battery_soc=70, pv_power_w=6600, load_power_w=3000,
+            battery_soc=70, surplus_power_w=3600,
+            pv_power_w=6600, load_power_w=3000,
             min_power_w=4140,
         ))
         # open-loop excess: 3600 < 4140 min
@@ -346,7 +350,7 @@ class TestSolarStays:
     def test_stays_with_low_excess_holds_minimum(self):
         """When excess < min_power_w, output min_power_w (hold minimum)."""
         sm = make_sm(EVState.SOLAR)
-        out = sm.step(make_inputs(pv_power_w=1500, load_power_w=1200))  # open-loop: 300
+        out = sm.step(make_inputs(surplus_power_w=300, pv_power_w=1500, load_power_w=1200))
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 1400  # min_power_w
 
@@ -521,6 +525,7 @@ class TestMinStayTimer:
         sm = make_sm(EVState.SOLAR, now=_T0)
         sm._time_fn = lambda: _T0 + 60  # 1 min in
         out = sm.step(make_inputs(
+            surplus_power_w=300,
             pv_power_w=1500, load_power_w=1200,  # open-loop: 300 < 1400
         ))
         assert out.state == EVState.SOLAR
@@ -555,18 +560,18 @@ class TestMinStayTimer:
 class TestSolarPower:
     def test_clamp_to_min(self):
         sm = make_sm(EVState.SOLAR)
-        out = sm.step(make_inputs(pv_power_w=4400, load_power_w=3000))  # open-loop: 1400
+        out = sm.step(make_inputs(surplus_power_w=1400, pv_power_w=4400, load_power_w=3000))
         assert out.target_power_w == 1400
 
     def test_clamp_to_max(self):
         sm = make_sm(EVState.SOLAR)
-        out = sm.step(make_inputs(pv_power_w=18000, load_power_w=3000))  # open-loop: 15000
+        out = sm.step(make_inputs(surplus_power_w=15000, pv_power_w=18000, load_power_w=3000))
         assert out.target_power_w == 11000
 
     def test_round_to_step(self):
         sm = make_sm(EVState.SOLAR)
         # open-loop: 4680 → round(4680/100)*100 = 4700
-        out = sm.step(make_inputs(pv_power_w=7680, load_power_w=3000))
+        out = sm.step(make_inputs(surplus_power_w=4680, pv_power_w=7680, load_power_w=3000))
         assert out.target_power_w == 4700
 
     def test_excess_includes_wallbox_power_closed_loop(self):
@@ -581,13 +586,13 @@ class TestSolarPower:
 
     def test_low_excess_holds_minimum(self):
         sm = make_sm(EVState.SOLAR)
-        out = sm.step(make_inputs(pv_power_w=3500, load_power_w=3200))  # open-loop: 300
+        out = sm.step(make_inputs(surplus_power_w=300, pv_power_w=3500, load_power_w=3200))
         assert out.target_power_w == 1400
 
     def test_custom_min(self):
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(
-            pv_power_w=5000, load_power_w=3000, min_power_w=2500,
+            surplus_power_w=2000, pv_power_w=5000, load_power_w=3000, min_power_w=2500,
         ))
         # open-loop: 2000 < min=2500 → hold minimum
         assert out.target_power_w == 2500
@@ -595,7 +600,7 @@ class TestSolarPower:
     def test_custom_max(self):
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(
-            pv_power_w=15000, load_power_w=3000, max_power_w=8000,
+            surplus_power_w=12000, pv_power_w=15000, load_power_w=3000, max_power_w=8000,
         ))
         # open-loop: 12000, clamped to 8000
         assert out.target_power_w == 8000
@@ -644,7 +649,7 @@ class TestMultiStep:
         sm = EVStateMachine(time_fn=lambda: t[0])
 
         # Start NORMAL — no excess
-        out = sm.step(make_inputs(pv_power_w=1000, load_power_w=1000))
+        out = sm.step(make_inputs(surplus_power_w=0, pv_power_w=1000, load_power_w=1000))
         assert out.state == EVState.NORMAL
 
         # Excess appears → SOLAR
@@ -655,7 +660,8 @@ class TestMultiStep:
         out = sm.step(make_inputs(charging_mode="cheap"))
         assert out.state == EVState.CHEAP
         out = sm.step(make_inputs(
-            charging_mode="solar", pv_power_w=1000, load_power_w=1000,
+            charging_mode="solar", surplus_power_w=0,
+            pv_power_w=1000, load_power_w=1000,
         ))
         assert out.state == EVState.NORMAL
 

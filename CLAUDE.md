@@ -88,8 +88,10 @@ pip install -r requirements-dev.txt
 - HA entities created via REST API (`POST /api/states/`), not platform-backed services
 - Wallbox power limit set via `set_sensor_state`, not `number.set_value` (REST-created entity)
 - Grid power: prefer M-Bus smart meter (`sensor.grid_power`) if fresh (<30s), fallback to Huawei DTSU
-- EV solar excess is closed-loop: `excess = -grid_power + wallbox_power`
-- Battery protection: block EV if forecast SOC at 21:00 < 80%
+- EV solar charging uses forecast-based strategy: SOC simulation with wallbox load to find optimal amp level
+- Battery is the buffer: covers gap between coarse amp steps (690W on 3-phase) and actual surplus
+- EV solar entry uses `sensor.surplus_power` (= solar - house_load); no closed-loop formula
+- Battery protection: dynamic target = min(80%, baseline SOC at 21:00 without EV)
 - Version bumps: update both `config.yaml` version field and `run.py` `__version__`
 - **Every add-on change requires a version bump before commit/push.** Bump the patch version in both `config.yaml` and `run.py` for the affected add-on. Without a version bump, HA Supervisor won't detect the update and `ha addons rebuild` will use stale code.
 

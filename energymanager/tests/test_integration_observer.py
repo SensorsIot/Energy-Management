@@ -33,6 +33,7 @@ def _make_inputs(**overrides) -> EVInputs:
         charging_mode="solar",
         is_cheap_tariff=False,
         grid_power_w=-5000.0,
+        surplus_power_w=5000.0,
         pv_power_w=8000.0,
         load_power_w=3000.0,
         min_power_w=1400.0,

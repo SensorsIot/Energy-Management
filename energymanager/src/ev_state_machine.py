@@ -60,6 +60,7 @@ class EVInputs:
     charging_mode: str                # "solar" / "immediate" / "cheap"
     is_cheap_tariff: bool
     grid_power_w: float
+    surplus_power_w: float             # solar surplus (PV - house load) (W)
     pv_power_w: float                 # current PV production (W)
     load_power_w: float               # current household load (W)
     min_power_w: float                # default 1400W
@@ -91,7 +92,7 @@ def _compute_excess(i: EVInputs) -> float:
     """Dual excess formula: closed-loop when battery full, open-loop otherwise."""
     if i.battery_soc >= 100:
         return -i.grid_power_w + i.wallbox_power_w      # closed-loop
-    return i.pv_power_w - i.load_power_w                 # open-loop
+    return i.surplus_power_w                              # open-loop
 
 
 def _solar_target(

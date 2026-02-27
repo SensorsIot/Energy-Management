@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.24
+**Version:** 2.25
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -217,9 +217,11 @@ Without correction: -4300 W  (SUN2000 would think grid is exporting)
 
 | Entity ID | Description | Controller Use |
 |-----------|-------------|---------|
-| `sensor.load_power` | House consumption (calculated) | **Critical: Load input** |
+| `sensor.house_load_power` | House consumption (Shelly 3EM, 3-phase sum) | **Critical: Load input** |
+| `sensor.total_load_power` | Total consumption incl. wallbox (house + EV) | Display on Fire tablet |
+| `sensor.surplus_power` | Solar surplus (solar - house_load) | EV strategy input |
 
-**Note:** `sensor.load_power` is calculated by the Huawei Solar integration:
+**Note:** `sensor.house_load_power` is the sum of Shelly 3EM phase measurements (template sensor `load_total_power` renamed in entity registry). The Huawei Solar integration also calculates a load value:
 ```
 load = solar_pv_total_ac_power - power_meter_active_power + battery_charge_discharge_power
 ```
@@ -330,7 +332,7 @@ Grid Power = PV Production - Load + Battery Discharge - Battery Charge
 
 Where:
   PV Production = sensor.inverter_active_power + sensor.enphase_energy_power
-  Load = sensor.load_power (calculated) or sum of Shelly 3EM phases (measured)
+  Load = sensor.house_load_power (Shelly 3EM 3-phase sum)
   Battery = sensor.battery_charge_discharge_power (+ = discharge, - = charge)
 ```
 
@@ -393,7 +395,7 @@ All power values follow a consistent sign convention. The canonical reference ta
 | Grid power | `sensor.power_meter_active_power` | Export (to grid) | Import (from grid) | −11 000 … +11 000 W |
 | Battery power | `sensor.battery_charge_discharge_power` | Discharge (to house) | Charge (from PV/grid) | −5 000 … +5 000 W |
 | PV production | `sensor.solar_pv_total_ac_power` | Generation | *(never negative)* | 0 … 12 000 W |
-| House load | `sensor.load_power` | Consumption | *(never negative)* | 0 … 10 000 W |
+| House load | `sensor.house_load_power` | Consumption | *(never negative)* | 0 … 10 000 W |
 | Wallbox power | `sensor.wallbox_power` | Consumption | *(never negative)* | 0 … 11 000 W |
 | Net energy (forecast) | calculated `net_energy_wh` | Surplus (PV > Load) | Deficit (PV < Load) | — |
 | Excess power (EV) | calculated | Available for EV | Grid import needed | — |
@@ -811,7 +813,7 @@ def load_config(config_path: str) -> dict:
 | `influxdb.org` | energymanagement | InfluxDB organization |
 | `influxdb.source_bucket` | HomeAssistant | Bucket with historical load data |
 | `influxdb.target_bucket` | load_forecast | Output bucket name |
-| `load_sensor.entity_id` | sensor.load_power | HA entity ID for load power |
+| `load_sensor.entity_id` | sensor.house_load_power | HA entity ID for load power |
 | `forecast.history_days` | 90 | Days of history for profile |
 | `forecast.horizon_hours` | 48 | Forecast horizon (hours) |
 | `schedule.cron` | 15 * * * * | Cron schedule for forecast runs |
@@ -1374,12 +1376,7 @@ from(bucket: "HomeAssistant")
   |> aggregateWindow(every: 15m, fn: mean)
 ```
 
-**Important:** The `sensor.load_power` entity in Home Assistant is calculated by the Huawei Solar integration:
-```
-load = solar_pv_total_ac_power - power_meter_active_power + battery_charge_discharge_power
-```
-
-For more accurate measurements, Shelly 3EM phase sensors can be used as an alternative.
+**Important:** `sensor.house_load_power` is the Shelly 3EM 3-phase sum (direct measurement, template sensor `load_total_power`). The Huawei Solar integration also calculates a load value (`inverter_active_power - power_meter_active_power + battery_charge_discharge_power`) but the Shelly measurement is preferred for accuracy.
 
 ## 3.8 Source Files
 
@@ -1930,7 +1927,7 @@ The state machine controls **only the wallbox charging setpoint** (power in watt
 | # | State | What happens | Output |
 |---|-------|-------------|--------|
 | 1 | **NORMAL** | No EV charging. SUN2000 has full control. | `target_power=0` |
-| 2 | **SOLAR** | Variable power from solar excess. | `target_power=clamp(excess, min, max)` where excess = `measured_excess_w` if battery full, else `solar_excess_w` |
+| 2 | **SOLAR** | Forecast-based solar charging. Battery acts as buffer. | `target_power` = optimal amp step from SOC simulation (see 4.5.7) |
 | 3 | **CHEAP** | Cheap-tariff mode. Charges at max during cheap tariff, pauses during expensive. Battery discharge blocked while charging. | `max_power_w` when cheap, `0` when expensive |
 | 4 | **IMMEDIATE** | Immediate mode. Charging at maximum power regardless of tariff. Battery discharge blocked while charging. | `target_power=max_power_w` |
 
@@ -1950,7 +1947,7 @@ The machine stays in its current state unless one of the listed conditions trigg
 |---|-----------|-------------|
 | N1 | `charging_mode == "immediate" AND wallbox_available` | IMMEDIATE |
 | N2 | `charging_mode == "cheap" AND wallbox_available` | CHEAP |
-| N3 | `charging_mode == "solar" AND wallbox_available AND solar_excess_w >= min_power_w` | SOLAR |
+| N3 | `charging_mode == "solar" AND wallbox_available AND ev_strategy_power_w > 0` | SOLAR |
 
 ---
 
@@ -1965,18 +1962,11 @@ The machine stays in its current state unless one of the listed conditions trigg
 | S3 | `charging_mode == "cheap"` | CHEAP | User switched mode |
 
 **Power while in SOLAR:**
-```
-if battery_soc >= 100:
-    # Battery full — grid meter reflects true excess (closed-loop)
-    excess = -grid_power_w + wallbox_power_w          # measured_excess_w
-else:
-    # Battery charging — SUN2000 hides available power (open-loop)
-    excess = pv_power_w - household_load_w             # solar_excess_w
 
-if excess >= min_power_w:
-    target = round_to_step(clamp(excess, min_power_w, max_power_w), 100)
-else:
-    target = 0                 # pause until excess recovers
+The target power is determined by the EV Charging Strategy (Section 4.5.7), which runs every 15 minutes as part of the optimization cycle. The strategy uses SOC simulation to find the optimal wallbox amp level. Between strategy runs, the last computed target is held.
+
+```
+target_power_w = ev_strategy_power_w   # from Section 4.5.7
 ```
 
 ---
@@ -2011,17 +2001,13 @@ Power toggles internally: `max_power_w` when `is_cheap_tariff`, `0` when expensi
 
 Single boolean: wallbox entity exists AND WebSocket connected AND not faulted AND car plugged in (status != "Available").
 
-**`solar_excess_w`** (open-loop)
+**`surplus_power_w`**
 
-Calculated each cycle: `solar_excess_w = pv_power_w - household_load_w`. Includes power currently charging the battery. Used for entry decision (N3) because SUN2000 will automatically reduce battery charging when EV demand appears.
+Read from `sensor.surplus_power` (HA template sensor): `solar_pv_total_ac_power - house_load_power`. Represents instantaneous solar surplus available for EV charging. The battery acts as a buffer — it absorbs or provides the difference between this surplus and the actual wallbox power (which must be a full-amp step).
 
-**`measured_excess_w`** (closed-loop)
+**`ev_strategy_power_w`**
 
-Calculated each cycle: `measured_excess_w = -grid_power_w + wallbox_power_w`. What the grid meter actually sees. Only accurate when battery is full — when battery is charging, SUN2000 absorbs excess, making this value artificially low. Used for power adjustment in SOLAR state when `battery_soc >= 100`.
-
-**`forecasted_excess_kwh`**
-
-Computed by battery optimizer every 15 minutes. Forecasted excess energy (kWh) from now until next cheap tariff period — derived from SOC simulation as energy that would be exported after battery reaches 100%. Determines phase selection: high forecast → 3-phase minimum, low forecast → 1-phase minimum (if supported).
+Computed by the EV Charging Strategy (Section 4.5.7) every 15 minutes. The optimal wallbox power level determined by SOC simulation. Used for SOLAR state entry (N3) and power target.
 
 
 #### 4.5.6.3 Required Signals
@@ -2038,37 +2024,21 @@ Computed by battery optimizer every 15 minutes. Forecasted excess energy (kWh) f
 | `battery_soc` | `sensor.battery_state_of_capacity` | Battery state of charge (%) |
 | `charging_mode` | `input_select.ev_charging_mode` | `"solar"` / `"immediate"` / `"cheap"` |
 | `is_cheap_tariff` | Computed from tariff schedule (Section 4.1.4) | True during cheap tariff window |
-| `grid_power_w` | M-Bus `sensor.grid_power` (preferred, freshness < 20 s) or DTSU `sensor.power_meter_active_power` (fallback) | Grid power (W): positive = import, negative = export. Both include wallbox consumption — gPlug measures at the utility meter; DTSU is corrected by Modbus Proxy (`dtsu + wallbox_power`) before SUN2000 reports it. Config keys: `sensors.mbus_grid_power`, `sensors.dtsu_grid_power`. |
+| `surplus_power_w` | `sensor.surplus_power` | Solar surplus (= solar PV total AC - house load). Used by EV strategy for entry decision. |
+| `grid_power_w` | M-Bus `sensor.grid_power` (preferred, freshness < 20 s) or DTSU `sensor.power_meter_active_power` (fallback) | Grid power (W): positive = import, negative = export. Config keys: `sensors.mbus_grid_power`, `sensors.dtsu_grid_power`. |
 | `pv_power_w` | `sensor.solar_pv_total_ac_power` | Total PV AC output (Huawei + Enphase) (W) |
-| `household_load_w` | `sensor.phase_1_power` + `sensor.phase_2_power` + `sensor.phase_3_power` | Household consumption from Shelly 3EM (W) |
-| `forecasted_excess_kwh` | Computed by battery optimizer (every 15 min) | Forecasted excess energy (kWh) from now until next cheap tariff period. Derived from SOC simulation: energy that would be exported after battery reaches 100%. |
-| `single_phase_supported` | `binary_sensor.wallbox_single_phase_supported` | Wallbox supports 1-phase charging (from OCPP server config) |
-| `min_power_1p_w` | Configuration | 1-phase minimum charging power, default 1400W (6A × 230V) |
-| `min_power_3p_w` | Configuration | 3-phase minimum charging power, default 4200W (6A × 230V × 3) |
+| `household_load_w` | `sensor.house_load_power` | Household consumption from Shelly 3EM (W) |
+| `ev_strategy_power_w` | Computed by EV Charging Strategy (Section 4.5.7) every 15 min | Optimal wallbox power from SOC simulation |
+| `min_solar_power_w` | Configuration | Minimum energy budget for solar charging, default 3500W. Below wallbox hardware minimum (4140W on 3-phase) — battery covers the gap. |
+| `min_power_w` | Configuration | Wallbox hardware minimum, default 4140W (6A × 230V × 3) |
 | `max_power_w` | Configuration | Maximum charging power, default 11000W |
-| `phase_threshold_kwh` | Configuration | Forecasted excess threshold for 3-phase selection, default 10 kWh |
 
-**Intermediate signals** (computed each cycle):
+**Intermediate signals** (computed by EV Charging Strategy every 15 min):
 
-| Signal | Calculation | Use | Description |
-|--------|-------------|-----|-------------|
-| `solar_excess_w` | `pv_power_w - household_load_w` | Entry decision (N3), power adjustment when battery not full | Open-loop excess: includes power currently charging the battery. When EV charging starts, SUN2000 automatically reduces battery charging to maintain grid ≈ 0, making this power available for EV. |
-| `measured_excess_w` | `-grid_power_w + wallbox_power_w` | Power adjustment when battery full | Closed-loop excess: what the grid meter actually sees. Only accurate when battery is full — otherwise SUN2000 absorbs excess into battery, making this value artificially low. |
-| `min_power_w` | See phase selection logic below | Entry threshold and hold minimum | Effective minimum: depends on forecast and battery state. |
-
-**Phase selection** (re-evaluated every 15 min by battery optimizer):
-
-```
-if battery_soc >= 100:
-    # Battery full — capture any excess, use lowest possible minimum
-    min_power_w = min_power_1p_w if single_phase_supported else min_power_3p_w
-elif single_phase_supported AND forecasted_excess_kwh < phase_threshold_kwh:
-    # Marginal forecast — use 1-phase to capture smaller excess
-    min_power_w = min_power_1p_w
-else:
-    # Good forecast or no 1-phase support — use 3-phase minimum
-    min_power_w = min_power_3p_w
-```
+| Signal | Calculation | Description |
+|--------|-------------|-------------|
+| `ev_strategy_power_w` | SOC simulation with wallbox load (Section 4.5.7) | Optimal wallbox power that maximizes solar use while protecting battery |
+| `protection_target` | `min(80%, baseline_soc_at_2100)` | Dynamic battery protection target — adapts to bad days |
 
 The OCPP server handles the actual phase switching automatically: setpoint < 4140W → 1-phase relay, ≥ 4140W → 3-phase relay (Section 4.3.3 of OCPP server FSD).
 
@@ -2087,6 +2057,131 @@ class EVOutput:
 | `target_power_w` | `number.wallbox_power_limit` | Wallbox power setpoint (W). 0 = pause. |
 | `state` | `sensor.ev_charge_status` | Current state for dashboard/logging |
 | `reason` | Logged to InfluxDB | Human-readable reason for current decision |
+
+### 4.5.7 EV Charging Strategy (Forecast-Based)
+
+#### 4.5.7.1 Problem
+
+The wallbox only accepts full-amp current values. On 3-phase at 230V, this gives 690W steps (e.g., 6A=4140W, 7A=4830W, ..., 16A=11040W). Instantaneous surplus rarely matches a step exactly. The battery acts as a buffer, absorbing or providing the difference.
+
+The challenge: find the optimal wallbox power level that:
+1. Maximizes solar self-consumption (avoids SOC clipping at 100%)
+2. Protects the battery (SOC ≥ target at 21:00)
+3. Works on good days, bad days, mornings, and afternoons — one algorithm
+
+#### 4.5.7.2 Core Concept: Battery as Buffer
+
+The SUN2000 inverter maintains grid ≈ 0 via zero-export control. When the wallbox draws power:
+- If surplus > wallbox: battery charges the difference
+- If surplus < wallbox: battery discharges the difference
+
+The battery naturally fills the gap between the coarse amp steps and the actual solar surplus. The strategy's job is to pick the right amp step so the battery can sustain this buffering without:
+- Hitting 100% (wasted solar → grid export)
+- Dropping below the protection target (insufficient reserve for evening)
+
+#### 4.5.7.3 Algorithm
+
+Runs every 15 minutes as part of the optimization cycle. Uses the existing `SocSimulator.simulate()` from Section 4.2.
+
+**Inputs:**
+- Current battery SOC (%)
+- PV forecast and load forecast (from InfluxDB)
+- `min_solar_power_w`: minimum energy budget for EV (configurable, default 3500W)
+- `min_amps` / `max_amps`: wallbox current range (6A-16A)
+- `phases`: number of phases (from OCPP server config)
+
+**Step 1: Determine battery protection target**
+
+```
+sim_no_ev = simulate(current_soc, forecast, ev_power_w=0)
+baseline_soc_2100 = soc_at_target(sim_no_ev, 21:00)
+protection_target = min(80%, baseline_soc_2100)
+```
+
+On a good day, `baseline_soc_2100` ≥ 80% → target = 80% (normal protection).
+On a bad day, `baseline_soc_2100` = 55% → target = 55% (can't reach 80% anyway, don't penalize EV).
+
+**Step 2: Check minimum viability**
+
+```
+sim_min = simulate(current_soc, forecast, ev_power_w=min_solar_power_w)
+if soc_at_target(sim_min, 21:00) < protection_target:
+    return 0   # can't justify even minimum solar power
+```
+
+**Step 3: Find optimal amp level (bottom-up search)**
+
+```
+best_amps = 0
+
+for amps in range(min_amps, max_amps + 1):
+    wallbox_w = amps × 230 × phases
+
+    # Modify only the first 15-min slot of the forecast
+    forecast_copy = forecast.copy()
+    forecast_copy.iloc[0]['net_energy_wh'] -= wallbox_w × 0.25
+
+    sim = simulate(current_soc, forecast_copy)
+    soc_2100 = soc_at_target(sim, 21:00)
+    soc_max = sim['soc_percent'].max()
+
+    if soc_2100 < protection_target:
+        break                    # one step too far, stop
+
+    best_amps = amps
+
+    if soc_max < 100:
+        break                    # no clipping at this level, optimal
+
+return best_amps × 230 × phases   # convert to watts
+```
+
+#### 4.5.7.4 How It Handles All Scenarios
+
+| Scenario | What happens |
+|----------|-------------|
+| **Good morning** | SOC hits 100% at low amps → keeps going up until no clipping. Starts early, uses battery as buffer. |
+| **Afternoon** | Forecast shrinks → optimal amps naturally decreases each cycle. Eventually min_solar_power_w fails → stop. |
+| **Bad/cloudy day** | `baseline_soc_2100` < 80% → dynamic target. Small surplus still charges EV without making battery worse. |
+| **Peak solar** | High surplus → high amps. Battery charges the excess between steps. |
+| **Low surplus (e.g. 2000W)** | Below `min_solar_power_w` → no charging. Above → charge at `min_amps`, battery buffers the gap. |
+| **Battery already full** | SOC at 100%, clipping imminent → algorithm pushes amps up aggressively to absorb energy. |
+
+#### 4.5.7.5 Self-Correcting Behavior
+
+The strategy re-runs every 15 minutes with:
+- **Actual current SOC** (not forecasted — accounts for forecast errors)
+- **Updated PV and load forecasts** (rolling window)
+- **Only the next 15-min slot** modified by wallbox power
+
+This makes it inherently self-correcting:
+
+| Forecast error | Effect |
+|----------------|--------|
+| PV lower than forecast | SOC drops → next cycle reduces amps or stops |
+| PV higher than forecast | SOC rises → next cycle increases amps |
+| Load higher than forecast | Battery discharges more → next cycle adapts |
+| Load lower than forecast | Battery has more headroom → next cycle may increase amps |
+
+#### 4.5.7.6 Configuration Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ev.min_solar_power_w` | 3500 | Minimum energy budget to start solar charging. Below wallbox hardware minimum — battery covers the gap. |
+| `ev.min_current_a` | 6 | Wallbox minimum current (hardware limit) |
+| `ev.max_current_a` | 16 | Wallbox maximum current (hardware limit) |
+| `ev.phases` | 3 | Number of phases (from `wallbox_type` config) |
+| `battery.protection_soc_percent` | 80 | Target SOC at 21:00 on good days |
+
+#### 4.5.7.7 Relationship to Other Components
+
+| Component | Interaction |
+|-----------|------------|
+| `SocSimulator` (4.2) | Re-used directly — strategy modifies forecast input, not the simulator |
+| `BatteryOptimizer` (4.3) | Runs independently — nightly discharge decision is separate from EV strategy |
+| OCPP Server | Receives `wallbox_power_limit` in watts; handles amp conversion and phase switching internally |
+| `sensor.surplus_power` | HA template sensor (solar - house_load) — used for real-time monitoring, not for the strategy calculation |
+| ESP32 Modbus Proxy | Publishes wallbox power via MQTT → SUN2000 sees wallbox load → battery buffers naturally |
 
 ## 4.6 Smart Car SOC Polling
 
@@ -2347,7 +2442,7 @@ Forecast accuracy tracking serves to **improve decision-making quality** for ene
 |----------|--------|---------------------|-----------------|
 | **Battery discharge blocking** | 21:00 daily | PV forecast for next day | Grid import during expensive hours |
 | **Appliance signal** (washer) | Real-time | PV surplus forecast | Suboptimal timing, grid usage |
-| **EV charging power** | Real-time | PV surplus forecast + `forecasted_excess_kwh` | Missed solar charging, wrong phase selection |
+| **EV charging power** | Every 15 min | SOC simulation with PV + load forecast | Missed solar charging, sub-optimal amp level |
 
 ## 5.3 Forecast Accuracy #1: Battery Discharge Optimization
 
@@ -3092,17 +3187,19 @@ appliances:
 
 sensors:
   pv_power: "sensor.solar_pv_total_ac_power"
-  load_power: "sensor.load_power"
+  load_power: "sensor.house_load_power"
+  surplus_power: "sensor.surplus_power"
   mbus_grid_power: "sensor.grid_power"            # EBL smart meter via gPlug M-Bus (preferred, < 20s)
   dtsu_grid_power: "sensor.power_meter_active_power"  # Huawei DTSU666-H at inverter (fallback)
 
 ev_charging:
   enabled: true
   mode_entity: "input_select.ev_charging_mode"
-  min_power_1p_w: 1400
-  min_power_3p_w: 4200
+  min_solar_power_w: 3500                         # Minimum energy budget for solar charging (battery buffers gap)
+  min_current_a: 6                                # Wallbox hardware minimum (amps)
+  max_current_a: 16                               # Wallbox hardware maximum (amps)
   max_power_w: 11000
-  phase_threshold_kwh: 10
+  protection_soc_percent: 80                      # Target SOC at 21:00 on good days
 
 schedule:
   update_interval_minutes: 15
@@ -3329,9 +3426,10 @@ See Section 4.6 for adaptive polling logic.
 
 **End of Document**
 
-*Version 2.24 - February 2026*
+*Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.25: Forecast-based EV solar charging strategy (Section 4.5.7) — replaces instantaneous open-loop/closed-loop excess with SOC simulation; battery acts as buffer for coarse amp steps (690W on 3-phase); bottom-up search from min to max amps; dynamic protection target adapts to bad days; `min_solar_power_w` config for early charging below wallbox minimum; `sensor.surplus_power` for entry decision; renamed `sensor.load_power` → `sensor.house_load_power`; added `sensor.total_load_power` (house + wallbox for Fire display)
 - v2.24: Appendix F — Comprehensive Smart Car API reference: full `electricVehicleStatus` field catalogue with all 16 `chargerState` values (from pySmartHashtag/evcc/ioBroker), `statusOfChargerConnection` physical cable states, V2L fields, charging lids, DC charging fields; HA entity mapping table; other `vehicleStatus` sections (climate, doors, maintenance, GPS, 12V battery); poll frequency table
 - v2.23: Wallbox idle detection exits all EV modes — added `wallbox_idle` input (Section 4.5.6); S1/C1/M1 transitions exit SOLAR/CHEAP/IMMEDIATE to NORMAL when car finishes charging (wallbox idle ≥ 5 min); idle timer extended from immediate/cheap to all modes; dashboard shows `idle_minutes` and `wallbox_idle` attributes; EC-16 passive integration test; IT-BATT-04 test catalogue entry
 - v2.22: Integration test catalogue (Appendix D.5/D.6) — 22 tests across 6 categories; 3 implemented (IT-PHASE-01, IT-BATT-01, IT-BATT-03), 19 documented as future; EV charging power tests documented (Appendix D.5)

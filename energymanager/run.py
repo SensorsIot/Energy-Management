@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.41"
+__version__ = "1.6.42"
 
 import json
 import logging
@@ -142,7 +142,8 @@ class EnergyManager:
         # Sensor entities for appliance signal calculation
         sensors_opts = options.get("sensors", {})
         self.pv_power_entity = sensors_opts.get("pv_power", "sensor.solar_pv_total_ac_power")
-        self.load_power_entity = sensors_opts.get("load_power", "sensor.load_power")
+        self.load_power_entity = sensors_opts.get("load_power", "sensor.house_load_power")
+        self.surplus_power_entity = sensors_opts.get("surplus_power", "sensor.surplus_power")
         self.appliance_signal_entity = sensors_opts.get("appliance_signal", "sensor.appliance_signal")
 
         # Scheduler
@@ -692,6 +693,7 @@ class EnergyManager:
 
             pv_power = self.ha_client.get_sensor_value(self.pv_power_entity) or 0.0
             load_power = self.ha_client.get_sensor_value(self.load_power_entity) or 0.0
+            surplus_power = self.ha_client.get_sensor_value(self.surplus_power_entity) or 0.0
 
             validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
 
@@ -717,6 +719,7 @@ class EnergyManager:
                 charging_mode=ev_mode,
                 is_cheap_tariff=tariff.is_cheap_now,
                 grid_power_w=grid_power,
+                surplus_power_w=surplus_power,
                 pv_power_w=pv_power,
                 load_power_w=load_power,
                 min_power_w=ev_min_power,
