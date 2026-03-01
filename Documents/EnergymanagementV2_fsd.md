@@ -2409,7 +2409,35 @@ Each layer has its own error handling:
 - **HA REST API**: 30s timeout, 5 retries (our code)
 - **Huawei Solar Integration**: Login verification, permission handling
 - **huawei-solar-lib**: 10s timeout, 3 retries with exponential backoff
-- **Modbus TCP**: pymodbus connection handling
+- **Modbus TCP**: tModbus connection handling (v2.0.0b2 uses tModbus, not pyModbus)
+
+#### Huawei Solar Stability Patches (applied to v2.0.0b2)
+
+The stock `huawei_solar` v2.0.0b2 integration has a connection recovery defect: when the
+SUN2000 inverter stops responding (e.g., `ServerDeviceBusyError` followed by timeouts), the
+Modbus TCP connection remains "open" (connected to the modbus-proxy) but the inverter's
+application layer is unresponsive. The stock code only forces a TCP reconnect on
+`ModbusConnectionError`, not on `TimeoutError`, so it retries indefinitely on the same stale
+connection.
+
+Three patches are applied locally (files in `patches/`):
+
+| File | Location in HA container | Fix |
+|------|--------------------------|-----|
+| `patches/tmodbus/async_smart.py` | `/usr/local/lib/python3.13/site-packages/tmodbus/transport/async_smart.py` | **Fix 1**: After 3 consecutive `TimeoutError` responses, set `_must_reconnect=True` to force TCP teardown/reopen. **Fix 2**: Move `_communication_lock` from class-level to per-instance (prevents cross-instance serialization). |
+| `patches/huawei_solar/update_coordinator.py` | `/config/custom_components/huawei_solar/update_coordinator.py` | **Fix 3**: After 3 consecutive coordinator update failures (~90s), set `_must_reconnect=True` on the transport, ensuring the next poll cycle uses a fresh TCP connection. Also catches `TimeoutError` (not just `HuaweiSolarException`). |
+
+**Important**: These patches are overwritten when the `huawei_solar` integration or HA core
+is updated. Re-apply after updates using:
+```bash
+# From devcontainer:
+source ~/.secrets/env
+cat patches/tmodbus/async_smart.py | ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.0.202 \
+  "docker exec -i homeassistant tee /usr/local/lib/python3.13/site-packages/tmodbus/transport/async_smart.py > /dev/null"
+cat patches/huawei_solar/update_coordinator.py | ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.0.202 \
+  "docker exec -i homeassistant tee /config/custom_components/huawei_solar/update_coordinator.py > /dev/null"
+ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.0.202 "ha core restart"
+```
 
 **EV charging control:**
 ```
@@ -3145,6 +3173,47 @@ Integration tests verify cross-module behavior — interactions between EV charg
 
 **Legend:** ✅ Implemented and passing | 🔮 Future (prerequisite listed)
 
+## D.7 Passive Integration Observer Tests
+
+24 tests (11 normal, 13 edge) run automatically every 10 s cycle during live operation.
+Results persist to `/config/ev_integration_tests.json`; Telegram notifications on status changes.
+
+Report version: **3** (bumped when test definitions change — invalidates stale results).
+
+### D.7.1 Normal Operation (11 tests)
+
+| ID | Name | Preconditions | Pass condition |
+|----|------|---------------|----------------|
+| NO-01 | NORMAL stays when wallbox unavailable | mode=solar, wallbox unavailable | state=NORMAL, power=0 |
+| NO-02 | NORMAL→SOLAR on strategy power>0 | prev=NORMAL, mode=solar, available, protection passed, strategy>0 | state=SOLAR |
+| NO-05 | SOLAR power equals strategy power | state=SOLAR, strategy>0 | target_power_w == ev_strategy_power_w |
+| NO-06 | NORMAL→IMMEDIATE | prev=NORMAL, mode=immediate, available | state=IMMEDIATE, power=max |
+| NO-07 | IMMEDIATE→NORMAL mode change | prev=IMMEDIATE, mode≠immediate | state=NORMAL, power=0 |
+| NO-08 | Immediate→solar sends 0W | prev=IMMEDIATE, mode=solar | state=NORMAL, power=0 |
+| NO-09 | NORMAL→CHEAP | prev=NORMAL, mode=cheap, available | state=CHEAP |
+| NO-10 | CHEAP charges at max (cheap tariff) | state=CHEAP, cheap tariff | power=max |
+| NO-11 | CHEAP pauses (expensive tariff) | state=CHEAP, expensive tariff | power=0 |
+| NO-12 | IMMEDIATE blocks discharge | state=IMMEDIATE, power>0 | discharge_blocked=True |
+| NO-13 | SOLAR exits when strategy returns 0 | prev output=SOLAR, strategy≤0, not idle, mode=solar | state=NORMAL, power=0 |
+
+### D.7.2 Edge Cases (13 tests)
+
+| ID | Name | Preconditions | Pass condition |
+|----|------|---------------|----------------|
+| EC-02 | SOLAR does NOT block discharge | state=SOLAR | discharge_blocked=False |
+| EC-03 | CHEAP blocks discharge when charging | state=CHEAP, cheap tariff, power>0 | discharge_blocked=True |
+| EC-04 | CHEAP unblocks at expensive tariff | state=CHEAP, expensive tariff, power=0 | discharge_blocked=False |
+| EC-05 | Battery protection blocks SOLAR entry | prev=NORMAL, mode=solar, available, protection=False, strategy>0 | state=NORMAL, power=0 |
+| EC-06 | Battery protection exits SOLAR after grace | prev output=SOLAR, prev_state=SOLAR, protection=False, not idle, mode=solar | state=NORMAL, power=0 |
+| EC-07 | Battery protection grace holds SOLAR | state=SOLAR, protection=False | power>0 |
+| EC-08 | SOLAR→IMMEDIATE | prev=SOLAR, mode=immediate | state=IMMEDIATE, power=max |
+| EC-09 | SOLAR→CHEAP | prev=SOLAR, mode=cheap | state=CHEAP |
+| EC-12 | Power limit sent only on change | prev exists, power unchanged | last_sent unchanged |
+| EC-13 | Auto-revert: mode resets to solar | prev mode=immediate/cheap, curr mode=solar, idle≥5min | state=NORMAL |
+| EC-14 | Faulted/Unknown → NORMAL | wallbox Faulted/Unknown | state=NORMAL, power=0 |
+| EC-15 | CHEAP→NORMAL clears discharge | prev=CHEAP, mode≠cheap | state=NORMAL, power=0, blocked=False |
+| EC-16 | Idle detection exits to NORMAL | prev=SOLAR/CHEAP/IMMEDIATE, idle=True | state=NORMAL, power=0 |
+
 ---
 
 # Appendix E: EnergyManager Configuration
@@ -3429,6 +3498,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.26: Passive integration observer test revision (Appendix D.7) — replaced 5 obsolete surplus-tracking tests (NO-03, NO-04, EC-01, EC-10, EC-11) with forecast-strategy-aligned tests (NO-05, NO-13, EC-05, EC-06, EC-07); updated NO-02 preconditions for strategy-based entry; report version bumped to 3; evidence includes `strategy` field
 - v2.25: Forecast-based EV solar charging strategy (Section 4.5.7) — replaces instantaneous open-loop/closed-loop excess with SOC simulation; battery acts as buffer for coarse amp steps (690W on 3-phase); bottom-up search from min to max amps; dynamic protection target adapts to bad days; `min_solar_power_w` config for early charging below wallbox minimum; `sensor.surplus_power` for entry decision; renamed `sensor.load_power` → `sensor.house_load_power`; added `sensor.total_load_power` (house + wallbox for Fire display)
 - v2.24: Appendix F — Comprehensive Smart Car API reference: full `electricVehicleStatus` field catalogue with all 16 `chargerState` values (from pySmartHashtag/evcc/ioBroker), `statusOfChargerConnection` physical cable states, V2L fields, charging lids, DC charging fields; HA entity mapping table; other `vehicleStatus` sections (climate, doors, maintenance, GPS, 12V battery); poll frequency table
 - v2.23: Wallbox idle detection exits all EV modes — added `wallbox_idle` input (Section 4.5.6); S1/C1/M1 transitions exit SOLAR/CHEAP/IMMEDIATE to NORMAL when car finishes charging (wallbox idle ≥ 5 min); idle timer extended from immediate/cheap to all modes; dashboard shows `idle_minutes` and `wallbox_idle` attributes; EC-16 passive integration test; IT-BATT-04 test catalogue entry
