@@ -1605,7 +1605,7 @@ Each mechanism only touches its own flag. `control_battery()` is called with the
 1. CHECK CURRENT TARIFF
    IF expensive tariff (06:00-21:00):
       → blocked_by_protection = False
-      → Skip to step 3
+      → Skip to step 4
 
 2. SIMULATE SOC (only during cheap tariff 21:00-06:00)
    - Simulate from NOW until end of next expensive period (21:00)
@@ -1620,10 +1620,36 @@ Each mechanism only touches its own flag. `control_battery()` is called with the
 
    IF min_soc_in_expensive_hours >= min_soc (10%):
       → blocked_by_protection = False
-   ELSE:
-      → blocked_by_protection = True
+      → Skip to step 4
 
-3. APPLY combined decision (see above)
+3. CALCULATE DISCHARGE FLOOR (cheap tariff, SOC would drop below min)
+   Instead of blocking immediately, calculate a SOC floor — the level at
+   which to stop discharging — so the battery can serve the house during
+   the evening and only hold once it reaches the minimum needed for
+   the next morning's expensive hours.
+
+   a) Run a REFERENCE simulation from cheap_end (06:00) starting at 100%
+      using the morning/daytime forecast. This measures the true "morning
+      drop" — how much SOC falls from cheap_end to the expensive-hours
+      minimum before PV production recovers it.
+
+   b) soc_floor = min(min_soc + morning_drop, 100%)
+
+      Example: min_soc=10%, morning drop=21% → floor=31%
+      The battery must hold 31% at 06:00 so it doesn't go below 10%
+      at the morning minimum (~08:00).
+
+   c) Compare current SOC against floor:
+      IF current_soc > soc_floor:
+         → blocked_by_protection = False   (above floor, allow discharge)
+      ELSE:
+         → blocked_by_protection = True    (at/below floor, hold for morning)
+
+   The 15-minute re-evaluation loop naturally catches the SOC-to-floor
+   transition: discharge is allowed until SOC drops to the floor, then
+   blocked for the remainder of the cheap period.
+
+4. APPLY combined decision (see above)
 ```
 
 #### EV flag — set every 10 seconds by `control_ev_charging_mode()`
@@ -1646,12 +1672,18 @@ APPLY combined decision (see above)
 - Battery should discharge to avoid expensive grid import
 - No reason to block—this is exactly when we want battery power
 
+**Why use a discharge floor instead of immediate blocking:**
+- The old binary approach blocked ALL discharge from the moment the free-discharge simulation showed the SOC dipping below the threshold during future expensive hours — even hours before it was necessary
+- Example: at 71% SOC on Sunday evening, the battery was blocked for 12 hours to prevent a brief 6% dip at 08:00 Monday, forcing unnecessary grid import all evening
+- The floor approach allows the battery to serve the house until it reaches the minimum SOC needed for morning protection, then holds
+- This is both economically better (less cheap-rate grid import) and user-expected behavior (battery powers the house when it has charge)
+
 **Why re-check every 15 minutes during cheap hours:**
 - Forecasts may have errors; actual conditions may differ
 - If load was lower than forecast, SOC will be higher than predicted
 - If PV was higher than forecast, battery may have extra charge
 - Re-simulation with current SOC naturally adapts to reality
-- No need to pre-calculate a "switch-on time"—just ask "is it safe now?"
+- The floor comparison (`current_soc > soc_floor?`) naturally transitions from "allow" to "block" as the battery discharges through the evening
 
 **Why only check expensive hours on weekdays:**
 - During cheap tariff (21:00-06:00), low SOC is acceptable—grid electricity is inexpensive
@@ -1671,10 +1703,11 @@ The rolling 15-minute check makes the system self-correcting:
 
 | Scenario | Effect |
 |----------|--------|
-| Load lower than forecast | SOC stays higher → allows discharge earlier |
-| PV higher than forecast | More energy available → allows discharge earlier |
-| Unexpected high load | SOC drops → may block discharge to protect reserve |
-| Battery started fuller | More headroom → may allow discharge immediately |
+| Load lower than forecast | SOC stays higher → floor reached later or never |
+| PV higher than forecast | More energy available → morning drop smaller → lower floor |
+| Unexpected high load | SOC drops faster → reaches floor sooner → blocks earlier |
+| Battery started fuller | More headroom above floor → serves house longer |
+| SOC reaches floor | Blocks discharge, battery holds for morning expensive hours |
 
 This eliminates the complexity of pre-calculating switch-on times while naturally adapting to real-world conditions.
 
