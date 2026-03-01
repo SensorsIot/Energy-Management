@@ -47,10 +47,8 @@ def _make_forecast(
 
 
 def _noon_utc() -> datetime:
-    """Return today at noon UTC (≈ 13:00 Swiss, expensive tariff)."""
-    return datetime.now(SWISS_TZ).replace(
-        hour=12, minute=0, second=0, microsecond=0,
-    ).astimezone(ZoneInfo("UTC"))
+    """Return a Wednesday at noon Swiss (11:00 UTC), guaranteed weekday expensive tariff."""
+    return datetime(2026, 3, 4, 12, 0, 0, tzinfo=SWISS_TZ).astimezone(ZoneInfo("UTC"))
 
 
 # ---------------------------------------------------------------------------
