@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.38"
+__version__ = "0.9.39"
 
 import asyncio
 import json
@@ -234,6 +234,9 @@ class OCPPServer:
 
         # Keep-alive pulse for paused transactions
         self._keepalive_last_pulse: float = 0.0
+
+        # Periodic reconciliation of HA power limit vs wallbox
+        self._last_reconcile_at: float = 0.0
 
         # Synchronization: _watch_controls waits until _post_connect_setup finishes
         self._setup_complete = asyncio.Event()
@@ -693,6 +696,25 @@ class OCPPServer:
                     if since_last_change >= self.power_update_interval_s:
                         power_w = self._pending_power_w
                         await self._send_power_to_wallbox(power_w)
+
+                # Periodic reconciliation: re-send if HA value differs from last-sent
+                if (
+                    self._pending_power_w is None
+                    and self.charge_point
+                    and power_state is not None
+                    and time.monotonic() - self._last_reconcile_at >= 60
+                ):
+                    try:
+                        ha_power_w = float(power_state)
+                    except ValueError:
+                        ha_power_w = None
+                    if ha_power_w is not None and ha_power_w != self._last_sent_power_w:
+                        logger.warning(
+                            f"Reconciliation: HA says {ha_power_w}W but wallbox has "
+                            f"{self._last_sent_power_w}W — re-sending"
+                        )
+                        await self._send_power_to_wallbox(ha_power_w)
+                    self._last_reconcile_at = time.monotonic()
 
                 # Re-send profile if wallbox stuck in SuspendedEVSE with power > 0
                 if (

@@ -8,7 +8,6 @@ Usage: source ~/.secrets/env && python3 calibration_sweep.py
 
 import json
 import os
-import sys
 import time
 import urllib.request
 

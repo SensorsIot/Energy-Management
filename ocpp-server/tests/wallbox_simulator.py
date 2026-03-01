@@ -21,9 +21,7 @@ from ocpp.v16 import ChargePoint as CP
 from ocpp.v16 import call, call_result
 from ocpp.v16.enums import (
     Action,
-    ChargePointStatus,
     RegistrationStatus,
-    AuthorizationStatus,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
