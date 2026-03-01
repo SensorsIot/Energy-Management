@@ -294,23 +294,127 @@ class TestDetectors:
         )
         assert obs._detect_no01(None, snap) is None
 
-    def test_no03_pass(self, tmp_path):
+    def test_no02_pass_strategy(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
-            inputs=_make_inputs(),
-            output=EVOutput(EVState.SOLAR, 5000, "Solar"),
-            excess=5000,
+            inputs=_make_inputs(ev_strategy_power_w=3000),
+            output=EVOutput(EVState.SOLAR, 3000, "Solar"),
+            prev_state=EVState.NORMAL,
         )
-        assert obs._detect_no03(None, snap) is True
+        assert obs._detect_no02(None, snap) is True
 
-    def test_no04_pass(self, tmp_path):
+    def test_no02_skip_protection_false(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
-            inputs=_make_inputs(grid_power_w=-500),
-            output=EVOutput(EVState.SOLAR, 1400, "Solar low"),
-            excess=500,
+            inputs=_make_inputs(ev_strategy_power_w=3000, battery_protection_passed=False),
+            output=EVOutput(EVState.NORMAL, 0, "Blocked"),
+            prev_state=EVState.NORMAL,
         )
-        assert obs._detect_no04(None, snap) is True
+        assert obs._detect_no02(None, snap) is None
+
+    def test_no02_skip_strategy_zero(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        snap = _make_snapshot(
+            inputs=_make_inputs(ev_strategy_power_w=0),
+            output=EVOutput(EVState.NORMAL, 0, "No strategy"),
+            prev_state=EVState.NORMAL,
+        )
+        assert obs._detect_no02(None, snap) is None
+
+    def test_no05_pass(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        snap = _make_snapshot(
+            inputs=_make_inputs(ev_strategy_power_w=5000),
+            output=EVOutput(EVState.SOLAR, 5000, "Solar"),
+        )
+        assert obs._detect_no05(None, snap) is True
+
+    def test_no05_fail_mismatch(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        snap = _make_snapshot(
+            inputs=_make_inputs(ev_strategy_power_w=5000),
+            output=EVOutput(EVState.SOLAR, 3000, "Solar mismatch"),
+        )
+        assert obs._detect_no05(None, snap) is False
+
+    def test_no05_skip_not_solar(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        snap = _make_snapshot(
+            inputs=_make_inputs(ev_strategy_power_w=5000),
+            output=EVOutput(EVState.NORMAL, 0, "Normal"),
+        )
+        assert obs._detect_no05(None, snap) is None
+
+    def test_no13_pass(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        prev = _make_snapshot(
+            output=EVOutput(EVState.SOLAR, 3000, "Solar"),
+        )
+        curr = _make_snapshot(
+            inputs=_make_inputs(ev_strategy_power_w=0),
+            output=EVOutput(EVState.NORMAL, 0, "Strategy zero"),
+            prev_state=EVState.SOLAR,
+        )
+        assert obs._detect_no13(prev, curr) is True
+
+    def test_no13_skip_idle(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        now = datetime.now(timezone.utc)
+        prev = _make_snapshot(
+            output=EVOutput(EVState.SOLAR, 3000, "Solar"),
+        )
+        curr = _make_snapshot(
+            inputs=_make_inputs(ev_strategy_power_w=0, wallbox_idle=True),
+            output=EVOutput(EVState.NORMAL, 0, "Idle"),
+            prev_state=EVState.SOLAR,
+            ts=now,
+        )
+        assert obs._detect_no13(prev, curr) is None
+
+    def test_ec05_pass(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        snap = _make_snapshot(
+            inputs=_make_inputs(
+                battery_protection_passed=False,
+                ev_strategy_power_w=3000,
+            ),
+            output=EVOutput(EVState.NORMAL, 0, "Blocked by protection"),
+            prev_state=EVState.NORMAL,
+        )
+        assert obs._detect_ec05(None, snap) is True
+
+    def test_ec05_skip_protection_passed(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        snap = _make_snapshot(
+            inputs=_make_inputs(
+                battery_protection_passed=True,
+                ev_strategy_power_w=3000,
+            ),
+            output=EVOutput(EVState.SOLAR, 3000, "Solar"),
+            prev_state=EVState.NORMAL,
+        )
+        assert obs._detect_ec05(None, snap) is None
+
+    def test_ec06_pass(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        prev = _make_snapshot(
+            output=EVOutput(EVState.SOLAR, 3000, "Solar"),
+            prev_state=EVState.SOLAR,
+        )
+        curr = _make_snapshot(
+            inputs=_make_inputs(battery_protection_passed=False),
+            output=EVOutput(EVState.NORMAL, 0, "Protection exit"),
+            prev_state=EVState.SOLAR,
+        )
+        assert obs._detect_ec06(prev, curr) is True
+
+    def test_ec07_pass(self, tmp_path):
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        snap = _make_snapshot(
+            inputs=_make_inputs(battery_protection_passed=False),
+            output=EVOutput(EVState.SOLAR, 3000, "Grace period"),
+        )
+        assert obs._detect_ec07(None, snap) is True
 
     def test_ec02_pass(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
@@ -327,24 +431,6 @@ class TestDetectors:
             discharge_blocked=True,
         )
         assert obs._detect_ec02(None, snap) is False
-
-    def test_ec10_phase_gap_down(self, tmp_path):
-        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
-        snap = _make_snapshot(
-            inputs=_make_inputs(battery_soc=70),
-            output=EVOutput(EVState.SOLAR, 3700, "Solar"),
-            excess=3900,
-        )
-        assert obs._detect_ec10(None, snap) is True
-
-    def test_ec11_phase_gap_up(self, tmp_path):
-        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
-        snap = _make_snapshot(
-            inputs=_make_inputs(battery_soc=100),
-            output=EVOutput(EVState.SOLAR, 4140, "Solar"),
-            excess=3900,
-        )
-        assert obs._detect_ec11(None, snap) is True
 
     def test_ec12_pass_no_change(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))

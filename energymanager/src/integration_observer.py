@@ -72,9 +72,8 @@ class _TestDef:
 _TEST_DEFS: list[_TestDef] = [
     # Normal operation
     _TestDef("NO-01", "NORMAL stays when wallbox unavailable", "normal", "_detect_no01"),
-    _TestDef("NO-02", "NORMAL->SOLAR on excess>=min", "normal", "_detect_no02"),
-    _TestDef("NO-03", "SOLAR power tracks excess", "normal", "_detect_no03"),
-    _TestDef("NO-04", "SOLAR holds min when excess<min", "normal", "_detect_no04"),
+    _TestDef("NO-02", "NORMAL->SOLAR on strategy power>0", "normal", "_detect_no02"),
+    _TestDef("NO-05", "SOLAR power equals strategy power", "normal", "_detect_no05"),
     _TestDef("NO-06", "NORMAL->IMMEDIATE", "normal", "_detect_no06"),
     _TestDef("NO-07", "IMMEDIATE->NORMAL mode change", "normal", "_detect_no07"),
     _TestDef("NO-08", "Immediate->solar sends 0W", "normal", "_detect_no08"),
@@ -82,15 +81,16 @@ _TEST_DEFS: list[_TestDef] = [
     _TestDef("NO-10", "CHEAP charges at max (cheap tariff)", "normal", "_detect_no10"),
     _TestDef("NO-11", "CHEAP pauses (expensive tariff)", "normal", "_detect_no11"),
     _TestDef("NO-12", "IMMEDIATE blocks discharge", "normal", "_detect_no12"),
+    _TestDef("NO-13", "SOLAR exits when strategy returns 0", "normal", "_detect_no13"),
     # Edge cases
-    _TestDef("EC-01", "SOLAR entered without battery protection", "edge", "_detect_ec01"),
     _TestDef("EC-02", "SOLAR does NOT block discharge", "edge", "_detect_ec02"),
     _TestDef("EC-03", "CHEAP blocks discharge when charging", "edge", "_detect_ec03"),
     _TestDef("EC-04", "CHEAP unblocks at expensive tariff", "edge", "_detect_ec04"),
+    _TestDef("EC-05", "Battery protection blocks SOLAR entry", "edge", "_detect_ec05"),
+    _TestDef("EC-06", "Battery protection exits SOLAR after grace", "edge", "_detect_ec06"),
+    _TestDef("EC-07", "Battery protection grace holds SOLAR", "edge", "_detect_ec07"),
     _TestDef("EC-08", "SOLAR->IMMEDIATE", "edge", "_detect_ec08"),
     _TestDef("EC-09", "SOLAR->CHEAP", "edge", "_detect_ec09"),
-    _TestDef("EC-10", "Phase-gap snap down (batt<100%)", "edge", "_detect_ec10"),
-    _TestDef("EC-11", "Phase-gap snap up (batt=100%)", "edge", "_detect_ec11"),
     _TestDef("EC-12", "Power limit sent only on change", "edge", "_detect_ec12"),
     _TestDef("EC-13", "Auto-revert: mode resets to solar", "edge", "_detect_ec13"),
     _TestDef("EC-14", "Faulted/Unknown -> NORMAL", "edge", "_detect_ec14"),
@@ -103,7 +103,7 @@ _TEST_DEFS: list[_TestDef] = [
 # Observer
 # ---------------------------------------------------------------------------
 
-_REPORT_VERSION = "2"  # bump to invalidate stale results after formula changes
+_REPORT_VERSION = "3"  # bump to invalidate stale results after formula changes
 
 
 class IntegrationObserver:
@@ -204,6 +204,7 @@ class IntegrationObserver:
             f"state={o.state.value} prev={s.prev_state.value} "
             f"power={o.target_power_w:.0f}W mode={i.charging_mode} "
             f"excess={s.excess_w:.0f}W "
+            f"strategy={i.ev_strategy_power_w:.0f}W "
             f"blocked={s.discharge_blocked_by_ev} "
             f"last_sent={s.last_power_limit_sent}"
         )
@@ -283,34 +284,26 @@ class IntegrationObserver:
         return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
 
     def _detect_no02(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """NO-02: NORMAL->SOLAR on excess>=min."""
+        """NO-02: NORMAL->SOLAR on strategy power>0."""
         i = curr.inputs
         if curr.prev_state != EVState.NORMAL:
             return None
         if i.charging_mode != "solar" or not i.wallbox_available:
             return None
-        if curr.excess_w < i.min_power_w:
+        if not i.battery_protection_passed:
+            return None
+        if i.ev_strategy_power_w <= 0:
             return None
         return curr.output.state == EVState.SOLAR
 
-    def _detect_no03(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """NO-03: SOLAR power tracks excess."""
+    def _detect_no05(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
+        """NO-05: SOLAR power equals strategy power."""
         i = curr.inputs
         if curr.output.state != EVState.SOLAR:
             return None
-        if curr.excess_w < i.min_power_w:
+        if i.ev_strategy_power_w <= 0:
             return None
-        p = curr.output.target_power_w
-        return i.min_power_w <= p <= i.max_power_w
-
-    def _detect_no04(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """NO-04: SOLAR holds min when excess<min."""
-        i = curr.inputs
-        if curr.output.state != EVState.SOLAR:
-            return None
-        if curr.excess_w >= i.min_power_w:
-            return None
-        return curr.output.target_power_w == i.min_power_w
+        return curr.output.target_power_w == i.ev_strategy_power_w
 
     def _detect_no06(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """NO-06: NORMAL->IMMEDIATE."""
@@ -377,19 +370,22 @@ class IntegrationObserver:
             return None
         return curr.discharge_blocked_by_ev is True
 
-    # --- Edge Cases ---
-
-    def _detect_ec01(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """EC-01: SOLAR entered without battery protection."""
+    def _detect_no13(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
+        """NO-13: SOLAR exits when strategy returns 0."""
+        if prev is None:
+            return None
         i = curr.inputs
-        if curr.prev_state != EVState.NORMAL:
+        if prev.output.state != EVState.SOLAR:
             return None
-        if i.battery_protection_passed:
-            return None  # only fires when protection is False
-        if curr.excess_w < i.min_power_w:
+        if i.ev_strategy_power_w > 0:
             return None
-        # Solar should still be entered (protection is informational, not blocking)
-        return curr.output.state == EVState.SOLAR
+        if i.wallbox_idle:
+            return None  # idle exit is EC-16, not this
+        if i.charging_mode != "solar":
+            return None
+        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
+
+    # --- Edge Cases ---
 
     def _detect_ec02(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """EC-02: SOLAR does NOT block discharge."""
@@ -440,27 +436,44 @@ class IntegrationObserver:
             return None
         return curr.output.state == EVState.CHEAP
 
-    def _detect_ec10(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """EC-10: Phase-gap snap down (batt<100%)."""
+    def _detect_ec05(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
+        """EC-05: Battery protection blocks SOLAR entry."""
         i = curr.inputs
-        if curr.output.state != EVState.SOLAR:
+        if curr.prev_state != EVState.NORMAL:
             return None
-        if not (3700 < curr.excess_w < 4140):
+        if i.charging_mode != "solar" or not i.wallbox_available:
             return None
-        if i.battery_soc >= 100:
+        if i.battery_protection_passed:
+            return None  # only fires when protection blocks
+        if i.ev_strategy_power_w <= 0:
             return None
-        return curr.output.target_power_w == 3700
+        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
 
-    def _detect_ec11(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """EC-11: Phase-gap snap up (batt=100%)."""
+    def _detect_ec06(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
+        """EC-06: Battery protection exits SOLAR after grace."""
+        if prev is None:
+            return None
+        i = curr.inputs
+        if prev.output.state != EVState.SOLAR:
+            return None
+        if prev.prev_state != EVState.SOLAR:
+            return None
+        if i.battery_protection_passed:
+            return None
+        if i.wallbox_idle:
+            return None
+        if i.charging_mode != "solar":
+            return None
+        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
+
+    def _detect_ec07(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
+        """EC-07: Battery protection grace holds SOLAR."""
         i = curr.inputs
         if curr.output.state != EVState.SOLAR:
             return None
-        if not (3700 < curr.excess_w < 4140):
-            return None
-        if i.battery_soc < 100:
-            return None
-        return curr.output.target_power_w == 4140
+        if i.battery_protection_passed:
+            return None  # only interesting when protection is False
+        return curr.output.target_power_w > 0
 
     def _detect_ec12(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """EC-12: Power limit sent only on change."""
