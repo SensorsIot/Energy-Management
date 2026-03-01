@@ -265,6 +265,59 @@ class TestCheapTariffBlock:
         assert decision.min_soc_percent < 20 or decision.discharge_allowed is True
 
 
+class TestDischargeFloor:
+    """SOC floor logic: allow discharge above floor, block at/below floor."""
+
+    def test_high_soc_above_floor_allows(self):
+        """At 22:00 cheap, with high SOC well above the floor → allow discharge.
+
+        This is the core fix: the old algorithm blocked at 71% because the
+        free-discharge sim showed 6% at 08:00. The new algorithm calculates
+        a SOC floor (~15%) and allows discharge since 71% >> 15%.
+        """
+        optimizer = BatteryOptimizer(
+            capacity_wh=10000,
+            min_soc_percent=10,
+        )
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+
+        # Moderate PV (enough to recover by midday), moderate load
+        pv_pattern = [0] * 32 + [3000] * 48 + [0] * 16
+        load_pattern = [500] * 96
+
+        forecast = make_forecast(start=now, hours=48,
+                                 pv_pattern=pv_pattern, load_pattern=load_pattern)
+
+        decision, _, _ = optimizer.calculate_decision(
+            soc_percent=71, forecast=forecast, now=now,
+        )
+        # Old algorithm would block; new algorithm allows (above floor)
+        assert decision.discharge_allowed is True
+        assert "floor" in decision.reason.lower() or "stays >=" in decision.reason.lower()
+
+    def test_low_soc_at_floor_blocks(self):
+        """SOC at or below floor → block discharge."""
+        optimizer = BatteryOptimizer(
+            capacity_wh=10000,
+            min_soc_percent=10,
+        )
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+
+        # Low PV — morning drop is significant
+        pv_pattern = [0] * 36 + [1500] * 48 + [0] * 12
+        load_pattern = [800] * 96
+
+        forecast = make_forecast(start=now, hours=48,
+                                 pv_pattern=pv_pattern, load_pattern=load_pattern)
+
+        # Very low SOC — at or below the calculated floor
+        decision, _, _ = optimizer.calculate_decision(
+            soc_percent=12, forecast=forecast, now=now,
+        )
+        assert decision.discharge_allowed is False
+        assert "block" in decision.reason.lower()
+
+
 class TestSelfCorrecting:
     """Test that re-checking every 15 min allows self-correction."""
 

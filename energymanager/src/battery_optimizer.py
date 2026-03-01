@@ -100,6 +100,15 @@ class BatteryOptimizer:
         """Check if entire day is cheap (weekend or holiday)."""
         return (self.weekend_all_day_cheap and self.is_weekend(dt)) or self.is_holiday(dt)
 
+    def _soc_at_time(self, sim: pd.DataFrame, target: datetime) -> float:
+        """Extract SOC percentage at a target time from a simulation DataFrame."""
+        if sim.empty:
+            return 0.0
+        valid = sim.index[sim.index <= target]
+        if len(valid) == 0:
+            return float(sim["soc_percent"].iloc[0])
+        return float(sim.loc[valid[-1], "soc_percent"])
+
     def filter_expensive_periods(self, simulation: pd.DataFrame) -> pd.DataFrame:
         """Filter simulation to only include expensive weekday periods (06:15-21:00).
 
@@ -384,19 +393,65 @@ class BatteryOptimizer:
             reason = f"SOC stays >= {self.min_soc_percent:.0f}% (min: {min_soc_percent:.0f}% at {swiss_time(min_soc_time)})"
 
         else:
-            # CHEAP TARIFF + SOC NOT OK: Block discharge
-            discharge_allowed = False
-            reason = f"Block - SOC would drop to {min_soc_percent:.0f}% at {swiss_time(min_soc_time)} (need {self.min_soc_percent:.0f}%)"
+            # CHEAP TARIFF + SOC NOT OK: Calculate discharge floor
+            # Instead of blocking immediately, find the SOC level at which to block.
+            # The battery can discharge to the floor, then hold for expensive hours.
+            #
+            # Use a reference simulation from cheap_end at 100% to measure the true
+            # morning consumption (how much SOC drops from cheap_end to the minimum).
+            # This avoids the distortion from the free-discharge sim where the battery
+            # may already be at 0% before cheap_end.
+            morning_forecast = forecast[forecast.index >= tariff.cheap_end]
+            if not morning_forecast.empty:
+                sim_ref = self.simulate_soc(100.0, morning_forecast)
+                exp_ref = self.filter_expensive_periods(sim_ref)
+                if not exp_ref.empty:
+                    ref_min = exp_ref["soc_percent"].min()
+                    morning_drop = 100.0 - ref_min
+                else:
+                    morning_drop = 0
+            else:
+                morning_drop = 0
+
+            soc_floor = min(self.min_soc_percent + morning_drop, 100.0)
+
+            logger.info(f"SOC floor: {soc_floor:.0f}% (need {self.min_soc_percent:.0f}% + "
+                       f"{morning_drop:.0f}% morning drop)")
+
+            if soc_percent > soc_floor:
+                # Above floor — allow discharge, re-check in 15 min
+                discharge_allowed = True
+                reason = (f"SOC {soc_percent:.0f}% above floor {soc_floor:.0f}% "
+                         f"(protect {self.min_soc_percent:.0f}% at {swiss_time(min_soc_time)})")
+            else:
+                # At or below floor — block to preserve for expensive hours
+                discharge_allowed = False
+                reason = (f"Block - SOC {soc_percent:.0f}% at floor {soc_floor:.0f}% "
+                         f"(protect {self.min_soc_percent:.0f}% at {swiss_time(min_soc_time)})")
 
         logger.info(f"Decision: discharge_allowed={discharge_allowed}")
 
-        # For visualization: if blocking, show what would happen with full block until cheap_end
+        # For visualization: show strategy simulation
         if not discharge_allowed:
+            # Blocking from now — show that trajectory
             sim_with_strategy = self.simulate_soc(
                 soc_percent,
                 forecast,
                 block_from=now,
                 block_until=tariff.cheap_end
+            )
+        elif not soc_ok and tariff.is_cheap_now:
+            # Above floor but will need to block later — show deferred block
+            below_floor = sim_full[sim_full["soc_percent"] <= soc_floor]
+            if not below_floor.empty:
+                block_from_time = below_floor.index[0]
+            else:
+                block_from_time = tariff.cheap_end
+            sim_with_strategy = self.simulate_soc(
+                soc_percent,
+                forecast,
+                block_from=block_from_time,
+                block_until=tariff.cheap_end,
             )
         else:
             sim_with_strategy = sim_full
