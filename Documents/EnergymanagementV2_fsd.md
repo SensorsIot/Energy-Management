@@ -2032,7 +2032,7 @@ The strategy re-runs every 15 minutes with actual SOC and updated forecasts, mak
 
 #### Surplus Capture
 
-The Enphase microinverters (~1.5 kW AC max) feed the house AC bus. When their production exceeds house load, the excess is exported. Surplus capture converts this measured grid export into a 1-phase wallbox power setpoint (always 1-phase because Enphase max is below the 3-phase minimum of 4,140W).
+Surplus capture measures real-time grid export and converts it into a wallbox power setpoint. Grid export can come from any source — Enphase microinverters, SUN2000 when the battery is full, or both. The calculation uses the configured phase count (`phases`) and clamps to `min_current_a`..`max_current_a`, so the minimum power is always `min_current_a × 230 × phases` (the actual wallbox minimum).
 
 **Inputs:** `grid_power_w` (from `sensor.grid_power` or DTSU fallback), `pv_power_w` (from `sensor.solar_pv_total_ac_power`), `wallbox_power_w` (from `sensor.wallbox_power` — for feedback correction).
 
