@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.62"
+__version__ = "1.6.63"
 
 import json
 import logging
@@ -594,6 +594,13 @@ class EnergyManager:
         try:
             now = datetime.now(timezone.utc)
             tariff = self.optimizer.get_tariff_periods(now)
+
+            # During cheap tariff, battery protection is irrelevant —
+            # no forecast exists for the *next* cheap_start (tomorrow 21:00).
+            if tariff.is_cheap_now:
+                logger.debug("Battery protection: cheap tariff active → EV allowed")
+                return True, 100.0
+
             query_api = self.influx_client.query_api()
 
             # Query SOC at cheap tariff start (narrow window around 21:00)
