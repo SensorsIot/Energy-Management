@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.25
+**Version:** 2.26 
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -1835,10 +1835,12 @@ EV charging optimization maximizes solar self-consumption while ensuring chargin
 > **Wallbox infrastructure:** The OCPP server, phase switching, power-to-current conversion, and wallbox communication are documented in [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md).
 
 **Key Features:**
-- 4 modes: Off (normal), solar charging, cheap tariff charging, and immediate charging
+- 4 modes: Off, solar, cheap tariff, immediate — user selects via dashboard
 - Solar charging is the default mode
-- Forecast-based strategy determines optimal charging power (Section 4.5.7)
-- Grid surplus capture charges EV from exported energy (Section 4.5.8)
+- State machine (Section 4.5.5) routes to correct mode
+- EV charging power calculation (Section 4.5.6) determines solar charging power
+- Two solar power sources: forecast strategy and grid surplus capture (both in Section 4.5.6)
+- `input_number.ev_min_solar_power` gates both solar paths — minimum power to start charging
 - Real-time charging power adjustment every 10 seconds
 
 ### 4.5.2 Architecture
@@ -1870,7 +1872,7 @@ From the EnergyManager's perspective, the wallbox is controlled through HA entit
 
 ### 4.5.4 Charging Mode Selection
 
-The user selects one of three charging modes via the kitchen dashboard (Amazon Fire tablet). The mode is persistent — it stays selected until the user changes it. The state machine may reset the mode back to `auto_pv_excess` as a side-effect (see Section 4.5.6, auto-revert).
+The user selects one of three charging modes via the kitchen dashboard (Amazon Fire tablet). The mode is persistent — it stays selected until the user changes it.
 
 | Mode | `input_select` value | Dashboard Label | Description |
 |------|---------------------|----------------|-------------|
@@ -1880,158 +1882,79 @@ The user selects one of three charging modes via the kitchen dashboard (Amazon F
 
 **Control entity:** The dashboard provides two buttons ("Cheap Charge" and "Charge Now") that toggle between the selected mode. If both are unselected, `auto_pv_excess` is active. Charge now starts charging immediately.
 
-### 4.5.5 Idle State
+### 4.5.5 EV Charging State Machine
 
-The IDLE state means "no EV charging right now." The wallbox power limit is set to 0 W. This is the initial state and the return state after any charging session ends.
+The state machine routes the wallbox to the correct operating mode based on user selection. It does **not** compute charging power — that is done by the EV Charging Power Calculation (Section 4.5.6).
 
-IDLE is entered when:
-- No charging conditions are met (solar mode but no surplus/strategy)
-- User selects "off" mode
-- Car finishes charging (wallbox idle timeout)
-- User switches away from immediate/cheap mode
+> **Wallbox infrastructure:** Faults, disconnects, phase switching, and amp conversion are handled by the OCPP server (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md)). The state machine only makes charging decisions.
 
-When `number.wallbox_power_limit` = 0, the OCPP server suspends charging. The transaction stays alive until the car is unplugged (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md)).
+#### 4.5.5.1 States
 
-### 4.5.6 EV Charging State Machine
-
-#### 4.5.6.1 Goals and Constraints
-
-The **battery is controlled by the solar inverter SUN2000** with the objective of grid power ≈ 0 (self-consumption / zero-export bias). The EV charging state machine does **not** command the battery.
-
-The state machine controls **only the wallbox charging setpoint** (power in watts).
-
-**Primary goals:**
-1. **Maximize self-consumption:** use PV surplus for battery first (handled by SUN2000), then EV
-2. **Avoid export** when feasible; accept export when unavoidable (battery full/power-limited and EV at max)
-3. **Monitor battery reserve:** battery protection status is reported to the dashboard for monitoring, but solar excess is always used for EV charging when available (SUN2000 gives the battery first priority via zero-export control)
-
-**Actuation constraints:**
-- Wallbox accepts power setpoint in range `[min_power_w .. manual_power_w]` (configurable per installation)
-- Measurement cadence is 15 s — setpoint changes must be rate-limited to avoid oscillation
-
-#### 4.5.6.2 States and Transitions
-
-4 states. Infrastructure concerns (faults, disconnects) are handled by the OCPP server (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md)). The energy manager state machine only makes charging decisions.
-
-**States**
-
-| # | State | What happens | Output |
-|---|-------|-------------|--------|
-| 1 | **IDLE** | No EV charging. SUN2000 has full control. | `target_power=0` |
-| 2 | **SOLAR** | Forecast-based solar charging. Battery acts as buffer. | `target_power` = optimal amp step from SOC simulation (see 4.5.7) |
-| 3 | **CHEAP** | Cheap-tariff mode. Charges at manual power during cheap tariff, pauses during expensive. Battery discharge blocked while charging. | `manual_power_w` when cheap, `0` when expensive |
-| 4 | **IMMEDIATE** | Immediate mode. Charging at manual power regardless of tariff. Battery discharge blocked while charging. | `target_power=manual_power_w` |
+| # | State | Description | Power output |
+|---|-------|-------------|--------------|
+| 1 | **IDLE** | No EV charging. SUN2000 has full control of the battery. | `0` |
+| 2 | **SOLAR** | Solar charging. Power from Section 4.5.6. | `ev_charging_power_w` |
+| 3 | **CHEAP** | Cheap-tariff charging at user-set power. Battery discharge blocked. | `manual_power_w` when cheap, `0` when expensive |
+| 4 | **IMMEDIATE** | Immediate charging at user-set power. Battery discharge blocked. | `manual_power_w` |
 
 Initial state: **IDLE**
 
-**State Change Criteria**
+#### 4.5.5.2 Transitions
 
 The machine stays in its current state unless one of the listed conditions triggers a change. Conditions are evaluated in listed order — first match fires.
 
----
-
-**IDLE**
-
-*Stays in IDLE unless:*
+**IDLE** — *Stays in IDLE unless:*
 
 | # | Condition | → New State |
 |---|-----------|-------------|
 | N1 | `charging_mode == "immediate" AND wallbox_available` | IMMEDIATE |
 | N2 | `charging_mode == "cheap" AND wallbox_available` | CHEAP |
-| N3 | `charging_mode == "solar" AND wallbox_available AND ev_target_power_w > 0` | SOLAR |
+| N3 | `charging_mode == "solar" AND wallbox_available AND ev_charging_power_w > 0` | SOLAR |
 
----
+**SOLAR** — *Stays in SOLAR unless:*
 
-**SOLAR**
+| # | Condition | → New State |
+|---|-----------|-------------|
+| S1 | `wallbox_idle` | IDLE |
+| S2 | `charging_mode == "immediate"` | IMMEDIATE |
+| S3 | `charging_mode == "cheap"` | CHEAP |
 
-*Stays in SOLAR unless:*
+**CHEAP** — *Stays in CHEAP unless:*
 
-| # | Condition | → New State | Notes |
-|---|-----------|-------------|-------|
-| S1 | `wallbox_idle` | IDLE | Car finished — wallbox idle for ≥ timeout |
-| S2 | `charging_mode == "immediate"` | IMMEDIATE | User switched mode |
-| S3 | `charging_mode == "cheap"` | CHEAP | User switched mode |
-
-**Power while in SOLAR:**
-
-The target power is determined by the EV Charging Strategy (Section 4.5.7), which runs every 15 minutes as part of the optimization cycle. The strategy uses SOC simulation to find the optimal wallbox amp level. Between strategy runs, the last computed target is held.
-
-```
-target_power_w = ev_target_power_w   # from Section 4.5.7
-```
-
----
-
-**CHEAP**
-
-*Stays in CHEAP unless:*
+| # | Condition | → New State |
+|---|-----------|-------------|
+| C1 | `wallbox_idle` | IDLE |
+| C2 | `charging_mode != "cheap"` | IDLE |
 
 Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expensive. No state change on tariff toggle.
 
-| # | Condition | → New State | Notes |
-|---|-----------|-------------|-------|
-| C1 | `wallbox_idle` | IDLE | Car finished — wallbox idle for ≥ timeout |
-| C2 | `charging_mode != "cheap"` | IDLE | User deselected cheap mode |
+**IMMEDIATE** — *Stays in IMMEDIATE unless:*
 
----
+| # | Condition | → New State |
+|---|-----------|-------------|
+| M1 | `wallbox_idle` | IDLE |
+| M2 | `charging_mode != "immediate"` | IDLE |
 
-**IMMEDIATE**
+#### 4.5.5.3 Shared Concepts
 
-*Stays in IMMEDIATE unless:*
+**`wallbox_available`** — Single boolean: wallbox entity exists AND WebSocket connected AND not faulted AND car plugged in (status ≠ "Available").
 
-| # | Condition | → New State | Notes |
-|---|-----------|-------------|-------|
-| M1 | `wallbox_idle` | IDLE | Car finished — wallbox idle for ≥ timeout |
-| M2 | `charging_mode != "immediate"` | IDLE | User deselected immediate mode |
+**`wallbox_idle`** — `True` when power = 0 and status ∈ {`Finishing`, `SuspendedEV`} for ≥ `auto_reset_timeout_min` (default 5 min). Signals the car has finished charging.
 
----
+#### 4.5.5.4 Inputs and Outputs
 
-**Shared Concepts**
+**Inputs:**
 
-**`wallbox_available`**
+| Input | Source | Used by |
+|-------|--------|---------|
+| `wallbox_available` | `binary_sensor.car_ready` | IDLE → entry guard |
+| `wallbox_idle` | Computed in `run.py` | All states → IDLE exit |
+| `charging_mode` | `input_select.ev_charging_mode` | State routing |
+| `is_cheap_tariff` | Tariff schedule (Section 4.1.4) | CHEAP power toggle |
+| `ev_charging_power_w` | EV Charging Power Calculation (Section 4.5.6) | SOLAR entry + power |
+| `manual_power_w` | `input_number.ev_manual_power` | CHEAP/IMMEDIATE power |
 
-Single boolean: wallbox entity exists AND WebSocket connected AND not faulted AND car plugged in (status != "Available").
-
-**`surplus_power_w`**
-
-Read from `sensor.surplus_power` (HA template sensor): `solar_pv_total_ac_power - house_load_power`. Represents instantaneous solar surplus available for EV charging. The battery acts as a buffer — it absorbs or provides the difference between this surplus and the actual wallbox power (which must be a full-amp step).
-
-**`ev_target_power_w`**
-
-Computed by the EV Charging Strategy (Section 4.5.7) every 15 minutes. The optimal wallbox power level determined by SOC simulation. Used for SOLAR state entry (N3) and power target.
-
-
-#### 4.5.6.3 Required Signals
-
-**Inputs** (`EVInputs`):
-
-| Input | Source | Description |
-|-------|--------|-------------|
-| `wallbox_available` | `binary_sensor.car_ready` | Car plugged in and ready to charge |
-| `wallbox_power_w` | `sensor.wallbox_power` | Current wallbox charging power (W) |
-| `wallbox_status` | `sensor.wallbox_status` | Status string (logging only) |
-| `wallbox_idle` | Computed in `run.py` | `True` when power = 0 and status ∈ {`Finishing`, `SuspendedEV`} for ≥ `auto_reset_timeout_min` (default 5 min). Signals the car has finished charging. |
-| `battery_protection_passed` | `check_battery_protection()` | Forecast says battery will reach ≥ 80% SOC at 21:00 |
-| `battery_soc` | `sensor.battery_state_of_capacity` | Battery state of charge (%) |
-| `charging_mode` | `input_select.ev_charging_mode` | `"solar"` / `"immediate"` / `"cheap"` |
-| `is_cheap_tariff` | Tariff schedule (Section 4.1.4) | True during cheap tariff window |
-| `surplus_power_w` | `sensor.surplus_power` | Solar surplus = PV - house load (W) |
-| `grid_power_w` | `sensor.grid_power` (M-Bus, preferred) or `sensor.power_meter_active_power` (DTSU, fallback) | Grid power (W): positive = import, negative = export |
-| `pv_power_w` | `sensor.solar_pv_total_ac_power` | Total PV AC output (Huawei + Enphase) (W) |
-| `load_power_w` | `sensor.house_load_power` | Household consumption (W) |
-| `ev_target_power_w` | EV Charging Strategy (Section 4.5.7), every 15 min | Optimal wallbox power from SOC simulation |
-| `surplus_capture_power_w` | Grid surplus capture (Section 4.5.8), every 10 s | Wallbox power from grid export capture |
-| `min_power_w` | `sensor.wallbox_min_power_w` (dynamic) or config | Wallbox hardware minimum (W) |
-| `manual_power_w` | `input_number.ev_power_limit` or config | User-selected charging power for immediate/cheap modes (W) |
-
-**Intermediate signals** (computed by EV Charging Strategy every 15 min):
-
-| Signal | Calculation | Description |
-|--------|-------------|-------------|
-| `ev_target_power_w` | SOC simulation with wallbox load (Section 4.5.7) | Optimal wallbox power that maximizes solar use while protecting battery |
-| `protection_target` | `min(80%, baseline_soc_at_2100)` | Dynamic battery protection target — adapts to bad days |
-
-**Output** (`EVOutput`):
+**Output:**
 
 | Output | HA Entity | Description |
 |--------|-----------|-------------|
@@ -2039,103 +1962,64 @@ Computed by the EV Charging Strategy (Section 4.5.7) every 15 minutes. The optim
 | `state` | `sensor.ev_charge_status` | Current state for dashboard/logging |
 | `reason` | Attribute on `sensor.ev_target_power` | Human-readable reason for current decision |
 
-### 4.5.7 EV Charging Strategy (Forecast-Based)
+### 4.5.6 EV Charging Power Calculation
 
-#### 4.5.7.1 Problem
+When the state machine is in SOLAR mode, this calculation determines the wallbox power setpoint. It runs every 10 seconds and selects from two power sources.
 
-The wallbox only accepts full-amp current values. On 3-phase at 230V, this gives 690W steps (e.g., 6A=4140W, 7A=4830W, ..., 16A=11040W). Instantaneous surplus rarely matches a step exactly. The battery acts as a buffer, absorbing or providing the difference.
+#### Goals
 
-The challenge: find the optimal wallbox power level that:
-1. Maximizes solar self-consumption (avoids SOC clipping at 100%)
-2. Protects the battery (SOC ≥ target at 21:00)
-3. Works on good days, bad days, mornings, and afternoons — one algorithm
+1. **Maximize solar self-consumption** — use PV surplus for EV instead of exporting to grid
+2. **Capture wasted energy** — Enphase AC-coupled production that the DC-coupled battery cannot absorb
+3. **Protect battery reserve** — ensure sufficient SOC at 21:00 for evening consumption
+4. **Single threshold** — `ev_min_solar_power` gates all solar charging in one place
 
-#### 4.5.7.2 Core Concept: Battery as Buffer
+#### Input Parameters
 
-The SUN2000 inverter maintains grid ≈ 0 via zero-export control. When the wallbox draws power:
-- If surplus > wallbox: battery charges the difference
-- If surplus < wallbox: battery discharges the difference
+| Parameter | HA Entity / Source | Default | Description |
+|-----------|-------------------|---------|-------------|
+| `ev_min_solar_power` | `input_number.ev_min_solar_power` | 1380 W | Minimum power to start solar EV charging. Gate for both sources. |
+| `ev_forecasted_power_w` | Forecast strategy, every 15 min | — | Optimal wallbox power from SOC simulation |
+| `surplus_capture_power_w` | Surplus capture, every 10 s | — | Wallbox power derived from measured grid export |
+| `battery_protection_passed` | `check_battery_protection()` | — | Forecast says battery will reach ≥ target SOC at 21:00 |
 
-The battery naturally fills the gap between the coarse amp steps and the actual solar surplus. The strategy's job is to pick the right amp step so the battery can sustain this buffering without:
-- Hitting 100% (wasted solar → grid export)
-- Dropping below the protection target (insufficient reserve for evening)
+**Output:** `ev_charging_power_w` — the wallbox power setpoint in watts (0 = don't charge).
 
-#### 4.5.7.3 Algorithm
+#### Power Sources
 
-Runs every 15 minutes as part of the optimization cycle. Uses the existing `SocSimulator.simulate()` from Section 4.2.
+Two independent calculations provide candidate power levels:
 
-**Inputs:**
-- Current battery SOC (%)
-- PV forecast and load forecast (from InfluxDB)
-- `min_solar_power_w`: minimum energy budget for EV (configurable, default 3500W)
-- `min_amps` / `max_amps`: wallbox current range (6A-16A)
-- `phases`: number of phases (from OCPP server config)
+| Source | What it does | Update frequency |
+|--------|-------------|-----------------|
+| **Surplus capture** | Measures real-time grid export that would otherwise be exported (the DC-coupled SUN2000 battery cannot absorb AC power from Enphase). If higher than `ev_min_solar_power`, the EV is charged. | Every 10 s |
+| **Forecast strategy** | Uses SOC simulation (Section 4.2) to find the highest wallbox amp level that keeps battery SOC ≥ protection target at 21:00. The battery acts as buffer between coarse amp steps and actual surplus. | Every 15 min |
 
-**Step 1: Determine battery protection target**
+#### Selection Rules
 
-```
-sim_no_ev = simulate(current_soc, forecast, ev_power_w=0)
-baseline_soc_2100 = soc_at_target(sim_no_ev, 21:00)
-protection_target = min(80%, baseline_soc_2100)
-```
+The power calculation picks the first matching rule:
 
-On a good day, `baseline_soc_2100` ≥ 80% → target = 80% (normal protection).
-On a bad day, `baseline_soc_2100` = 55% → target = 55% (can't reach 80% anyway, don't penalize EV).
+| # | Rule | Power | Reasoning |
+|---|------|-------|-----------|
+| 1 | Surplus capture ≥ `ev_min_solar_power` | `surplus_capture_power_w` | Exported energy is wasted — capture it first. Bypasses battery protection because this energy is "free." |
+| 2 | Forecast strategy ≥ `ev_min_solar_power` AND `battery_protection_passed` | `ev_forecasted_power_w` | SOC simulation says battery can sustain EV charging while keeping reserve for evening. |
+| 3 | Neither source meets threshold | 0 | Not enough solar power to justify starting the wallbox. |
 
-**Step 2: Check minimum viability**
+**`ev_min_solar_power`** is the minimum power gate, applied uniformly to both sources in this one place. Below this threshold, the wallbox should not start. Neither the forecast strategy nor the surplus capture apply this threshold themselves.
 
-```
-sim_min = simulate(current_soc, forecast, ev_power_w=min_solar_power_w)
-if soc_at_target(sim_min, 21:00) < protection_target:
-    return 0   # can't justify even minimum solar power
-```
+**Battery protection** is only required for the forecast path. Surplus capture energy would be lost to the grid anyway — using it for EV charging never makes the battery worse.
 
-**Step 3: Find optimal amp level (bottom-up search)**
+#### Forecast Strategy
 
-```
-best_amps = 0
+The wallbox accepts full-amp steps only (690W per step on 3-phase). The battery absorbs the gap between the coarse step and the actual surplus. The forecast strategy picks the right step so the battery can sustain this buffering until 21:00.
 
-for amps in range(min_amps, max_amps + 1):
-    wallbox_w = amps × 230 × phases
+**Inputs:** Current battery SOC, PV and load forecasts (from InfluxDB), `min_current_a` (default 6A), `max_current_a` (default 16A), `phases` (default 3), `protection_soc_percent` (default 80%).
 
-    # Modify only the first 15-min slot of the forecast
-    forecast_copy = forecast.copy()
-    forecast_copy.iloc[0]['net_energy_wh'] -= wallbox_w × 0.25
+**Step 1 — Protection target:** Simulate SOC until 21:00 without EV load. On a good day the battery reaches ≥ 80% → target = 80%. On a bad day it only reaches 55% → target = 55% (can't reach 80% anyway, don't penalize EV).
 
-    sim = simulate(current_soc, forecast_copy)
-    soc_2100 = soc_at_target(sim, 21:00)
-    soc_max = sim['soc_percent'].max()
+**Step 2 — Viability check:** Simulate with minimum wallbox load (6A). If SOC at 21:00 drops below the protection target, there's not enough surplus for any EV charging → return 0.
 
-    if soc_2100 < protection_target:
-        break                    # one step too far, stop
+**Step 3 — Bottom-up amp search:** Try each amp level from 6A to 16A. For each level, subtract the wallbox energy from the next 15-min forecast slot and simulate. Stop when SOC at 21:00 would drop below the protection target, or when no battery clipping occurs (optimal point found). Output: `best_amps × 230 × phases`.
 
-    best_amps = amps
-
-    if soc_max < 100:
-        break                    # no clipping at this level, optimal
-
-return best_amps × 230 × phases   # convert to watts
-```
-
-#### 4.5.7.4 How It Handles All Scenarios
-
-| Scenario | What happens |
-|----------|-------------|
-| **Good morning** | SOC hits 100% at low amps → keeps going up until no clipping. Starts early, uses battery as buffer. |
-| **Afternoon** | Forecast shrinks → optimal amps naturally decreases each cycle. Eventually min_solar_power_w fails → stop. |
-| **Bad/cloudy day** | `baseline_soc_2100` < 80% → dynamic target. Small surplus still charges EV without making battery worse. |
-| **Peak solar** | High surplus → high amps. Battery charges the excess between steps. |
-| **Low surplus (e.g. 2000W)** | Below `min_solar_power_w` → no charging. Above → charge at `min_amps`, battery buffers the gap. |
-| **Battery already full** | SOC at 100%, clipping imminent → algorithm pushes amps up aggressively to absorb energy. |
-
-#### 4.5.7.5 Self-Correcting Behavior
-
-The strategy re-runs every 15 minutes with:
-- **Actual current SOC** (not forecasted — accounts for forecast errors)
-- **Updated PV and load forecasts** (rolling window)
-- **Only the next 15-min slot** modified by wallbox power
-
-This makes it inherently self-correcting:
+The strategy re-runs every 15 minutes with actual SOC and updated forecasts, making it self-correcting:
 
 | Forecast error | Effect |
 |----------------|--------|
@@ -2144,24 +2028,26 @@ This makes it inherently self-correcting:
 | Load higher than forecast | Battery discharges more → next cycle adapts |
 | Load lower than forecast | Battery has more headroom → next cycle may increase amps |
 
-#### 4.5.7.6 Configuration Parameters
+#### Surplus Capture
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `ev.min_solar_power_w` | 3500 | Minimum energy budget to start solar charging. Below wallbox hardware minimum — battery covers the gap. |
-| `ev.min_current_a` | 6 | Wallbox minimum current (hardware limit) |
-| `ev.max_current_a` | 16 | Wallbox maximum current (hardware limit) |
-| `ev.phases` | 3 | Number of phases (from `wallbox_type` config) |
-| `battery.protection_soc_percent` | 80 | Target SOC at 21:00 on good days |
+The Enphase microinverters (~1.5 kW AC max) feed the house AC bus. When their production exceeds house load, the excess is exported. Surplus capture converts this measured grid export into a 1-phase wallbox power setpoint (always 1-phase because Enphase max is below the 3-phase minimum of 4,140W).
 
-#### 4.5.7.7 Relationship to Other Components
+**Inputs:** `grid_power_w` (from `sensor.grid_power` or DTSU fallback), `pv_power_w` (from `sensor.solar_pv_total_ac_power`), `wallbox_power_w` (from `sensor.wallbox_power` — for feedback correction).
 
-| Component | Interaction |
-|-----------|------------|
-| `SocSimulator` (4.2) | Re-used directly — strategy modifies forecast input, not the simulator |
-| `BatteryOptimizer` (4.3) | Runs independently — nightly discharge decision is separate from EV strategy |
-| OCPP Server ([ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md)) | Receives `wallbox_power_limit` in watts; handles amp conversion and phase switching internally |
-| `sensor.surplus_power` | HA template sensor (solar - house_load) — used for real-time monitoring, not for the strategy calculation |
+**Feedback loop prevention:** When the wallbox starts charging, it increases house load, reducing measured grid export. To avoid oscillation, the wallbox's current power is added back to the measured export when surplus capture is already active — reconstructing the "pre-wallbox" export level.
+
+#### Scenarios
+
+| Scenario | What happens |
+|----------|-------------|
+| **Good morning** | Forecast: SOC hits 100% at low amps → keeps going up until no clipping. Charging starts once forecast power ≥ `ev_min_solar_power`. Battery buffers. |
+| **Afternoon** | Forecast: shrinks each cycle → amps decrease. Eventually drops below `ev_min_solar_power` → 0. |
+| **Bad/cloudy day** | Forecast: dynamic target adapts down. Small surplus still charges EV without hurting battery. |
+| **Peak solar** | Forecast: high surplus → high amps. Battery charges the excess between steps. |
+| **Battery already full** | Forecast: SOC at 100%, clipping imminent → pushes amps up aggressively. |
+| **Low surplus (e.g. 1000W)** | Both sources below `ev_min_solar_power` → no charging. Not enough to justify starting the wallbox. |
+| **Enphase exporting** | Surplus capture: grid export ≥ `ev_min_solar_power` → 1-phase charging captures the export. |
+| **Both sources available** | Surplus capture wins (rule 1) — exported energy takes priority over forecast. |
 
 ## 4.6 Smart Car SOC Polling
 
@@ -2927,7 +2813,7 @@ cd energymanager && python -m pytest tests/test_appliance_signal.py -v
 
 Test file: `energymanager/tests/test_ev_state_machine.py`
 
-**66 unit tests** organized by state, covering all transitions defined in Section 4.5.6:
+**66 unit tests** organized by state, covering all transitions defined in Section 4.5.5:
 
 ### State stay tests
 
@@ -3166,7 +3052,7 @@ Report version: **3** (bumped when test definitions change — invalidates stale
 |----|------|---------------|----------------|
 | NO-01 | IDLE stays when wallbox unavailable | mode=solar, wallbox unavailable | state=IDLE, power=0 |
 | NO-02 | IDLE→SOLAR on strategy power>0 | prev=IDLE, mode=solar, available, protection passed, strategy>0 | state=SOLAR |
-| NO-05 | SOLAR power equals strategy power | state=SOLAR, strategy>0 | target_power_w == ev_target_power_w |
+| NO-05 | SOLAR power equals strategy power | state=SOLAR, strategy>0 | target_power_w == ev_forecasted_power_w |
 | NO-06 | IDLE→IMMEDIATE | prev=IDLE, mode=immediate, available | state=IMMEDIATE, power=max |
 | NO-07 | IMMEDIATE→IDLE mode change | prev=IMMEDIATE, mode≠immediate | state=IDLE, power=0 |
 | NO-08 | Immediate→solar sends 0W | prev=IMMEDIATE, mode=solar | state=IDLE, power=0 |
