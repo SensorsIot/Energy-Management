@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.71"
+__version__ = "1.6.72"
 
 import json
 import logging
@@ -725,13 +725,8 @@ class EnergyManager:
             return hits_min, min_soc, target_time
         return True, None, target_time
 
-    def check_battery_protection(self, ev_power_w: float = 0.0) -> tuple[bool, float]:
+    def check_battery_protection(self) -> tuple[bool, float]:
         """Check if battery SOC at next cheap tariff start meets protection target.
-
-        Args:
-            ev_power_w: EV charging power in watts. Converted to energy for
-                        one 15-min interval (ev_power_w * 0.25 Wh) and
-                        subtracted from the forecast as worst-case load.
 
         EV forecast path is allowed if:
         1. SOC at target >= protection target (default 80%), OR
@@ -742,11 +737,7 @@ class EnergyManager:
             (reaches_target, soc_at_target) tuple
         """
         try:
-            # EV load for one 15-min interval
-            ev_load_wh = ev_power_w * 0.25
-            soc_at_target, target_time = self.get_forecast_soc_at_target(
-                extra_load_wh=ev_load_wh
-            )
+            soc_at_target, target_time = self.get_forecast_soc_at_target()
 
             if soc_at_target is None:
                 logger.warning(
@@ -756,10 +747,9 @@ class EnergyManager:
                 return False, 0.0
 
             reaches_target = soc_at_target >= self.ev_battery_protection_soc
-            ev_note = f" (with EV {ev_load_wh:.0f}Wh)" if ev_load_wh > 0 else ""
             logger.info(
                 f"Battery protection: forecast SOC at {swiss_time(target_time)}="
-                f"{soc_at_target:.0f}%{ev_note} "
+                f"{soc_at_target:.0f}% "
                 f"(target={self.ev_battery_protection_soc}%) → "
                 f"{'EV allowed' if reaches_target else 'EV blocked'}"
             )
@@ -866,19 +856,16 @@ class EnergyManager:
             )
 
             # Battery forecast checks for EV decision
+            # No EV load deduction here — these checks answer "can we afford to charge?"
+            # Deducting EV load would create circular logic (charge→deduct→block→don't charge)
             if battery_soc >= 100:
                 reaches_target, soc_at_target = True, 100.0
                 battery_will_be_full = True
                 battery_will_hit_min = False
             else:
-                reaches_target, soc_at_target = self.check_battery_protection(
-                    ev_power_w=self._ev_forecasted_power_w
-                )
+                reaches_target, soc_at_target = self.check_battery_protection()
                 battery_will_be_full, _, _ = self.will_battery_hit_full()
-                ev_load_wh = self._ev_forecasted_power_w * 0.25
-                battery_will_hit_min, _, _ = self.will_battery_hit_minimum(
-                    extra_load_wh=ev_load_wh
-                )
+                battery_will_hit_min, _, _ = self.will_battery_hit_minimum()
             self._battery_reaches_target = reaches_target
             self._battery_min_soc_forecast = soc_at_target
 
