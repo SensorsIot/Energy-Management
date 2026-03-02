@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.64"
+__version__ = "1.6.65"
 
 import json
 import logging
@@ -612,16 +612,59 @@ class EnergyManager:
             return result[0].records[0].get_value(), target_time
         return None, target_time
 
+    def get_forecast_soc_range(self) -> tuple[float | None, float | None, datetime]:
+        """Query min and max SOC from now until the next cheap tariff start.
+
+        Scans the full SOC trajectory (with_strategy scenario) from now
+        until tariff.target to find the lowest and highest predicted SOC.
+
+        Returns:
+            (min_soc or None, max_soc or None, target_time)
+        """
+        now = datetime.now(timezone.utc)
+        tariff = self.optimizer.get_tariff_periods(now)
+        target_time = tariff.target
+        target_stop = (target_time + timedelta(minutes=15)).isoformat()
+        query_api = self.influx_client.query_api()
+
+        min_soc = None
+        max_soc = None
+
+        for agg, label in [("min", "min"), ("max", "max")]:
+            query = f'''
+            from(bucket: "{self.output_bucket}")
+              |> range(start: now(), stop: {target_stop})
+              |> filter(fn: (r) => r._measurement == "soc_forecast")
+              |> filter(fn: (r) => r.scenario == "with_strategy")
+              |> filter(fn: (r) => r._field == "soc_percent")
+              |> {agg}()
+            '''
+            result = query_api.query(query)
+            if result and result[0].records:
+                val = result[0].records[0].get_value()
+                if label == "min":
+                    min_soc = val
+                else:
+                    max_soc = val
+
+        if min_soc is not None:
+            logger.debug(
+                f"SOC range until {swiss_time(target_time)}: "
+                f"min={min_soc:.0f}%, max={max_soc:.0f}%"
+            )
+
+        return min_soc, max_soc, target_time
+
     def check_battery_protection(self) -> tuple[bool, float]:
         """Check if battery SOC at next cheap tariff start meets protection target.
 
-        Uses get_forecast_soc_at_target() to query the predicted SOC at the
-        next 21:00. EV forecast path is only allowed if SOC >= protection
-        target (default 80%).
+        Uses get_forecast_soc_at_target() for the SOC at 21:00 and
+        get_forecast_soc_range() for min/max along the trajectory.
 
-        Override: if battery is forecast to hit 100% before 21:00, excess
-        solar would be curtailed — allow EV to use it even if final SOC
-        drops below target.
+        EV forecast path is allowed if:
+        1. SOC at target >= protection target (default 80%), OR
+        2. Peak SOC reaches 100% before target (battery full override —
+           excess solar would be curtailed, better to divert to EV)
 
         Returns:
             (reaches_target, soc_at_target) tuple
@@ -647,25 +690,14 @@ class EnergyManager:
             # Override: if battery is forecast to reach 100% before target,
             # excess solar would be curtailed — let EV use it.
             if not reaches_target:
-                window_stop = (target_time + timedelta(minutes=15)).isoformat()
-                peak_query = f'''
-                from(bucket: "{self.output_bucket}")
-                  |> range(start: now(), stop: {window_stop})
-                  |> filter(fn: (r) => r._measurement == "soc_forecast")
-                  |> filter(fn: (r) => r.scenario == "with_strategy")
-                  |> filter(fn: (r) => r._field == "soc_percent")
-                  |> max()
-                '''
-                peak_result = self.influx_client.query_api().query(peak_query)
-                if peak_result and peak_result[0].records:
-                    peak_soc = peak_result[0].records[0].get_value()
-                    if peak_soc >= 99:
-                        reaches_target = True
-                        logger.info(
-                            "Battery protection override: peak SOC %.0f%% "
-                            "(battery full before target) → EV allowed",
-                            peak_soc,
-                        )
+                _min_soc, max_soc, _ = self.get_forecast_soc_range()
+                if max_soc is not None and max_soc >= 99:
+                    reaches_target = True
+                    logger.info(
+                        "Battery protection override: peak SOC %.0f%% "
+                        "(battery full before target) → EV allowed",
+                        max_soc,
+                    )
 
             return reaches_target, soc_at_target
 
