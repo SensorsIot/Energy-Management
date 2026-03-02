@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.57"
+__version__ = "1.6.58"
 
 import json
 import logging
@@ -753,12 +753,13 @@ class EnergyManager:
             # Compute grid surplus capture candidate (FSD 4.5 — grid surplus rule)
             surplus_capture_power_w = 0.0
             if ev_mode == "solar":
+                # Grid convention: positive = export, negative = import.
                 # Feedback correction: when already capturing, compute grid
                 # export as if the wallbox load were removed.
                 if self._surplus_capture_active and wallbox_power > 0:
-                    grid_export = max(0.0, -(grid_power - wallbox_power))
+                    grid_export = max(0.0, grid_power + wallbox_power)
                 else:
-                    grid_export = max(0.0, -grid_power)
+                    grid_export = max(0.0, grid_power)
                 if grid_export >= ev_min_power and pv_power > 0:
                     # Clamp to wallbox min/max (from OCPP sensor, phase-aware)
                     surplus_capture_power_w = float(
