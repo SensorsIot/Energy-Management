@@ -1,5 +1,5 @@
 """
-Tests for forecast-based EV charging strategy (FSD 4.5.7).
+Tests for surplus-based EV charging strategy (FSD 4.5.6).
 """
 
 from __future__ import annotations
@@ -52,124 +52,113 @@ def _noon_utc() -> datetime:
 
 
 # ---------------------------------------------------------------------------
-# Good day: plenty of surplus → charges at optimal amps
+# Surplus snap: picks correct amp level based on surplus
 # ---------------------------------------------------------------------------
 
-class TestGoodDay:
-    def test_sunny_forecast_returns_positive_power(self):
+class TestSurplusSnap:
+    def test_surplus_5000_picks_8a(self):
+        """5000 W surplus → 8A (8×230×3 = 5520 W), not 16A."""
         opt = _make_optimizer()
         strategy = EVChargingStrategy(optimizer=opt)
         now = _noon_utc()
-        # Each slot has 1000 Wh net surplus (huge surplus)
         forecast = _make_forecast(now, slots=40, net_wh_per_slot=1000)
         result = strategy.calculate(
             current_soc=50, forecast=forecast, now=now,
+            surplus_power_w=5000,
         )
-        assert result.power_w > 0
-        assert result.amps >= 6
+        assert result.amps == 8
+        assert result.power_w == 8 * 230 * 3  # 5520 W
 
-    def test_high_surplus_reaches_max_amps(self):
+    def test_surplus_below_min_uses_min(self):
+        """2000 W surplus (< 6A×230×3=4140) → snaps to 6A = 4140 W."""
         opt = _make_optimizer()
         strategy = EVChargingStrategy(optimizer=opt)
         now = _noon_utc()
-        # Massive surplus — battery easily full, lots of clipping
-        forecast = _make_forecast(now, slots=40, net_wh_per_slot=2000)
+        forecast = _make_forecast(now, slots=40, net_wh_per_slot=1000)
         result = strategy.calculate(
-            current_soc=90, forecast=forecast, now=now,
+            current_soc=50, forecast=forecast, now=now,
+            surplus_power_w=2000,
         )
-        # With huge surplus and high SOC, should push amps up
-        assert result.amps >= 10
+        assert result.amps == 6
+        assert result.power_w == 6 * 230 * 3  # 4140 W
+
+    def test_surplus_above_max_uses_max(self):
+        """12000 W surplus (> 16A×230×3=11040) → caps at 16A = 11040 W."""
+        opt = _make_optimizer()
+        strategy = EVChargingStrategy(optimizer=opt)
+        now = _noon_utc()
+        forecast = _make_forecast(now, slots=40, net_wh_per_slot=1000)
+        result = strategy.calculate(
+            current_soc=50, forecast=forecast, now=now,
+            surplus_power_w=12000,
+        )
+        assert result.amps == 16
+        assert result.power_w == 16 * 230 * 3  # 11040 W
+
+    def test_surplus_exact_step_boundary(self):
+        """Surplus exactly on a step boundary (6900 = 10A×230×3) → picks 10A."""
+        opt = _make_optimizer()
+        strategy = EVChargingStrategy(optimizer=opt)
+        now = _noon_utc()
+        forecast = _make_forecast(now, slots=40, net_wh_per_slot=1000)
+        result = strategy.calculate(
+            current_soc=50, forecast=forecast, now=now,
+            surplus_power_w=6900,
+        )
+        assert result.amps == 10
+        assert result.power_w == 6900
+
+
+# ---------------------------------------------------------------------------
+# Battery protection: steps down when SOC target at risk
+# ---------------------------------------------------------------------------
+
+class TestBatteryProtection:
+    def test_tight_battery_steps_down(self):
+        """Surplus 8000 W → candidate 12A, but only 3 forecast slots limit recovery.
+
+        10 kWh battery at 82% = 8200 Wh. 3 slots of 500 Wh.
+        Baseline: 8200 + 3×500×0.95 = 9625 → 96.25%. Protection = 80%.
+        12A = 8280 W → 2070 Wh from slot 0 → net = -1570 → SOC ~65.5%.
+        2 recovery slots add 950 Wh → ~75%. < 80% → 12A fails.
+        8A = 5520 W → 1380 Wh from slot 0 → net = -880 → SOC ~72.7%.
+        2 recovery slots add 950 Wh → ~82.2%. ≥ 80% → 8A passes.
+        """
+        opt = _make_optimizer()
+        strategy = EVChargingStrategy(optimizer=opt)
+        now = _noon_utc()
+        forecast = _make_forecast(now, slots=3, net_wh_per_slot=500)
+        result = strategy.calculate(
+            current_soc=82, forecast=forecast, now=now,
+            surplus_power_w=8000,
+            protection_soc_percent=80,
+        )
+        # Candidate 12A fails, should step down to ~8A
+        assert 0 < result.amps < 12
         assert result.power_w == result.amps * 230 * 3
 
-
-# ---------------------------------------------------------------------------
-# Bad day: cloudy → protection target drops, still charges if viable
-# ---------------------------------------------------------------------------
-
-class TestBadDay:
-    def test_cloudy_but_viable_charges(self):
-        opt = _make_optimizer()
-        strategy = EVChargingStrategy(optimizer=opt)
-        now = _noon_utc()
-        # Small surplus per slot — SOC at 21:00 might be lower
-        forecast = _make_forecast(now, slots=40, net_wh_per_slot=300)
-        result = strategy.calculate(
-            current_soc=60, forecast=forecast, now=now,
-        )
-        # Should still charge since protection drops with baseline
-        assert result.protection_target <= 80
-
-
-# ---------------------------------------------------------------------------
-# Very bad day: viability fails → returns 0W
-# ---------------------------------------------------------------------------
-
-class TestViabilityFail:
-    def test_tight_margin_viability_fails(self):
-        """When baseline barely reaches protection, adding min EV load tips it below.
-
-        10kWh battery at 78%. Baseline needs tiny surplus to reach 80%.
-        Min EV = 6A × 230V × 3ph = 4140W → 1035Wh per slot subtracted from slot 0.
-        That drops SOC below the 80% target.
-        """
+    def test_very_tight_battery_returns_zero(self):
+        """Surplus 5000 W but battery so tight even min_amps fails → 0."""
         opt = _make_optimizer()
         strategy = EVChargingStrategy(optimizer=opt)
         now = _noon_utc()
         # Tiny surplus: 30 Wh/slot × 40 slots × 0.95 = 1140 Wh charge
         # Starting at 78% = 7800 Wh → ends at ~8940 Wh ≈ 89% baseline
-        # But protection is 80% (min of 80, 89) = 80%
-        # Min EV subtracts 1035 Wh from slot 0:
-        # slot 0 net = 30 - 1035 = -1005 Wh → battery discharges
-        # 7800 - 1005/0.95 = 7800 - 1058 = 6742 Wh ≈ 67%
-        # Remaining 39 slots add back 39 × 30 × 0.95 = 1112 Wh → 7854 Wh ≈ 78.5%
-        # 78.5% < 80% target → viability fails
+        # Protection = min(80, 89) = 80%
+        # Min EV (4140 W) subtracts 1035 Wh from slot 0 → drops below 80%
         forecast = _make_forecast(now, slots=40, net_wh_per_slot=30)
         result = strategy.calculate(
             current_soc=78, forecast=forecast, now=now,
+            surplus_power_w=5000,
             protection_soc_percent=80,
         )
         assert result.power_w == 0
         assert result.amps == 0
-        assert "viability fail" in result.reason
-
-    def test_deficit_baseline_drops_protection(self):
-        """With deficit forecast, protection target drops to baseline SOC at 21:00.
-
-        When baseline is already low, the algorithm allows EV because the
-        battery is going to be empty anyway.
-        """
-        opt = _make_optimizer()
-        strategy = EVChargingStrategy(optimizer=opt)
-        now = _noon_utc()
-        forecast = _make_forecast(now, slots=40, net_wh_per_slot=-200)
-        result = strategy.calculate(
-            current_soc=50, forecast=forecast, now=now,
-        )
-        # Protection target drops to baseline (near 0%), so EV is allowed
-        assert result.protection_target < 80
-        assert result.baseline_soc_2100 < 50
+        assert "protection fail" in result.reason
 
 
 # ---------------------------------------------------------------------------
-# Battery full: pushes amps up aggressively (clipping prevention)
-# ---------------------------------------------------------------------------
-
-class TestBatteryFull:
-    def test_high_soc_with_surplus_charges(self):
-        opt = _make_optimizer()
-        strategy = EVChargingStrategy(optimizer=opt)
-        now = _noon_utc()
-        # Good surplus with high SOC — clipping risk
-        forecast = _make_forecast(now, slots=40, net_wh_per_slot=800)
-        result = strategy.calculate(
-            current_soc=95, forecast=forecast, now=now,
-        )
-        assert result.power_w > 0
-        assert result.amps >= 6
-
-
-# ---------------------------------------------------------------------------
-# Empty forecast
+# Edge cases
 # ---------------------------------------------------------------------------
 
 class TestEdgeCases:
@@ -180,6 +169,7 @@ class TestEdgeCases:
         forecast = pd.DataFrame()
         result = strategy.calculate(
             current_soc=50, forecast=forecast, now=now,
+            surplus_power_w=5000,
         )
         assert result.power_w == 0
         assert result.reason == "no forecast"
@@ -192,9 +182,23 @@ class TestEdgeCases:
         forecast = _make_forecast(now, slots=40, net_wh_per_slot=1500)
         result = strategy.calculate(
             current_soc=90, forecast=forecast, now=now,
+            surplus_power_w=5000,
             protection_soc_percent=60,
         )
         assert result.protection_target <= 60
+
+    def test_deficit_baseline_drops_protection(self):
+        """With deficit forecast, protection target drops to baseline SOC at 21:00."""
+        opt = _make_optimizer()
+        strategy = EVChargingStrategy(optimizer=opt)
+        now = _noon_utc()
+        forecast = _make_forecast(now, slots=40, net_wh_per_slot=-200)
+        result = strategy.calculate(
+            current_soc=50, forecast=forecast, now=now,
+            surplus_power_w=5000,
+        )
+        assert result.protection_target < 80
+        assert result.baseline_soc_2100 < 50
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +213,7 @@ class TestConfigVariations:
         forecast = _make_forecast(now, slots=40, net_wh_per_slot=1000)
         result = strategy.calculate(
             current_soc=60, forecast=forecast, now=now,
+            surplus_power_w=3000,
             phases=1,
         )
         # Single phase: amps × 230 × 1
@@ -221,6 +226,7 @@ class TestConfigVariations:
         forecast = _make_forecast(now, slots=40, net_wh_per_slot=1500)
         result = strategy.calculate(
             current_soc=60, forecast=forecast, now=now,
+            surplus_power_w=5000,
             min_amps=8, max_amps=12,
         )
         assert 8 <= result.amps <= 12 or result.amps == 0

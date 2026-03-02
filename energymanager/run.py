@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.51"
+__version__ = "1.6.53"
 
 import json
 import logging
@@ -488,14 +488,14 @@ class EnergyManager:
             # (checks if battery has enough energy to run appliance without grid import)
             self.calculate_appliance_signal(current_soc, sim_no_strategy)
 
-            # EV charging strategy (FSD 4.5.7)
+            # EV charging strategy (FSD 4.5.6)
             if self.ev_charging_enabled:
-                min_solar = self.ha_client.get_sensor_value(self.ev_min_solar_power_entity) or 3500
+                surplus_power = self.ha_client.get_sensor_value(self.surplus_power_entity) or 0.0
                 result = self._ev_strategy.calculate(
                     current_soc=current_soc,
                     forecast=forecast,
                     now=now,
-                    min_solar_power_w=min_solar,
+                    surplus_power_w=surplus_power,
                     min_amps=self.ev_min_amps,
                     max_amps=self.ev_max_amps,
                     phases=self.ev_phases,
@@ -634,7 +634,7 @@ class EnergyManager:
                     peak_result = query_api.query(peak_query)
                     if peak_result and peak_result[0].records:
                         peak_soc = peak_result[0].records[0].get_value()
-                        if peak_soc >= 100:
+                        if peak_soc >= 99:
                             reaches_target = True
                             logger.info(
                                 "Battery protection override: peak SOC %.0f%% "
