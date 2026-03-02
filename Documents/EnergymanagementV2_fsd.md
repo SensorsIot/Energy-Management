@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.27
+**Version:** 2.28
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -404,7 +404,7 @@ All power values follow a consistent sign convention. The canonical reference ta
 
 | Formula | Location | Logic |
 |---------|----------|-------|
-| `excess = −grid_power + wallbox_power` | run.py EV loop | Negates grid (export → available), adds back wallbox's own draw |
+| `excess = grid_power + wallbox_power` | run.py EV loop | Grid positive = export; adds back wallbox's own draw when already capturing |
 | `net_energy_wh = pv_wh − load_wh` | forecast_reader.py | Positive = surplus to charge battery |
 | `excess_power = pv − load` | appliance_signal.py | Positive = surplus available for appliance |
 
@@ -413,7 +413,7 @@ All power values follow a consistent sign convention. The canonical reference ta
 The following invariants should hold under normal operation. Runtime sanity checks in `energymanager/src/sanity.py` validate these and log warnings on violation (but never block control):
 
 1. **PV ≥ 0, Load ≥ 0, Wallbox ≥ 0** — always; negative values indicate sensor fault
-2. **At midday with PV > 2 000 W and no wallbox load** — grid should typically be negative (exporting)
+2. **At midday with PV > 2 000 W and no wallbox load** — grid should typically be positive (exporting)
 3. **|grid| should not exceed ~15 000 W** — above this suggests sensor fault (PV peak + battery max ≈ 17 kW)
 
 ## 1.10 Design Principles
@@ -3367,6 +3367,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.28: Fix grid power sign convention in surplus capture formula (Section 1.9.1) — grid sensor uses positive=export, code was negating it; corrected sanity invariant (Section 1.9.2); skip peak-SOC override query in battery protection when past cheap_start (Section 4.5.6)
 - v2.27: Surplus-based EV forecast strategy (Section 4.5.6) — forecast path now snaps current `sensor.surplus_power` to next wallbox amp step instead of bottom-up search from min to max; entry gate changed from `ev_forecasted_power_w >= threshold` to `surplus_power >= ev_min_solar_power` (live surplus must exceed configured minimum); battery protection check steps down from candidate amp level; updated Selection Rules table, Input Parameters, and Scenarios
 - v2.26: Passive integration observer test revision (Appendix D.7) — replaced 5 obsolete surplus-tracking tests (NO-03, NO-04, EC-01, EC-10, EC-11) with forecast-strategy-aligned tests (NO-05, NO-13, EC-05, EC-06, EC-07); updated NO-02 preconditions for strategy-based entry; report version bumped to 3; evidence includes `strategy` field
 - v2.25: Forecast-based EV solar charging strategy (Section 4.5.7) — replaces instantaneous open-loop/closed-loop excess with SOC simulation; battery acts as buffer for coarse amp steps (690W on 3-phase); bottom-up search from min to max amps; dynamic protection target adapts to bad days; `min_solar_power_w` config for early charging below wallbox minimum; `sensor.surplus_power` for entry decision; renamed `sensor.load_power` → `sensor.house_load_power`; added `sensor.total_load_power` (house + wallbox for Fire display)
