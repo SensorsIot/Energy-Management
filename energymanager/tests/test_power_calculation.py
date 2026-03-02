@@ -13,6 +13,7 @@ def compute_ev_charging_power(
     *,
     ev_mode: str,
     surplus_capture_power_w: float,
+    surplus_power_w: float,
     ev_forecasted_power_w: float,
     reaches_target: bool,
     threshold: float,
@@ -25,8 +26,8 @@ def compute_ev_charging_power(
         if surplus_capture_power_w >= threshold:
             ev_charging_power_w = surplus_capture_power_w
             ev_charging_source = "surplus"
-        # Rule 2: forecast strategy (needs battery protection)
-        elif reaches_target and ev_forecasted_power_w >= threshold:
+        # Rule 2: surplus above threshold + battery protection → use forecast power
+        elif surplus_power_w >= threshold and reaches_target and ev_forecasted_power_w > 0:
             ev_charging_power_w = ev_forecasted_power_w
             ev_charging_source = "forecast"
     return ev_charging_power_w, ev_charging_source
@@ -40,6 +41,7 @@ class TestSurplusPriority:
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_capture_power_w=1610,
+            surplus_power_w=5000,
             ev_forecasted_power_w=5000,
             reaches_target=True,
             threshold=1400,
@@ -48,10 +50,11 @@ class TestSurplusPriority:
         assert source == "surplus"
 
     def test_surplus_below_threshold_uses_forecast(self):
-        """Surplus below threshold falls through to forecast."""
+        """Surplus capture below threshold, but surplus_power above → forecast."""
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_capture_power_w=1000,
+            surplus_power_w=4000,
             ev_forecasted_power_w=5000,
             reaches_target=True,
             threshold=1400,
@@ -61,12 +64,13 @@ class TestSurplusPriority:
 
 
 class TestForecastWithProtection:
-    """Forecast path requires battery protection (FSD Rule 2)."""
+    """Forecast path requires surplus >= threshold and battery protection (FSD Rule 2)."""
 
-    def test_forecast_above_threshold_protection_passed(self):
+    def test_forecast_surplus_above_protection_passed(self):
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_capture_power_w=0,
+            surplus_power_w=4000,
             ev_forecasted_power_w=5000,
             reaches_target=True,
             threshold=1400,
@@ -74,11 +78,12 @@ class TestForecastWithProtection:
         assert power == 5000
         assert source == "forecast"
 
-    def test_forecast_above_threshold_protection_failed(self):
+    def test_forecast_protection_failed(self):
         """Battery protection blocks forecast → 0."""
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_capture_power_w=0,
+            surplus_power_w=4000,
             ev_forecasted_power_w=5000,
             reaches_target=False,
             threshold=1400,
@@ -86,12 +91,26 @@ class TestForecastWithProtection:
         assert power == 0.0
         assert source == "none"
 
-    def test_forecast_below_threshold(self):
-        """Forecast below threshold → 0."""
+    def test_forecast_surplus_below_threshold(self):
+        """Surplus power below threshold → 0 even with good forecast."""
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_capture_power_w=0,
-            ev_forecasted_power_w=1000,
+            surplus_power_w=1000,
+            ev_forecasted_power_w=5000,
+            reaches_target=True,
+            threshold=1400,
+        )
+        assert power == 0.0
+        assert source == "none"
+
+    def test_forecast_zero_returns_zero(self):
+        """Forecast power is 0 → no charging even with surplus above threshold."""
+        power, source = compute_ev_charging_power(
+            ev_mode="solar",
+            surplus_capture_power_w=0,
+            surplus_power_w=4000,
+            ev_forecasted_power_w=0,
             reaches_target=True,
             threshold=1400,
         )
@@ -104,6 +123,7 @@ class TestBothBelowThreshold:
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_capture_power_w=500,
+            surplus_power_w=800,
             ev_forecasted_power_w=800,
             reaches_target=True,
             threshold=1400,
@@ -117,6 +137,7 @@ class TestNonSolarMode:
         power, source = compute_ev_charging_power(
             ev_mode="immediate",
             surplus_capture_power_w=2000,
+            surplus_power_w=5000,
             ev_forecasted_power_w=5000,
             reaches_target=True,
             threshold=1400,
@@ -128,6 +149,7 @@ class TestNonSolarMode:
         power, source = compute_ev_charging_power(
             ev_mode="cheap",
             surplus_capture_power_w=2000,
+            surplus_power_w=5000,
             ev_forecasted_power_w=5000,
             reaches_target=True,
             threshold=1400,
@@ -137,12 +159,13 @@ class TestNonSolarMode:
 
 
 class TestSurplusBypassesProtection:
-    """Surplus doesn't need battery protection — it's free energy."""
+    """Surplus capture doesn't need battery protection — it's free energy."""
 
     def test_surplus_works_without_protection(self):
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_capture_power_w=1610,
+            surplus_power_w=1610,
             ev_forecasted_power_w=0,
             reaches_target=False,
             threshold=1400,
