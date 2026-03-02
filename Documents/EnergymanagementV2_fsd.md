@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.28
+**Version:** 2.29
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -1757,6 +1757,7 @@ Every 15 minutes:
    a) Min SOC% >= reserve% + appliance%
       → SOC never drops below threshold at any point in the simulation
    b) Grid export before evening >= appliance_energy (1500Wh)
+      AND min SOC% >= reserve% (SOC never drops below minimum)
       → If we're exporting energy anyway, might as well use it
       → Export = sum of net_wh when SOC >= 99.9% and before 18:00
 
@@ -1798,11 +1799,14 @@ grid_export_wh = sum of net_wh where:
   - AND net_wh > 0 (excess PV)
   - AND time < 18:00 local
 
-If grid_export_wh >= appliance_energy_wh (1500Wh):
+If grid_export_wh >= appliance_energy_wh (1500Wh)
+   AND min_soc_percent >= reserve_percent (10%):
   → ORANGE: Better to use the energy than export it
 ```
 
-**Rationale:** If the battery is full and we're exporting energy to the grid anyway, it makes more sense to use that energy for the washing machine than to sell it at a low feed-in tariff.
+**SOC floor guard:** Even though the export energy would cover the appliance, the appliance draws power NOW — potentially before the battery reaches 100%. The min SOC must stay above the reserve to prevent the battery from being depleted.
+
+**Rationale:** If the battery is full and we're exporting energy to the grid anyway, it makes more sense to use that energy for the washing machine than to sell it at a low feed-in tariff. But only if the battery never drops below the minimum reserve at any point in the forecast.
 
 ### 4.4.3 Output: sensor.appliance_signal
 
@@ -3367,6 +3371,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.29: Appliance signal ORANGE condition 2b (grid export) now requires min SOC ≥ reserve% (Section 4.4.2, 4.4.2.2) — prevents recommending appliance when battery would drop below minimum reserve
 - v2.28: Fix grid power sign convention in surplus capture formula (Section 1.9.1) — grid sensor uses positive=export, code was negating it; corrected sanity invariant (Section 1.9.2); skip peak-SOC override query in battery protection when past cheap_start (Section 4.5.6)
 - v2.27: Surplus-based EV forecast strategy (Section 4.5.6) — forecast path now snaps current `sensor.surplus_power` to next wallbox amp step instead of bottom-up search from min to max; entry gate changed from `ev_forecasted_power_w >= threshold` to `surplus_power >= ev_min_solar_power` (live surplus must exceed configured minimum); battery protection check steps down from candidate amp level; updated Selection Rules table, Input Parameters, and Scenarios
 - v2.26: Passive integration observer test revision (Appendix D.7) — replaced 5 obsolete surplus-tracking tests (NO-03, NO-04, EC-01, EC-10, EC-11) with forecast-strategy-aligned tests (NO-05, NO-13, EC-05, EC-06, EC-07); updated NO-02 preconditions for strategy-based entry; report version bumped to 3; evidence includes `strategy` field

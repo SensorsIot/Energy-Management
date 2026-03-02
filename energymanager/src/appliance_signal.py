@@ -86,12 +86,14 @@ def calculate_appliance_signal(
         )
 
     # ORANGE condition 2: Grid export before evening > appliance energy
-    # If we're going to export energy anyway, might as well use it
+    # If we're going to export energy anyway, might as well use it.
+    # Guard: SOC must never drop below reserve% — even with export headroom,
+    # the appliance draws power NOW before the export window.
     export_wh = calculate_grid_export_before_evening(
         simulation, evening_hour, local_timezone
     )
 
-    if export_wh >= appliance_energy_wh:
+    if export_wh >= appliance_energy_wh and min_soc_percent >= reserve_percent:
         return ApplianceSignal(
             signal="orange",
             reason=f"Grid export {export_wh:.0f}Wh >= {appliance_energy_wh:.0f}Wh before {evening_hour}:00",
@@ -99,10 +101,19 @@ def calculate_appliance_signal(
             final_soc_percent=min_soc_percent,
         )
 
-    # RED: SOC drops below threshold and not enough export
+    # RED: SOC drops below threshold and not enough export (or SOC below reserve)
+    if min_soc_percent < reserve_percent:
+        reason = (
+            f"Min SOC {min_soc_percent:.0f}% < reserve {reserve_percent:.0f}%"
+        )
+    else:
+        reason = (
+            f"Min SOC {min_soc_percent:.0f}% < {orange_threshold_percent:.0f}%, "
+            f"export {export_wh:.0f}Wh < {appliance_energy_wh:.0f}Wh"
+        )
     return ApplianceSignal(
         signal="red",
-        reason=f"Min SOC {min_soc_percent:.0f}% < {orange_threshold_percent:.0f}%, export {export_wh:.0f}Wh < {appliance_energy_wh:.0f}Wh",
+        reason=reason,
         excess_power_w=excess_power,
         final_soc_percent=min_soc_percent,
     )
