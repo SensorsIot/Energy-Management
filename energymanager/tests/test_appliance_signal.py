@@ -1,12 +1,11 @@
 """
-Tests for appliance signal calculation (FSD v2.6).
+Tests for appliance signal calculation (FSD v2.29).
 
 Test cases:
 1. GREEN: PV excess > appliance power
-2. ORANGE: Min SOC% >= reserve% + appliance%
-3. ORANGE: Grid export before evening >= appliance energy
-4. RED: Min SOC% < threshold AND not enough export
-5. Edge cases (no simulation, low PV, etc.)
+2. ORANGE: SOC with appliance load simulated stays above reserve%
+3. RED: SOC with appliance would drop below reserve%
+4. Edge cases (no simulation, low PV, etc.)
 """
 
 import pytest
@@ -16,6 +15,7 @@ from datetime import datetime, timezone
 from src.appliance_signal import (
     calculate_appliance_signal,
     calculate_grid_export_before_evening,
+    simulate_with_appliance,
     ApplianceSignal,
     get_final_soc_percent,
     get_min_soc_percent,
@@ -33,16 +33,13 @@ def make_simulation(final_soc_percent: float) -> pd.DataFrame:
     soc_values = [80 + (final_soc_percent - 80) * i / 9 for i in range(10)]
     return pd.DataFrame({
         "soc_percent": soc_values,
-        "soc_wh": [s * 100 for s in soc_values],  # For 10kWh battery
-        "net_wh": [0] * 10,  # No net energy flow
+        "soc_wh": [s * 100 for s in soc_values],
+        "net_wh": [0] * 10,
     }, index=times)
 
 
 def make_simulation_with_dip(final_soc_percent: float, min_soc_percent: float) -> pd.DataFrame:
-    """Create a simulation that dips to min_soc_percent then recovers to final_soc_percent.
-
-    All intermediate values stay >= min_soc_percent so min() returns the expected value.
-    """
+    """Create a simulation that dips to min_soc_percent then recovers."""
     times = pd.date_range(
         start=datetime.now(timezone.utc),
         periods=5,
@@ -64,15 +61,7 @@ def make_simulation_with_export(
     export_periods: int,
     start_hour: int = 10,
 ) -> pd.DataFrame:
-    """Create a simulation with battery full and grid export.
-
-    Args:
-        min_soc_percent: Minimum SOC (to trigger RED without export rule)
-        export_wh_per_period: Export per 15-min period when battery is full
-        export_periods: Number of periods with export
-        start_hour: Starting hour in UTC (default 10 = 11:00 CET in winter)
-    """
-    # Create timestamps starting at start_hour UTC (before evening)
+    """Create a simulation with battery full and grid export."""
     base_time = datetime.now(timezone.utc).replace(
         hour=start_hour, minute=0, second=0, microsecond=0
     )
@@ -83,17 +72,14 @@ def make_simulation_with_export(
 
     for i in range(len(times)):
         if i < 2:
-            # Start with low SOC (to make min_soc low)
             soc_values.append(min_soc_percent)
-            net_wh_values.append(100)  # Charging
+            net_wh_values.append(100)
         elif i < 2 + export_periods:
-            # Battery full, exporting
             soc_values.append(100)
             net_wh_values.append(export_wh_per_period)
         else:
-            # Evening, no more export
             soc_values.append(100)
-            net_wh_values.append(-50)  # Small discharge
+            net_wh_values.append(-50)
 
     return pd.DataFrame({
         "soc_percent": soc_values,
@@ -125,7 +111,7 @@ class TestGreenSignal:
         signal = calculate_appliance_signal(
             current_pv_w=5000,
             current_load_w=2000,
-            simulation=make_simulation(5),  # Very low SOC
+            simulation=make_simulation(5),
             appliance_power_w=2500,
             appliance_energy_wh=1500,
             capacity_wh=10000,
@@ -135,7 +121,7 @@ class TestGreenSignal:
         assert signal.signal == "green"
 
     def test_not_green_when_pv_excess_exactly_equals_threshold(self):
-        """PV excess exactly 2500W = 2500W threshold → NOT GREEN (need >)."""
+        """PV excess exactly 2500W = threshold → NOT GREEN (need >)."""
         signal = calculate_appliance_signal(
             current_pv_w=3500,
             current_load_w=1000,
@@ -146,15 +132,14 @@ class TestGreenSignal:
             reserve_percent=10,
         )
 
-        # Excess is exactly 2500, need > 2500 for GREEN
         assert signal.signal != "green"
 
 
 class TestOrangeSignal:
-    """ORANGE: Min SOC% >= reserve% + appliance%."""
+    """ORANGE: SOC with appliance load stays above reserve%."""
 
     def test_orange_when_soc_above_threshold(self):
-        """Final SOC 30% >= 25% (10% reserve + 15% appliance) → ORANGE."""
+        """Min SOC 30% - 15% appliance = 15% ≥ 10% reserve → ORANGE."""
         signal = calculate_appliance_signal(
             current_pv_w=1000,
             current_load_w=800,
@@ -165,14 +150,11 @@ class TestOrangeSignal:
             reserve_percent=10,
         )
 
-        # Not GREEN (excess only 200W)
-        # ORANGE: 30% >= 10% + 15% = 25%
         assert signal.signal == "orange"
-        assert "reserve 10%" in signal.reason
-        assert "appliance 15%" in signal.reason
+        assert "appliance" in signal.reason.lower()
 
     def test_orange_exactly_at_threshold(self):
-        """Final SOC exactly at threshold (25%) → ORANGE."""
+        """Min SOC 25% - 15% = 10% = reserve → ORANGE (>= check)."""
         signal = calculate_appliance_signal(
             current_pv_w=500,
             current_load_w=500,
@@ -186,45 +168,39 @@ class TestOrangeSignal:
         assert signal.signal == "orange"
 
     def test_orange_threshold_calculation(self):
-        """Verify threshold calculation with different parameters."""
-        # 20% reserve + 20% appliance (2000Wh / 10000Wh) = 40% threshold
+        """20% reserve, 2000Wh/10kWh = 20% appliance. Min 45% - 20% = 25% ≥ 20% → ORANGE."""
         signal = calculate_appliance_signal(
             current_pv_w=0,
             current_load_w=500,
-            simulation=make_simulation(45),  # Above 40% threshold
+            simulation=make_simulation(45),
             appliance_power_w=2500,
-            appliance_energy_wh=2000,  # 20% of 10kWh
+            appliance_energy_wh=2000,
             capacity_wh=10000,
             reserve_percent=20,
         )
 
         assert signal.signal == "orange"
-        assert "reserve 20%" in signal.reason
-        assert "appliance 20%" in signal.reason
 
     def test_orange_with_different_battery_capacity(self):
-        """Verify calculation with 15kWh battery."""
-        # 1500Wh / 15000Wh = 10% appliance
-        # 10% reserve + 10% appliance = 20% threshold
+        """15kWh battery: 1500Wh = 10% appliance. Min 25% - 10% = 15% ≥ 10% → ORANGE."""
         signal = calculate_appliance_signal(
             current_pv_w=0,
             current_load_w=500,
-            simulation=make_simulation(25),  # Above 20% threshold
+            simulation=make_simulation(25),
             appliance_power_w=2500,
             appliance_energy_wh=1500,
-            capacity_wh=15000,  # 15kWh battery
+            capacity_wh=15000,
             reserve_percent=10,
         )
 
         assert signal.signal == "orange"
-        assert "appliance 10%" in signal.reason
 
 
 class TestRedSignal:
-    """RED: Min SOC% < reserve% + appliance%."""
+    """RED: SOC with appliance would drop below reserve%."""
 
     def test_red_when_soc_below_threshold(self):
-        """Final SOC 20% < 25% threshold → RED."""
+        """Min SOC 20% - 15% = 5% < 10% reserve → RED."""
         signal = calculate_appliance_signal(
             current_pv_w=500,
             current_load_w=800,
@@ -236,7 +212,7 @@ class TestRedSignal:
         )
 
         assert signal.signal == "red"
-        assert "Min SOC" in signal.reason
+        assert "reserve" in signal.reason.lower()
 
     def test_red_with_zero_pv(self):
         """No PV and low SOC → RED."""
@@ -253,7 +229,7 @@ class TestRedSignal:
         assert signal.signal == "red"
 
     def test_red_just_below_threshold(self):
-        """Final SOC 24% just below 25% threshold → RED."""
+        """Min SOC 24% - 15% = 9% < 10% reserve → RED."""
         signal = calculate_appliance_signal(
             current_pv_w=500,
             current_load_w=500,
@@ -267,86 +243,15 @@ class TestRedSignal:
         assert signal.signal == "red"
 
 
-class TestOrangeExportCondition:
-    """ORANGE: Grid export before evening >= appliance energy (1500Wh)."""
+class TestExportContext:
+    """Grid export info is included in ORANGE reason when available."""
 
-    def test_orange_when_exporting_enough_energy(self):
-        """Export 2000Wh before evening (>= 1500Wh) → ORANGE despite low SOC."""
-        # 8 periods × 250Wh = 2000Wh export
+    def test_orange_includes_export_note(self):
+        """ORANGE with enough export mentions it in the reason."""
+        # min_soc=30 → 30-15=15 ≥ 10 → ORANGE, and has export
         simulation = make_simulation_with_export(
-            min_soc_percent=10,  # Below 25% threshold
-            export_wh_per_period=250,
-            export_periods=8,
-            start_hour=10,  # 11:00 CET, before evening
-        )
-
-        signal = calculate_appliance_signal(
-            current_pv_w=500,
-            current_load_w=800,
-            simulation=simulation,
-            appliance_power_w=2500,
-            appliance_energy_wh=1500,
-            capacity_wh=10000,
-            reserve_percent=10,
-            evening_hour=18,
-        )
-
-        assert signal.signal == "orange"
-        assert "export" in signal.reason.lower()
-        assert "1500Wh" in signal.reason
-
-    def test_orange_when_export_exactly_equals_threshold(self):
-        """Export exactly 1500Wh = threshold → ORANGE."""
-        # 6 periods × 250Wh = 1500Wh export
-        simulation = make_simulation_with_export(
-            min_soc_percent=10,
-            export_wh_per_period=250,
-            export_periods=6,
-            start_hour=10,
-        )
-
-        signal = calculate_appliance_signal(
-            current_pv_w=500,
-            current_load_w=800,
-            simulation=simulation,
-            appliance_power_w=2500,
-            appliance_energy_wh=1500,
-            capacity_wh=10000,
-            reserve_percent=10,
-            evening_hour=18,
-        )
-
-        assert signal.signal == "orange"
-
-    def test_red_when_export_below_threshold(self):
-        """Export 1000Wh < 1500Wh threshold → RED."""
-        # 4 periods × 250Wh = 1000Wh export (not enough)
-        simulation = make_simulation_with_export(
-            min_soc_percent=10,
-            export_wh_per_period=250,
-            export_periods=4,
-            start_hour=10,
-        )
-
-        signal = calculate_appliance_signal(
-            current_pv_w=500,
-            current_load_w=800,
-            simulation=simulation,
-            appliance_power_w=2500,
-            appliance_energy_wh=1500,
-            capacity_wh=10000,
-            reserve_percent=10,
-            evening_hour=18,
-        )
-
-        assert signal.signal == "red"
-        assert "export" in signal.reason.lower()
-
-    def test_soc_check_takes_priority_over_export(self):
-        """If SOC >= threshold, return ORANGE based on SOC (not export)."""
-        simulation = make_simulation_with_export(
-            min_soc_percent=30,  # Above 25% threshold
-            export_wh_per_period=500,  # Also has export
+            min_soc_percent=30,
+            export_wh_per_period=500,
             export_periods=10,
             start_hour=10,
         )
@@ -363,8 +268,52 @@ class TestOrangeExportCondition:
         )
 
         assert signal.signal == "orange"
-        # Should be SOC-based reason, not export-based
-        assert "Min SOC" in signal.reason
+        assert "export" in signal.reason.lower()
+
+    def test_red_despite_export_when_soc_too_low(self):
+        """Export available but SOC too low → RED (SOC constraint takes priority)."""
+        # min_soc=10 → 10-15=-5→0 < 10 → RED despite 2000Wh export
+        simulation = make_simulation_with_export(
+            min_soc_percent=10,
+            export_wh_per_period=250,
+            export_periods=8,
+            start_hour=10,
+        )
+
+        signal = calculate_appliance_signal(
+            current_pv_w=500,
+            current_load_w=800,
+            simulation=simulation,
+            appliance_power_w=2500,
+            appliance_energy_wh=1500,
+            capacity_wh=10000,
+            reserve_percent=10,
+            evening_hour=18,
+        )
+
+        assert signal.signal == "red"
+
+
+class TestSimulateWithAppliance:
+    """Test the simulate_with_appliance helper."""
+
+    def test_subtracts_appliance_from_soc(self):
+        """1500Wh / 10000Wh = 15% subtracted from all SOC values."""
+        sim = make_simulation(30)  # min SOC is 30 (linear from 80 to 30)
+        min_soc = simulate_with_appliance(sim, 1500, 10000)
+        # 30% - 15% = 15%
+        assert abs(min_soc - 15) < 0.1
+
+    def test_clips_at_zero(self):
+        """SOC can't go below 0 after subtraction."""
+        sim = make_simulation(5)  # min SOC is 5%
+        min_soc = simulate_with_appliance(sim, 1500, 10000)
+        # 5% - 15% = -10% → clipped to 0%
+        assert min_soc == 0.0
+
+    def test_empty_simulation(self):
+        min_soc = simulate_with_appliance(pd.DataFrame(), 1500, 10000)
+        assert min_soc == 0.0
 
 
 class TestCalculateGridExport:
@@ -393,8 +342,8 @@ class TestCalculateGridExport:
             freq="15min"
         )
         simulation = pd.DataFrame({
-            "soc_percent": [50, 60, 70, 80, 90],  # Never full
-            "net_wh": [100, 100, 100, 100, 100],  # Positive net
+            "soc_percent": [50, 60, 70, 80, 90],
+            "net_wh": [100, 100, 100, 100, 100],
         }, index=times)
 
         export = calculate_grid_export_before_evening(
@@ -405,7 +354,6 @@ class TestCalculateGridExport:
 
     def test_export_not_counted_after_evening(self):
         """Export after evening hour not counted."""
-        # Start at 17:00 UTC = 18:00 CET (evening)
         times = pd.date_range(
             start=datetime.now(timezone.utc).replace(hour=17),
             periods=5,
@@ -420,10 +368,9 @@ class TestCalculateGridExport:
             simulation, evening_hour=18, local_timezone="Europe/Zurich"
         )
 
-        assert export == 0  # All periods are after 18:00 CET
+        assert export == 0
 
     def test_empty_simulation_returns_zero(self):
-        """Empty simulation returns 0 export."""
         export = calculate_grid_export_before_evening(
             pd.DataFrame(), evening_hour=18, local_timezone="Europe/Zurich"
         )
@@ -432,10 +379,10 @@ class TestCalculateGridExport:
 
 
 class TestMinSocCheck:
-    """RED when SOC dips below reserve, even if final SOC is high enough."""
+    """RED when SOC with appliance dips below reserve."""
 
     def test_red_when_soc_dips_below_reserve(self):
-        """SOC dips to 0% but recovers to 48% → RED (not orange)."""
+        """SOC dips to 0% → with appliance still 0% < 10% → RED."""
         signal = calculate_appliance_signal(
             current_pv_w=1000,
             current_load_w=800,
@@ -447,10 +394,9 @@ class TestMinSocCheck:
         )
 
         assert signal.signal == "red"
-        assert "Min SOC" in signal.reason
 
     def test_red_when_soc_dips_just_below_threshold(self):
-        """SOC dips to 24% (just below 25% threshold) → RED."""
+        """SOC 24% - 15% = 9% < 10% reserve → RED."""
         signal = calculate_appliance_signal(
             current_pv_w=1000,
             current_load_w=800,
@@ -464,7 +410,7 @@ class TestMinSocCheck:
         assert signal.signal == "red"
 
     def test_orange_when_soc_stays_above_threshold(self):
-        """SOC dips to 30% but stays above 25% threshold, final 30% → ORANGE."""
+        """SOC 30% - 15% = 15% ≥ 10% reserve → ORANGE."""
         signal = calculate_appliance_signal(
             current_pv_w=1000,
             current_load_w=800,
@@ -478,7 +424,7 @@ class TestMinSocCheck:
         assert signal.signal == "orange"
 
     def test_orange_when_min_soc_exactly_at_threshold(self):
-        """SOC dips to exactly 25% threshold → ORANGE (>= check)."""
+        """SOC 25% - 15% = 10% = reserve → ORANGE (>= check)."""
         signal = calculate_appliance_signal(
             current_pv_w=1000,
             current_load_w=800,
@@ -507,7 +453,6 @@ class TestEdgeCases:
             reserve_percent=10,
         )
 
-        # No simulation data → can't confirm enough energy → RED
         assert signal.signal == "red"
 
     def test_simulation_without_soc_column(self):
@@ -526,7 +471,7 @@ class TestEdgeCases:
         assert signal.signal == "red"
 
     def test_negative_pv_excess(self):
-        """Load > PV (negative excess) → check SOC threshold."""
+        """Load > PV (negative excess) → check SOC with appliance."""
         signal = calculate_appliance_signal(
             current_pv_w=500,
             current_load_w=2000,
@@ -538,24 +483,23 @@ class TestEdgeCases:
         )
 
         # Excess is -1500W (negative), not GREEN
-        # SOC 30% >= 25% threshold → ORANGE
+        # Min SOC 30% - 15% = 15% ≥ 10% → ORANGE
         assert signal.signal == "orange"
         assert signal.excess_power_w == -1500
 
     def test_zero_reserve_percent(self):
-        """Zero reserve → only need appliance%."""
+        """Zero reserve → only need SOC > appliance%."""
         signal = calculate_appliance_signal(
             current_pv_w=0,
             current_load_w=500,
-            simulation=make_simulation(16),  # Just above 15%
+            simulation=make_simulation(16),
             appliance_power_w=2500,
             appliance_energy_wh=1500,
             capacity_wh=10000,
-            reserve_percent=0,  # No reserve
+            reserve_percent=0,
         )
 
-        # Threshold = 0% + 15% = 15%
-        # 16% >= 15% → ORANGE
+        # 16% - 15% = 1% ≥ 0% → ORANGE
         assert signal.signal == "orange"
 
     def test_high_reserve_percent(self):
@@ -567,11 +511,10 @@ class TestEdgeCases:
             appliance_power_w=2500,
             appliance_energy_wh=1500,
             capacity_wh=10000,
-            reserve_percent=30,  # High reserve
+            reserve_percent=30,
         )
 
-        # Threshold = 30% + 15% = 45%
-        # 40% < 45% → RED
+        # Min SOC 40% - 15% = 25% < 30% reserve → RED
         assert signal.signal == "red"
 
 
@@ -579,18 +522,15 @@ class TestGetFinalSocPercent:
     """Test the get_final_soc_percent helper function."""
 
     def test_returns_last_value(self):
-        """Should return the last soc_percent value."""
         sim = make_simulation(42)
         result = get_final_soc_percent(sim)
         assert abs(result - 42) < 0.1
 
     def test_empty_dataframe_returns_zero(self):
-        """Empty DataFrame returns 0."""
         result = get_final_soc_percent(pd.DataFrame())
         assert result == 0
 
     def test_missing_column_returns_zero(self):
-        """Missing soc_percent column returns 0."""
         bad_df = pd.DataFrame({"other": [1, 2, 3]})
         result = get_final_soc_percent(bad_df)
         assert result == 0
@@ -600,7 +540,6 @@ class TestGetMinSocPercent:
     """Test the get_min_soc_percent helper function."""
 
     def test_returns_minimum_value(self):
-        """Should return the minimum soc_percent value."""
         sim = make_simulation_with_dip(final_soc_percent=48, min_soc_percent=5)
         result = get_min_soc_percent(sim)
         assert abs(result - 5) < 0.1
@@ -624,13 +563,13 @@ class TestApplianceSignalDataclass:
             signal="green",
             reason="Test",
             excess_power_w=1000,
-            final_soc_percent=50,
+            min_soc_percent=50,
         )
 
         assert signal.signal == "green"
         assert signal.reason == "Test"
         assert signal.excess_power_w == 1000
-        assert signal.final_soc_percent == 50
+        assert signal.min_soc_percent == 50
 
 
 if __name__ == "__main__":

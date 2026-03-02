@@ -3,13 +3,13 @@ Appliance signal calculation for washing machine / dishwasher.
 
 Signal logic:
 - GREEN: Current PV excess > appliance power (can run directly from solar)
-- ORANGE: One of:
-  - Min SOC% >= reserve% + appliance% (SOC never drops below threshold)
-  - Grid export before evening > appliance energy (we'd waste the energy anyway)
-- RED: Otherwise
+- ORANGE: SOC with appliance load simulated never drops below reserve%
+- RED: Otherwise (running the appliance would deplete battery below reserve)
 
 The simulation passed to this module already accounts for battery efficiency.
 """
+
+from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
@@ -26,7 +26,28 @@ class ApplianceSignal:
     signal: str  # "green", "orange", or "red"
     reason: str
     excess_power_w: float
-    final_soc_percent: float
+    min_soc_percent: float
+
+
+def simulate_with_appliance(
+    simulation: pd.DataFrame,
+    appliance_energy_wh: float,
+    capacity_wh: float,
+) -> float:
+    """Subtract appliance energy from SOC trajectory and return min SOC.
+
+    The appliance draws power immediately. We subtract its energy as a
+    percentage of battery capacity from the entire SOC trajectory (worst
+    case: appliance runs at the SOC minimum). Returns the minimum SOC
+    across the adjusted trajectory.
+    """
+    if simulation.empty or "soc_percent" not in simulation.columns:
+        return 0.0
+
+    appliance_percent = appliance_energy_wh / capacity_wh * 100
+    adjusted_soc = simulation["soc_percent"] - appliance_percent
+    adjusted_soc = adjusted_soc.clip(lower=0)
+    return float(adjusted_soc.min())
 
 
 def calculate_appliance_signal(
@@ -65,57 +86,45 @@ def calculate_appliance_signal(
             signal="green",
             reason=f"PV excess {int(excess_power)}W > {int(appliance_power_w)}W",
             excess_power_w=excess_power,
-            final_soc_percent=0,
+            min_soc_percent=0,
         )
 
-    # Get minimum SOC% from simulation (efficiency already applied)
-    min_soc_percent = get_min_soc_percent(simulation)
-
-    # Calculate appliance energy as percentage of battery capacity
+    # Simulate SOC with appliance load subtracted
+    min_soc_with_appliance = simulate_with_appliance(
+        simulation, appliance_energy_wh, capacity_wh
+    )
     appliance_percent = appliance_energy_wh / capacity_wh * 100
 
-    # ORANGE condition 1: Min SOC >= reserve% + appliance%
-    orange_threshold_percent = reserve_percent + appliance_percent
-
-    if min_soc_percent >= orange_threshold_percent:
+    # ORANGE: SOC with appliance load never drops below reserve
+    if min_soc_with_appliance >= reserve_percent:
+        # Add export context if available
+        export_wh = calculate_grid_export_before_evening(
+            simulation, evening_hour, local_timezone
+        )
+        export_note = ""
+        if export_wh >= appliance_energy_wh:
+            export_note = f", export {export_wh:.0f}Wh available"
         return ApplianceSignal(
             signal="orange",
-            reason=f"Min SOC {min_soc_percent:.0f}% >= {orange_threshold_percent:.0f}% (reserve {reserve_percent:.0f}% + appliance {appliance_percent:.0f}%)",
+            reason=(
+                f"SOC with appliance ≥ {reserve_percent:.0f}% "
+                f"(min {min_soc_with_appliance:.0f}% after "
+                f"−{appliance_percent:.0f}%{export_note})"
+            ),
             excess_power_w=excess_power,
-            final_soc_percent=min_soc_percent,
+            min_soc_percent=min_soc_with_appliance,
         )
 
-    # ORANGE condition 2: Grid export before evening > appliance energy
-    # If we're going to export energy anyway, might as well use it.
-    # Guard: SOC must never drop below reserve% — even with export headroom,
-    # the appliance draws power NOW before the export window.
-    export_wh = calculate_grid_export_before_evening(
-        simulation, evening_hour, local_timezone
-    )
-
-    if export_wh >= appliance_energy_wh and min_soc_percent >= reserve_percent:
-        return ApplianceSignal(
-            signal="orange",
-            reason=f"Grid export {export_wh:.0f}Wh >= {appliance_energy_wh:.0f}Wh before {evening_hour}:00",
-            excess_power_w=excess_power,
-            final_soc_percent=min_soc_percent,
-        )
-
-    # RED: SOC drops below threshold and not enough export (or SOC below reserve)
-    if min_soc_percent < reserve_percent:
-        reason = (
-            f"Min SOC {min_soc_percent:.0f}% < reserve {reserve_percent:.0f}%"
-        )
-    else:
-        reason = (
-            f"Min SOC {min_soc_percent:.0f}% < {orange_threshold_percent:.0f}%, "
-            f"export {export_wh:.0f}Wh < {appliance_energy_wh:.0f}Wh"
-        )
+    # RED: running appliance would drop SOC below reserve
     return ApplianceSignal(
         signal="red",
-        reason=reason,
+        reason=(
+            f"SOC with appliance {min_soc_with_appliance:.0f}% "
+            f"< reserve {reserve_percent:.0f}% "
+            f"(−{appliance_percent:.0f}% appliance load)"
+        ),
         excess_power_w=excess_power,
-        final_soc_percent=min_soc_percent,
+        min_soc_percent=min_soc_with_appliance,
     )
 
 
@@ -150,17 +159,14 @@ def calculate_grid_export_before_evening(
     total_export = 0.0
 
     for t, row in simulation.iterrows():
-        # Convert timestamp to local time to check if before evening
         if hasattr(t, 'astimezone'):
             local_time = t.astimezone(local_tz)
         else:
-            # Handle naive timestamps
             local_time = t
 
         if local_time.hour >= evening_hour:
-            continue  # Past evening, stop counting
+            continue
 
-        # Export occurs when battery is full and we have excess PV
         soc = row["soc_percent"]
         net = row["net_wh"]
 
@@ -172,15 +178,7 @@ def calculate_grid_export_before_evening(
 
 
 def get_min_soc_percent(simulation: pd.DataFrame) -> float:
-    """
-    Get minimum SOC in percent from simulation.
-
-    Args:
-        simulation: DataFrame with soc_percent column
-
-    Returns:
-        Minimum SOC in %, or 0 if simulation is empty
-    """
+    """Get minimum SOC in percent from simulation."""
     if simulation.empty:
         return 0
 
@@ -191,18 +189,7 @@ def get_min_soc_percent(simulation: pd.DataFrame) -> float:
 
 
 def get_final_soc_percent(simulation: pd.DataFrame) -> float:
-    """
-    Get final SOC in percent from simulation.
-
-    The simulation DataFrame comes from BatteryOptimizer.simulate_soc and
-    already accounts for charge/discharge efficiency.
-
-    Args:
-        simulation: DataFrame with soc_percent column
-
-    Returns:
-        Final SOC in %, or 0 if simulation is empty
-    """
+    """Get final SOC in percent from simulation."""
     if simulation.empty:
         logger.warning("No simulation data for appliance signal")
         return 0
@@ -212,7 +199,5 @@ def get_final_soc_percent(simulation: pd.DataFrame) -> float:
         return 0
 
     final_soc_percent = float(simulation["soc_percent"].iloc[-1])
-
     logger.debug(f"Appliance signal: final_soc_percent={final_soc_percent:.0f}%")
-
     return final_soc_percent

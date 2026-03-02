@@ -1753,28 +1753,28 @@ Every 15 minutes:
    → Run now with pure solar
    → excess = current_pv - current_load
 
-2. ORANGE: Either condition met:
-   a) Min SOC% >= reserve% + appliance%
-      → SOC never drops below threshold at any point in the simulation
-   b) Grid export before evening >= appliance_energy (1500Wh)
-      AND min SOC% >= reserve% (SOC never drops below minimum)
-      → If we're exporting energy anyway, might as well use it
-      → Export = sum of net_wh when SOC >= 99.9% and before 18:00
+2. ORANGE: Simulate SOC with appliance load subtracted
+   → Subtract appliance_energy (1500Wh) as % of battery capacity from SOC trajectory
+   → If min SOC with appliance ≥ reserve% → ORANGE (safe to run)
+   → Grid export context added to reason if export before evening ≥ appliance_energy
 
-3. RED: Neither ORANGE condition met
-   → SOC drops below threshold AND not enough grid export
+3. RED: SOC with appliance would drop below reserve%
+   → Running the appliance now would deplete battery below minimum
 ```
 
-### 4.4.2.1 ORANGE Threshold Calculation (Condition 2a)
+### 4.4.2.1 Appliance Simulation
 
-All values in SOC% for consistency with simulation:
+The appliance energy is subtracted from the SOC trajectory to check whether the battery can handle the additional load:
 
 ```
 appliance% = appliance_energy_wh / capacity_wh × 100
            = 1500Wh / 10000Wh × 100 = 15%
 
-ORANGE threshold = reserve% + appliance%
-                 = 10% + 15% = 25%
+adjusted_soc = soc_trajectory − appliance%    (clipped at 0%)
+min_soc_with_appliance = min(adjusted_soc)
+
+ORANGE: min_soc_with_appliance ≥ reserve%  (10%)
+RED:    min_soc_with_appliance < reserve%
 ```
 
 **Example with default config:**
@@ -1785,36 +1785,30 @@ ORANGE threshold = reserve% + appliance%
 | `battery.reserve_percent` | 10% |
 | `appliances.energy_wh` | 1500 Wh |
 | `appliance%` | 15% |
-| **ORANGE threshold** | 25% |
+| **Minimum SOC for ORANGE** | 25% (10% + 15%) |
 
-The ORANGE check uses the **minimum** SOC across the entire simulation, not just the final value. This ensures the SOC never drops below the threshold at any point, even if it recovers later.
+The check uses the **minimum** SOC across the entire simulation, not just the final value. This ensures the SOC never drops below the reserve at any point, even if it recovers later.
 
-### 4.4.2.2 ORANGE Grid Export Condition (Condition 2b)
+### 4.4.2.2 Grid Export Context
 
-If the SOC threshold is not met, check if we'll export enough energy to the grid before evening:
+If ORANGE, grid export before evening is calculated and included in the reason for context:
 
 ```
 grid_export_wh = sum of net_wh where:
   - SOC >= 99.9% (battery full)
   - AND net_wh > 0 (excess PV)
   - AND time < 18:00 local
-
-If grid_export_wh >= appliance_energy_wh (1500Wh)
-   AND min_soc_percent >= reserve_percent (10%):
-  → ORANGE: Better to use the energy than export it
 ```
 
-**SOC floor guard:** Even though the export energy would cover the appliance, the appliance draws power NOW — potentially before the battery reaches 100%. The min SOC must stay above the reserve to prevent the battery from being depleted.
-
-**Rationale:** If the battery is full and we're exporting energy to the grid anyway, it makes more sense to use that energy for the washing machine than to sell it at a low feed-in tariff. But only if the battery never drops below the minimum reserve at any point in the forecast.
+If `grid_export_wh >= appliance_energy_wh`, the reason includes "export available" — the appliance energy would have been wasted to the grid anyway.
 
 ### 4.4.3 Output: sensor.appliance_signal
 
 | State | Meaning |
 |-------|---------|
 | `green` | Pure solar available now (excess > 2500W) |
-| `orange` | Safe to run: min SOC% >= threshold OR grid export >= 1.5kWh |
-| `red` | Insufficient surplus and not enough export |
+| `orange` | Safe to run: SOC with appliance load stays above reserve |
+| `red` | Running the appliance would deplete battery below reserve |
 
 ### 4.4.4 Sensor Attributes
 
@@ -1822,7 +1816,7 @@ If grid_export_wh >= appliance_energy_wh (1500Wh)
 |-----------|-------------|
 | `reason` | Human-readable explanation of the signal |
 | `excess_power_w` | Current PV excess (pv - load) in watts |
-| `final_soc_percent` | Minimum projected SOC from simulation in % |
+| `min_soc_percent` | Minimum projected SOC with appliance load subtracted (%) |
 
 ### 4.4.5 Test Cases
 
@@ -3371,7 +3365,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
-- v2.29: Appliance signal ORANGE condition 2b (grid export) now requires min SOC ≥ reserve% (Section 4.4.2, 4.4.2.2) — prevents recommending appliance when battery would drop below minimum reserve
+- v2.29: Appliance signal uses appliance-load simulation (Section 4.4.2.1) — subtracts appliance energy from SOC trajectory and checks min SOC ≥ reserve%; grid export is now contextual info, not a separate ORANGE path; renamed `final_soc_percent` → `min_soc_percent` attribute
 - v2.28: Fix grid power sign convention in surplus capture formula (Section 1.9.1) — grid sensor uses positive=export, code was negating it; corrected sanity invariant (Section 1.9.2); skip peak-SOC override query in battery protection when past cheap_start (Section 4.5.6)
 - v2.27: Surplus-based EV forecast strategy (Section 4.5.6) — forecast path now snaps current `sensor.surplus_power` to next wallbox amp step instead of bottom-up search from min to max; entry gate changed from `ev_forecasted_power_w >= threshold` to `surplus_power >= ev_min_solar_power` (live surplus must exceed configured minimum); battery protection check steps down from candidate amp level; updated Selection Rules table, Input Parameters, and Scenarios
 - v2.26: Passive integration observer test revision (Appendix D.7) — replaced 5 obsolete surplus-tracking tests (NO-03, NO-04, EC-01, EC-10, EC-11) with forecast-strategy-aligned tests (NO-05, NO-13, EC-05, EC-06, EC-07); updated NO-02 preconditions for strategy-based entry; report version bumped to 3; evidence includes `strategy` field
