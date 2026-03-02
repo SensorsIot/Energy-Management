@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.61"
+__version__ = "1.6.62"
 
 import json
 import logging
@@ -750,16 +750,17 @@ class EnergyManager:
 
             validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
 
+            # Grid convention: positive = export, negative = import.
+            # Feedback correction: when already capturing, compute grid
+            # export as if the wallbox load were removed.
+            if self._surplus_capture_active and wallbox_power > 0:
+                grid_export = max(0.0, grid_power + wallbox_power)
+            else:
+                grid_export = max(0.0, grid_power)
+
             # Compute grid surplus capture candidate (FSD 4.5 — grid surplus rule)
             surplus_capture_power_w = 0.0
             if ev_mode == "solar":
-                # Grid convention: positive = export, negative = import.
-                # Feedback correction: when already capturing, compute grid
-                # export as if the wallbox load were removed.
-                if self._surplus_capture_active and wallbox_power > 0:
-                    grid_export = max(0.0, grid_power + wallbox_power)
-                else:
-                    grid_export = max(0.0, grid_power)
                 if grid_export >= ev_min_power and pv_power > 0:
                     # Clamp to wallbox min/max (from OCPP sensor, phase-aware)
                     surplus_capture_power_w = float(
@@ -923,7 +924,7 @@ class EnergyManager:
                     "reaches_target": reaches_target,
                     "threshold_w": ev_threshold,
                     "surplus_power_w": surplus_power,
-                    "grid_export_w": grid_export if ev_mode == "solar" else 0,
+                    "grid_export_w": grid_export,
                     "surplus_capture_w": surplus_capture_power_w,
                     "forecast_power_w": self._ev_forecasted_power_w,
                     "icon": "mdi:ev-station",
