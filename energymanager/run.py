@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.63"
+__version__ = "1.6.64"
 
 import json
 import logging
@@ -580,80 +580,94 @@ class EnergyManager:
                 pass
         return self.ha_client.get_sensor_value(self.dtsu_grid_power_entity) or 0
 
-    def check_battery_protection(self) -> tuple[bool, float]:
-        """Check if battery SOC at cheap tariff start meets protection target (FSD 4.5.6).
+    def get_forecast_soc_at_target(self) -> tuple[float | None, datetime]:
+        """Query forecasted SOC at the next cheap tariff start (21:00).
 
-        Queries the SOC forecast from InfluxDB (written by run_optimization)
-        and checks the predicted SOC at the start of the next cheap tariff
-        window (21:00 on weekdays). EV charging is only allowed if the
-        battery will have >= 80% SOC at that time.
+        Looks up the SOC forecast written by run_optimization in InfluxDB.
+        Uses tariff.target which always points to the *next* 21:00,
+        regardless of the current time of day.
 
         Returns:
-            (reaches_target, soc_at_cheap_start) tuple
+            (soc_percent or None if no data, target_time)
+        """
+        now = datetime.now(timezone.utc)
+        tariff = self.optimizer.get_tariff_periods(now)
+        target_time = tariff.target
+        query_api = self.influx_client.query_api()
+
+        window_start = (target_time - timedelta(minutes=15)).isoformat()
+        window_stop = (target_time + timedelta(minutes=15)).isoformat()
+
+        query = f'''
+        from(bucket: "{self.output_bucket}")
+          |> range(start: {window_start}, stop: {window_stop})
+          |> filter(fn: (r) => r._measurement == "soc_forecast")
+          |> filter(fn: (r) => r.scenario == "with_strategy")
+          |> filter(fn: (r) => r._field == "soc_percent")
+          |> last()
+        '''
+
+        result = query_api.query(query)
+        if result and result[0].records:
+            return result[0].records[0].get_value(), target_time
+        return None, target_time
+
+    def check_battery_protection(self) -> tuple[bool, float]:
+        """Check if battery SOC at next cheap tariff start meets protection target.
+
+        Uses get_forecast_soc_at_target() to query the predicted SOC at the
+        next 21:00. EV forecast path is only allowed if SOC >= protection
+        target (default 80%).
+
+        Override: if battery is forecast to hit 100% before 21:00, excess
+        solar would be curtailed — allow EV to use it even if final SOC
+        drops below target.
+
+        Returns:
+            (reaches_target, soc_at_target) tuple
         """
         try:
-            now = datetime.now(timezone.utc)
-            tariff = self.optimizer.get_tariff_periods(now)
+            soc_at_target, target_time = self.get_forecast_soc_at_target()
 
-            # During cheap tariff, battery protection is irrelevant —
-            # no forecast exists for the *next* cheap_start (tomorrow 21:00).
-            if tariff.is_cheap_now:
-                logger.debug("Battery protection: cheap tariff active → EV allowed")
-                return True, 100.0
-
-            query_api = self.influx_client.query_api()
-
-            # Query SOC at cheap tariff start (narrow window around 21:00)
-            window_start = (tariff.cheap_start - timedelta(minutes=15)).isoformat()
-            window_stop = (tariff.cheap_start + timedelta(minutes=15)).isoformat()
-
-            query = f'''
-            from(bucket: "{self.output_bucket}")
-              |> range(start: {window_start}, stop: {window_stop})
-              |> filter(fn: (r) => r._measurement == "soc_forecast")
-              |> filter(fn: (r) => r.scenario == "with_strategy")
-              |> filter(fn: (r) => r._field == "soc_percent")
-              |> last()
-            '''
-
-            result = query_api.query(query)
-            if result and result[0].records:
-                soc_at_target = result[0].records[0].get_value()
-                reaches_target = soc_at_target >= self.ev_battery_protection_soc
-                logger.info(
-                    f"Battery protection: forecast SOC at {swiss_time(tariff.cheap_start)}="
-                    f"{soc_at_target:.0f}% "
-                    f"(target={self.ev_battery_protection_soc}%) → "
-                    f"{'EV allowed' if reaches_target else 'EV blocked'}"
+            if soc_at_target is None:
+                logger.warning(
+                    f"No SOC forecast at {swiss_time(target_time)} "
+                    "— blocking EV as precaution"
                 )
-
-                # Override: if battery is forecast to reach 100% before cheap
-                # tariff start, excess solar would be curtailed — let EV use it.
-                # Skip when already past cheap_start (range would be empty).
-                if not reaches_target and not tariff.is_cheap_now:
-                    peak_query = f'''
-                    from(bucket: "{self.output_bucket}")
-                      |> range(start: now(), stop: {window_stop})
-                      |> filter(fn: (r) => r._measurement == "soc_forecast")
-                      |> filter(fn: (r) => r.scenario == "with_strategy")
-                      |> filter(fn: (r) => r._field == "soc_percent")
-                      |> max()
-                    '''
-                    peak_result = query_api.query(peak_query)
-                    if peak_result and peak_result[0].records:
-                        peak_soc = peak_result[0].records[0].get_value()
-                        if peak_soc >= 99:
-                            reaches_target = True
-                            logger.info(
-                                "Battery protection override: peak SOC %.0f%% "
-                                "(battery full before 21:00) → EV allowed",
-                                peak_soc,
-                            )
-
-                return reaches_target, soc_at_target
-            else:
-                logger.warning("No SOC forecast data — blocking EV as precaution")
                 return False, 0.0
+
+            reaches_target = soc_at_target >= self.ev_battery_protection_soc
+            logger.info(
+                f"Battery protection: forecast SOC at {swiss_time(target_time)}="
+                f"{soc_at_target:.0f}% "
+                f"(target={self.ev_battery_protection_soc}%) → "
+                f"{'EV allowed' if reaches_target else 'EV blocked'}"
+            )
+
+            # Override: if battery is forecast to reach 100% before target,
+            # excess solar would be curtailed — let EV use it.
+            if not reaches_target:
+                window_stop = (target_time + timedelta(minutes=15)).isoformat()
+                peak_query = f'''
+                from(bucket: "{self.output_bucket}")
+                  |> range(start: now(), stop: {window_stop})
+                  |> filter(fn: (r) => r._measurement == "soc_forecast")
+                  |> filter(fn: (r) => r.scenario == "with_strategy")
+                  |> filter(fn: (r) => r._field == "soc_percent")
+                  |> max()
+                '''
+                peak_result = self.influx_client.query_api().query(peak_query)
+                if peak_result and peak_result[0].records:
+                    peak_soc = peak_result[0].records[0].get_value()
+                    if peak_soc >= 99:
+                        reaches_target = True
+                        logger.info(
+                            "Battery protection override: peak SOC %.0f%% "
+                            "(battery full before target) → EV allowed",
+                            peak_soc,
+                        )
+
+            return reaches_target, soc_at_target
 
         except Exception as e:
             logger.error(f"Battery protection check failed: {e}")
