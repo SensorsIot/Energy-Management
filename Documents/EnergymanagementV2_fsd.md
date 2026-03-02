@@ -1736,97 +1736,143 @@ See [Appendix D.4 — Discharge Blocking Tests](#d4-discharge-blocking-tests). T
 
 ---
 
-## 4.4 Appliance Signal
+## 4.4 Battery Forecast Functions
 
-### 4.4.1 Problem
+All battery-related decisions (EV charging, appliance signal, battery protection) use the same SOC forecast stored in InfluxDB by `run_optimization()`. Three shared functions query this forecast with optional "what-if" load simulation.
+
+### 4.4.1 `get_forecast_soc_at_target(extra_load_wh)`
+
+Returns the forecasted SOC at the **next cheap tariff start** (21:00).
+
+- Uses `tariff.target` which always points to the next 21:00, regardless of current time
+- Queries InfluxDB `soc_forecast` (scenario `with_strategy`) in a ±15 min window around target
+- Subtracts `extra_load_wh / capacity_wh × 100` from the result (worst-case)
+
+```
+soc_at_target = query(soc_forecast at tariff.target)
+soc_at_target -= extra_load_wh / capacity_wh × 100
+```
+
+**Callers:**
+
+| Caller | `extra_load_wh` | Question |
+|--------|-----------------|----------|
+| `check_battery_protection(ev_power_w)` | `ev_power_w × 0.25` | Will battery have ≥ 80% at 21:00 with one EV interval? |
+
+### 4.4.2 `will_battery_hit_full()`
+
+Returns whether the **peak SOC** reaches 100% between now and the next cheap tariff start.
+
+- Queries `max(soc_percent)` from now until `tariff.target`
+- If peak ≥ 99% → battery will be full → excess solar would be curtailed
+
+```
+peak_soc = query(max soc_forecast from now to tariff.target)
+hits_full = peak_soc >= 99%
+```
+
+**Used by:** EV charging Rule 2 — if battery will be full, allow EV charging even if SOC at 21:00 drops below protection target. That energy would be wasted otherwise.
+
+### 4.4.3 `will_battery_hit_minimum(extra_load_wh)`
+
+Returns whether the **minimum SOC** drops below reserve between now and the next cheap tariff start.
+
+- Queries `min(soc_percent)` from now until `tariff.target`
+- Subtracts `extra_load_wh / capacity_wh × 100` from the result (worst-case)
+- Compares against `reserve_percent` (default 10%)
+
+```
+min_soc = query(min soc_forecast from now to tariff.target)
+min_soc -= extra_load_wh / capacity_wh × 100
+hits_minimum = min_soc < reserve_percent
+```
+
+**Callers:**
+
+| Caller | `extra_load_wh` | Question |
+|--------|-----------------|----------|
+| Appliance signal | `appliance_energy_wh` (1500Wh) | Will battery drop below reserve with a wash? |
+| EV charging Rule 2 | `ev_power_w × 0.25` | Will battery drop below reserve with EV charging? |
+
+### 4.4.4 Load Conversion
+
+Extra load in Wh is converted to SOC percentage via `_extra_load_percent()`:
+
+```
+load_percent = extra_load_wh / capacity_wh × 100
+```
+
+| Example load | Wh | SOC impact (10 kWh battery) |
+|---|---|---|
+| Washing machine | 1500 Wh | −15% |
+| EV at 4140W × 15 min | 1035 Wh | −10.4% |
+| EV at 8000W × 15 min | 2000 Wh | −20% |
+| EV at 11040W × 15 min | 2760 Wh | −27.6% |
+
+### 4.4.5 Difference Between `soc_at_target` and `will_hit_minimum`
+
+These check different things:
+
+- **`get_forecast_soc_at_target`**: SOC **at 21:00 specifically** — will the battery have enough charge when cheap tariff starts?
+- **`will_battery_hit_minimum`**: SOC **at any point** between now and 21:00 — will it ever drop dangerously low?
+
+**Example:** 10:00, battery at 90%. Forecast: SOC dips to 8% at 15:00 (cloudy afternoon) but recovers to 85% by 21:00.
+
+| Check | Result | Reason |
+|---|---|---|
+| `get_forecast_soc_at_target()` | 85% ≥ 80% ✅ | Battery recovers by 21:00 |
+| `will_battery_hit_minimum()` | 8% < 10% ❌ | Battery dangerously low at 15:00 |
+
+Both checks are needed — one guards the endpoint, the other guards the trajectory.
+
+---
+
+## 4.5 Appliance Signal
+
+### 4.5.1 Problem
 
 High-power appliances (washing machine 2.5 kW) should run when there's sufficient solar surplus.
 
-### 4.4.2 Algorithm
+### 4.5.2 Algorithm
 
-The appliance signal uses the SOC simulation from the battery optimizer (same simulation stored in InfluxDB), which already accounts for charge/discharge efficiency (95% each way).
+Uses the battery forecast functions (Section 4.4) to check if the battery can absorb the appliance load.
 
 ```
 Every 15 minutes:
 
-1. GREEN: Current PV excess > appliance_power (2500W)
-   → Run now with pure solar
+1. GREEN: PV excess > appliance_power (2500W)
    → excess = current_pv - current_load
+   → Run now with pure solar
 
-2. ORANGE: Simulate SOC with appliance load subtracted
-   → Subtract appliance_energy (1500Wh) as % of battery capacity from SOC trajectory
-   → If min SOC with appliance ≥ reserve% → ORANGE (safe to run)
-   → Grid export context added to reason if export before evening ≥ appliance_energy
+2. ORANGE: will_battery_hit_minimum(appliance_energy_wh) == false
+   → Battery stays above reserve with appliance load
+   → Safe to run from battery
 
-3. RED: SOC with appliance would drop below reserve%
-   → Running the appliance now would deplete battery below minimum
+3. RED: will_battery_hit_minimum(appliance_energy_wh) == true
+   → Running the appliance would deplete battery below reserve
 ```
 
-### 4.4.2.1 Appliance Simulation
-
-The appliance energy is subtracted from the SOC trajectory to check whether the battery can handle the additional load:
-
-```
-appliance% = appliance_energy_wh / capacity_wh × 100
-           = 1500Wh / 10000Wh × 100 = 15%
-
-adjusted_soc = soc_trajectory − appliance%    (clipped at 0%)
-min_soc_with_appliance = min(adjusted_soc)
-
-ORANGE: min_soc_with_appliance ≥ reserve%  (10%)
-RED:    min_soc_with_appliance < reserve%
-```
-
-**Example with default config:**
-
-| Parameter | Value |
-|-----------|-------|
-| `battery.capacity_kwh` | 10 kWh |
-| `battery.reserve_percent` | 10% |
-| `appliances.energy_wh` | 1500 Wh |
-| `appliance%` | 15% |
-| **Minimum SOC for ORANGE** | 25% (10% + 15%) |
-
-The check uses the **minimum** SOC across the entire simulation, not just the final value. This ensures the SOC never drops below the reserve at any point, even if it recovers later.
-
-### 4.4.2.2 Grid Export Context
-
-If ORANGE, grid export before evening is calculated and included in the reason for context:
-
-```
-grid_export_wh = sum of net_wh where:
-  - SOC >= 99.9% (battery full)
-  - AND net_wh > 0 (excess PV)
-  - AND time < 18:00 local
-```
-
-If `grid_export_wh >= appliance_energy_wh`, the reason includes "export available" — the appliance energy would have been wasted to the grid anyway.
-
-### 4.4.3 Output: sensor.appliance_signal
+### 4.5.3 Output: sensor.appliance_signal
 
 | State | Meaning |
 |-------|---------|
 | `green` | Pure solar available now (excess > 2500W) |
-| `orange` | Safe to run: SOC with appliance load stays above reserve |
+| `orange` | Safe to run: battery stays above reserve with appliance load |
 | `red` | Running the appliance would deplete battery below reserve |
 
-### 4.4.4 Sensor Attributes
+### 4.5.4 Sensor Attributes
 
 | Attribute | Description |
 |-----------|-------------|
 | `reason` | Human-readable explanation of the signal |
-| `excess_power_w` | Current PV excess (pv - load) in watts |
+| `excess_power_w` | Current PV excess (pv − load) in watts |
 | `min_soc_percent` | Minimum projected SOC with appliance load subtracted (%) |
-
-### 4.4.5 Test Cases
-
-See [Appendix D.2 — Appliance Signal Tests](#d2-appliance-signal-tests). Test file: `energymanager/tests/test_appliance_signal.py` (26 tests passing as of v1.5.12).
 
 ---
 
-## 4.5 EV Charging
+## 4.6 EV Charging
 
-### 4.5.1 Overview
+### 4.6.1 Overview
 
 EV charging optimization maximizes solar self-consumption while ensuring charging goals are met.
 
@@ -1835,13 +1881,13 @@ EV charging optimization maximizes solar self-consumption while ensuring chargin
 **Key Features:**
 - 4 modes: Off, solar, cheap tariff, immediate — user selects via dashboard
 - Solar charging is the default mode
-- State machine (Section 4.5.5) routes to correct mode
-- EV charging power calculation (Section 4.5.6) determines solar charging power
-- Two solar power sources: forecast strategy and grid surplus capture (both in Section 4.5.6)
+- State machine (Section 4.6.5) routes to correct mode
+- EV charging power calculation (Section 4.6.6) determines solar charging power
+- Two solar power sources: forecast strategy and grid surplus capture (both in Section 4.6.6)
 - `input_number.ev_min_solar_power` gates both solar paths — minimum power to start charging
 - Real-time charging power adjustment every 10 seconds
 
-### 4.5.2 Architecture
+### 4.6.2 Architecture
 
 > **Wallbox communication, phase switching, MQTT power correction, and the EnergyManager ↔ OCPP Server interface contract are documented in [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md).**
 
@@ -1857,7 +1903,7 @@ From the EnergyManager's perspective, the wallbox is controlled through HA entit
 | **Feedback** | `sensor.wallbox_min_power_w` | sensor (W) | Dynamic minimum power based on current phase configuration |
 | **Feedback** | `sensor.wallbox_max_power_w` | sensor (W) | Dynamic maximum power based on current phase configuration |
 
-### 4.5.3 Power Ranges
+### 4.6.3 Power Ranges
 
 > **Phase switching hardware and power-to-current conversion are documented in [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md).**
 
@@ -1868,7 +1914,7 @@ From the EnergyManager's perspective, the wallbox is controlled through HA entit
 
 **Gap:** 3.7 - 4.1 kW is not achievable (hardware limitation). The OCPP server handles phase switching automatically based on the power setpoint.
 
-### 4.5.4 Charging Mode Selection
+### 4.6.4 Charging Mode Selection
 
 The user selects one of three charging modes via the kitchen dashboard (Amazon Fire tablet). The mode is persistent — it stays selected until the user changes it.
 
@@ -1880,24 +1926,24 @@ The user selects one of three charging modes via the kitchen dashboard (Amazon F
 
 **Control entity:** The dashboard provides two buttons ("Cheap Charge" and "Charge Now") that toggle between the selected mode. If both are unselected, `auto_pv_excess` is active. Charge now starts charging immediately.
 
-### 4.5.5 EV Charging State Machine
+### 4.6.5 EV Charging State Machine
 
-The state machine routes the wallbox to the correct operating mode based on user selection. It does **not** compute charging power — that is done by the EV Charging Power Calculation (Section 4.5.6).
+The state machine routes the wallbox to the correct operating mode based on user selection. It does **not** compute charging power — that is done by the EV Charging Power Calculation (Section 4.6.6).
 
 > **Wallbox infrastructure:** Faults, disconnects, phase switching, and amp conversion are handled by the OCPP server (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md)). The state machine only makes charging decisions.
 
-#### 4.5.5.1 States
+#### 4.6.5.1 States
 
 | # | State | Description | Power output |
 |---|-------|-------------|--------------|
 | 1 | **IDLE** | No EV charging. SUN2000 has full control of the battery. | `0` |
-| 2 | **SOLAR** | Solar charging. Power from Section 4.5.6. | `ev_charging_power_w` |
+| 2 | **SOLAR** | Solar charging. Power from Section 4.6.6. | `ev_charging_power_w` |
 | 3 | **CHEAP** | Cheap-tariff charging at user-set power. Battery discharge blocked. | `manual_power_w` when cheap, `0` when expensive |
 | 4 | **IMMEDIATE** | Immediate charging at user-set power. Battery discharge blocked. | `manual_power_w` |
 
 Initial state: **IDLE**
 
-#### 4.5.5.2 Transitions
+#### 4.6.5.2 Transitions
 
 The machine stays in its current state unless one of the listed conditions triggers a change. Conditions are evaluated in listed order — first match fires.
 
@@ -1933,13 +1979,13 @@ Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expe
 | M1 | `wallbox_idle` | IDLE |
 | M2 | `charging_mode != "immediate"` | IDLE |
 
-#### 4.5.5.3 Shared Concepts
+#### 4.6.5.3 Shared Concepts
 
 **`wallbox_available`** — Single boolean: wallbox entity exists AND WebSocket connected AND not faulted AND car plugged in (status ≠ "Available").
 
 **`wallbox_idle`** — `True` when power = 0 and status ∈ {`Finishing`, `SuspendedEV`} for ≥ `auto_reset_timeout_min` (default 5 min). Signals the car has finished charging.
 
-#### 4.5.5.4 Inputs and Outputs
+#### 4.6.5.4 Inputs and Outputs
 
 **Inputs:**
 
@@ -1949,7 +1995,7 @@ Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expe
 | `wallbox_idle` | Computed in `run.py` | All states → IDLE exit |
 | `charging_mode` | `input_select.ev_charging_mode` | State routing |
 | `is_cheap_tariff` | Tariff schedule (Section 4.1.4) | CHEAP power toggle |
-| `ev_charging_power_w` | EV Charging Power Calculation (Section 4.5.6) | SOLAR entry + power |
+| `ev_charging_power_w` | EV Charging Power Calculation (Section 4.6.6) | SOLAR entry + power |
 | `manual_power_w` | `input_number.ev_manual_power` | CHEAP/IMMEDIATE power |
 
 **Output:**
@@ -1960,7 +2006,7 @@ Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expe
 | `state` | `sensor.ev_charge_status` | Current state for dashboard/logging |
 | `reason` | Attribute on `sensor.ev_target_power` | Human-readable reason for current decision |
 
-### 4.5.6 EV Charging Power Calculation
+### 4.6.6 EV Charging Power Calculation
 
 When the state machine is in SOLAR mode, this calculation determines the wallbox power setpoint. It runs every 10 seconds and selects from two power sources.
 
@@ -1994,19 +2040,27 @@ Two independent calculations provide candidate power levels:
 
 #### Selection Rules
 
-The power calculation picks the first matching rule:
+The power calculation picks the first matching rule. Battery checks use the forecast functions from Section 4.4.
 
 | # | Rule | Power | Reasoning |
 |---|------|-------|-----------|
-| 1 | Surplus capture ≥ `ev_min_solar_power` | `surplus_capture_power_w` | Exported energy is wasted — capture it first. Bypasses battery protection because this energy is "free." |
-| 2 | `surplus_power` ≥ `ev_min_solar_power` AND `battery_protection_passed` AND forecast > 0 | `ev_forecasted_power_w` | Live surplus exceeds the minimum threshold and SOC simulation says battery can sustain EV charging while keeping reserve for evening. If the battery is forecast to reach 100% SOC at any point between now and 21:00, protection is bypassed — excess solar would be curtailed, so charging the EV is free. |
-| 3 | `surplus_power` < `ev_min_solar_power` | 0 | Not enough solar power to justify starting the wallbox. |
+| 1 | Surplus capture ≥ `ev_min_solar_power` | `surplus_capture_power_w` | Exported energy is wasted — capture it first. Bypasses all battery checks because this energy is "free." |
+| 2 | `surplus_power` ≥ threshold AND forecast > 0 AND NOT `will_battery_hit_minimum(ev_load)` AND (`reaches_target` OR `will_battery_hit_full()`) | `ev_forecasted_power_w` | Live surplus exceeds threshold, battery can handle the load, and either SOC at 21:00 is OK or battery will be full anyway. |
+| 3 | Otherwise | 0 | Not enough surplus, or battery cannot sustain EV load. |
 
-**`ev_min_solar_power`** is the minimum power gate. The live `sensor.surplus_power` (solar − house load) must exceed this threshold for EV charging to start. Surplus capture uses the same threshold independently (grid export ≥ threshold). Neither the forecast strategy nor the surplus capture apply this threshold themselves.
+**Three battery checks for Rule 2** (Section 4.4):
 
-**Battery protection** is only required for the forecast path. Surplus capture energy would be lost to the grid anyway — using it for EV charging never makes the battery worse.
+| Check | Function | Question | Effect |
+|---|---|---|---|
+| SOC at target | `get_forecast_soc_at_target(ev_load)` | ≥ 80% at 21:00 with EV? | Allow |
+| Battery full | `will_battery_hit_full()` | Peak SOC hits 100%? | Allow (override — solar curtailed) |
+| Battery minimum | `will_battery_hit_minimum(ev_load)` | Min SOC drops below reserve? | **Block** (regardless) |
 
-**Battery-full bypass:** If `check_battery_protection()` initially fails (SOC at 21:00 < target), a second query checks the peak forecast SOC between now and cheap tariff start. If the battery is forecast to reach 100% at any point, protection is overridden — the battery will be full and any additional solar would be curtailed or exported. Charging the EV with that energy is free.
+**Decision:** `allow = (reaches_target OR battery_will_be_full) AND NOT battery_will_hit_min`
+
+**`ev_min_solar_power`** is the minimum power gate. The live `sensor.surplus_power` (solar − house load) must exceed this threshold for EV charging to start. Surplus capture uses the same threshold independently (grid export ≥ threshold).
+
+**Rule 1 bypasses battery checks.** Surplus capture energy would be lost to the grid anyway — using it for EV charging never makes the battery worse.
 
 #### Forecast Strategy
 
@@ -2847,7 +2901,7 @@ cd energymanager && python -m pytest tests/test_appliance_signal.py -v
 
 Test file: `energymanager/tests/test_ev_state_machine.py`
 
-**66 unit tests** organized by state, covering all transitions defined in Section 4.5.5:
+**66 unit tests** organized by state, covering all transitions defined in Section 4.6.5:
 
 ### State stay tests
 
@@ -2978,7 +3032,7 @@ cd energymanager && python -m pytest tests/test_discharge_blocking.py -v
 
 Test file: `energymanager/tests/test_ev_charging.py`
 
-Tests the `calculate_ev_power()` pure function and `resolve_phase_gap()` logic (Section 4.5).
+Tests the `calculate_ev_power()` pure function and `resolve_phase_gap()` logic (Section 4.6).
 
 #### `resolve_phase_gap()` — Dead Zone Handling
 
@@ -3398,31 +3452,32 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.32: Restructured sections 4.4–4.6 — new Section 4.4 (Battery Forecast Functions) extracts `get_forecast_soc_at_target()`, `will_battery_hit_full()`, `will_battery_hit_minimum()` as reusable functions with `extra_load_wh` parameter; simplified Section 4.5 (Appliance Signal) to use Section 4.4 functions; renumbered EV Charging from 4.5 → 4.6; EV Rule 2 now uses three battery checks (`reaches_target`, `battery_will_be_full`, `battery_will_hit_min`); updated all cross-references
 - v2.31: Solar Decision card shows rule-by-rule evaluation with actual numbers and pass/fail (Section 4.8.3) — each rule displayed with live sensor values, ✅/❌ per sub-check; added `threshold_w` and `reaches_target` sensor attributes (v1.6.61)
 - v2.30: Solar Decision dashboard card (Section 4.8.3) — live EV charging decision inputs, reasoning, and source; replaced static markdown explanation
-- v2.29: Appliance signal uses appliance-load simulation (Section 4.4.2.1) — subtracts appliance energy from SOC trajectory and checks min SOC ≥ reserve%; grid export is now contextual info, not a separate ORANGE path; renamed `final_soc_percent` → `min_soc_percent` attribute
-- v2.28: Fix grid power sign convention in surplus capture formula (Section 1.9.1) — grid sensor uses positive=export, code was negating it; corrected sanity invariant (Section 1.9.2); skip peak-SOC override query in battery protection when past cheap_start (Section 4.5.6)
-- v2.27: Surplus-based EV forecast strategy (Section 4.5.6) — forecast path now snaps current `sensor.surplus_power` to next wallbox amp step instead of bottom-up search from min to max; entry gate changed from `ev_forecasted_power_w >= threshold` to `surplus_power >= ev_min_solar_power` (live surplus must exceed configured minimum); battery protection check steps down from candidate amp level; updated Selection Rules table, Input Parameters, and Scenarios
+- v2.29: Appliance signal uses appliance-load simulation (Section 4.5.2.1) — subtracts appliance energy from SOC trajectory and checks min SOC ≥ reserve%; grid export is now contextual info, not a separate ORANGE path; renamed `final_soc_percent` → `min_soc_percent` attribute
+- v2.28: Fix grid power sign convention in surplus capture formula (Section 1.9.1) — grid sensor uses positive=export, code was negating it; corrected sanity invariant (Section 1.9.2); skip peak-SOC override query in battery protection when past cheap_start (Section 4.6.6)
+- v2.27: Surplus-based EV forecast strategy (Section 4.6.6) — forecast path now snaps current `sensor.surplus_power` to next wallbox amp step instead of bottom-up search from min to max; entry gate changed from `ev_forecasted_power_w >= threshold` to `surplus_power >= ev_min_solar_power` (live surplus must exceed configured minimum); battery protection check steps down from candidate amp level; updated Selection Rules table, Input Parameters, and Scenarios
 - v2.26: Passive integration observer test revision (Appendix D.7) — replaced 5 obsolete surplus-tracking tests (NO-03, NO-04, EC-01, EC-10, EC-11) with forecast-strategy-aligned tests (NO-05, NO-13, EC-05, EC-06, EC-07); updated NO-02 preconditions for strategy-based entry; report version bumped to 3; evidence includes `strategy` field
-- v2.25: Forecast-based EV solar charging strategy (Section 4.5.7) — replaces instantaneous open-loop/closed-loop excess with SOC simulation; battery acts as buffer for coarse amp steps (690W on 3-phase); bottom-up search from min to max amps; dynamic protection target adapts to bad days; `min_solar_power_w` config for early charging below wallbox minimum; `sensor.surplus_power` for entry decision; renamed `sensor.load_power` → `sensor.house_load_power`; added `sensor.total_load_power` (house + wallbox for Fire display)
+- v2.25: Forecast-based EV solar charging strategy (Section 4.6.7) — replaces instantaneous open-loop/closed-loop excess with SOC simulation; battery acts as buffer for coarse amp steps (690W on 3-phase); bottom-up search from min to max amps; dynamic protection target adapts to bad days; `min_solar_power_w` config for early charging below wallbox minimum; `sensor.surplus_power` for entry decision; renamed `sensor.load_power` → `sensor.house_load_power`; added `sensor.total_load_power` (house + wallbox for Fire display)
 - v2.24: Appendix F — Comprehensive Smart Car API reference: full `electricVehicleStatus` field catalogue with all 16 `chargerState` values (from pySmartHashtag/evcc/ioBroker), `statusOfChargerConnection` physical cable states, V2L fields, charging lids, DC charging fields; HA entity mapping table; other `vehicleStatus` sections (climate, doors, maintenance, GPS, 12V battery); poll frequency table
-- v2.23: Wallbox idle detection exits all EV modes — added `wallbox_idle` input (Section 4.5.6); S1/C1/M1 transitions exit SOLAR/CHEAP/IMMEDIATE to IDLE when car finishes charging (wallbox idle ≥ 5 min); idle timer extended from immediate/cheap to all modes; dashboard shows `idle_minutes` and `wallbox_idle` attributes; EC-16 passive integration test; IT-BATT-04 test catalogue entry
+- v2.23: Wallbox idle detection exits all EV modes — added `wallbox_idle` input (Section 4.6.6); S1/C1/M1 transitions exit SOLAR/CHEAP/IMMEDIATE to IDLE when car finishes charging (wallbox idle ≥ 5 min); idle timer extended from immediate/cheap to all modes; dashboard shows `idle_minutes` and `wallbox_idle` attributes; EC-16 passive integration test; IT-BATT-04 test catalogue entry
 - v2.22: Integration test catalogue (Appendix D.5/D.6) — 22 tests across 6 categories; 3 implemented (IT-PHASE-01, IT-BATT-01, IT-BATT-03), 19 documented as future; EV charging power tests documented (Appendix D.5)
 - v2.21: Added wallbox status display mapping table for dashboard (Section 4.8.1) — documents how raw OCPP status is shown to the user
 - v2.20: SOC poll on charging mode change — switching modes (e.g. solar → immediate) triggers immediate SOC refresh for dashboard accuracy (Section 4.6.1)
 - v2.19: Adaptive Smart car SOC polling — 1-minute during charging, immediate on car connection, hourly baseline; cached Hello Smart client reduces API calls from 6 to 2 per poll (Section 4.6)
-- v2.18: Removed battery protection gate from solar EV charging — solar mode always active when excess available; battery protection is now informational (dashboard only); removed S4 transition from SOLAR state; updated N3 condition (Section 4.5.6)
+- v2.18: Removed battery protection gate from solar EV charging — solar mode always active when excess available; battery protection is now informational (dashboard only); removed S4 transition from SOLAR state; updated N3 condition (Section 4.6.6)
 - v2.17: Two-flag battery discharge blocking — EV charging in immediate/cheap mode now independently blocks battery discharge (Section 4.3.2); prevents SUN2000 from draining battery to cover wallbox load via DTSU correction; 17 new tests (Appendix D.4)
 - v2.16: Added sections 4.7 (InfluxDB Storage), 4.8 (Dashboard Examples), 4.9 (Error Handling and Notifications), Chapter 5 (Forecast Accuracy Tracking), Appendix E (EnergyManager Configuration). Updated EV config for 4-state machine (phase-based min power, phase_threshold_kwh). Updated EV decision table to include EV charging forecast dependency.
 - v2.15: FSD improvements — signal conventions box; weekend battery guard as explicit policy (`battery_guard_on_weekends`); `allow_1p_auto` flag for 1φ vs 3φ minimum; `effective_min_power_w` derived threshold; S06 forecast contract (measurement, field, staleness, missing=conservative); `battery_guard_margin_pct` (2% safety margin); smoothing defined (rolling median, 4 samples); rate limiting formalized (`setpoint_min_interval_s`, `setpoint_max_step_w`, `setpoint_step_w`); import tolerance (`import_tolerance_w`, `import_tolerance_cycles`); auto-revert trigger refined (only when setpoint > 0 recently); mode reset write-back semantics (one-shot, retry, idempotency); fault required-signals-per-mode; hard fault test-setpoint procedure; anti-flap table; S02 renamed EV_UNAVAILABLE; state priority order; scenario-based test table; edge-case worked examples (H: stale SoC, I: tariff boundary, J: phase gap)
-- v2.14: Redesigned EV state machine — states represent charging behavior, not device status (Section 4.5.6); 12 states in 3 groups (base/policy/PV-excess); debounce (S21), hysteresis (200W), cooldown (S24) prevent oscillation; soft/hard fault classification with recovery dwell and anti-flap; battery reserve guard with configurable scope policy; mode renamed to auto_pv_excess/immediate/deferred_tariff; auto-revert on EV finish
-- v2.13: Refactored EV charging to transition-based state machine with hysteresis (Section 4.5.6); 200W dead band prevents PAUSED↔SOLAR oscillation; 111 unit tests
+- v2.14: Redesigned EV state machine — states represent charging behavior, not device status (Section 4.6.6); 12 states in 3 groups (base/policy/PV-excess); debounce (S21), hysteresis (200W), cooldown (S24) prevent oscillation; soft/hard fault classification with recovery dwell and anti-flap; battery reserve guard with configurable scope policy; mode renamed to auto_pv_excess/immediate/deferred_tariff; auto-revert on EV finish
+- v2.13: Refactored EV charging to transition-based state machine with hysteresis (Section 4.6.6); 200W dead band prevents PAUSED↔SOLAR oscillation; 111 unit tests
 - v2.12: Moved all test cases to Appendix D with references from main chapters; dashboard button feedback (orange/green); car status card redesign
-- v2.11: Appliance signal ORANGE now also triggers on grid export >= 1.5kWh before evening (Section 4.4.2.2)
+- v2.11: Appliance signal ORANGE now also triggers on grid export >= 1.5kWh before evening (Section 4.5.2.2)
 - v2.10: Expensive hours check now excludes weekend/holiday days (Section 4.3.2, 4.3.3); fixes incorrect discharge blocking on Friday nights
-- v2.9: Appliance signal uses min SOC instead of final SOC for ORANGE check (Section 4.4); ensures SOC never dips below threshold at any point in simulation
+- v2.9: Appliance signal uses min SOC instead of final SOC for ORANGE check (Section 4.5); ensures SOC never dips below threshold at any point in simulation
 - v2.8: Dual SOC forecast scenarios (with/without strategy); forecast snapshot for accuracy tracking; updated InfluxDB storage schema (Section 4.7)
-- v2.7: Comprehensive EV Charging Optimization specification (Section 4.5) - OCPP 1.6j, phase switching, goal mode
-- v2.6: Simplified battery discharge algorithm - rolling 15-minute threshold check; added test cases (Section 4.3.6); appliance signal test cases (Section 4.4.5)
+- v2.7: Comprehensive EV Charging Optimization specification (Section 4.6) - OCPP 1.6j, phase switching, goal mode
+- v2.6: Simplified battery discharge algorithm - rolling 15-minute threshold check; added test cases (Section 4.3.6); appliance signal test cases (Section 4.5.5)
 - v2.5: Added Home Assistant API access documentation (homeassistant_api: true, battery entity reading)
 - v2.4: Added Chapter 5 - Forecast Accuracy Tracking (Accuracy #1: Battery Discharge Optimization)
