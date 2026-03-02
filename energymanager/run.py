@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.66"
+__version__ = "1.6.67"
 
 import json
 import logging
@@ -24,7 +24,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 from src.forecast_reader import ForecastReader
 from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
-from src.appliance_signal import calculate_appliance_signal
+from src.appliance_signal import ApplianceSignal
 from src.ev_state_machine import EVStateMachine, EVInputs, EVState
 from src.ev_strategy import EVChargingStrategy
 from src.influxdb_writer import SimulationWriter
@@ -510,35 +510,60 @@ class EnergyManager:
             logger.error(f"Optimization failed: {e}", exc_info=True)
 
     def calculate_appliance_signal(self, current_soc: float, simulation: pd.DataFrame):
-        """Calculate and output appliance signal to Home Assistant."""
+        """Calculate and output appliance signal to Home Assistant.
+
+        Uses the InfluxDB forecast functions with extra_load_wh to check
+        whether the battery can absorb the appliance load.
+        """
         try:
             # Get current PV and load from HA
-            current_pv = self.ha_client.get_sensor_value(self.pv_power_entity)
-            current_load = self.ha_client.get_sensor_value(self.load_power_entity)
+            current_pv = self.ha_client.get_sensor_value(self.pv_power_entity) or 0.0
+            current_load = self.ha_client.get_sensor_value(self.load_power_entity) or 0.0
+            excess_power = current_pv - current_load
 
-            # Log sensor values for debugging
-            logger.debug(f"Appliance signal sensors: PV={current_pv}W, Load={current_load}W")
+            # GREEN: Current PV excess covers the appliance directly
+            if excess_power > self.appliance_power_w:
+                signal = ApplianceSignal(
+                    signal="green",
+                    reason=f"PV excess {int(excess_power)}W > {int(self.appliance_power_w)}W",
+                    excess_power_w=excess_power,
+                    min_soc_percent=0,
+                )
+            else:
+                # Check forecast: will min SOC stay above reserve with appliance load?
+                min_soc, max_soc, target_time = self.get_forecast_soc_range(
+                    extra_load_wh=self.appliance_energy_wh
+                )
+                load_percent = self._extra_load_percent(self.appliance_energy_wh)
 
-            if current_pv is None or current_load is None:
-                logger.warning(f"Sensor read failed: PV={self.pv_power_entity}={current_pv}, "
-                              f"Load={self.load_power_entity}={current_load}")
-                current_pv = current_pv or 0
-                current_load = current_load or 0
-
-            # Calculate signal using simulation (which has efficiency applied)
-            signal = calculate_appliance_signal(
-                current_pv_w=current_pv,
-                current_load_w=current_load,
-                simulation=simulation,
-                appliance_power_w=self.appliance_power_w,
-                appliance_energy_wh=self.appliance_energy_wh,
-                capacity_wh=self.capacity_wh,
-                reserve_percent=self.reserve_percent,
-            )
+                if min_soc is not None and min_soc >= self.reserve_percent:
+                    # ORANGE: battery can absorb appliance load
+                    signal = ApplianceSignal(
+                        signal="orange",
+                        reason=(
+                            f"SOC with appliance ≥ {self.reserve_percent:.0f}% "
+                            f"(min {min_soc:.0f}% after −{load_percent:.0f}%)"
+                        ),
+                        excess_power_w=excess_power,
+                        min_soc_percent=min_soc,
+                    )
+                else:
+                    # RED: appliance would deplete battery below reserve
+                    actual_min = min_soc if min_soc is not None else 0.0
+                    signal = ApplianceSignal(
+                        signal="red",
+                        reason=(
+                            f"SOC with appliance {actual_min:.0f}% "
+                            f"< reserve {self.reserve_percent:.0f}% "
+                            f"(−{load_percent:.0f}% appliance load)"
+                        ),
+                        excess_power_w=excess_power,
+                        min_soc_percent=actual_min,
+                    )
 
             logger.info(f"Appliance signal: {signal.signal} - {signal.reason}")
 
-            # Output to Home Assistant (using configurable entity)
+            # Output to Home Assistant
             self.ha_client.set_sensor_state(
                 self.appliance_signal_entity,
                 signal.signal,
