@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.56"
+__version__ = "1.6.57"
 
 import json
 import logging
@@ -773,6 +773,14 @@ class EnergyManager:
                 threshold = self.ha_client.get_sensor_value(
                     self.ev_min_solar_power_entity
                 ) or ev_min_power
+                logger.info(
+                    f"EV decision: grid={grid_power:.0f}W wb={wallbox_power:.0f}W "
+                    f"surplus={surplus_power:.0f}W pv={pv_power:.0f}W "
+                    f"grid_export={grid_export:.0f}W capture={surplus_capture_power_w:.0f}W "
+                    f"forecast={self._ev_forecasted_power_w:.0f}W "
+                    f"threshold={threshold:.0f}W protection={reaches_target} "
+                    f"capture_active={self._surplus_capture_active}"
+                )
                 # Rule 1: surplus capture has priority (exported energy is wasted)
                 if surplus_capture_power_w >= threshold:
                     ev_charging_power_w = surplus_capture_power_w
