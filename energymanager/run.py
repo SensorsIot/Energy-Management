@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.58"
+__version__ = "1.6.59"
 
 import json
 import logging
@@ -770,26 +770,44 @@ class EnergyManager:
             # EV Charging Power Calculation (FSD 4.5.6)
             ev_charging_power_w = 0.0
             ev_charging_source = "none"
+            ev_source_reason = "no solar mode"
             if ev_mode == "solar":
                 threshold = self.ha_client.get_sensor_value(
                     self.ev_min_solar_power_entity
                 ) or ev_min_power
-                logger.info(
-                    f"EV decision: grid={grid_power:.0f}W wb={wallbox_power:.0f}W "
-                    f"surplus={surplus_power:.0f}W pv={pv_power:.0f}W "
-                    f"grid_export={grid_export:.0f}W capture={surplus_capture_power_w:.0f}W "
-                    f"forecast={self._ev_forecasted_power_w:.0f}W "
-                    f"threshold={threshold:.0f}W protection={reaches_target} "
-                    f"capture_active={self._surplus_capture_active}"
-                )
                 # Rule 1: surplus capture has priority (exported energy is wasted)
                 if surplus_capture_power_w >= threshold:
                     ev_charging_power_w = surplus_capture_power_w
                     ev_charging_source = "surplus"
+                    ev_source_reason = (
+                        f"Grid export {grid_export:.0f}W → capture {ev_charging_power_w:.0f}W"
+                    )
                 # Rule 2: surplus above threshold + battery protection → use forecast power
                 elif surplus_power >= threshold and reaches_target and self._ev_forecasted_power_w > 0:
                     ev_charging_power_w = self._ev_forecasted_power_w
                     ev_charging_source = "forecast"
+                    ev_source_reason = (
+                        f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
+                        f"forecast → {ev_charging_power_w:.0f}W"
+                    )
+                else:
+                    # Explain why neither rule fired
+                    reasons = []
+                    if surplus_capture_power_w < threshold:
+                        reasons.append(
+                            f"grid export {grid_export:.0f}W < {threshold:.0f}W"
+                        )
+                    if surplus_power < threshold:
+                        reasons.append(
+                            f"surplus {surplus_power:.0f}W < {threshold:.0f}W"
+                        )
+                    elif not reaches_target:
+                        reasons.append(
+                            f"battery protection blocked (SOC forecast {soc_at_target:.0f}%)"
+                        )
+                    elif self._ev_forecasted_power_w <= 0:
+                        reasons.append("no forecast available")
+                    ev_source_reason = "No charging — " + "; ".join(reasons)
                 # Hard floor: never send less than wallbox minimum
                 if 0 < ev_charging_power_w < ev_min_power:
                     ev_charging_power_w = ev_min_power
@@ -827,7 +845,10 @@ class EnergyManager:
             prev_ev_state = self._ev_sm.state
             output = self._ev_sm.step(inputs)
 
-            logger.info(f"EV [{output.state.value}] {output.target_power_w:.0f}W — {output.reason}")
+            logger.info(
+                f"EV [{output.state.value}] {output.target_power_w:.0f}W "
+                f"({ev_charging_source}) — {ev_source_reason}"
+            )
 
             # Auto-revert: immediate/cheap idle timeout → switch mode back to solar
             if wallbox_idle and ev_mode in ("immediate", "cheap"):
@@ -893,12 +914,14 @@ class EnergyManager:
                 attributes={
                     "friendly_name": "EV Target Power",
                     "unit_of_measurement": "W",
-                    "reason": output.reason,
-                    "battery_protection": not self._battery_reaches_target,
-                    "battery_forecast_max_soc": self._battery_min_soc_forecast,
+                    "reason": ev_source_reason,
                     "ev_charging_source": ev_charging_source,
+                    "battery_protection": not self._battery_reaches_target,
+                    "battery_forecast_soc": self._battery_min_soc_forecast,
+                    "surplus_power_w": surplus_power,
+                    "grid_export_w": grid_export if ev_mode == "solar" else 0,
                     "surplus_capture_w": surplus_capture_power_w,
-                    "surplus_capture_active": self._surplus_capture_active,
+                    "forecast_power_w": self._ev_forecasted_power_w,
                     "icon": "mdi:ev-station",
                 },
             )
