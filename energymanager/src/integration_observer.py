@@ -71,13 +71,13 @@ class _TestDef:
 
 _TEST_DEFS: list[_TestDef] = [
     # Normal operation
-    _TestDef("NO-01", "NORMAL stays when wallbox unavailable", "normal", "_detect_no01"),
-    _TestDef("NO-02", "NORMAL->SOLAR on strategy power>0", "normal", "_detect_no02"),
+    _TestDef("NO-01", "IDLE stays when wallbox unavailable", "normal", "_detect_no01"),
+    _TestDef("NO-02", "IDLE->SOLAR on strategy power>0", "normal", "_detect_no02"),
     _TestDef("NO-05", "SOLAR power equals strategy power", "normal", "_detect_no05"),
-    _TestDef("NO-06", "NORMAL->IMMEDIATE", "normal", "_detect_no06"),
-    _TestDef("NO-07", "IMMEDIATE->NORMAL mode change", "normal", "_detect_no07"),
+    _TestDef("NO-06", "IDLE->IMMEDIATE", "normal", "_detect_no06"),
+    _TestDef("NO-07", "IMMEDIATE->IDLE mode change", "normal", "_detect_no07"),
     _TestDef("NO-08", "Immediate->solar sends 0W", "normal", "_detect_no08"),
-    _TestDef("NO-09", "NORMAL->CHEAP", "normal", "_detect_no09"),
+    _TestDef("NO-09", "IDLE->CHEAP", "normal", "_detect_no09"),
     _TestDef("NO-10", "CHEAP charges at max (cheap tariff)", "normal", "_detect_no10"),
     _TestDef("NO-11", "CHEAP pauses (expensive tariff)", "normal", "_detect_no11"),
     _TestDef("NO-12", "IMMEDIATE blocks discharge", "normal", "_detect_no12"),
@@ -93,9 +93,9 @@ _TEST_DEFS: list[_TestDef] = [
     _TestDef("EC-09", "SOLAR->CHEAP", "edge", "_detect_ec09"),
     _TestDef("EC-12", "Power limit sent only on change", "edge", "_detect_ec12"),
     _TestDef("EC-13", "Auto-revert: mode resets to solar", "edge", "_detect_ec13"),
-    _TestDef("EC-14", "Faulted/Unknown -> NORMAL", "edge", "_detect_ec14"),
-    _TestDef("EC-15", "CHEAP->NORMAL clears discharge", "edge", "_detect_ec15"),
-    _TestDef("EC-16", "Idle detection exits to NORMAL", "edge", "_detect_ec16"),
+    _TestDef("EC-14", "Faulted/Unknown -> IDLE", "edge", "_detect_ec14"),
+    _TestDef("EC-15", "CHEAP->IDLE clears discharge", "edge", "_detect_ec15"),
+    _TestDef("EC-16", "Idle detection exits to IDLE", "edge", "_detect_ec16"),
 ]
 
 
@@ -103,7 +103,7 @@ _TEST_DEFS: list[_TestDef] = [
 # Observer
 # ---------------------------------------------------------------------------
 
-_REPORT_VERSION = "3"  # bump to invalidate stale results after formula changes
+_REPORT_VERSION = "4"  # bump to invalidate stale results after formula changes
 
 
 class IntegrationObserver:
@@ -204,7 +204,7 @@ class IntegrationObserver:
             f"state={o.state.value} prev={s.prev_state.value} "
             f"power={o.target_power_w:.0f}W mode={i.charging_mode} "
             f"excess={s.excess_w:.0f}W "
-            f"strategy={i.ev_strategy_power_w:.0f}W "
+            f"strategy={i.ev_target_power_w:.0f}W "
             f"blocked={s.discharge_blocked_by_ev} "
             f"last_sent={s.last_power_limit_sent}"
         )
@@ -277,22 +277,22 @@ class IntegrationObserver:
     # --- Normal Operation ---
 
     def _detect_no01(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """NO-01: NORMAL stays when wallbox unavailable."""
+        """NO-01: IDLE stays when wallbox unavailable."""
         i = curr.inputs
         if i.charging_mode != "solar" or i.wallbox_available:
             return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
+        return curr.output.state == EVState.IDLE and curr.output.target_power_w == 0
 
     def _detect_no02(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """NO-02: NORMAL->SOLAR on strategy power>0."""
+        """NO-02: IDLE->SOLAR on strategy power>0."""
         i = curr.inputs
-        if curr.prev_state != EVState.NORMAL:
+        if curr.prev_state != EVState.IDLE:
             return None
         if i.charging_mode != "solar" or not i.wallbox_available:
             return None
         if not i.battery_protection_passed:
             return None
-        if i.ev_strategy_power_w <= 0:
+        if i.ev_target_power_w <= 0:
             return None
         return curr.output.state == EVState.SOLAR
 
@@ -301,30 +301,30 @@ class IntegrationObserver:
         i = curr.inputs
         if curr.output.state != EVState.SOLAR:
             return None
-        if i.ev_strategy_power_w <= 0:
+        if i.ev_target_power_w <= 0:
             return None
-        return curr.output.target_power_w == i.ev_strategy_power_w
+        return curr.output.target_power_w == i.ev_target_power_w
 
     def _detect_no06(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """NO-06: NORMAL->IMMEDIATE."""
+        """NO-06: IDLE->IMMEDIATE."""
         i = curr.inputs
-        if curr.prev_state != EVState.NORMAL:
+        if curr.prev_state != EVState.IDLE:
             return None
         if i.charging_mode != "immediate" or not i.wallbox_available:
             return None
         return (
             curr.output.state == EVState.IMMEDIATE
-            and curr.output.target_power_w == i.max_power_w
+            and curr.output.target_power_w == i.manual_power_w
         )
 
     def _detect_no07(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """NO-07: IMMEDIATE->NORMAL mode change."""
+        """NO-07: IMMEDIATE->IDLE mode change."""
         i = curr.inputs
         if curr.prev_state != EVState.IMMEDIATE:
             return None
         if i.charging_mode == "immediate":
             return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
+        return curr.output.state == EVState.IDLE and curr.output.target_power_w == 0
 
     def _detect_no08(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """NO-08: Immediate->solar sends 0W (bug-fix check)."""
@@ -333,12 +333,12 @@ class IntegrationObserver:
             return None
         if i.charging_mode != "solar":
             return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
+        return curr.output.state == EVState.IDLE and curr.output.target_power_w == 0
 
     def _detect_no09(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """NO-09: NORMAL->CHEAP."""
+        """NO-09: IDLE->CHEAP."""
         i = curr.inputs
-        if curr.prev_state != EVState.NORMAL:
+        if curr.prev_state != EVState.IDLE:
             return None
         if i.charging_mode != "cheap" or not i.wallbox_available:
             return None
@@ -351,7 +351,7 @@ class IntegrationObserver:
             return None
         if not i.is_cheap_tariff:
             return None
-        return curr.output.target_power_w == i.max_power_w
+        return curr.output.target_power_w == i.manual_power_w
 
     def _detect_no11(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """NO-11: CHEAP pauses (expensive tariff)."""
@@ -377,13 +377,13 @@ class IntegrationObserver:
         i = curr.inputs
         if prev.output.state != EVState.SOLAR:
             return None
-        if i.ev_strategy_power_w > 0:
+        if i.ev_target_power_w > 0:
             return None
         if i.wallbox_idle:
             return None  # idle exit is EC-16, not this
         if i.charging_mode != "solar":
             return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
+        return curr.output.state == EVState.IDLE and curr.output.target_power_w == 0
 
     # --- Edge Cases ---
 
@@ -424,7 +424,7 @@ class IntegrationObserver:
             return None
         return (
             curr.output.state == EVState.IMMEDIATE
-            and curr.output.target_power_w == i.max_power_w
+            and curr.output.target_power_w == i.manual_power_w
         )
 
     def _detect_ec09(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
@@ -439,15 +439,15 @@ class IntegrationObserver:
     def _detect_ec05(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """EC-05: Battery protection blocks SOLAR entry."""
         i = curr.inputs
-        if curr.prev_state != EVState.NORMAL:
+        if curr.prev_state != EVState.IDLE:
             return None
         if i.charging_mode != "solar" or not i.wallbox_available:
             return None
         if i.battery_protection_passed:
             return None  # only fires when protection blocks
-        if i.ev_strategy_power_w <= 0:
+        if i.ev_target_power_w <= 0:
             return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
+        return curr.output.state == EVState.IDLE and curr.output.target_power_w == 0
 
     def _detect_ec06(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """EC-06: Battery protection exits SOLAR after grace."""
@@ -464,7 +464,7 @@ class IntegrationObserver:
             return None
         if i.charging_mode != "solar":
             return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
+        return curr.output.state == EVState.IDLE and curr.output.target_power_w == 0
 
     def _detect_ec07(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """EC-07: Battery protection grace holds SOLAR."""
@@ -499,33 +499,33 @@ class IntegrationObserver:
         idle_s = (curr.ts - curr.idle_since).total_seconds()
         if idle_s < 5 * 60:
             return None
-        return curr.output.state == EVState.NORMAL
+        return curr.output.state == EVState.IDLE
 
     def _detect_ec14(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """EC-14: Faulted/Unknown wallbox status -> NORMAL."""
+        """EC-14: Faulted/Unknown wallbox status -> IDLE."""
         i = curr.inputs
         if i.wallbox_status not in ("Faulted", "Unknown"):
             return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
+        return curr.output.state == EVState.IDLE and curr.output.target_power_w == 0
 
     def _detect_ec15(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """EC-15: CHEAP->NORMAL clears discharge block."""
+        """EC-15: CHEAP->IDLE clears discharge block."""
         i = curr.inputs
         if curr.prev_state != EVState.CHEAP:
             return None
         if i.charging_mode == "cheap":
             return None
         return (
-            curr.output.state == EVState.NORMAL
+            curr.output.state == EVState.IDLE
             and curr.output.target_power_w == 0
             and curr.discharge_blocked_by_ev is False
         )
 
     def _detect_ec16(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
-        """EC-16: Idle detection exits to NORMAL."""
+        """EC-16: Idle detection exits to IDLE."""
         i = curr.inputs
         if curr.prev_state not in (EVState.SOLAR, EVState.CHEAP, EVState.IMMEDIATE):
             return None
         if not i.wallbox_idle:
             return None
-        return curr.output.state == EVState.NORMAL and curr.output.target_power_w == 0
+        return curr.output.state == EVState.IDLE and curr.output.target_power_w == 0

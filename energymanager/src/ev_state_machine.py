@@ -2,7 +2,7 @@
 EV charging state machine — 4-state design.
 
 States:
-  1. NORMAL          — no EV charging, SUN2000 has full control
+  1. IDLE            — no EV charging, SUN2000 has full control
   2. SOLAR           — variable power from solar excess
   3. CHEAP           — max during cheap tariff, 0 during expensive
   4. IMMEDIATE       — immediate mode, max power regardless
@@ -31,7 +31,7 @@ MIN_STAY_S = 15 * 60
 
 class EVState(str, Enum):
     """EV charging states (str so it works as an HA sensor value)."""
-    NORMAL = "normal"
+    IDLE = "idle"
     SOLAR = "solar"
     CHEAP = "cheap"
     IMMEDIATE = "immediate"
@@ -57,8 +57,9 @@ class EVInputs:
     pv_power_w: float                 # current PV production (W)
     load_power_w: float               # current household load (W)
     min_power_w: float                # default 1400W
-    max_power_w: float                # default 11000W
-    ev_strategy_power_w: float = 0.0  # from EVChargingStrategy (0 = don't charge)
+    manual_power_w: float                # default 11000W
+    ev_target_power_w: float = 0.0  # from EVChargingStrategy (0 = don't charge)
+    surplus_capture_power_w: float = 0.0  # grid surplus capture (0 = inactive)
 
 
 @dataclass
@@ -81,7 +82,7 @@ class EVStateMachine:
     """
 
     def __init__(self, *, time_fn=None) -> None:
-        self.state: EVState = EVState.NORMAL
+        self.state: EVState = EVState.IDLE
         self._entered_solar_at: float | None = None
         self._time_fn = time_fn or time.monotonic
 
@@ -105,37 +106,43 @@ class EVStateMachine:
         return self._time_fn() - self._entered_solar_at
 
     # -------------------------------------------------------------------
-    # NORMAL
+    # IDLE
     # -------------------------------------------------------------------
 
-    def _step_normal(self, i: EVInputs) -> EVOutput:
+    def _step_idle(self, i: EVInputs) -> EVOutput:
         # N1: immediate mode
         if i.charging_mode == "immediate" and i.wallbox_available:
             self._set_state(EVState.IMMEDIATE)
-            return EVOutput(EVState.IMMEDIATE, i.max_power_w,
+            return EVOutput(EVState.IMMEDIATE, i.manual_power_w,
                             "Immediate mode — charge at max power")
 
         # N2: cheap mode
         if i.charging_mode == "cheap" and i.wallbox_available:
             self._set_state(EVState.CHEAP)
-            power = i.max_power_w if i.is_cheap_tariff else 0
+            power = i.manual_power_w if i.is_cheap_tariff else 0
             reason = ("Cheap mode — cheap tariff active, charge at max power"
                       if i.is_cheap_tariff
                       else "Cheap mode — waiting for cheap tariff")
             return EVOutput(EVState.CHEAP, power, reason)
 
-        # N3: solar mode — only enter if battery protection allows it
+        # N3: solar mode
         if i.charging_mode == "solar" and i.wallbox_available:
-            if not i.battery_protection_passed:
-                return EVOutput(EVState.NORMAL, 0,
-                                "Solar — battery protection blocks EV")
-            if i.ev_strategy_power_w > 0:
+            # N3a: grid surplus capture — bypasses battery protection
+            if i.surplus_capture_power_w > 0:
                 self._set_state(EVState.SOLAR)
-                return EVOutput(EVState.SOLAR, i.ev_strategy_power_w,
-                                f"Solar charging {i.ev_strategy_power_w:.0f}W (strategy)")
+                return EVOutput(EVState.SOLAR, i.surplus_capture_power_w,
+                                f"Surplus capture {i.surplus_capture_power_w:.0f}W (1ph)")
+            # N3b: forecast strategy — requires battery protection
+            if not i.battery_protection_passed:
+                return EVOutput(EVState.IDLE, 0,
+                                "Solar — battery protection blocks EV")
+            if i.ev_target_power_w > 0:
+                self._set_state(EVState.SOLAR)
+                return EVOutput(EVState.SOLAR, i.ev_target_power_w,
+                                f"Solar charging {i.ev_target_power_w:.0f}W (strategy)")
 
         # Stay NORMAL
-        return EVOutput(EVState.NORMAL, 0, "No EV charging")
+        return EVOutput(EVState.IDLE, 0, "No EV charging")
 
     # -------------------------------------------------------------------
     # SOLAR
@@ -144,38 +151,43 @@ class EVStateMachine:
     def _step_solar(self, i: EVInputs) -> EVOutput:
         # S1: car finished — wallbox idle
         if i.wallbox_idle:
-            self._set_state(EVState.NORMAL)
-            return EVOutput(EVState.NORMAL, 0,
+            self._set_state(EVState.IDLE)
+            return EVOutput(EVState.IDLE, 0,
                             "Car finished — wallbox idle")
 
         # S2: battery protection failed — exit after grace period
-        if not i.battery_protection_passed and self._time_in_solar() >= MIN_STAY_S:
-            self._set_state(EVState.NORMAL)
-            return EVOutput(EVState.NORMAL, 0,
+        #     (skip when surplus capture is active — that energy is free)
+        if (not i.battery_protection_passed
+                and i.surplus_capture_power_w == 0
+                and self._time_in_solar() >= MIN_STAY_S):
+            self._set_state(EVState.IDLE)
+            return EVOutput(EVState.IDLE, 0,
                             "Solar — battery protection blocks EV")
 
         # S3: user switched to immediate
         if i.charging_mode == "immediate":
             self._set_state(EVState.IMMEDIATE)
-            return EVOutput(EVState.IMMEDIATE, i.max_power_w,
+            return EVOutput(EVState.IMMEDIATE, i.manual_power_w,
                             "Immediate mode — charge at max power")
 
         # S4: user switched to cheap
         if i.charging_mode == "cheap":
             self._set_state(EVState.CHEAP)
-            power = i.max_power_w if i.is_cheap_tariff else 0
+            power = i.manual_power_w if i.is_cheap_tariff else 0
             reason = ("Cheap mode — cheap tariff active, charge at max power"
                       if i.is_cheap_tariff
                       else "Cheap mode — waiting for cheap tariff")
             return EVOutput(EVState.CHEAP, power, reason)
 
-        # Stay in SOLAR — use strategy power
-        if i.ev_strategy_power_w > 0:
-            return EVOutput(EVState.SOLAR, i.ev_strategy_power_w,
-                            f"Solar charging {i.ev_strategy_power_w:.0f}W (strategy)")
-        else:
-            self._set_state(EVState.NORMAL)
-            return EVOutput(EVState.NORMAL, 0, "Solar — strategy says stop")
+        # Stay in SOLAR — forecast strategy takes priority, surplus capture fallback
+        if i.ev_target_power_w > 0:
+            return EVOutput(EVState.SOLAR, i.ev_target_power_w,
+                            f"Solar charging {i.ev_target_power_w:.0f}W (strategy)")
+        if i.surplus_capture_power_w > 0:
+            return EVOutput(EVState.SOLAR, i.surplus_capture_power_w,
+                            f"Surplus capture {i.surplus_capture_power_w:.0f}W (1ph)")
+        self._set_state(EVState.IDLE)
+        return EVOutput(EVState.IDLE, 0, "Solar — no power source")
 
     # -------------------------------------------------------------------
     # CHEAP
@@ -184,18 +196,18 @@ class EVStateMachine:
     def _step_cheap(self, i: EVInputs) -> EVOutput:
         # C1: car finished — wallbox idle
         if i.wallbox_idle:
-            self._set_state(EVState.NORMAL)
-            return EVOutput(EVState.NORMAL, 0,
+            self._set_state(EVState.IDLE)
+            return EVOutput(EVState.IDLE, 0,
                             "Car finished — wallbox idle")
 
         # C2: user deselected cheap mode
         if i.charging_mode != "cheap":
-            self._set_state(EVState.NORMAL)
-            return EVOutput(EVState.NORMAL, 0, "No EV charging")
+            self._set_state(EVState.IDLE)
+            return EVOutput(EVState.IDLE, 0, "No EV charging")
 
         # Stay in CHEAP — toggle power based on tariff
         if i.is_cheap_tariff:
-            return EVOutput(EVState.CHEAP, i.max_power_w,
+            return EVOutput(EVState.CHEAP, i.manual_power_w,
                             "Cheap mode — cheap tariff active, charge at max power")
         return EVOutput(EVState.CHEAP, 0,
                         "Cheap mode — waiting for cheap tariff")
@@ -207,23 +219,23 @@ class EVStateMachine:
     def _step_max(self, i: EVInputs) -> EVOutput:
         # M1: car finished — wallbox idle
         if i.wallbox_idle:
-            self._set_state(EVState.NORMAL)
-            return EVOutput(EVState.NORMAL, 0,
+            self._set_state(EVState.IDLE)
+            return EVOutput(EVState.IDLE, 0,
                             "Car finished — wallbox idle")
 
         # M2: user deselected immediate mode
         if i.charging_mode != "immediate":
-            self._set_state(EVState.NORMAL)
-            return EVOutput(EVState.NORMAL, 0, "No EV charging")
+            self._set_state(EVState.IDLE)
+            return EVOutput(EVState.IDLE, 0, "No EV charging")
 
         # Stay in IMMEDIATE
-        return EVOutput(EVState.IMMEDIATE, i.max_power_w,
+        return EVOutput(EVState.IMMEDIATE, i.manual_power_w,
                         "Immediate mode — charge at max power")
 
 
 # Dispatch table
 _DISPATCH = {
-    EVState.NORMAL: EVStateMachine._step_normal,
+    EVState.IDLE: EVStateMachine._step_idle,
     EVState.SOLAR: EVStateMachine._step_solar,
     EVState.CHEAP: EVStateMachine._step_cheap,
     EVState.IMMEDIATE: EVStateMachine._step_max,

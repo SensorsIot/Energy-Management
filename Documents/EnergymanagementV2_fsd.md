@@ -1830,93 +1830,43 @@ See [Appendix D.2 — Appliance Signal Tests](#d2-appliance-signal-tests). Test 
 
 ### 4.5.1 Overview
 
-EV charging optimization maximizes solar self-consumption while ensuring charging goals are met. The OCPP Server HA add-on bridges the wallbox to Home Assistant via native HA entities, and publishes actual wallbox power to MQTT for the ESP32 Modbus Proxy power correction (see Section 1.7.3).
+EV charging optimization maximizes solar self-consumption while ensuring charging goals are met.
+
+> **Wallbox infrastructure:** The OCPP server, phase switching, power-to-current conversion, and wallbox communication are documented in [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md).
 
 **Key Features:**
-- OCPP 1.6J server as HA add-on (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md))
-- Phase switching (1-phase / 3-phase) via EARU latching relay (ESPHome)
-- Calibrated power-to-current conversion (3-phase lookup table)
-- It offers 4 modes: Off, cheap charging, immediate charging, and optimized charging 
-- Optimized charging is the default mode
-- Real-time charging power adjustment every minute
+- 4 modes: Off (normal), solar charging, cheap tariff charging, and immediate charging
+- Solar charging is the default mode
+- Forecast-based strategy determines optimal charging power (Section 4.5.7)
+- Grid surplus capture charges EV from exported energy (Section 4.5.8)
+- Real-time charging power adjustment every 10 seconds
 
 ### 4.5.2 Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                       Home Assistant                              │
-│                                                                  │
-│  ┌──────────────┐              ┌───────────────────────────┐    │
-│  │ EnergyManager│──HA states──►│    OCPP Server Add-on     │    │
-│  │              │  & services  │                           │    │
-│  │  reads:      │              │  • WebSocket :8887        │    │
-│  │  sensors     │              │  • OCPP 1.6J handler      │    │
-│  │  sets:       │              │  • HA entity provider     │    │
-│  │  power_limit │              │  • Phase switch ctrl      │    │
-│  └──────────────┘              │  • MQTT publisher (10s)   │    │
-│                                └──┬────────────┬──────┬───┘    │
-│                                   │            │      │        │
-│  ┌─────────────────────┐         │            │      │ MQTT   │
-│  │ EARU Breaker        │◄────────┘            │      │        │
-│  │ (ESPHome BK7231N)   │ switch.turn_on/off   │      │        │
-│  │ ON=3φ  OFF=1φ       │                      │      │        │
-│  └─────────┬───────────┘                      │      │        │
-│            │ relay                             │      │        │
-└────────────┼──────────────────────────────────┼──────┼────────┘
-             │ L1/L2/L3 switching               │      │
-             │                                  │      │ topic: wallbox
-             │                        OCPP 1.6J │      │ (power in W)
-             │                        WebSocket │      │
-             │                        ┌─────────┴──┐   │
-             │                        │   Wallbox   │   │
-             └───────────────────────►│ (AcTec)     │   │
-                                      │ 6-16A, OCPP │   │
-                                      └─────────────┘   │
-                                                        │
-                                      ┌─────────────────┴───┐
-                                      │  ESP32 Modbus Proxy  │
-                                      │  (RS485 on DTSU bus) │
-                                      │  corrected = dtsu +  │
-                                      │    wallbox_power     │
-                                      └─────────────────────┘
-```
+> **Wallbox communication, phase switching, MQTT power correction, and the EnergyManager ↔ OCPP Server interface contract are documented in [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md).**
 
-**Communication paths:**
+From the EnergyManager's perspective, the wallbox is controlled through HA entities provided by the OCPP server:
 
-1. **Command** (EnergyManager → Wallbox):
-   `EnergyManager → number.wallbox_power_limit → OCPP Server → SetChargingProfile → Wallbox`
-
-2. **Measurement** (Wallbox → EnergyManager):
-   `Wallbox → MeterValues → OCPP Server → sensor.wallbox_power → EnergyManager`
-
-3. **Power correction** (Wallbox → SUN2000 via Modbus Proxy):
-   `Wallbox → MeterValues → OCPP Server → MQTT "wallbox" (every 10s) → ESP32 Modbus Proxy → RS485 → SUN2000`
-
-**Interface contract:** The full EnergyManager ↔ OCPP Server interface contract (control semantics, state semantics, responsibility split) is defined in [ocpp-server-fsd.md Section 4.6](../ocpp-server/docs/ocpp-server-fsd.md#46-energymanager--ocpp-server-contract). Key points: `number.wallbox_power_limit = 0` means "pause now" (unthrottled); `> 0` means "ensure charging" (throttled). EnergyManager reads dynamic `sensor.wallbox_min_power_w` / `sensor.wallbox_max_power_w` for phase-aware power limits.
+| Direction | Entity | Type | Description |
+|-----------|--------|------|-------------|
+| **Control** | `number.wallbox_power_limit` | number | Power setpoint (W). `0` = pause, `> 0` = charge at this power. |
+| **Feedback** | `sensor.wallbox_power` | sensor (W) | Actual measured charging power from wallbox MeterValues |
+| **Feedback** | `sensor.wallbox_status` | sensor | OCPP status: `Preparing`, `Charging`, `SuspendedEV`, `SuspendedEVSE`, `Finishing`, `Faulted` |
+| **Feedback** | `binary_sensor.wallbox_connected` | binary | WebSocket connection to wallbox (`on`/`off`). If `off`, EV control is skipped entirely. |
+| **Feedback** | `binary_sensor.car_ready` | binary | Car plugged in and ready to charge (`on`/`off`) |
+| **Feedback** | `sensor.wallbox_min_power_w` | sensor (W) | Dynamic minimum power based on current phase configuration |
+| **Feedback** | `sensor.wallbox_max_power_w` | sensor (W) | Dynamic maximum power based on current phase configuration |
 
 ### 4.5.3 Power Ranges
 
-The wallbox supports phase switching for a wider usable power range:
+> **Phase switching hardware and power-to-current conversion are documented in [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md).**
 
 | Mode | Voltage | Current | Power Range |
 |------|---------|---------|-------------|
 | **1-phase** | 230V | 6-16A | 1.4 - 3.7 kW |
 | **3-phase** | 400V | 6-16A | 4.1 - 11.0 kW |
 
-**Gap:** 3.7 - 4.1 kW is not achievable (hardware limitation)
-
-**Phase-gap handling (solar mode):** When the computed charging target falls inside the dead zone (3700 < target < 4140 W), the system snaps to an achievable power level:
-
-| Battery state | Action | Rationale |
-|---------------|--------|-----------|
-| Not full (SOC < 100%) | Snap down to 3700 W (1φ max) | Surplus feeds the battery via SUN2000 |
-| Full (SOC = 100%) | Snap up to 4140 W (3φ min) | No battery headroom — use power in EV rather than export |
-
-This rule is implemented in `resolve_phase_gap()` (`energymanager/src/ev_charging.py`) and applies only to the solar excess charging path. Immediate and cheap modes always send `max_power_w`.
-
-**Minimum charging power:** 1.4 kW (1-phase, 6A)
-
-**Maximum charging power:** 11 kW (3-phase, 16A)
+**Gap:** 3.7 - 4.1 kW is not achievable (hardware limitation). The OCPP server handles phase switching automatically based on the power setpoint.
 
 ### 4.5.4 Charging Mode Selection
 
@@ -1930,9 +1880,17 @@ The user selects one of three charging modes via the kitchen dashboard (Amazon F
 
 **Control entity:** The dashboard provides two buttons ("Cheap Charge" and "Charge Now") that toggle between the selected mode. If both are unselected, `auto_pv_excess` is active. Charge now starts charging immediately.
 
-### 4.5.5 Paused State
+### 4.5.5 Idle State
 
-When `number.wallbox_power_limit` = 0 (e.g. solar mode with no excess, or cheap mode outside tariff window), the wallbox enters `SuspendedEVSE`. The transaction stays alive until the car is unplugged.
+The IDLE state means "no EV charging right now." The wallbox power limit is set to 0 W. This is the initial state and the return state after any charging session ends.
+
+IDLE is entered when:
+- No charging conditions are met (solar mode but no surplus/strategy)
+- User selects "off" mode
+- Car finishes charging (wallbox idle timeout)
+- User switches away from immediate/cheap mode
+
+When `number.wallbox_power_limit` = 0, the OCPP server suspends charging. The transaction stays alive until the car is unplugged (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md)).
 
 ### 4.5.6 EV Charging State Machine
 
@@ -1948,23 +1906,23 @@ The state machine controls **only the wallbox charging setpoint** (power in watt
 3. **Monitor battery reserve:** battery protection status is reported to the dashboard for monitoring, but solar excess is always used for EV charging when available (SUN2000 gives the battery first priority via zero-export control)
 
 **Actuation constraints:**
-- Wallbox accepts power setpoint in range `[min_power_w .. max_power_w]` (configurable per installation)
+- Wallbox accepts power setpoint in range `[min_power_w .. manual_power_w]` (configurable per installation)
 - Measurement cadence is 15 s — setpoint changes must be rate-limited to avoid oscillation
 
 #### 4.5.6.2 States and Transitions
 
-4 states. Infrastructure concerns (faults, disconnects) are handled by the OCPP server. The energy manager state machine only makes charging decisions.
+4 states. Infrastructure concerns (faults, disconnects) are handled by the OCPP server (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md)). The energy manager state machine only makes charging decisions.
 
 **States**
 
 | # | State | What happens | Output |
 |---|-------|-------------|--------|
-| 1 | **NORMAL** | No EV charging. SUN2000 has full control. | `target_power=0` |
+| 1 | **IDLE** | No EV charging. SUN2000 has full control. | `target_power=0` |
 | 2 | **SOLAR** | Forecast-based solar charging. Battery acts as buffer. | `target_power` = optimal amp step from SOC simulation (see 4.5.7) |
-| 3 | **CHEAP** | Cheap-tariff mode. Charges at max during cheap tariff, pauses during expensive. Battery discharge blocked while charging. | `max_power_w` when cheap, `0` when expensive |
-| 4 | **IMMEDIATE** | Immediate mode. Charging at maximum power regardless of tariff. Battery discharge blocked while charging. | `target_power=max_power_w` |
+| 3 | **CHEAP** | Cheap-tariff mode. Charges at manual power during cheap tariff, pauses during expensive. Battery discharge blocked while charging. | `manual_power_w` when cheap, `0` when expensive |
+| 4 | **IMMEDIATE** | Immediate mode. Charging at manual power regardless of tariff. Battery discharge blocked while charging. | `target_power=manual_power_w` |
 
-Initial state: **NORMAL**
+Initial state: **IDLE**
 
 **State Change Criteria**
 
@@ -1972,15 +1930,15 @@ The machine stays in its current state unless one of the listed conditions trigg
 
 ---
 
-**NORMAL**
+**IDLE**
 
-*Stays in NORMAL unless:*
+*Stays in IDLE unless:*
 
 | # | Condition | → New State |
 |---|-----------|-------------|
 | N1 | `charging_mode == "immediate" AND wallbox_available` | IMMEDIATE |
 | N2 | `charging_mode == "cheap" AND wallbox_available` | CHEAP |
-| N3 | `charging_mode == "solar" AND wallbox_available AND ev_strategy_power_w > 0` | SOLAR |
+| N3 | `charging_mode == "solar" AND wallbox_available AND ev_target_power_w > 0` | SOLAR |
 
 ---
 
@@ -1990,7 +1948,7 @@ The machine stays in its current state unless one of the listed conditions trigg
 
 | # | Condition | → New State | Notes |
 |---|-----------|-------------|-------|
-| S1 | `wallbox_idle` | NORMAL | Car finished — wallbox idle for ≥ timeout |
+| S1 | `wallbox_idle` | IDLE | Car finished — wallbox idle for ≥ timeout |
 | S2 | `charging_mode == "immediate"` | IMMEDIATE | User switched mode |
 | S3 | `charging_mode == "cheap"` | CHEAP | User switched mode |
 
@@ -1999,7 +1957,7 @@ The machine stays in its current state unless one of the listed conditions trigg
 The target power is determined by the EV Charging Strategy (Section 4.5.7), which runs every 15 minutes as part of the optimization cycle. The strategy uses SOC simulation to find the optimal wallbox amp level. Between strategy runs, the last computed target is held.
 
 ```
-target_power_w = ev_strategy_power_w   # from Section 4.5.7
+target_power_w = ev_target_power_w   # from Section 4.5.7
 ```
 
 ---
@@ -2008,12 +1966,12 @@ target_power_w = ev_strategy_power_w   # from Section 4.5.7
 
 *Stays in CHEAP unless:*
 
-Power toggles internally: `max_power_w` when `is_cheap_tariff`, `0` when expensive. No state change on tariff toggle.
+Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expensive. No state change on tariff toggle.
 
 | # | Condition | → New State | Notes |
 |---|-----------|-------------|-------|
-| C1 | `wallbox_idle` | NORMAL | Car finished — wallbox idle for ≥ timeout |
-| C2 | `charging_mode != "cheap"` | NORMAL | User deselected cheap mode |
+| C1 | `wallbox_idle` | IDLE | Car finished — wallbox idle for ≥ timeout |
+| C2 | `charging_mode != "cheap"` | IDLE | User deselected cheap mode |
 
 ---
 
@@ -2023,8 +1981,8 @@ Power toggles internally: `max_power_w` when `is_cheap_tariff`, `0` when expensi
 
 | # | Condition | → New State | Notes |
 |---|-----------|-------------|-------|
-| M1 | `wallbox_idle` | NORMAL | Car finished — wallbox idle for ≥ timeout |
-| M2 | `charging_mode != "immediate"` | NORMAL | User deselected immediate mode |
+| M1 | `wallbox_idle` | IDLE | Car finished — wallbox idle for ≥ timeout |
+| M2 | `charging_mode != "immediate"` | IDLE | User deselected immediate mode |
 
 ---
 
@@ -2038,7 +1996,7 @@ Single boolean: wallbox entity exists AND WebSocket connected AND not faulted AN
 
 Read from `sensor.surplus_power` (HA template sensor): `solar_pv_total_ac_power - house_load_power`. Represents instantaneous solar surplus available for EV charging. The battery acts as a buffer — it absorbs or provides the difference between this surplus and the actual wallbox power (which must be a full-amp step).
 
-**`ev_strategy_power_w`**
+**`ev_target_power_w`**
 
 Computed by the EV Charging Strategy (Section 4.5.7) every 15 minutes. The optimal wallbox power level determined by SOC simulation. Used for SOLAR state entry (N3) and power target.
 
@@ -2047,49 +2005,39 @@ Computed by the EV Charging Strategy (Section 4.5.7) every 15 minutes. The optim
 
 **Inputs** (`EVInputs`):
 
-| Input | HA Entity | Description |
-|-------|-----------|-------------|
-| `wallbox_available` | Derived from `binary_sensor.wallbox_connected`, `sensor.wallbox_status` | Wallbox exists AND connected AND not faulted AND car plugged in |
+| Input | Source | Description |
+|-------|--------|-------------|
+| `wallbox_available` | `binary_sensor.car_ready` | Car plugged in and ready to charge |
 | `wallbox_power_w` | `sensor.wallbox_power` | Current wallbox charging power (W) |
-| `wallbox_status` | `sensor.wallbox_status` | OCPP status string (logging only) |
-| `wallbox_idle` | Computed in `run.py` | `True` when wallbox power = 0 and status ∈ {`Finishing`, `SuspendedEV`} for ≥ `auto_reset_timeout_min` (default 5 min). Signals the car has finished charging. |
-| `battery_protection_passed` | Computed upstream | Battery forecast module output (informational — published to dashboard, does not gate solar charging) |
+| `wallbox_status` | `sensor.wallbox_status` | Status string (logging only) |
+| `wallbox_idle` | Computed in `run.py` | `True` when power = 0 and status ∈ {`Finishing`, `SuspendedEV`} for ≥ `auto_reset_timeout_min` (default 5 min). Signals the car has finished charging. |
+| `battery_protection_passed` | `check_battery_protection()` | Forecast says battery will reach ≥ 80% SOC at 21:00 |
 | `battery_soc` | `sensor.battery_state_of_capacity` | Battery state of charge (%) |
 | `charging_mode` | `input_select.ev_charging_mode` | `"solar"` / `"immediate"` / `"cheap"` |
-| `is_cheap_tariff` | Computed from tariff schedule (Section 4.1.4) | True during cheap tariff window |
-| `surplus_power_w` | `sensor.surplus_power` | Solar surplus (= solar PV total AC - house load). Used by EV strategy for entry decision. |
-| `grid_power_w` | M-Bus `sensor.grid_power` (preferred, freshness < 20 s) or DTSU `sensor.power_meter_active_power` (fallback) | Grid power (W): positive = import, negative = export. Config keys: `sensors.mbus_grid_power`, `sensors.dtsu_grid_power`. |
+| `is_cheap_tariff` | Tariff schedule (Section 4.1.4) | True during cheap tariff window |
+| `surplus_power_w` | `sensor.surplus_power` | Solar surplus = PV - house load (W) |
+| `grid_power_w` | `sensor.grid_power` (M-Bus, preferred) or `sensor.power_meter_active_power` (DTSU, fallback) | Grid power (W): positive = import, negative = export |
 | `pv_power_w` | `sensor.solar_pv_total_ac_power` | Total PV AC output (Huawei + Enphase) (W) |
-| `household_load_w` | `sensor.house_load_power` | Household consumption from Shelly 3EM (W) |
-| `ev_strategy_power_w` | Computed by EV Charging Strategy (Section 4.5.7) every 15 min | Optimal wallbox power from SOC simulation |
-| `min_solar_power_w` | Configuration | Minimum energy budget for solar charging, default 3500W. Below wallbox hardware minimum (4140W on 3-phase) — battery covers the gap. |
-| `min_power_w` | Configuration | Wallbox hardware minimum, default 4140W (6A × 230V × 3) |
-| `max_power_w` | Configuration | Maximum charging power, default 11000W |
+| `load_power_w` | `sensor.house_load_power` | Household consumption (W) |
+| `ev_target_power_w` | EV Charging Strategy (Section 4.5.7), every 15 min | Optimal wallbox power from SOC simulation |
+| `surplus_capture_power_w` | Grid surplus capture (Section 4.5.8), every 10 s | Wallbox power from grid export capture |
+| `min_power_w` | `sensor.wallbox_min_power_w` (dynamic) or config | Wallbox hardware minimum (W) |
+| `manual_power_w` | `input_number.ev_power_limit` or config | User-selected charging power for immediate/cheap modes (W) |
 
 **Intermediate signals** (computed by EV Charging Strategy every 15 min):
 
 | Signal | Calculation | Description |
 |--------|-------------|-------------|
-| `ev_strategy_power_w` | SOC simulation with wallbox load (Section 4.5.7) | Optimal wallbox power that maximizes solar use while protecting battery |
+| `ev_target_power_w` | SOC simulation with wallbox load (Section 4.5.7) | Optimal wallbox power that maximizes solar use while protecting battery |
 | `protection_target` | `min(80%, baseline_soc_at_2100)` | Dynamic battery protection target — adapts to bad days |
 
-The OCPP server handles the actual phase switching automatically: setpoint < 4140W → 1-phase relay, ≥ 4140W → 3-phase relay (Section 4.3.3 of OCPP server FSD).
-
 **Output** (`EVOutput`):
-
-```python
-@dataclass
-class EVOutput:
-    state: EVState
-    target_power_w: float
-    reason: str
-```
 
 | Output | HA Entity | Description |
 |--------|-----------|-------------|
 | `target_power_w` | `number.wallbox_power_limit` | Wallbox power setpoint (W). 0 = pause. |
 | `state` | `sensor.ev_charge_status` | Current state for dashboard/logging |
-| `reason` | Logged to InfluxDB | Human-readable reason for current decision |
+| `reason` | Attribute on `sensor.ev_target_power` | Human-readable reason for current decision |
 
 ### 4.5.7 EV Charging Strategy (Forecast-Based)
 
@@ -2212,9 +2160,8 @@ This makes it inherently self-correcting:
 |-----------|------------|
 | `SocSimulator` (4.2) | Re-used directly — strategy modifies forecast input, not the simulator |
 | `BatteryOptimizer` (4.3) | Runs independently — nightly discharge decision is separate from EV strategy |
-| OCPP Server | Receives `wallbox_power_limit` in watts; handles amp conversion and phase switching internally |
+| OCPP Server ([ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md)) | Receives `wallbox_power_limit` in watts; handles amp conversion and phase switching internally |
 | `sensor.surplus_power` | HA template sensor (solar - house_load) — used for real-time monitoring, not for the strategy calculation |
-| ESP32 Modbus Proxy | Publishes wallbox power via MQTT → SUN2000 sees wallbox load → battery buffers naturally |
 
 ## 4.6 Smart Car SOC Polling
 
@@ -2987,8 +2934,8 @@ Test file: `energymanager/tests/test_ev_state_machine.py`
 | Category | # Tests | Description |
 |----------|---------|-------------|
 | TestEVStateEnum | 3 | Enum has 4 states, str inheritance, snake_case values |
-| TestInit | 1 | Initial state is NORMAL |
-| TestNormalStays | 4 | Stays NORMAL: no wallbox, solar enters without battery protection, excess below min |
+| TestInit | 1 | Initial state is IDLE |
+| TestNormalStays | 4 | Stays IDLE: no wallbox, solar enters without battery protection, excess below min |
 | TestSolarStays | 3 | Stays SOLAR: with excess, low excess holds min_power_w, stays regardless of battery protection |
 | TestCheapStays | 2 | Stays CHEAP: expensive tariff (0W), cheap tariff (max_power_w) |
 | TestMaxStays | 2 | Stays IMMEDIATE: at max_power_w, with custom max |
@@ -3026,7 +2973,7 @@ Test file: `energymanager/tests/test_ev_state_machine.py`
 
 | Category | # Tests | Scenarios |
 |----------|---------|-----------|
-| TestMultiStep | 3 | NORMAL → SOLAR → NORMAL (mode change); full mode cycle (IMMEDIATE → NORMAL → CHEAP → NORMAL → SOLAR); SOLAR → IMMEDIATE → NORMAL → SOLAR |
+| TestMultiStep | 3 | IDLE → SOLAR → IDLE (mode change); full mode cycle (IMMEDIATE → IDLE → CHEAP → IDLE → SOLAR); SOLAR → IMMEDIATE → IDLE → SOLAR |
 
 ### wallbox_available guard tests
 
@@ -3051,7 +2998,7 @@ cd energymanager && python -m pytest tests/test_ev_state_machine.py -v
 | EV-15 | Battery protection is informational | SOLAR mode active with excess even when battery_protection_passed=False; dashboard shows protection status |
 | EV-16 | Battery full, low excess | SOLAR with 1-phase min_power_w — captures every watt |
 | EV-17 | Cheap tariff toggles | CHEAP state: charges at max during cheap, pauses during expensive, no state change |
-| EV-18 | Car reaches target SOC | Returns to NORMAL from any charging state |
+| EV-18 | Car reaches target SOC | Returns to IDLE from any charging state |
 
 ---
 
@@ -3188,7 +3135,7 @@ Integration tests verify cross-module behavior — interactions between EV charg
 | IT-BATT-01 | Cheap mode blocks discharge | `ev_charging_mode = "cheap"`, power > 0 | `_discharge_blocked_by_ev = True` | ✅ `test_discharge_blocking.py::TestCheapModeBlocksDischarge` |
 | IT-BATT-02 | Battery protection blocks EV | Forecast SOC at 21:00 < 80% | `battery_protection_passed = False` (dashboard) | 🔮 Future — requires InfluxDB mock |
 | IT-BATT-03 | Tariff boundary transitions | 20:59 (expensive), 21:01 (cheap), 05:59 (cheap), 06:01 (expensive) | Correct `is_cheap_now` flag | ✅ `test_battery_optimizer.py::TestTariffBoundaryTransitions` |
-| IT-BATT-04 | Wallbox idle detection exits all modes | SOLAR/CHEAP/IMMEDIATE + `wallbox_idle=True` | State machine → NORMAL, 0 W | ✅ `test_ev_state_machine.py::TestIdleDetection` |
+| IT-BATT-04 | Wallbox idle detection exits all modes | SOLAR/CHEAP/IMMEDIATE + `wallbox_idle=True` | State machine → IDLE, 0 W | ✅ `test_ev_state_machine.py::TestIdleDetection` |
 
 ### D.6.5 Authorization & Transaction (Category E)
 
@@ -3217,17 +3164,17 @@ Report version: **3** (bumped when test definitions change — invalidates stale
 
 | ID | Name | Preconditions | Pass condition |
 |----|------|---------------|----------------|
-| NO-01 | NORMAL stays when wallbox unavailable | mode=solar, wallbox unavailable | state=NORMAL, power=0 |
-| NO-02 | NORMAL→SOLAR on strategy power>0 | prev=NORMAL, mode=solar, available, protection passed, strategy>0 | state=SOLAR |
-| NO-05 | SOLAR power equals strategy power | state=SOLAR, strategy>0 | target_power_w == ev_strategy_power_w |
-| NO-06 | NORMAL→IMMEDIATE | prev=NORMAL, mode=immediate, available | state=IMMEDIATE, power=max |
-| NO-07 | IMMEDIATE→NORMAL mode change | prev=IMMEDIATE, mode≠immediate | state=NORMAL, power=0 |
-| NO-08 | Immediate→solar sends 0W | prev=IMMEDIATE, mode=solar | state=NORMAL, power=0 |
-| NO-09 | NORMAL→CHEAP | prev=NORMAL, mode=cheap, available | state=CHEAP |
+| NO-01 | IDLE stays when wallbox unavailable | mode=solar, wallbox unavailable | state=IDLE, power=0 |
+| NO-02 | IDLE→SOLAR on strategy power>0 | prev=IDLE, mode=solar, available, protection passed, strategy>0 | state=SOLAR |
+| NO-05 | SOLAR power equals strategy power | state=SOLAR, strategy>0 | target_power_w == ev_target_power_w |
+| NO-06 | IDLE→IMMEDIATE | prev=IDLE, mode=immediate, available | state=IMMEDIATE, power=max |
+| NO-07 | IMMEDIATE→IDLE mode change | prev=IMMEDIATE, mode≠immediate | state=IDLE, power=0 |
+| NO-08 | Immediate→solar sends 0W | prev=IMMEDIATE, mode=solar | state=IDLE, power=0 |
+| NO-09 | IDLE→CHEAP | prev=IDLE, mode=cheap, available | state=CHEAP |
 | NO-10 | CHEAP charges at max (cheap tariff) | state=CHEAP, cheap tariff | power=max |
 | NO-11 | CHEAP pauses (expensive tariff) | state=CHEAP, expensive tariff | power=0 |
 | NO-12 | IMMEDIATE blocks discharge | state=IMMEDIATE, power>0 | discharge_blocked=True |
-| NO-13 | SOLAR exits when strategy returns 0 | prev output=SOLAR, strategy≤0, not idle, mode=solar | state=NORMAL, power=0 |
+| NO-13 | SOLAR exits when strategy returns 0 | prev output=SOLAR, strategy≤0, not idle, mode=solar | state=IDLE, power=0 |
 
 ### D.7.2 Edge Cases (13 tests)
 
@@ -3236,16 +3183,16 @@ Report version: **3** (bumped when test definitions change — invalidates stale
 | EC-02 | SOLAR does NOT block discharge | state=SOLAR | discharge_blocked=False |
 | EC-03 | CHEAP blocks discharge when charging | state=CHEAP, cheap tariff, power>0 | discharge_blocked=True |
 | EC-04 | CHEAP unblocks at expensive tariff | state=CHEAP, expensive tariff, power=0 | discharge_blocked=False |
-| EC-05 | Battery protection blocks SOLAR entry | prev=NORMAL, mode=solar, available, protection=False, strategy>0 | state=NORMAL, power=0 |
-| EC-06 | Battery protection exits SOLAR after grace | prev output=SOLAR, prev_state=SOLAR, protection=False, not idle, mode=solar | state=NORMAL, power=0 |
+| EC-05 | Battery protection blocks SOLAR entry | prev=IDLE, mode=solar, available, protection=False, strategy>0 | state=IDLE, power=0 |
+| EC-06 | Battery protection exits SOLAR after grace | prev output=SOLAR, prev_state=SOLAR, protection=False, not idle, mode=solar | state=IDLE, power=0 |
 | EC-07 | Battery protection grace holds SOLAR | state=SOLAR, protection=False | power>0 |
 | EC-08 | SOLAR→IMMEDIATE | prev=SOLAR, mode=immediate | state=IMMEDIATE, power=max |
 | EC-09 | SOLAR→CHEAP | prev=SOLAR, mode=cheap | state=CHEAP |
 | EC-12 | Power limit sent only on change | prev exists, power unchanged | last_sent unchanged |
-| EC-13 | Auto-revert: mode resets to solar | prev mode=immediate/cheap, curr mode=solar, idle≥5min | state=NORMAL |
-| EC-14 | Faulted/Unknown → NORMAL | wallbox Faulted/Unknown | state=NORMAL, power=0 |
-| EC-15 | CHEAP→NORMAL clears discharge | prev=CHEAP, mode≠cheap | state=NORMAL, power=0, blocked=False |
-| EC-16 | Idle detection exits to NORMAL | prev=SOLAR/CHEAP/IMMEDIATE, idle=True | state=NORMAL, power=0 |
+| EC-13 | Auto-revert: mode resets to solar | prev mode=immediate/cheap, curr mode=solar, idle≥5min | state=IDLE |
+| EC-14 | Faulted/Unknown → IDLE | wallbox Faulted/Unknown | state=IDLE, power=0 |
+| EC-15 | CHEAP→IDLE clears discharge | prev=CHEAP, mode≠cheap | state=IDLE, power=0, blocked=False |
+| EC-16 | Idle detection exits to IDLE | prev=SOLAR/CHEAP/IMMEDIATE, idle=True | state=IDLE, power=0 |
 
 ---
 
@@ -3437,7 +3384,7 @@ Full enum from pySmartHashtag (`ChargingState` array, indexed by value):
 
 **Observed in our system:** 0 (NOT_CHARGING), 2 (CHARGING), 4 (COMPLETE).
 
-**Idle detection relevance:** Values 4, 5, 6, 7, 9, 11 all indicate "plugged in, not charging" — any of these could signal that the car has finished and the energy manager should exit to NORMAL.
+**Idle detection relevance:** Values 4, 5, 6, 7, 9, 11 all indicate "plugged in, not charging" — any of these could signal that the car has finished and the energy manager should exit to IDLE.
 
 Sources: [pySmartHashtag](https://github.com/DasBasti/pySmartHashtag) `vehicle/battery.py`, [evcc](https://github.com/evcc-io/evcc) `vehicle/smart/hello/provider.go`, [ioBroker.smart-eq](https://github.com/TA2k/ioBroker.smart-eq).
 
@@ -3534,7 +3481,7 @@ See Section 4.6 for adaptive polling logic.
 - v2.26: Passive integration observer test revision (Appendix D.7) — replaced 5 obsolete surplus-tracking tests (NO-03, NO-04, EC-01, EC-10, EC-11) with forecast-strategy-aligned tests (NO-05, NO-13, EC-05, EC-06, EC-07); updated NO-02 preconditions for strategy-based entry; report version bumped to 3; evidence includes `strategy` field
 - v2.25: Forecast-based EV solar charging strategy (Section 4.5.7) — replaces instantaneous open-loop/closed-loop excess with SOC simulation; battery acts as buffer for coarse amp steps (690W on 3-phase); bottom-up search from min to max amps; dynamic protection target adapts to bad days; `min_solar_power_w` config for early charging below wallbox minimum; `sensor.surplus_power` for entry decision; renamed `sensor.load_power` → `sensor.house_load_power`; added `sensor.total_load_power` (house + wallbox for Fire display)
 - v2.24: Appendix F — Comprehensive Smart Car API reference: full `electricVehicleStatus` field catalogue with all 16 `chargerState` values (from pySmartHashtag/evcc/ioBroker), `statusOfChargerConnection` physical cable states, V2L fields, charging lids, DC charging fields; HA entity mapping table; other `vehicleStatus` sections (climate, doors, maintenance, GPS, 12V battery); poll frequency table
-- v2.23: Wallbox idle detection exits all EV modes — added `wallbox_idle` input (Section 4.5.6); S1/C1/M1 transitions exit SOLAR/CHEAP/IMMEDIATE to NORMAL when car finishes charging (wallbox idle ≥ 5 min); idle timer extended from immediate/cheap to all modes; dashboard shows `idle_minutes` and `wallbox_idle` attributes; EC-16 passive integration test; IT-BATT-04 test catalogue entry
+- v2.23: Wallbox idle detection exits all EV modes — added `wallbox_idle` input (Section 4.5.6); S1/C1/M1 transitions exit SOLAR/CHEAP/IMMEDIATE to IDLE when car finishes charging (wallbox idle ≥ 5 min); idle timer extended from immediate/cheap to all modes; dashboard shows `idle_minutes` and `wallbox_idle` attributes; EC-16 passive integration test; IT-BATT-04 test catalogue entry
 - v2.22: Integration test catalogue (Appendix D.5/D.6) — 22 tests across 6 categories; 3 implemented (IT-PHASE-01, IT-BATT-01, IT-BATT-03), 19 documented as future; EV charging power tests documented (Appendix D.5)
 - v2.21: Added wallbox status display mapping table for dashboard (Section 4.8.1) — documents how raw OCPP status is shown to the user
 - v2.20: SOC poll on charging mode change — switching modes (e.g. solar → immediate) triggers immediate SOC refresh for dashboard accuracy (Section 4.6.1)

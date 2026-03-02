@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.45"
+__version__ = "1.6.46"
 
 import json
 import logging
@@ -188,7 +188,8 @@ class EnergyManager:
         self._last_ev_power_limit = None
         self._ev_sm = EVStateMachine()
         self._ev_strategy = EVChargingStrategy(optimizer=self.optimizer)
-        self._ev_strategy_power_w: float = 0.0
+        self._ev_target_power_w: float = 0.0
+        self._surplus_capture_active: bool = False
         self.ev_min_solar_power_entity = ev_opts.get(
             "min_solar_power_entity", "input_number.ev_min_solar_power"
         )
@@ -198,8 +199,8 @@ class EnergyManager:
         self.ev_protection_soc = ev_opts.get("protection_soc_percent", 80)
 
         # Charging mode config (FSD 4.5.4)
-        self.ev_power_limit_entity = ev_opts.get(
-            "power_limit_entity", "input_number.ev_power_limit"
+        self.manual_power_entity = ev_opts.get(
+            "manual_power_entity", "input_number.ev_manual_power"
         )
         self.ev_charging_mode_entity = ev_opts.get(
             "mode_entity", "input_select.ev_charging_mode"
@@ -500,7 +501,7 @@ class EnergyManager:
                     phases=self.ev_phases,
                     protection_soc_percent=self.ev_protection_soc,
                 )
-                self._ev_strategy_power_w = result.power_w
+                self._ev_target_power_w = result.power_w
                 logger.info(
                     f"EV strategy: {result.power_w:.0f}W ({result.amps}A) — {result.reason}"
                 )
@@ -703,11 +704,11 @@ class EnergyManager:
             grid_power = self._read_grid_power()
             battery_soc = self.ha_client.get_sensor_value(self.soc_entity) or 0
 
-            # User power slider
-            user_limit = self.ha_client.get_sensor_value(self.ev_power_limit_entity)
-            max_power = (
-                int(user_limit)
-                if user_limit is not None
+            # User power slider (manual_power for immediate/cheap modes)
+            manual_power_raw = self.ha_client.get_sensor_value(self.manual_power_entity)
+            manual_power = (
+                int(manual_power_raw)
+                if manual_power_raw is not None
                 else ev_max_power
             )
 
@@ -724,6 +725,22 @@ class EnergyManager:
             surplus_power = self.ha_client.get_sensor_value(self.surplus_power_entity) or 0.0
 
             validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
+
+            # Compute grid surplus capture power (FSD 4.5 — grid surplus rule)
+            surplus_capture_power_w = 0.0
+            if self._ev_target_power_w == 0 and ev_mode == "solar":
+                grid_export = max(0.0, -grid_power)
+                # Feedback correction: add wallbox power back when already capturing
+                if self._surplus_capture_active and wallbox_power > 0:
+                    grid_export += wallbox_power
+                # Read threshold from HA input_number (default = ev_min_power)
+                threshold = self.ha_client.get_sensor_value(
+                    self.ev_min_solar_power_entity
+                ) or ev_min_power
+                if grid_export >= threshold and pv_power > 0:
+                    amps = min(max(int(grid_export / 230), self.ev_min_amps), self.ev_max_amps)
+                    surplus_capture_power_w = float(amps * 230)
+            self._surplus_capture_active = surplus_capture_power_w > 0
 
             # Compute wallbox idle state (all modes)
             if wallbox_power == 0 and wb_status in ("Finishing", "SuspendedEV"):
@@ -751,8 +768,9 @@ class EnergyManager:
                 pv_power_w=pv_power,
                 load_power_w=load_power,
                 min_power_w=ev_min_power,
-                max_power_w=max_power,
-                ev_strategy_power_w=self._ev_strategy_power_w,
+                manual_power_w=manual_power,
+                ev_target_power_w=self._ev_target_power_w,
+                surplus_capture_power_w=surplus_capture_power_w,
             )
             prev_ev_state = self._ev_sm.state
             output = self._ev_sm.step(inputs)
@@ -826,6 +844,8 @@ class EnergyManager:
                     "reason": output.reason,
                     "battery_protection": not self._battery_reaches_target,
                     "battery_forecast_max_soc": self._battery_min_soc_forecast,
+                    "surplus_capture_w": surplus_capture_power_w,
+                    "surplus_capture_active": self._surplus_capture_active,
                     "icon": "mdi:ev-station",
                 },
             )

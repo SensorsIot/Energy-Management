@@ -157,7 +157,7 @@ def _setup_ev_charging(manager, *, mode: str, wb_status: str = "Charging",
             return None
         if entity == manager.soc_entity:
             return 50.0
-        if entity == manager.ev_power_limit_entity:
+        if entity == manager.manual_power_entity:
             return None
         return None
 
