@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.29
+**Version:** 2.30
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -2211,6 +2211,21 @@ cards:
       {{ 'green' if is_state('binary_sensor.battery_discharge_allowed', 'on') else 'orange' }}
 ```
 
+### 4.8.3 Solar Decision Card (Amazon Fire Dashboard)
+
+Displays live EV charging decision inputs and reasoning. Uses `sensor.ev_target_power` attributes.
+
+**Displayed values:**
+
+| Line | Content | Source |
+|------|---------|--------|
+| Decision | `⚡ SURPLUS → 8000W: Grid export 8000W → capture 8000W` | `ev_charging_source` + `reason` |
+| Inputs | `Surplus: -200W \| Grid export: 8000W \| Threshold: 3000W` | `surplus_power_w`, `grid_export_w`, `input_number.ev_min_solar_power` |
+| Strategy | `Forecast strategy: 4140W \| Surplus capture: 8000W` | `forecast_power_w`, `surplus_capture_w` |
+| Protection | `🟢 82%` or `🔴 blocked (SOC 56%)` | `battery_protection`, `battery_forecast_soc` |
+
+**Source icons:** ⚡ surplus, 📊 forecast, ⏸️ none.
+
 ## 4.9 Error Handling and Notifications
 
 ### 4.9.1 Battery Control Retry Logic
@@ -3365,6 +3380,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.30: Solar Decision dashboard card (Section 4.8.3) — live EV charging decision inputs, reasoning, and source; replaced static markdown explanation
 - v2.29: Appliance signal uses appliance-load simulation (Section 4.4.2.1) — subtracts appliance energy from SOC trajectory and checks min SOC ≥ reserve%; grid export is now contextual info, not a separate ORANGE path; renamed `final_soc_percent` → `min_soc_percent` attribute
 - v2.28: Fix grid power sign convention in surplus capture formula (Section 1.9.1) — grid sensor uses positive=export, code was negating it; corrected sanity invariant (Section 1.9.2); skip peak-SOC override query in battery protection when past cheap_start (Section 4.5.6)
 - v2.27: Surplus-based EV forecast strategy (Section 4.5.6) — forecast path now snaps current `sensor.surplus_power` to next wallbox amp step instead of bottom-up search from min to max; entry gate changed from `ev_forecasted_power_w >= threshold` to `surplus_power >= ev_min_solar_power` (live surplus must exceed configured minimum); battery protection check steps down from candidate amp level; updated Selection Rules table, Input Parameters, and Scenarios
