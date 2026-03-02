@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.69"
+__version__ = "1.6.70"
 
 import json
 import logging
@@ -530,13 +530,13 @@ class EnergyManager:
                     min_soc_percent=0,
                 )
             else:
-                # Check forecast: will min SOC stay above reserve with appliance load?
-                min_soc, max_soc, target_time = self.get_forecast_soc_range(
+                # Check forecast: will battery hit minimum with appliance load?
+                hits_min, min_soc, _ = self.will_battery_hit_minimum(
                     extra_load_wh=self.appliance_energy_wh
                 )
                 load_percent = self._extra_load_percent(self.appliance_energy_wh)
 
-                if min_soc is not None and min_soc >= self.reserve_percent:
+                if not hits_min and min_soc is not None:
                     # ORANGE: battery can absorb appliance load
                     signal = ApplianceSignal(
                         signal="orange",
@@ -652,64 +652,81 @@ class EnergyManager:
             return soc, target_time
         return None, target_time
 
-    def get_forecast_soc_range(
-        self, extra_load_wh: float = 0.0
-    ) -> tuple[float | None, float | None, datetime]:
-        """Query min and max SOC from now until the next cheap tariff start.
+    def will_battery_hit_full(self) -> tuple[bool, float | None, datetime]:
+        """Check if battery is forecast to reach 100% before next cheap tariff.
 
-        Scans the full SOC trajectory (with_strategy scenario) from now
-        until tariff.target to find the lowest and highest predicted SOC.
-
-        Args:
-            extra_load_wh: Additional load to subtract (worst-case).
-                           Subtracted from min_soc; max_soc left unchanged
-                           (battery could still peak before the load hits).
+        If the battery will be full, excess solar would be curtailed —
+        better to divert energy to EV or appliances.
 
         Returns:
-            (min_soc or None, max_soc or None, target_time)
+            (hits_full, peak_soc or None, target_time)
         """
         now = datetime.now(timezone.utc)
         tariff = self.optimizer.get_tariff_periods(now)
         target_time = tariff.target
         target_stop = (target_time + timedelta(minutes=15)).isoformat()
-        query_api = self.influx_client.query_api()
 
-        min_soc = None
-        max_soc = None
-
-        for agg, label in [("min", "min"), ("max", "max")]:
-            query = f'''
-            from(bucket: "{self.output_bucket}")
-              |> range(start: now(), stop: {target_stop})
-              |> filter(fn: (r) => r._measurement == "soc_forecast")
-              |> filter(fn: (r) => r.scenario == "with_strategy")
-              |> filter(fn: (r) => r._field == "soc_percent")
-              |> {agg}()
-            '''
-            result = query_api.query(query)
-            if result and result[0].records:
-                val = result[0].records[0].get_value()
-                if label == "min":
-                    min_soc = val
-                else:
-                    max_soc = val
-
-        # Subtract extra load from min (worst case); max stays unchanged
-        if min_soc is not None:
-            min_soc = max(0.0, min_soc - self._extra_load_percent(extra_load_wh))
+        query = f'''
+        from(bucket: "{self.output_bucket}")
+          |> range(start: now(), stop: {target_stop})
+          |> filter(fn: (r) => r._measurement == "soc_forecast")
+          |> filter(fn: (r) => r.scenario == "with_strategy")
+          |> filter(fn: (r) => r._field == "soc_percent")
+          |> max()
+        '''
+        result = self.influx_client.query_api().query(query)
+        if result and result[0].records:
+            peak_soc = result[0].records[0].get_value()
+            hits_full = peak_soc >= 99
             logger.debug(
-                f"SOC range until {swiss_time(target_time)}: "
-                f"min={min_soc:.0f}%, max={max_soc:.0f}%"
-                + (f" (with {extra_load_wh:.0f}Wh load)" if extra_load_wh > 0 else "")
+                f"Peak SOC until {swiss_time(target_time)}: {peak_soc:.0f}%"
+                f" → {'battery full' if hits_full else 'not full'}"
             )
+            return hits_full, peak_soc, target_time
+        return False, None, target_time
 
-        return min_soc, max_soc, target_time
+    def will_battery_hit_minimum(
+        self, extra_load_wh: float = 0.0
+    ) -> tuple[bool, float | None, datetime]:
+        """Check if battery SOC drops below reserve before next cheap tariff.
+
+        Answers: "if we add this extra load, will the battery be depleted?"
+
+        Args:
+            extra_load_wh: Additional load to subtract (e.g. 1500Wh wash,
+                           2000Wh for one EV 15-min interval).
+
+        Returns:
+            (hits_minimum, min_soc or None, target_time)
+        """
+        now = datetime.now(timezone.utc)
+        tariff = self.optimizer.get_tariff_periods(now)
+        target_time = tariff.target
+        target_stop = (target_time + timedelta(minutes=15)).isoformat()
+
+        query = f'''
+        from(bucket: "{self.output_bucket}")
+          |> range(start: now(), stop: {target_stop})
+          |> filter(fn: (r) => r._measurement == "soc_forecast")
+          |> filter(fn: (r) => r.scenario == "with_strategy")
+          |> filter(fn: (r) => r._field == "soc_percent")
+          |> min()
+        '''
+        result = self.influx_client.query_api().query(query)
+        if result and result[0].records:
+            min_soc = result[0].records[0].get_value()
+            min_soc = max(0.0, min_soc - self._extra_load_percent(extra_load_wh))
+            hits_min = min_soc < self.reserve_percent
+            load_note = f" (with {extra_load_wh:.0f}Wh load)" if extra_load_wh > 0 else ""
+            logger.debug(
+                f"Min SOC until {swiss_time(target_time)}: {min_soc:.0f}%{load_note}"
+                f" → {'below reserve' if hits_min else 'OK'}"
+            )
+            return hits_min, min_soc, target_time
+        return True, None, target_time
 
     def check_battery_protection(self, ev_power_w: float = 0.0) -> tuple[bool, float]:
         """Check if battery SOC at next cheap tariff start meets protection target.
-
-        Uses get_forecast_soc_at_target() for the SOC at 21:00 and
-        get_forecast_soc_range() for min/max along the trajectory.
 
         Args:
             ev_power_w: EV charging power in watts. Converted to energy for
@@ -718,8 +735,8 @@ class EnergyManager:
 
         EV forecast path is allowed if:
         1. SOC at target >= protection target (default 80%), OR
-        2. Peak SOC reaches 100% before target (battery full override —
-           excess solar would be curtailed, better to divert to EV)
+        2. Battery will hit 100% before target (excess solar would be
+           curtailed — better to divert to EV)
 
         Returns:
             (reaches_target, soc_at_target) tuple
@@ -747,16 +764,15 @@ class EnergyManager:
                 f"{'EV allowed' if reaches_target else 'EV blocked'}"
             )
 
-            # Override: if battery is forecast to reach 100% before target,
-            # excess solar would be curtailed — let EV use it.
+            # Override: battery will be full → solar curtailed → let EV use it
             if not reaches_target:
-                _min_soc, max_soc, _ = self.get_forecast_soc_range()
-                if max_soc is not None and max_soc >= 99:
+                hits_full, peak_soc, _ = self.will_battery_hit_full()
+                if hits_full:
                     reaches_target = True
                     logger.info(
                         "Battery protection override: peak SOC %.0f%% "
                         "(battery full before target) → EV allowed",
-                        max_soc,
+                        peak_soc,
                     )
 
             return reaches_target, soc_at_target
