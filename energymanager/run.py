@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.49"
+__version__ = "1.6.50"
 
 import json
 import logging
@@ -756,10 +756,11 @@ class EnergyManager:
                 # Feedback correction: add wallbox power back when already capturing
                 if self._surplus_capture_active and wallbox_power > 0:
                     grid_export += wallbox_power
-                if grid_export > 0 and pv_power > 0:
-                    volts_per_phase = 230 * self.ev_phases
-                    amps = min(max(int(grid_export / volts_per_phase), self.ev_min_amps), self.ev_max_amps)
-                    surplus_capture_power_w = float(amps * volts_per_phase)
+                if grid_export >= ev_min_power and pv_power > 0:
+                    # Clamp to wallbox min/max (from OCPP sensor, phase-aware)
+                    surplus_capture_power_w = float(
+                        min(max(grid_export, ev_min_power), ev_max_power)
+                    )
             self._surplus_capture_active = surplus_capture_power_w > 0
 
             # EV Charging Power Calculation (FSD 4.5.6)

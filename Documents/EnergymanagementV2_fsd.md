@@ -2032,7 +2032,7 @@ The strategy re-runs every 15 minutes with actual SOC and updated forecasts, mak
 
 #### Surplus Capture
 
-Surplus capture measures real-time grid export and converts it into a wallbox power setpoint. Grid export can come from any source — Enphase microinverters, SUN2000 when the battery is full, or both. The calculation uses the configured phase count (`phases`) and clamps to `min_current_a`..`max_current_a`, so the minimum power is always `min_current_a × 230 × phases` (the actual wallbox minimum).
+Surplus capture measures real-time grid export and converts it into a wallbox power setpoint. Grid export can come from any source — Enphase microinverters, SUN2000 when the battery is full, or both. The power is clamped to the wallbox's published limits (`sensor.wallbox_min_power_w`..`sensor.wallbox_max_power_w`), which the OCPP server updates dynamically on phase switches. If grid export is below the wallbox minimum, surplus capture produces 0W.
 
 **Inputs:** `grid_power_w` (from `sensor.grid_power` or DTSU fallback), `pv_power_w` (from `sensor.solar_pv_total_ac_power`), `wallbox_power_w` (from `sensor.wallbox_power` — for feedback correction).
 
