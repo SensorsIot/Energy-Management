@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.70"
+__version__ = "1.6.71"
 
 import json
 import logging
@@ -865,12 +865,19 @@ class EnergyManager:
                 else ev_max_power
             )
 
-            # Battery protection — includes EV load for one 15-min interval
+            # Battery forecast checks for EV decision
             if battery_soc >= 100:
                 reaches_target, soc_at_target = True, 100.0
+                battery_will_be_full = True
+                battery_will_hit_min = False
             else:
                 reaches_target, soc_at_target = self.check_battery_protection(
                     ev_power_w=self._ev_forecasted_power_w
+                )
+                battery_will_be_full, _, _ = self.will_battery_hit_full()
+                ev_load_wh = self._ev_forecasted_power_w * 0.25
+                battery_will_hit_min, _, _ = self.will_battery_hit_minimum(
+                    extra_load_wh=ev_load_wh
                 )
             self._battery_reaches_target = reaches_target
             self._battery_min_soc_forecast = soc_at_target
@@ -916,13 +923,23 @@ class EnergyManager:
                     ev_source_reason = (
                         f"Grid export {grid_export:.0f}W → capture {ev_charging_power_w:.0f}W"
                     )
-                # Rule 2: surplus above threshold + battery protection → use forecast power
-                elif surplus_power >= threshold and reaches_target and self._ev_forecasted_power_w > 0:
+                # Rule 2: forecast-based charging
+                # Allowed if surplus above threshold AND:
+                #   - battery reaches target SOC at cheap tariff, OR
+                #   - battery will hit 100% (solar would be curtailed)
+                # Blocked if battery would hit minimum SOC with EV load
+                elif (
+                    surplus_power >= threshold
+                    and self._ev_forecasted_power_w > 0
+                    and not battery_will_hit_min
+                    and (reaches_target or battery_will_be_full)
+                ):
                     ev_charging_power_w = self._ev_forecasted_power_w
                     ev_charging_source = "forecast"
+                    full_note = " (battery full override)" if battery_will_be_full and not reaches_target else ""
                     ev_source_reason = (
                         f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
-                        f"forecast → {ev_charging_power_w:.0f}W"
+                        f"forecast → {ev_charging_power_w:.0f}W{full_note}"
                     )
                 else:
                     # Explain why neither rule fired
@@ -935,7 +952,11 @@ class EnergyManager:
                         reasons.append(
                             f"surplus {surplus_power:.0f}W < {threshold:.0f}W"
                         )
-                    elif not reaches_target:
+                    elif battery_will_hit_min:
+                        reasons.append(
+                            f"battery would hit minimum SOC with EV load"
+                        )
+                    elif not reaches_target and not battery_will_be_full:
                         reasons.append(
                             f"battery protection blocked (SOC forecast {soc_at_target:.0f}%)"
                         )
@@ -1052,6 +1073,8 @@ class EnergyManager:
                     "ev_charging_source": ev_charging_source,
                     "battery_protection": not self._battery_reaches_target,
                     "battery_forecast_soc": self._battery_min_soc_forecast,
+                    "battery_will_be_full": battery_will_be_full,
+                    "battery_will_hit_min": battery_will_hit_min,
                     "reaches_target": reaches_target,
                     "threshold_w": ev_threshold,
                     "surplus_power_w": surplus_power,
