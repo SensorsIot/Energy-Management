@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.55"
+__version__ = "1.6.56"
 
 import json
 import logging
@@ -622,7 +622,8 @@ class EnergyManager:
 
                 # Override: if battery is forecast to reach 100% before cheap
                 # tariff start, excess solar would be curtailed — let EV use it.
-                if not reaches_target:
+                # Skip when already past cheap_start (range would be empty).
+                if not reaches_target and not tariff.is_cheap_now:
                     peak_query = f'''
                     from(bucket: "{self.output_bucket}")
                       |> range(start: now(), stop: {window_stop})
