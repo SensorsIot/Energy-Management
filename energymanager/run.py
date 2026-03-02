@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.65"
+__version__ = "1.6.66"
 
 import json
 import logging
@@ -580,12 +580,25 @@ class EnergyManager:
                 pass
         return self.ha_client.get_sensor_value(self.dtsu_grid_power_entity) or 0
 
-    def get_forecast_soc_at_target(self) -> tuple[float | None, datetime]:
+    def _extra_load_percent(self, extra_load_wh: float) -> float:
+        """Convert extra load in Wh to SOC percentage of battery capacity."""
+        if extra_load_wh <= 0 or self.capacity_wh <= 0:
+            return 0.0
+        return extra_load_wh / self.capacity_wh * 100
+
+    def get_forecast_soc_at_target(
+        self, extra_load_wh: float = 0.0
+    ) -> tuple[float | None, datetime]:
         """Query forecasted SOC at the next cheap tariff start (21:00).
 
         Looks up the SOC forecast written by run_optimization in InfluxDB.
         Uses tariff.target which always points to the *next* 21:00,
         regardless of the current time of day.
+
+        Args:
+            extra_load_wh: Additional load to subtract (e.g. 1500Wh wash,
+                           1000Wh for one EV 15-min interval). Subtracted
+                           as worst-case from the forecasted SOC.
 
         Returns:
             (soc_percent or None if no data, target_time)
@@ -609,14 +622,23 @@ class EnergyManager:
 
         result = query_api.query(query)
         if result and result[0].records:
-            return result[0].records[0].get_value(), target_time
+            soc = result[0].records[0].get_value()
+            soc = max(0.0, soc - self._extra_load_percent(extra_load_wh))
+            return soc, target_time
         return None, target_time
 
-    def get_forecast_soc_range(self) -> tuple[float | None, float | None, datetime]:
+    def get_forecast_soc_range(
+        self, extra_load_wh: float = 0.0
+    ) -> tuple[float | None, float | None, datetime]:
         """Query min and max SOC from now until the next cheap tariff start.
 
         Scans the full SOC trajectory (with_strategy scenario) from now
         until tariff.target to find the lowest and highest predicted SOC.
+
+        Args:
+            extra_load_wh: Additional load to subtract (worst-case).
+                           Subtracted from min_soc; max_soc left unchanged
+                           (battery could still peak before the load hits).
 
         Returns:
             (min_soc or None, max_soc or None, target_time)
@@ -647,10 +669,13 @@ class EnergyManager:
                 else:
                     max_soc = val
 
+        # Subtract extra load from min (worst case); max stays unchanged
         if min_soc is not None:
+            min_soc = max(0.0, min_soc - self._extra_load_percent(extra_load_wh))
             logger.debug(
                 f"SOC range until {swiss_time(target_time)}: "
                 f"min={min_soc:.0f}%, max={max_soc:.0f}%"
+                + (f" (with {extra_load_wh:.0f}Wh load)" if extra_load_wh > 0 else "")
             )
 
         return min_soc, max_soc, target_time
