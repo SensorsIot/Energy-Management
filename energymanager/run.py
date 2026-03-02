@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.72"
+__version__ = "1.6.73"
 
 import json
 import logging
@@ -725,8 +725,12 @@ class EnergyManager:
             return hits_min, min_soc, target_time
         return True, None, target_time
 
-    def check_battery_protection(self) -> tuple[bool, float]:
+    def check_battery_protection(self, ev_load_wh: float = 0.0) -> tuple[bool, float]:
         """Check if battery SOC at next cheap tariff start meets protection target.
+
+        Args:
+            ev_load_wh: EV energy consumption in Wh for the next 15-min interval,
+                        subtracted from the forecast as worst-case load.
 
         EV forecast path is allowed if:
         1. SOC at target >= protection target (default 80%), OR
@@ -737,7 +741,9 @@ class EnergyManager:
             (reaches_target, soc_at_target) tuple
         """
         try:
-            soc_at_target, target_time = self.get_forecast_soc_at_target()
+            soc_at_target, target_time = self.get_forecast_soc_at_target(
+                extra_load_wh=ev_load_wh
+            )
 
             if soc_at_target is None:
                 logger.warning(
@@ -747,9 +753,10 @@ class EnergyManager:
                 return False, 0.0
 
             reaches_target = soc_at_target >= self.ev_battery_protection_soc
+            ev_note = f" (with EV {ev_load_wh:.0f}Wh)" if ev_load_wh > 0 else ""
             logger.info(
                 f"Battery protection: forecast SOC at {swiss_time(target_time)}="
-                f"{soc_at_target:.0f}% "
+                f"{soc_at_target:.0f}%{ev_note} "
                 f"(target={self.ev_battery_protection_soc}%) → "
                 f"{'EV allowed' if reaches_target else 'EV blocked'}"
             )
@@ -855,20 +862,6 @@ class EnergyManager:
                 else ev_max_power
             )
 
-            # Battery forecast checks for EV decision
-            # No EV load deduction here — these checks answer "can we afford to charge?"
-            # Deducting EV load would create circular logic (charge→deduct→block→don't charge)
-            if battery_soc >= 100:
-                reaches_target, soc_at_target = True, 100.0
-                battery_will_be_full = True
-                battery_will_hit_min = False
-            else:
-                reaches_target, soc_at_target = self.check_battery_protection()
-                battery_will_be_full, _, _ = self.will_battery_hit_full()
-                battery_will_hit_min, _, _ = self.will_battery_hit_minimum()
-            self._battery_reaches_target = reaches_target
-            self._battery_min_soc_forecast = soc_at_target
-
             pv_power = self.ha_client.get_sensor_value(self.pv_power_entity) or 0.0
             load_power = self.ha_client.get_sensor_value(self.load_power_entity) or 0.0
             surplus_power = self.ha_client.get_sensor_value(self.surplus_power_entity) or 0.0
@@ -883,17 +876,16 @@ class EnergyManager:
             else:
                 grid_export = max(0.0, grid_power)
 
-            # Compute grid surplus capture candidate (FSD 4.5 — grid surplus rule)
+            # Compute grid surplus capture candidate (FSD 4.6 — grid surplus rule)
             surplus_capture_power_w = 0.0
             if ev_mode == "solar":
                 if grid_export >= ev_min_power and pv_power > 0:
-                    # Clamp to wallbox min/max (from OCPP sensor, phase-aware)
                     surplus_capture_power_w = float(
                         min(max(grid_export, ev_min_power), ev_max_power)
                     )
             self._surplus_capture_active = surplus_capture_power_w > 0
 
-            # EV Charging Power Calculation (FSD 4.5.6)
+            # Step 1: Determine candidate EV power (what we'd charge at)
             ev_charging_power_w = 0.0
             ev_charging_source = "none"
             ev_source_reason = "no solar mode"
@@ -903,56 +895,79 @@ class EnergyManager:
                     self.ev_min_solar_power_entity
                 ) or ev_min_power
                 ev_threshold = threshold
-                # Rule 1: surplus capture has priority (exported energy is wasted)
+
+                # Rule 1: surplus capture (exported energy is free — no battery check)
                 if surplus_capture_power_w >= threshold:
                     ev_charging_power_w = surplus_capture_power_w
                     ev_charging_source = "surplus"
                     ev_source_reason = (
                         f"Grid export {grid_export:.0f}W → capture {ev_charging_power_w:.0f}W"
                     )
-                # Rule 2: forecast-based charging
-                # Allowed if surplus above threshold AND:
-                #   - battery reaches target SOC at cheap tariff, OR
-                #   - battery will hit 100% (solar would be curtailed)
-                # Blocked if battery would hit minimum SOC with EV load
+                # Rule 2 candidate: forecast-based (needs battery check)
                 elif (
                     surplus_power >= threshold
                     and self._ev_forecasted_power_w > 0
-                    and not battery_will_hit_min
-                    and (reaches_target or battery_will_be_full)
                 ):
                     ev_charging_power_w = self._ev_forecasted_power_w
                     ev_charging_source = "forecast"
+
+            # Step 2: Battery forecast checks WITH the candidate EV load
+            ev_load_wh = ev_charging_power_w * 0.25 if ev_charging_source == "forecast" else 0.0
+            if battery_soc >= 100:
+                reaches_target, soc_at_target = True, 100.0
+                battery_will_be_full = True
+                battery_will_hit_min = False
+            else:
+                reaches_target, soc_at_target = self.check_battery_protection(
+                    ev_load_wh=ev_load_wh
+                )
+                battery_will_be_full, _, _ = self.will_battery_hit_full()
+                battery_will_hit_min, _, _ = self.will_battery_hit_minimum(
+                    extra_load_wh=ev_load_wh
+                )
+            self._battery_reaches_target = reaches_target
+            self._battery_min_soc_forecast = soc_at_target
+
+            # Step 3: Gate Rule 2 on battery checks
+            if ev_charging_source == "forecast":
+                if not battery_will_hit_min and (reaches_target or battery_will_be_full):
                     full_note = " (battery full override)" if battery_will_be_full and not reaches_target else ""
                     ev_source_reason = (
                         f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
                         f"forecast → {ev_charging_power_w:.0f}W{full_note}"
                     )
                 else:
-                    # Explain why neither rule fired
+                    # Battery check failed — cancel Rule 2
                     reasons = []
-                    if surplus_capture_power_w < threshold:
+                    if battery_will_hit_min:
                         reasons.append(
-                            f"grid export {grid_export:.0f}W < {threshold:.0f}W"
-                        )
-                    if surplus_power < threshold:
-                        reasons.append(
-                            f"surplus {surplus_power:.0f}W < {threshold:.0f}W"
-                        )
-                    elif battery_will_hit_min:
-                        reasons.append(
-                            f"battery would hit minimum SOC with EV load"
+                            f"battery would hit minimum SOC with {ev_charging_power_w:.0f}W EV load"
                         )
                     elif not reaches_target and not battery_will_be_full:
                         reasons.append(
                             f"battery protection blocked (SOC forecast {soc_at_target:.0f}%)"
                         )
-                    elif self._ev_forecasted_power_w <= 0:
-                        reasons.append("no forecast available")
                     ev_source_reason = "No charging — " + "; ".join(reasons)
-                # Hard floor: never send less than wallbox minimum
-                if 0 < ev_charging_power_w < ev_min_power:
-                    ev_charging_power_w = ev_min_power
+                    ev_charging_power_w = 0.0
+                    ev_charging_source = "none"
+            elif ev_charging_source == "none" and ev_mode == "solar":
+                # Explain why neither rule fired
+                reasons = []
+                if surplus_capture_power_w < ev_threshold:
+                    reasons.append(
+                        f"grid export {grid_export:.0f}W < {ev_threshold:.0f}W"
+                    )
+                if surplus_power < ev_threshold:
+                    reasons.append(
+                        f"surplus {surplus_power:.0f}W < {ev_threshold:.0f}W"
+                    )
+                elif self._ev_forecasted_power_w <= 0:
+                    reasons.append("no forecast available")
+                ev_source_reason = "No charging — " + "; ".join(reasons)
+
+            # Hard floor: never send less than wallbox minimum
+            if ev_mode == "solar" and 0 < ev_charging_power_w < ev_min_power:
+                ev_charging_power_w = ev_min_power
 
             # Compute wallbox idle state (all modes)
             if wallbox_power == 0 and wb_status in ("Finishing", "SuspendedEV"):
