@@ -2213,18 +2213,36 @@ cards:
 
 ### 4.8.3 Solar Decision Card (Amazon Fire Dashboard)
 
-Displays live EV charging decision inputs and reasoning. Uses `sensor.ev_target_power` attributes.
+Displays rule-by-rule EV charging evaluation with actual numbers and pass/fail status. Uses `sensor.ev_target_power` attributes.
 
-**Displayed values:**
+**Card layout — rule evaluation with live values:**
 
-| Line | Content | Source |
-|------|---------|--------|
-| Decision | `⚡ SURPLUS → 8000W: Grid export 8000W → capture 8000W` | `ev_charging_source` + `reason` |
-| Inputs | `Surplus: -200W \| Grid export: 8000W \| Threshold: 3000W` | `surplus_power_w`, `grid_export_w`, `input_number.ev_min_solar_power` |
-| Strategy | `Forecast strategy: 4140W \| Surplus capture: 8000W` | `forecast_power_w`, `surplus_capture_w` |
-| Protection | `🟢 82%` or `🔴 blocked (SOC 56%)` | `battery_protection`, `battery_forecast_soc` |
+```
+✅ Rule 1 — Surplus Capture
+  grid_export 8000W → capture 8000W ≥ threshold 3000W?
 
-**Source icons:** ⚡ surplus, 📊 forecast, ⏸️ none.
+❌ Rule 2 — Forecast
+  surplus -200W ≥ threshold 3000W? ❌
+  battery protection? 🟢 OK (SOC 82%)
+  forecast available? 🟢 4140W
+
+⚡ SURPLUS CAPTURE → 8000W
+```
+
+**Sensor attributes used by card:**
+
+| Attribute | Purpose |
+|-----------|---------|
+| `threshold_w` | Min solar power threshold (W) |
+| `grid_export_w` | Current grid export (W) |
+| `surplus_capture_w` | Capture power offered to wallbox (W) |
+| `surplus_power_w` | Solar surplus = PV − house load (W) |
+| `battery_protection` | True if battery protection blocks forecast path |
+| `battery_forecast_soc` | Forecasted battery SOC at target hour (%) |
+| `forecast_power_w` | Forecast-based charging power (W) |
+| `ev_charging_source` | Active rule: `surplus`, `forecast`, or `none` |
+
+**Result icons:** ⚡ surplus capture, 📊 forecast, ⏸️ no charging.
 
 ## 4.9 Error Handling and Notifications
 
@@ -3380,6 +3398,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.31: Solar Decision card shows rule-by-rule evaluation with actual numbers and pass/fail (Section 4.8.3) — each rule displayed with live sensor values, ✅/❌ per sub-check; added `threshold_w` and `reaches_target` sensor attributes (v1.6.61)
 - v2.30: Solar Decision dashboard card (Section 4.8.3) — live EV charging decision inputs, reasoning, and source; replaced static markdown explanation
 - v2.29: Appliance signal uses appliance-load simulation (Section 4.4.2.1) — subtracts appliance energy from SOC trajectory and checks min SOC ≥ reserve%; grid export is now contextual info, not a separate ORANGE path; renamed `final_soc_percent` → `min_soc_percent` attribute
 - v2.28: Fix grid power sign convention in surplus capture formula (Section 1.9.1) — grid sensor uses positive=export, code was negating it; corrected sanity invariant (Section 1.9.2); skip peak-SOC override query in battery protection when past cheap_start (Section 4.5.6)
