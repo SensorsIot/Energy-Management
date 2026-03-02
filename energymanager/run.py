@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.47"
+__version__ = "1.6.48"
 
 import json
 import logging
@@ -619,6 +619,29 @@ class EnergyManager:
                     f"(target={self.ev_battery_protection_soc}%) → "
                     f"{'EV allowed' if reaches_target else 'EV blocked'}"
                 )
+
+                # Override: if battery is forecast to reach 100% before cheap
+                # tariff start, excess solar would be curtailed — let EV use it.
+                if not reaches_target:
+                    peak_query = f'''
+                    from(bucket: "{self.output_bucket}")
+                      |> range(start: now(), stop: {window_stop})
+                      |> filter(fn: (r) => r._measurement == "soc_forecast")
+                      |> filter(fn: (r) => r.scenario == "with_strategy")
+                      |> filter(fn: (r) => r._field == "soc_percent")
+                      |> max()
+                    '''
+                    peak_result = query_api.query(peak_query)
+                    if peak_result and peak_result[0].records:
+                        peak_soc = peak_result[0].records[0].get_value()
+                        if peak_soc >= 100:
+                            reaches_target = True
+                            logger.info(
+                                "Battery protection override: peak SOC %.0f%% "
+                                "(battery full before 21:00) → EV allowed",
+                                peak_soc,
+                            )
+
                 return reaches_target, soc_at_target
             else:
                 logger.warning("No SOC forecast data — blocking EV as precaution")

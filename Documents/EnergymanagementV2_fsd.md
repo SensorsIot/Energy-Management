@@ -2000,12 +2000,14 @@ The power calculation picks the first matching rule:
 | # | Rule | Power | Reasoning |
 |---|------|-------|-----------|
 | 1 | Surplus capture ≥ `ev_min_solar_power` | `surplus_capture_power_w` | Exported energy is wasted — capture it first. Bypasses battery protection because this energy is "free." |
-| 2 | Forecast strategy ≥ `ev_min_solar_power` AND `battery_protection_passed` | `ev_forecasted_power_w` | SOC simulation says battery can sustain EV charging while keeping reserve for evening. |
+| 2 | Forecast strategy ≥ `ev_min_solar_power` AND `battery_protection_passed` | `ev_forecasted_power_w` | SOC simulation says battery can sustain EV charging while keeping reserve for evening. If the battery is forecast to reach 100% SOC at any point between now and 21:00, protection is bypassed — excess solar would be curtailed, so charging the EV is free. |
 | 3 | Neither source meets threshold | 0 | Not enough solar power to justify starting the wallbox. |
 
 **`ev_min_solar_power`** is the minimum power gate, applied uniformly to both sources in this one place. Below this threshold, the wallbox should not start. Neither the forecast strategy nor the surplus capture apply this threshold themselves.
 
 **Battery protection** is only required for the forecast path. Surplus capture energy would be lost to the grid anyway — using it for EV charging never makes the battery worse.
+
+**Battery-full bypass:** If `check_battery_protection()` initially fails (SOC at 21:00 < target), a second query checks the peak forecast SOC between now and cheap tariff start. If the battery is forecast to reach 100% at any point, protection is overridden — the battery will be full and any additional solar would be curtailed or exported. Charging the EV with that energy is free.
 
 #### Forecast Strategy
 
