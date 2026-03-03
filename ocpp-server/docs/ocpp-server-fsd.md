@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 3.2 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 3.3 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -366,7 +366,13 @@ BL0942 sensors are available in HA for dashboards but **not consumed by the OCPP
 
 Manual refresh: `homeassistant.update_entity` on any smarthashtag entity.
 
-### 5.3 AcTec SuspendedEVSE Bug
+### 5.3 AcTec Sample.Clock MeterValues (verified 2026-03-03)
+
+The AcTec wallbox sends a `Sample.Clock` MeterValues message at every 15-minute boundary (`:00`, `:15`, `:30`, `:45`). This message contains **only** `Energy.Active.Import.Register` — no Power, Current, or Voltage measurands. The message arrives at `:XX:47` (consistently ~13s before the clock boundary).
+
+The OCPP server must **not** update `sensor.wallbox_power` from these messages, because the absence of Power measurands would incorrectly zero the reported power. Energy is still updated normally. Before v0.9.42 this bug caused false 0W readings for ~50s every 15 minutes, which — combined with the Huawei inverter's simultaneous battery rebalancing cycle — produced grid export spikes of -3,500W.
+
+### 5.4 AcTec SuspendedEVSE Bug
 
 AcTec always reports `SuspendedEVSE` regardless of whether the charger or car initiated the stop. The OCPP server corrects this using cloud status (see Section 3.6.1).
 
