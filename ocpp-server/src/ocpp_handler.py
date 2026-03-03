@@ -133,6 +133,7 @@ class ChargePointHandler(CP):
                 )
 
         total_power = 0.0
+        has_power_measurand = False
         for mv in meter_value:
             for sampled in mv.get("sampled_value", []):
                 measurand = sampled.get("measurand", "Energy.Active.Import.Register")
@@ -140,6 +141,7 @@ class ChargePointHandler(CP):
 
                 if "Power" in measurand:
                     total_power += value
+                    has_power_measurand = True
                 elif "Energy" in measurand:
                     self.session_energy_wh = value
                     if self.on_status_change:
@@ -147,6 +149,16 @@ class ChargePointHandler(CP):
 
         self.last_meter_values_time = time.monotonic()
         self.meter_values_event.set()
+
+        # Skip power update for energy-only messages (e.g. Sample.Clock at
+        # 15-minute boundaries) — they contain no Power measurand so
+        # total_power=0 would incorrectly zero the reported power.
+        if not has_power_measurand:
+            logger.debug(
+                f"MeterValues: energy-only (no Power measurand), "
+                f"keeping power={self.current_power_w}W"
+            )
+            return call_result.MeterValues()
 
         # Only accept power readings during an active transaction
         # Wallbox may return stale cached MeterValues when triggered outside a transaction

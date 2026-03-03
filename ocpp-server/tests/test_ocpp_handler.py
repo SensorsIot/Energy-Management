@@ -108,6 +108,41 @@ class TestMeterValues:
         assert handler.session_energy_wh == 5000
         callback.assert_called_with("energy_wh", 5000)
 
+    @pytest.mark.asyncio
+    async def test_energy_only_message_preserves_power(self, mock_connection):
+        """Energy-only MeterValues (Sample.Clock) must not zero current_power_w.
+
+        The AcTec wallbox sends a Sample.Clock message at 15-minute boundaries
+        containing only Energy.Active.Import.Register (no Power measurand).
+        Previously this zeroed wallbox_power, causing false 0W readings.
+        """
+        callback = MagicMock()
+        handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
+        handler.transaction_id = 1
+        handler.current_power_w = 3940  # actively charging
+
+        await handler.on_meter_values(
+            connector_id=1,
+            meter_value=[
+                {
+                    "sampled_value": [
+                        {
+                            "measurand": "Energy.Active.Import.Register",
+                            "value": "49890",
+                            "context": "Sample.Clock",
+                        }
+                    ]
+                }
+            ],
+        )
+
+        # Power must be preserved — not zeroed
+        assert handler.current_power_w == 3940
+        # Energy should still be updated
+        assert handler.session_energy_wh == 49890
+        # Callback should only have been called for energy, not power
+        callback.assert_called_once_with("energy_wh", 49890)
+
 
 class TestTransactions:
     """Tests for transaction handling."""

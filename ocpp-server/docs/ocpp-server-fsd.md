@@ -143,7 +143,7 @@ The wallbox reports its state via OCPP `StatusNotification`. These states drive 
 | `Authorize` | Accept all tags |
 | `StartTransaction` | Assign transaction ID |
 | `StopTransaction` | Clear transaction |
-| `MeterValues` | Sum per-phase power → `sensor.wallbox_power` |
+| `MeterValues` | Sum per-phase power → `sensor.wallbox_power`. Energy-only messages (e.g. `Sample.Clock` at 15-min boundaries) update energy but do **not** change power. |
 
 **Outgoing (Server → Wallbox):**
 
@@ -408,6 +408,7 @@ Wallbox draws ~1A less than requested. Delta ~100–190W (cable losses + backgro
 | TC-03 | Power limit >0→0 (active transaction) | 0A profile → SuspendedEVSE, transaction alive, power=0 |
 | TC-04 | Power limit change (transaction active) | SetChargingProfile only |
 | TC-05 | MeterValues during transaction | Per-phase power summed → wallbox_power |
+| TC-05b | Energy-only MeterValues (Sample.Clock) | Energy updated, power unchanged (not zeroed) |
 | TC-06 | Wallbox disconnect | connected=off, transaction cleared |
 | TC-07 | Phase switch: <4140W | Relay OFF, 1-phase, phases=1 |
 | TC-08 | Phase switch: ≥4140W | Relay ON, 3-phase, phases=3 |
