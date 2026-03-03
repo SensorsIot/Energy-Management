@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.77"
+__version__ = "1.6.78"
 
 import json
 import logging
@@ -186,6 +186,7 @@ class EnergyManager:
         self.wallbox_power_limit_entity = ev_opts.get("wallbox_power_limit_entity", "number.wallbox_power_limit")
         self.ev_target_power_entity = ev_opts.get("ev_target_power_entity", "sensor.ev_target_power")
         self._last_ev_power_limit = None
+        self._last_ev_power_limit_at: float = 0.0  # monotonic timestamp
         self._ev_sm = EVStateMachine()
         self._surplus_capture_active: bool = False
         self._surplus_samples: list[float] = []  # rolling 1-min avg (6 × 10 s)
@@ -1039,20 +1040,30 @@ class EnergyManager:
                 self._ev_idle_since = None
 
             # Send power limit to OCPP (on change only; OCPP server handles re-sends)
+            # Rate limit: min 60s between changes to prevent wallbox oscillation
+            # at amp-step boundaries (e.g. 4140↔4830W). 0W bypasses (safety).
             if output.target_power_w != self._last_ev_power_limit:
-                success = self.ha_client.set_sensor_state(
-                    self.wallbox_power_limit_entity,
-                    int(output.target_power_w),
-                    attributes={
-                        "friendly_name": "Wallbox Power Limit",
-                        "unit_of_measurement": "W",
-                        "icon": "mdi:speedometer",
-                    },
-                )
-                if success:
-                    self._last_ev_power_limit = output.target_power_w
+                since_last = time.monotonic() - self._last_ev_power_limit_at
+                if output.target_power_w == 0 or since_last >= 60:
+                    success = self.ha_client.set_sensor_state(
+                        self.wallbox_power_limit_entity,
+                        int(output.target_power_w),
+                        attributes={
+                            "friendly_name": "Wallbox Power Limit",
+                            "unit_of_measurement": "W",
+                            "icon": "mdi:speedometer",
+                        },
+                    )
+                    if success:
+                        self._last_ev_power_limit = output.target_power_w
+                        self._last_ev_power_limit_at = time.monotonic()
+                    else:
+                        logger.error("Failed to set wallbox power limit")
                 else:
-                    logger.error("Failed to set wallbox power limit")
+                    logger.debug(
+                        f"Rate-limited: want {output.target_power_w:.0f}W "
+                        f"but only {since_last:.0f}s since last change"
+                    )
 
             # Discharge blocking: block when IMMEDIATE/CHEAP and power > 0
             should_block = (

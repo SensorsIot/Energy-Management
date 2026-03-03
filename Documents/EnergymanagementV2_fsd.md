@@ -2063,6 +2063,8 @@ Because `control_ev_charging()` runs every 10 seconds with live surplus, the sys
 | Load increases | Surplus drops → next cycle adapts down |
 | Load decreases | Surplus rises → next cycle may increase power |
 
+**Rate limiting:** The wallbox power limit (`number.wallbox_power_limit`) is only sent when it differs from the last-sent value **and** at least 60 seconds have passed since the last change. This prevents oscillation at amp-step boundaries (e.g. surplus hovering near 4140/4830W causing the wallbox to flip between 6A and 7A every 10 seconds). 0W (pause) bypasses the rate limit for safety. The dashboard sensor `sensor.ev_target_power` still updates every 10 seconds to show the desired power.
+
 #### Surplus Capture
 
 Surplus capture measures real-time grid export and converts it into a wallbox power setpoint. Grid export can come from any source — Enphase microinverters, SUN2000 when the battery is full, or both. The power is clamped to the wallbox's published limits (`sensor.wallbox_min_power_w`..`sensor.wallbox_max_power_w`), which the OCPP server updates dynamically on phase switches. If grid export is below the wallbox minimum, surplus capture produces 0W.
@@ -3449,6 +3451,7 @@ See Section 4.6 for adaptive polling logic.
 **Changelog:**
 - v2.34: Added step-down loop for Rule 2 battery protection (Section 4.6.6) — when snapped candidate amp level fails battery checks, step down one amp at a time until checks pass or power drops below `ev_min_solar_power`; `will_battery_hit_full()` checked once outside loop; prevents all-or-nothing blocking when a lower amp level would be sustainable (v1.6.75)
 - v2.33: Removed EVChargingStrategy class — EV Rule 2 now uses inline `snap_to_amp_step()` (every 10 s) instead of stale 15-min forecast strategy; removed `ev_forecasted_power_w` and `battery_protection_passed` fields from EVInputs; replaced `forecast_power_w` sensor attribute with `candidate_power_w`; removed `battery_protection` sensor attribute (redundant with `reaches_target`); deleted `ev_strategy.py`; updated observer EC-05/EC-06 detectors (v1.6.74)
+- v2.33: Rate-limit wallbox power limit changes to 60s minimum interval (Section 4.6.6) — prevents oscillation at amp-step boundaries; 0W bypass for safety; ev_target_power still updates every 10s for dashboard
 - v2.32: Restructured sections 4.4–4.6 — new Section 4.4 (Battery Forecast Functions) extracts `get_forecast_soc_at_target()`, `will_battery_hit_full()`, `will_battery_hit_minimum()` as reusable functions with `extra_load_wh` parameter; simplified Section 4.5 (Appliance Signal) to use Section 4.4 functions; renumbered EV Charging from 4.5 → 4.6; EV Rule 2 now uses three battery checks (`reaches_target`, `battery_will_be_full`, `battery_will_hit_min`); updated all cross-references
 - v2.31: Solar Decision card shows rule-by-rule evaluation with actual numbers and pass/fail (Section 4.8.3) — each rule displayed with live sensor values, ✅/❌ per sub-check; added `threshold_w` and `reaches_target` sensor attributes (v1.6.61)
 - v2.30: Solar Decision dashboard card (Section 4.8.3) — live EV charging decision inputs, reasoning, and source; replaced static markdown explanation
