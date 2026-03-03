@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.75"
+__version__ = "1.6.77"
 
 import json
 import logging
@@ -188,6 +188,7 @@ class EnergyManager:
         self._last_ev_power_limit = None
         self._ev_sm = EVStateMachine()
         self._surplus_capture_active: bool = False
+        self._surplus_samples: list[float] = []  # rolling 1-min avg (6 × 10 s)
         self.ev_min_solar_power_entity = ev_opts.get(
             "min_solar_power_entity", "input_number.ev_min_solar_power"
         )
@@ -829,6 +830,17 @@ class EnergyManager:
 
             # Read inputs for state machine
             ev_mode = self.ha_client.get_input_select(self.ev_charging_mode_entity)
+
+            # Guard: only solar/immediate/cheap are valid — no "off" state
+            if ev_mode not in ("solar", "immediate", "cheap"):
+                logger.warning(
+                    f"EV charging mode '{ev_mode}' is invalid, resetting to solar"
+                )
+                self.ha_client.set_input_select(
+                    self.ev_charging_mode_entity, "solar"
+                )
+                ev_mode = "solar"
+
             now = datetime.now(timezone.utc)
             tariff = self.optimizer.get_tariff_periods(now)
             grid_power = self._read_grid_power()
@@ -844,7 +856,13 @@ class EnergyManager:
 
             pv_power = self.ha_client.get_sensor_value(self.pv_power_entity) or 0.0
             load_power = self.ha_client.get_sensor_value(self.load_power_entity) or 0.0
-            surplus_power = self.ha_client.get_sensor_value(self.surplus_power_entity) or 0.0
+            surplus_power_raw = self.ha_client.get_sensor_value(self.surplus_power_entity) or 0.0
+
+            # Rolling 1-minute average of surplus (6 samples × 10 s)
+            self._surplus_samples.append(surplus_power_raw)
+            if len(self._surplus_samples) > 6:
+                self._surplus_samples.pop(0)
+            surplus_power = sum(self._surplus_samples) / len(self._surplus_samples)
 
             validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
 
@@ -1187,6 +1205,16 @@ class EnergyManager:
 
         # Ensure all sensors exist in HA before anything else
         self._publish_initial_sensors()
+
+        # Ensure EV charging mode starts as "solar" (FSD 4.6.4 default)
+        if self.ev_charging_enabled:
+            try:
+                self.ha_client.set_input_select(
+                    self.ev_charging_mode_entity, "solar"
+                )
+                logger.info("EV charging mode set to solar (startup default)")
+            except Exception as e:
+                logger.warning(f"Failed to set EV charging mode on startup: {e}")
 
         # Run immediately
         self.run_optimization()
