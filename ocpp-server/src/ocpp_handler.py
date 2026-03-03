@@ -250,6 +250,9 @@ class ChargePointHandler(CP):
         """
         limit_w = max(0, power_w)
         limit_a = round(limit_w / (num_phases * 230), 1)
+        # AcTec offset: wallbox consumes ~0.5A internally, car gets less
+        if limit_a > 0:
+            limit_a += 0.5
 
         logger.info(
             f"Setting charging power: {limit_w:.0f}W → {limit_a:.1f}A "
