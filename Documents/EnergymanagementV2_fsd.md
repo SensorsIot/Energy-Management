@@ -3,7 +3,7 @@
 
 **Project:** Intelligent energy management with PV, battery, EV, and tariffs
 **Location:** Lausen (BL), Switzerland
-**Version:** 2.30
+**Version:** 2.33
 **Status:** Active Development
 **Architecture:** 3 Home Assistant Add-ons
 **Data Storage:** InfluxDB
@@ -1883,7 +1883,7 @@ EV charging optimization maximizes solar self-consumption while ensuring chargin
 - Solar charging is the default mode
 - State machine (Section 4.6.5) routes to correct mode
 - EV charging power calculation (Section 4.6.6) determines solar charging power
-- Two solar power sources: forecast strategy and grid surplus capture (both in Section 4.6.6)
+- Two solar power sources: snap-to-amp and grid surplus capture (both in Section 4.6.6)
 - `input_number.ev_min_solar_power` gates both solar paths — minimum power to start charging
 - Real-time charging power adjustment every 10 seconds
 
@@ -2022,66 +2022,46 @@ When the state machine is in SOLAR mode, this calculation determines the wallbox
 | Parameter | HA Entity / Source | Default | Description |
 |-----------|-------------------|---------|-------------|
 | `ev_min_solar_power` | `input_number.ev_min_solar_power` | 1380 W | Minimum power to start solar EV charging. Gate for both sources. |
-| `surplus_power` | `sensor.surplus_power` | — | Live surplus (solar − house load). Must exceed `ev_min_solar_power` for forecast path. |
-| `ev_forecasted_power_w` | Forecast strategy, every 15 min | — | Optimal wallbox power from SOC simulation (snapped to surplus) |
+| `surplus_power` | `sensor.surplus_power` | — | Live surplus (solar − house load). Must exceed `ev_min_solar_power` for snap-to-amp path. |
 | `surplus_capture_power_w` | Surplus capture, every 10 s | — | Wallbox power derived from measured grid export |
-| `battery_protection_passed` | `check_battery_protection()` | — | Forecast says battery will reach ≥ target SOC at 21:00 |
 
 **Output:** `ev_charging_power_w` — the wallbox power setpoint in watts (0 = don't charge).
 
-#### Power Sources
-
-Two independent calculations provide candidate power levels:
-
-| Source | What it does | Update frequency |
-|--------|-------------|-----------------|
-| **Surplus capture** | Measures real-time grid export that would otherwise be exported (the DC-coupled SUN2000 battery cannot absorb AC power from Enphase). If higher than `ev_min_solar_power`, the EV is charged. | Every 10 s |
-| **Forecast strategy** | Uses SOC simulation (Section 4.2) to find the highest wallbox amp level that keeps battery SOC ≥ protection target at 21:00. The battery acts as buffer between coarse amp steps and actual surplus. | Every 15 min |
-
 #### Selection Rules
 
-The power calculation picks the first matching rule. Battery checks use the forecast functions from Section 4.4.
+The power calculation branches on whether the battery will reach 100%. Battery checks use the forecast functions from Section 4.4.
 
-| # | Rule | Power | Reasoning |
-|---|------|-------|-----------|
-| 1 | Surplus capture ≥ `ev_min_solar_power` | `surplus_capture_power_w` | Exported energy is wasted — capture it first. Bypasses all battery checks because this energy is "free." |
-| 2 | `surplus_power` ≥ threshold AND forecast > 0 AND NOT `will_battery_hit_minimum(ev_load)` AND (`reaches_target` OR `will_battery_hit_full()`) | `ev_forecasted_power_w` | Live surplus exceeds threshold, battery can handle the load, and either SOC at 21:00 is OK or battery will be full anyway. |
-| 3 | Otherwise | 0 | Not enough surplus, or battery cannot sustain EV load. |
+**Case 1: Battery will reach 100%** — Charge the EV at the snapped surplus level. No battery protection needed — the energy would be curtailed anyway.
 
-**Three battery checks for Rule 2** (Section 4.4):
+**Case 2: Battery will NOT reach 100%** — Step down from the snapped candidate amp level one amp at a time until battery checks pass, or until power drops below `ev_min_solar_power`. If no level passes → 0W.
 
 | Check | Function | Question | Effect |
 |---|---|---|---|
 | SOC at target | `get_forecast_soc_at_target(ev_load)` | ≥ 80% at 21:00 with EV? | Allow |
-| Battery full | `will_battery_hit_full()` | Peak SOC hits 100%? | Allow (override — solar curtailed) |
 | Battery minimum | `will_battery_hit_minimum(ev_load)` | Min SOC drops below reserve? | **Block** (regardless) |
 
-**Decision:** `allow = (reaches_target OR battery_will_be_full) AND NOT battery_will_hit_min`
+**Decision (Case 2):** `allow = reaches_target AND NOT battery_will_hit_min`
 
-**`ev_min_solar_power`** is the minimum power gate. The live `sensor.surplus_power` (solar − house load) must exceed this threshold for EV charging to start. Surplus capture uses the same threshold independently (grid export ≥ threshold).
+**`ev_min_solar_power`** is the minimum power gate. The live `sensor.surplus_power` (solar − house load) must exceed this threshold for EV charging to start. It also serves as the step-down floor — below this level, there isn't enough surplus to justify charging.
 
-**Rule 1 bypasses battery checks.** Surplus capture energy would be lost to the grid anyway — using it for EV charging never makes the battery worse.
+#### Snap-to-Amp Step
 
-#### Forecast Strategy
+The snap-to-amp calculation converts the live `surplus_power` into the next wallbox amp level at or above the surplus (ceiling division), producing one of a fixed set of power levels (4140, 4830, ..., 11040 W) because the car only accepts whole amps (690 W steps on 3-phase). The battery absorbs the gap between the coarse step and the actual surplus.
 
-The forecast strategy decides every 15 minutes what the maximum wallbox power is for the next 15 minutes, such that the battery stays above the protection target at 21:00. The answer is one of a fixed set of power levels (4140, 4830, ..., 11040 W) because the car only accepts whole amps (690 W steps on 3-phase). The battery absorbs the gap between the coarse step and the actual surplus.
+**Inputs:** `surplus_power` (live measurement from `sensor.surplus_power`), `min_current_a` (default 6A), `max_current_a` (default 16A), `phases` (default 3).
 
-**Inputs:** Current battery SOC, current surplus power (live measurement from `sensor.surplus_power`), PV and load forecasts (from InfluxDB), `min_current_a` (default 6A), `max_current_a` (default 16A), `phases` (default 3), `protection_soc_percent` (default 80%).
+**Calculation:** `candidate_amps = ceil(surplus_power / (230 × phases))`, clamped to `[min_current_a, max_current_a]`. Candidate power = `candidate_amps × 230 × phases`.
 
-**Step 1 — Protection target:** Simulate SOC until 21:00 without EV load. On a good day the battery reaches ≥ 80% → target = 80%. On a bad day it only reaches 55% → target = 55% (can't reach 80% anyway, don't penalize EV).
+**Battery gating (step-down loop):** In Case 2 (battery won't reach 100%), the candidate amp level is checked against the battery forecast functions (Section 4.4). If the battery cannot sustain the load at the snapped level, the loop steps down one amp at a time and re-checks until either: (a) `reaches_target` AND NOT `will_hit_minimum`, or (b) the power drops below `ev_min_solar_power` (floor). If the winning level is below the wallbox hardware minimum, the hard floor clamp raises it to `wallbox_min_power_w` and the battery covers the difference. In Case 1 (battery will reach 100%), the snapped level is used directly — no step-down needed.
 
-**Step 2 — Select power level:** Read the current surplus power. Find the next wallbox power level above the surplus (4140, 4830, 5520, ..., 11040 W). If surplus is 5000 W, the wallbox must charge at 5520 W — the battery covers the 520 W gap.
+Because `control_ev_charging()` runs every 10 seconds with live surplus, the system is self-correcting:
 
-**Step 3 — Protection check:** Subtract the selected power level from the current 15-min forecast slot and simulate the battery to 21:00. If the battery stays above the protection target → use this power level. If not → step down one level. If even the minimum level (4140 W) fails → return 0.
-
-The strategy re-runs every 15 minutes with actual SOC and updated forecasts, making it self-correcting:
-
-| Forecast error | Effect |
-|----------------|--------|
-| PV lower than forecast | Surplus drops → next cycle picks lower power level |
-| PV higher than forecast | Surplus rises → next cycle picks higher power level |
-| Load higher than forecast | Surplus drops → next cycle adapts down |
-| Load lower than forecast | Surplus rises → next cycle may increase power |
+| Condition change | Effect |
+|------------------|--------|
+| PV drops (clouds) | Surplus drops → next cycle picks lower amp level |
+| PV rises | Surplus rises → next cycle picks higher amp level |
+| Load increases | Surplus drops → next cycle adapts down |
+| Load decreases | Surplus rises → next cycle may increase power |
 
 #### Surplus Capture
 
@@ -2095,14 +2075,13 @@ Surplus capture measures real-time grid export and converts it into a wallbox po
 
 | Scenario | What happens |
 |----------|-------------|
-| **Good morning** | Surplus rises above `ev_min_solar_power` → forecast strategy picks amp level matching surplus. Battery buffers the gap between amp step and actual surplus. |
+| **Good morning** | Surplus rises above `ev_min_solar_power` → snap-to-amp picks amp level matching surplus. Battery buffers the gap between amp step and actual surplus. |
 | **Afternoon** | Surplus drops each cycle → lower amp level. Eventually surplus drops below `ev_min_solar_power` → 0. |
-| **Bad/cloudy day** | Forecast: dynamic target adapts down. Small surplus still charges EV without hurting battery. |
-| **Peak solar** | Forecast: high surplus → high amps. Battery charges the excess between steps. |
-| **Battery already full** | Forecast: SOC at 100%, clipping imminent → pushes amps up aggressively. |
-| **Low surplus (e.g. 1000W)** | Both sources below `ev_min_solar_power` → no charging. Not enough to justify starting the wallbox. |
+| **Bad/cloudy day** | Battery forecast checks adapt. Small surplus still charges EV if battery can sustain it. |
+| **Peak solar** | High surplus → high amps. Battery charges the excess between steps. |
+| **Battery will be full** | Case 1 — snapped surplus level used directly, no step-down needed. Energy would be curtailed anyway. |
+| **Low surplus (e.g. 1000W)** | Below `ev_min_solar_power` → no charging. Not enough to justify starting the wallbox. |
 | **Enphase exporting** | Surplus capture: grid export ≥ `ev_min_solar_power` → 1-phase charging captures the export. |
-| **Both sources available** | Surplus capture wins (rule 1) — exported energy takes priority over forecast. |
 
 ## 4.6 Smart Car SOC Polling
 
@@ -2267,20 +2246,34 @@ cards:
 
 ### 4.8.3 Solar Decision Card (Amazon Fire Dashboard)
 
-Displays rule-by-rule EV charging evaluation with actual numbers and pass/fail status. Uses `sensor.ev_target_power` attributes.
+Displays EV charging decision with case evaluation and pass/fail status. Uses `sensor.ev_target_power` attributes.
 
-**Card layout — rule evaluation with live values:**
+**Card layout — case evaluation with live values:**
 
 ```
-✅ Rule 1 — Surplus Capture
-  grid_export 8000W → capture 8000W ≥ threshold 3000W?
+Surplus: 4200W  Threshold: 1380W  ✅
 
-❌ Rule 2 — Forecast
-  surplus -200W ≥ threshold 3000W? ❌
-  battery protection? 🟢 OK (SOC 82%)
-  forecast available? 🟢 4140W
+🟢 Battery will be full → Case 1
+   Snap-to-amp: 7A → 4830W
 
-⚡ SURPLUS CAPTURE → 8000W
+📊 FORECAST → 4830W
+```
+
+```
+Surplus: 4200W  Threshold: 1380W  ✅
+
+⚪ Battery will NOT be full → Case 2
+   Step-down: 8A → 7A → 4830W
+   reaches target SOC? 🟢 yes (82%)
+   battery will hit min? 🟢 no
+
+📊 FORECAST → 4830W
+```
+
+```
+Surplus: 800W  Threshold: 1380W  ❌
+
+⏸️ NO CHARGING → 0W
 ```
 
 **Sensor attributes used by card:**
@@ -2288,13 +2281,15 @@ Displays rule-by-rule EV charging evaluation with actual numbers and pass/fail s
 | Attribute | Purpose |
 |-----------|---------|
 | `threshold_w` | Min solar power threshold (W) |
-| `grid_export_w` | Current grid export (W) |
-| `surplus_capture_w` | Capture power offered to wallbox (W) |
 | `surplus_power_w` | Solar surplus = PV − house load (W) |
-| `battery_protection` | True if battery protection blocks forecast path |
+| `surplus_capture_w` | Capture power offered to wallbox (W) |
+| `grid_export_w` | Current grid export (W) |
+| `candidate_power_w` | Winning charging power from snap-to-amp (W) |
+| `battery_will_be_full` | Case 1 vs Case 2 |
+| `reaches_target` | SOC at 21:00 ≥ protection target? |
+| `battery_will_hit_min` | SOC would drop below reserve? |
 | `battery_forecast_soc` | Forecasted battery SOC at target hour (%) |
-| `forecast_power_w` | Forecast-based charging power (W) |
-| `ev_charging_source` | Active rule: `surplus`, `forecast`, or `none` |
+| `ev_charging_source` | Active source: `surplus`, `forecast`, or `none` |
 
 **Result icons:** ⚡ surplus capture, 📊 forecast, ⏸️ no charging.
 
@@ -2969,7 +2964,7 @@ cd energymanager && python -m pytest tests/test_ev_state_machine.py -v
 | EV-12 | Dashboard: tap active button | `input_select.ev_charging_mode` = `solar` (back to default) |
 | EV-13 | Dashboard: car connected, charging | Card shows power in W, state = SOLAR/CHEAP/IMMEDIATE |
 | EV-14 | Mode change while charging | New mode takes effect within ~60 s (OCPP throttle) |
-| EV-15 | Battery protection is informational | SOLAR mode active with excess even when battery_protection_passed=False; dashboard shows protection status |
+| EV-15 | Battery protection gates charging | SOLAR mode: surplus above threshold but battery checks fail → ev_charging_power_w=0, stays IDLE; dashboard shows `reaches_target` status |
 | EV-16 | Battery full, low excess | SOLAR with 1-phase min_power_w — captures every watt |
 | EV-17 | Cheap tariff toggles | CHEAP state: charges at max during cheap, pauses during expensive, no state change |
 | EV-18 | Car reaches target SOC | Returns to IDLE from any charging state |
@@ -3107,7 +3102,7 @@ Integration tests verify cross-module behavior — interactions between EV charg
 | ID | Description | Setup | Expected | Status |
 |----|-------------|-------|----------|--------|
 | IT-BATT-01 | Cheap mode blocks discharge | `ev_charging_mode = "cheap"`, power > 0 | `_discharge_blocked_by_ev = True` | ✅ `test_discharge_blocking.py::TestCheapModeBlocksDischarge` |
-| IT-BATT-02 | Battery protection blocks EV | Forecast SOC at 21:00 < 80% | `battery_protection_passed = False` (dashboard) | 🔮 Future — requires InfluxDB mock |
+| IT-BATT-02 | Battery protection blocks EV | Forecast SOC at 21:00 < target | `ev_charging_power_w = 0`, `reaches_target = False` (dashboard) | 🔮 Future — requires InfluxDB mock |
 | IT-BATT-03 | Tariff boundary transitions | 20:59 (expensive), 21:01 (cheap), 05:59 (cheap), 06:01 (expensive) | Correct `is_cheap_now` flag | ✅ `test_battery_optimizer.py::TestTariffBoundaryTransitions` |
 | IT-BATT-04 | Wallbox idle detection exits all modes | SOLAR/CHEAP/IMMEDIATE + `wallbox_idle=True` | State machine → IDLE, 0 W | ✅ `test_ev_state_machine.py::TestIdleDetection` |
 
@@ -3139,8 +3134,8 @@ Report version: **3** (bumped when test definitions change — invalidates stale
 | ID | Name | Preconditions | Pass condition |
 |----|------|---------------|----------------|
 | NO-01 | IDLE stays when wallbox unavailable | mode=solar, wallbox unavailable | state=IDLE, power=0 |
-| NO-02 | IDLE→SOLAR on strategy power>0 | prev=IDLE, mode=solar, available, protection passed, strategy>0 | state=SOLAR |
-| NO-05 | SOLAR power equals strategy power | state=SOLAR, strategy>0 | target_power_w == ev_forecasted_power_w |
+| NO-02 | IDLE→SOLAR on charging power>0 | prev=IDLE, mode=solar, available, ev_charging_power_w>0 | state=SOLAR |
+| NO-05 | SOLAR power equals charging power | state=SOLAR, ev_charging_power_w>0 | target_power_w == ev_charging_power_w |
 | NO-06 | IDLE→IMMEDIATE | prev=IDLE, mode=immediate, available | state=IMMEDIATE, power=max |
 | NO-07 | IMMEDIATE→IDLE mode change | prev=IMMEDIATE, mode≠immediate | state=IDLE, power=0 |
 | NO-08 | Immediate→solar sends 0W | prev=IMMEDIATE, mode=solar | state=IDLE, power=0 |
@@ -3157,8 +3152,8 @@ Report version: **3** (bumped when test definitions change — invalidates stale
 | EC-02 | SOLAR does NOT block discharge | state=SOLAR | discharge_blocked=False |
 | EC-03 | CHEAP blocks discharge when charging | state=CHEAP, cheap tariff, power>0 | discharge_blocked=True |
 | EC-04 | CHEAP unblocks at expensive tariff | state=CHEAP, expensive tariff, power=0 | discharge_blocked=False |
-| EC-05 | Battery protection blocks SOLAR entry | prev=IDLE, mode=solar, available, protection=False, strategy>0 | state=IDLE, power=0 |
-| EC-06 | Battery protection exits SOLAR after grace | prev output=SOLAR, prev_state=SOLAR, protection=False, not idle, mode=solar | state=IDLE, power=0 |
+| EC-05 | Battery protection blocks SOLAR entry | prev=IDLE, mode=solar, available, surplus≥min_power, ev_charging_power_w=0 | state=IDLE |
+| EC-06 | Battery protection exits SOLAR | prev output=SOLAR, surplus≥min_power, ev_charging_power_w=0, not idle, mode=solar | state=IDLE, power=0 |
 | EC-07 | Battery protection grace holds SOLAR | state=SOLAR, protection=False | power>0 |
 | EC-08 | SOLAR→IMMEDIATE | prev=SOLAR, mode=immediate | state=IMMEDIATE, power=max |
 | EC-09 | SOLAR→CHEAP | prev=SOLAR, mode=cheap | state=CHEAP |
@@ -3452,6 +3447,8 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.34: Added step-down loop for Rule 2 battery protection (Section 4.6.6) — when snapped candidate amp level fails battery checks, step down one amp at a time until checks pass or power drops below `ev_min_solar_power`; `will_battery_hit_full()` checked once outside loop; prevents all-or-nothing blocking when a lower amp level would be sustainable (v1.6.75)
+- v2.33: Removed EVChargingStrategy class — EV Rule 2 now uses inline `snap_to_amp_step()` (every 10 s) instead of stale 15-min forecast strategy; removed `ev_forecasted_power_w` and `battery_protection_passed` fields from EVInputs; replaced `forecast_power_w` sensor attribute with `candidate_power_w`; removed `battery_protection` sensor attribute (redundant with `reaches_target`); deleted `ev_strategy.py`; updated observer EC-05/EC-06 detectors (v1.6.74)
 - v2.32: Restructured sections 4.4–4.6 — new Section 4.4 (Battery Forecast Functions) extracts `get_forecast_soc_at_target()`, `will_battery_hit_full()`, `will_battery_hit_minimum()` as reusable functions with `extra_load_wh` parameter; simplified Section 4.5 (Appliance Signal) to use Section 4.4 functions; renumbered EV Charging from 4.5 → 4.6; EV Rule 2 now uses three battery checks (`reaches_target`, `battery_will_be_full`, `battery_will_hit_min`); updated all cross-references
 - v2.31: Solar Decision card shows rule-by-rule evaluation with actual numbers and pass/fail (Section 4.8.3) — each rule displayed with live sensor values, ✅/❌ per sub-check; added `threshold_w` and `reaches_target` sensor attributes (v1.6.61)
 - v2.30: Solar Decision dashboard card (Section 4.8.3) — live EV charging decision inputs, reasoning, and source; replaced static markdown explanation

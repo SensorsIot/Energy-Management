@@ -38,8 +38,6 @@ def _make_inputs(**overrides) -> EVInputs:
         min_power_w=1400.0,
         manual_power_w=11000.0,
         ev_charging_power_w=0.0,
-        ev_forecasted_power_w=0.0,
-        battery_protection_passed=True,
     )
     defaults.update(overrides)
     return EVInputs(**defaults)
@@ -364,12 +362,11 @@ class TestDetectors:
         assert obs._detect_no13(prev, curr) is None
 
     def test_ec05_pass(self, tmp_path):
-        """Battery protection blocks: ev_forecasted_power_w>0 but ev_charging_power_w=0."""
+        """Battery protection blocks: surplus above threshold but ev_charging_power_w=0."""
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(
-                battery_protection_passed=False,
-                ev_forecasted_power_w=3000,
+                surplus_power_w=5000,
                 ev_charging_power_w=0,
             ),
             output=EVOutput(EVState.IDLE, 0, "Blocked by protection"),
@@ -377,12 +374,11 @@ class TestDetectors:
         )
         assert obs._detect_ec05(None, snap) is True
 
-    def test_ec05_skip_protection_passed(self, tmp_path):
+    def test_ec05_skip_charging_active(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(
-                battery_protection_passed=True,
-                ev_forecasted_power_w=3000,
+                surplus_power_w=5000,
                 ev_charging_power_w=3000,
             ),
             output=EVOutput(EVState.SOLAR, 3000, "Solar"),
@@ -398,7 +394,7 @@ class TestDetectors:
             prev_state=EVState.SOLAR,
         )
         curr = _make_snapshot(
-            inputs=_make_inputs(battery_protection_passed=False, ev_charging_power_w=0),
+            inputs=_make_inputs(surplus_power_w=5000, ev_charging_power_w=0),
             output=EVOutput(EVState.IDLE, 0, "Protection exit"),
             prev_state=EVState.SOLAR,
         )

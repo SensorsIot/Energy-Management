@@ -53,9 +53,6 @@ class EVInputs:
     min_power_w: float                # default 1400W
     manual_power_w: float                # default 11000W
     ev_charging_power_w: float = 0.0   # pre-computed charging power (FSD 4.5.6)
-    # Fields below are kept for observer/dashboard — state machine ignores them
-    ev_forecasted_power_w: float = 0.0
-    battery_protection_passed: bool = True
 
 
 @dataclass

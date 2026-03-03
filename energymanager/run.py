@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.73"
+__version__ = "1.6.75"
 
 import json
 import logging
@@ -26,7 +26,7 @@ from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
 from src.appliance_signal import ApplianceSignal
 from src.ev_state_machine import EVStateMachine, EVInputs, EVState
-from src.ev_strategy import EVChargingStrategy
+from src.ev_charging import snap_to_amp_step
 from src.influxdb_writer import SimulationWriter
 from src.integration_observer import CycleSnapshot, IntegrationObserver
 from src.notifications import init_telegram, notify_error
@@ -187,8 +187,6 @@ class EnergyManager:
         self.ev_target_power_entity = ev_opts.get("ev_target_power_entity", "sensor.ev_target_power")
         self._last_ev_power_limit = None
         self._ev_sm = EVStateMachine()
-        self._ev_strategy = EVChargingStrategy(optimizer=self.optimizer)
-        self._ev_forecasted_power_w: float = 0.0
         self._surplus_capture_active: bool = False
         self.ev_min_solar_power_entity = ev_opts.get(
             "min_solar_power_entity", "input_number.ev_min_solar_power"
@@ -487,24 +485,6 @@ class EnergyManager:
             # Calculate appliance signal using full simulation
             # (checks if battery has enough energy to run appliance without grid import)
             self.calculate_appliance_signal(current_soc, sim_no_strategy)
-
-            # EV charging strategy (FSD 4.5.6)
-            if self.ev_charging_enabled:
-                surplus_power = self.ha_client.get_sensor_value(self.surplus_power_entity) or 0.0
-                result = self._ev_strategy.calculate(
-                    current_soc=current_soc,
-                    forecast=forecast,
-                    now=now,
-                    surplus_power_w=surplus_power,
-                    min_amps=self.ev_min_amps,
-                    max_amps=self.ev_max_amps,
-                    phases=self.ev_phases,
-                    protection_soc_percent=self.ev_protection_soc,
-                )
-                self._ev_forecasted_power_w = result.power_w
-                logger.info(
-                    f"EV strategy: {result.power_w:.0f}W ({result.amps}A) — {result.reason}"
-                )
 
         except Exception as e:
             logger.error(f"Optimization failed: {e}", exc_info=True)
@@ -903,54 +883,84 @@ class EnergyManager:
                     ev_source_reason = (
                         f"Grid export {grid_export:.0f}W → capture {ev_charging_power_w:.0f}W"
                     )
-                # Rule 2 candidate: forecast-based (needs battery check)
-                elif (
-                    surplus_power >= threshold
-                    and self._ev_forecasted_power_w > 0
-                ):
-                    ev_charging_power_w = self._ev_forecasted_power_w
+                # Rule 2 candidate: snap surplus to amp step (needs battery check)
+                elif surplus_power >= threshold:
                     ev_charging_source = "forecast"
 
             # Step 2: Battery forecast checks WITH the candidate EV load
-            ev_load_wh = ev_charging_power_w * 0.25 if ev_charging_source == "forecast" else 0.0
             if battery_soc >= 100:
                 reaches_target, soc_at_target = True, 100.0
                 battery_will_be_full = True
                 battery_will_hit_min = False
+            elif ev_charging_source == "forecast":
+                battery_will_be_full, _, _ = self.will_battery_hit_full()
+                candidate_amps = snap_to_amp_step(
+                    surplus_power, self.ev_min_amps, self.ev_max_amps, self.ev_phases
+                )
+
+                if battery_will_be_full:
+                    # Case 1: battery will reach 100% — charge at snapped level
+                    ev_charging_power_w = candidate_amps * 230 * self.ev_phases
+                    reaches_target, soc_at_target = self.check_battery_protection(
+                        ev_load_wh=ev_charging_power_w * 0.25
+                    )
+                    battery_will_hit_min = False
+                    ev_source_reason = (
+                        f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
+                        f"forecast → {ev_charging_power_w:.0f}W (battery full)"
+                    )
+                else:
+                    # Case 2: battery won't reach 100% — step down until
+                    # battery checks pass or power drops below ev_min_solar_power
+                    ev_charging_power_w = 0.0
+                    reaches_target, soc_at_target = False, 0.0
+                    battery_will_hit_min = False
+                    for try_amps in range(candidate_amps, 0, -1):
+                        try_power = try_amps * 230 * self.ev_phases
+                        if try_power < threshold:
+                            break
+                        ev_load_wh = try_power * 0.25
+                        reaches_target, soc_at_target = self.check_battery_protection(
+                            ev_load_wh=ev_load_wh
+                        )
+                        battery_will_hit_min, _, _ = self.will_battery_hit_minimum(
+                            extra_load_wh=ev_load_wh
+                        )
+                        if reaches_target and not battery_will_hit_min:
+                            ev_charging_power_w = try_power
+                            stepped = f", stepped {candidate_amps}→{try_amps}A" if try_amps < candidate_amps else ""
+                            ev_source_reason = (
+                                f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
+                                f"forecast → {ev_charging_power_w:.0f}W{stepped}"
+                            )
+                            break
+
+                    if ev_charging_power_w == 0.0:
+                        reasons = []
+                        if battery_will_hit_min:
+                            reasons.append(
+                                f"battery would hit minimum SOC with "
+                                f"{candidate_amps * 230 * self.ev_phases:.0f}W EV load"
+                            )
+                        elif not reaches_target:
+                            reasons.append(
+                                f"battery protection blocked (SOC forecast {soc_at_target:.0f}%)"
+                            )
+                        ev_source_reason = "No charging — " + "; ".join(reasons)
+                        ev_charging_source = "none"
             else:
+                # No EV load — check battery without it
                 reaches_target, soc_at_target = self.check_battery_protection(
-                    ev_load_wh=ev_load_wh
+                    ev_load_wh=0.0
                 )
                 battery_will_be_full, _, _ = self.will_battery_hit_full()
                 battery_will_hit_min, _, _ = self.will_battery_hit_minimum(
-                    extra_load_wh=ev_load_wh
+                    extra_load_wh=0.0
                 )
             self._battery_reaches_target = reaches_target
             self._battery_min_soc_forecast = soc_at_target
 
-            # Step 3: Gate Rule 2 on battery checks
-            if ev_charging_source == "forecast":
-                if not battery_will_hit_min and (reaches_target or battery_will_be_full):
-                    full_note = " (battery full override)" if battery_will_be_full and not reaches_target else ""
-                    ev_source_reason = (
-                        f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
-                        f"forecast → {ev_charging_power_w:.0f}W{full_note}"
-                    )
-                else:
-                    # Battery check failed — cancel Rule 2
-                    reasons = []
-                    if battery_will_hit_min:
-                        reasons.append(
-                            f"battery would hit minimum SOC with {ev_charging_power_w:.0f}W EV load"
-                        )
-                    elif not reaches_target and not battery_will_be_full:
-                        reasons.append(
-                            f"battery protection blocked (SOC forecast {soc_at_target:.0f}%)"
-                        )
-                    ev_source_reason = "No charging — " + "; ".join(reasons)
-                    ev_charging_power_w = 0.0
-                    ev_charging_source = "none"
-            elif ev_charging_source == "none" and ev_mode == "solar":
+            if ev_charging_source == "none" and ev_mode == "solar":
                 # Explain why neither rule fired
                 reasons = []
                 if surplus_capture_power_w < ev_threshold:
@@ -961,9 +971,8 @@ class EnergyManager:
                     reasons.append(
                         f"surplus {surplus_power:.0f}W < {ev_threshold:.0f}W"
                     )
-                elif self._ev_forecasted_power_w <= 0:
-                    reasons.append("no forecast available")
-                ev_source_reason = "No charging — " + "; ".join(reasons)
+                if reasons:
+                    ev_source_reason = "No charging — " + "; ".join(reasons)
 
             # Hard floor: never send less than wallbox minimum
             if ev_mode == "solar" and 0 < ev_charging_power_w < ev_min_power:
@@ -996,8 +1005,6 @@ class EnergyManager:
                 min_power_w=ev_min_power,
                 manual_power_w=manual_power,
                 ev_charging_power_w=ev_charging_power_w,
-                ev_forecasted_power_w=self._ev_forecasted_power_w,
-                battery_protection_passed=reaches_target,
             )
             prev_ev_state = self._ev_sm.state
             output = self._ev_sm.step(inputs)
@@ -1073,7 +1080,6 @@ class EnergyManager:
                     "unit_of_measurement": "W",
                     "reason": ev_source_reason,
                     "ev_charging_source": ev_charging_source,
-                    "battery_protection": not self._battery_reaches_target,
                     "battery_forecast_soc": self._battery_min_soc_forecast,
                     "battery_will_be_full": battery_will_be_full,
                     "battery_will_hit_min": battery_will_hit_min,
@@ -1082,7 +1088,7 @@ class EnergyManager:
                     "surplus_power_w": surplus_power,
                     "grid_export_w": grid_export,
                     "surplus_capture_w": surplus_capture_power_w,
-                    "forecast_power_w": self._ev_forecasted_power_w,
+                    "candidate_power_w": ev_charging_power_w,
                     "icon": "mdi:ev-station",
                 },
             )

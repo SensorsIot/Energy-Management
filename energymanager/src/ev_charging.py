@@ -74,6 +74,21 @@ def calculate_ev_power(
     )
 
 
+def snap_to_amp_step(
+    surplus_w: float,
+    min_amps: int,
+    max_amps: int,
+    phases: int,
+) -> int:
+    """Snap surplus power to the next wallbox amp level.
+
+    Returns amps clamped to [min_amps, max_amps].
+    """
+    step_w = 230 * phases
+    raw_amps = int(-(-surplus_w // step_w))  # ceil without import
+    return max(min_amps, min(raw_amps, max_amps))
+
+
 def _round_to_step(value: float, step: float = 100) -> float:
     """Round to nearest step (matches number.wallbox_power_limit step size)."""
     return round(value / step) * step

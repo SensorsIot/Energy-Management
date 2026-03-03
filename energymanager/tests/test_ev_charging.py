@@ -2,7 +2,36 @@
 
 from __future__ import annotations
 
-from src.ev_charging import calculate_ev_power, resolve_phase_gap
+from src.ev_charging import calculate_ev_power, resolve_phase_gap, snap_to_amp_step
+
+
+# --- snap_to_amp_step unit tests ---
+
+
+class TestSnapToAmpStep:
+    def test_surplus_5000_picks_8a(self):
+        """5000 W surplus → ceil(5000/690) = 8A."""
+        assert snap_to_amp_step(5000, min_amps=6, max_amps=16, phases=3) == 8
+
+    def test_surplus_below_min_uses_min(self):
+        """2000 W surplus (< 6A×690) → clamps to min_amps=6."""
+        assert snap_to_amp_step(2000, min_amps=6, max_amps=16, phases=3) == 6
+
+    def test_surplus_above_max_uses_max(self):
+        """12000 W surplus (> 16A×690) → clamps to max_amps=16."""
+        assert snap_to_amp_step(12000, min_amps=6, max_amps=16, phases=3) == 16
+
+    def test_exact_step_boundary(self):
+        """6900 W = exactly 10A×690 → picks 10A."""
+        assert snap_to_amp_step(6900, min_amps=6, max_amps=16, phases=3) == 10
+
+    def test_single_phase(self):
+        """3000 W / 230 = ceil(13.04) = 14A, capped at max 16."""
+        assert snap_to_amp_step(3000, min_amps=6, max_amps=16, phases=1) == 14
+
+    def test_custom_amp_range(self):
+        """5000 W → 8A, but min=8 max=12 → 8A."""
+        assert snap_to_amp_step(5000, min_amps=8, max_amps=12, phases=3) == 8
 
 
 # --- resolve_phase_gap unit tests ---

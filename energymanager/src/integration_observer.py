@@ -204,7 +204,6 @@ class IntegrationObserver:
             f"power={o.target_power_w:.0f}W mode={i.charging_mode} "
             f"excess={s.excess_w:.0f}W "
             f"ev_charging={i.ev_charging_power_w:.0f}W "
-            f"strategy={i.ev_forecasted_power_w:.0f}W "
             f"blocked={s.discharge_blocked_by_ev} "
             f"last_sent={s.last_power_limit_sent}"
         )
@@ -437,38 +436,39 @@ class IntegrationObserver:
     def _detect_ec05(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """EC-05: Battery protection blocks SOLAR entry.
 
-        When battery_protection_passed=False and ev_forecasted_power_w>0,
-        the power calculation returns ev_charging_power_w=0.
+        Surplus is above threshold but ev_charging_power_w=0 because
+        battery checks rejected the candidate.
         """
         i = curr.inputs
         if curr.prev_state != EVState.IDLE:
             return None
         if i.charging_mode != "solar" or not i.wallbox_available:
             return None
-        if i.battery_protection_passed:
-            return None  # only fires when protection blocks
-        if i.ev_forecasted_power_w <= 0:
-            return None
-        # Protection blocked → power calculation should have set ev_charging_power_w=0
-        return curr.output.state == EVState.IDLE and i.ev_charging_power_w == 0
+        if i.ev_charging_power_w > 0:
+            return None  # charging allowed — not this scenario
+        if i.surplus_power_w < i.min_power_w:
+            return None  # surplus too low — not protection related
+        return curr.output.state == EVState.IDLE
 
     def _detect_ec06(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """EC-06: Battery protection exits SOLAR.
 
-        Protection failure → power calculation returns 0 → state machine exits.
+        Was in SOLAR, but ev_charging_power_w dropped to 0 (battery check
+        rejected candidate) → state machine exits to IDLE.
         """
         if prev is None:
             return None
         i = curr.inputs
         if prev.output.state != EVState.SOLAR:
             return None
-        if i.battery_protection_passed:
-            return None
+        if i.ev_charging_power_w > 0:
+            return None  # still charging — not this scenario
         if i.wallbox_idle:
             return None
         if i.charging_mode != "solar":
             return None
-        # ev_charging_power_w should be 0 → state exits to IDLE
+        if i.surplus_power_w < i.min_power_w:
+            return None  # surplus too low — not protection related
         return curr.output.state == EVState.IDLE and curr.output.target_power_w == 0
 
     def _detect_ec12(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
