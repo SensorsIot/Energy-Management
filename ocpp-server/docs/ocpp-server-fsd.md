@@ -105,7 +105,7 @@ The wallbox reports its state via OCPP `StatusNotification`. These states drive 
 
 **Re-send logic:** In `SuspendedEVSE` with last sent > 0W, retries at 10s, 30s, 60s intervals. Cloud check runs in parallel — if car-initiated stop confirmed, corrects to `SuspendedEV` and stops retries.
 
-**Keep-alive pulse:** In `SuspendedEVSE` with last sent = 0W (paused by EnergyManager), the server sends a brief minimum-power pulse every 25 minutes to prevent the wallbox session from timing out. Sequence: send `min_current_a × 230 × phases` (e.g. 4140W on 3-phase), wait up to 90s for MeterValues confirmation, then revert to 0W. The pulse timer resets after each pulse. Does not fire in `SuspendedEV` (car-initiated stop).
+**Keep-alive pulse:** In `SuspendedEVSE` with last sent = 0W (paused by EnergyManager), the server sends a brief minimum-power pulse every 25 minutes to prevent the wallbox session from timing out. The pulse is synchronized to the wallbox's MeterValues cadence (~60s): it fires 55s after the last MeterValues (so the next one arrives ~5s later), sends `min_current_a × 230 × phases` (e.g. 4140W on 3-phase), waits up to 15s for MeterValues confirmation, then immediately reverts to 0W. This keeps actual charging to ~5s instead of up to 60s. The pulse timer resets after each pulse. Does not fire in `SuspendedEV` (car-initiated stop).
 
 ## 3. Functional Requirements
 

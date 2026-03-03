@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.42"
+__version__ = "0.9.43"
 
 import asyncio
 import json
@@ -736,27 +736,33 @@ class OCPPServer:
                         self._resend_retry_count += 1
                         self._last_change_at = time.monotonic()
 
-                # Keep-alive pulse: briefly charge to keep session alive while paused
+                # Keep-alive pulse: briefly charge to keep session alive while paused.
+                # Synchronized to MeterValues cadence: fire 57s after the last
+                # MeterValues so the next one arrives ~3s later, minimizing
+                # actual charging to ~3-5s instead of up to 60s.
                 if (
                     self._last_sent_power_w == 0
                     and self.charge_point
                     and self.charge_point.current_status == "SuspendedEVSE"
                     and (time.monotonic() - self._keepalive_last_pulse) >= 1500
+                    and self.charge_point.last_meter_values_time > 0
+                    and (time.monotonic() - self.charge_point.last_meter_values_time) >= 55
                 ):
                     min_power_w = self.min_current_a * 230 * self._current_phases
+                    mv_age = time.monotonic() - self.charge_point.last_meter_values_time
                     logger.info(
-                        f"Keep-alive pulse: sending {min_power_w}W, "
-                        f"waiting for MeterValues confirmation"
+                        f"Keep-alive pulse: sending {min_power_w}W "
+                        f"({mv_age:.0f}s since last MeterValues)"
                     )
                     self.charge_point.meter_values_event.clear()
                     await self.charge_point.set_charging_power(
                         min_power_w, num_phases=self._current_phases
                     )
-                    # Wait for MeterValues confirming power draw
+                    # Wait for next MeterValues (~3s away)
                     try:
                         await asyncio.wait_for(
                             self.charge_point.meter_values_event.wait(),
-                            timeout=90,
+                            timeout=15,
                         )
                         power = (
                             self.charge_point.current_power_w
@@ -769,7 +775,7 @@ class OCPPServer:
                         )
                     except asyncio.TimeoutError:
                         logger.warning(
-                            "Keep-alive pulse: no MeterValues after 90s, "
+                            "Keep-alive pulse: no MeterValues after 15s, "
                             "reverting to 0W anyway"
                         )
                     await self.charge_point.set_charging_power(
