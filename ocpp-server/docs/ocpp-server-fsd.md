@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 3.3 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 3.4 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -105,7 +105,7 @@ The wallbox reports its state via OCPP `StatusNotification`. These states drive 
 
 **Re-send logic:** In `SuspendedEVSE` with last sent > 0W, retries at 10s, 30s, 60s intervals. Cloud check runs in parallel — if car-initiated stop confirmed, corrects to `SuspendedEV` and stops retries.
 
-**Keep-alive pulse:** In `SuspendedEVSE` with last sent = 0W (paused by EnergyManager), the server sends a brief minimum-power pulse every 25 minutes to prevent the wallbox session from timing out. The pulse is synchronized to the wallbox's MeterValues cadence (~60s): it fires 55s after the last MeterValues (so the next one arrives ~5s later), sends `min_current_a × 230 × phases` (e.g. 4140W on 3-phase), waits up to 15s for MeterValues confirmation, then immediately reverts to 0W. This keeps actual charging to ~5s instead of up to 60s. The pulse timer resets after each pulse. Does not fire in `SuspendedEV` (car-initiated stop).
+**Keep-alive pulse:** In `SuspendedEVSE` with last sent = 0W (paused by EnergyManager), the server sends a brief minimum-power pulse every 25 minutes to prevent the wallbox session from timing out. The pulse sends `min_current_a × 230 × phases` (e.g. 4140W on 3-phase), holds for `KEEPALIVE_PULSE_DURATION_S` seconds (tunable constant, currently 5s), then immediately reverts to 0W. The duration is experimentally tuned: reduce until the wallbox transitions to Finishing, then increase slightly. The pulse timer resets after each pulse. Does not fire in `SuspendedEV` (car-initiated stop).
 
 ## 3. Functional Requirements
 
@@ -310,7 +310,7 @@ Non-overlapping ranges provide natural hysteresis.
 | OCPP protocol | W→A conversion via calibration table, SetChargingProfile, RemoteStart |
 | Transactions | Auto-start on >0W, keep alive during pause, end on unplug |
 | Re-send | Throttled retries (10s, 30s, 60s) in SuspendedEVSE |
-| Keep-alive | Pulse min power every 25 min in SuspendedEVSE (paused at 0W) to prevent session timeout |
+| Keep-alive | Pulse min power for `KEEPALIVE_PULSE_DURATION_S` every 25 min in SuspendedEVSE (paused at 0W) to prevent session timeout |
 | Phase switching | Phase selection, relay safety sequence, time lock |
 | Throttle | Rate-limit SetChargingProfile (0W bypasses) |
 | Device quirks | AcTec: SuspendedEVSE bug, integer-only amps, profile-before-start |
@@ -496,3 +496,5 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 | 3.0 | 2026-02-18 | Major interface redesign: car_ready, static min/max, initialization sequence, phase switching with time lock |
 | 3.1 | 2026-02-18 | Simplified FSD: removed duplicate sections, condensed session logs, consolidated entity interface |
 | 3.2 | 2026-03-02 | Document keep-alive pulse behavior in SuspendedEVSE (existing code, previously undocumented) |
+| 3.3 | 2026-03-03 | Section 5.3: AcTec Sample.Clock energy-only MeterValues handling; TC-05b |
+| 3.4 | 2026-03-03 | Simplified keep-alive pulse: fixed-duration sleep instead of MeterValues sync (tunable `KEEPALIVE_PULSE_DURATION_S`) |
