@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.47"
+__version__ = "0.9.48"
 
 import asyncio
 import json
@@ -358,6 +358,8 @@ class OCPPServer:
         # Map transaction started/stopped to charging/idle
         elif key == "transaction":
             state = "charging" if value == "started" else "idle"
+        elif key == "power_w":
+            state = round(value)
         else:
             state = value
 
