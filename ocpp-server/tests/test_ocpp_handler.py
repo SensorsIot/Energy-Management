@@ -192,16 +192,16 @@ class TestSetChargingPowerAmps:
 
     @pytest.mark.asyncio
     async def test_sends_amps_from_watts(self, handler):
-        """SetChargingProfile should convert watts to decimal amps."""
+        """SetChargingProfile should convert watts to integer amps via demand calibration."""
         with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
             mock_call.return_value = type("R", (), {"status": "Accepted"})()
-            result = await handler.set_charging_power(6400, 3)
+            result = await handler.set_charging_power(6288, 3)
             assert result is True
             profile = mock_call.call_args[0][0].cs_charging_profiles
             schedule = profile["charging_schedule"]
             assert schedule["charging_rate_unit"] == "A"
-            # 6400 / (3 * 230) = 9.2753... → rounded to 9.3 (OCPP requires 0.1 multiple)
-            assert schedule["charging_schedule_period"][0]["limit"] == 9.3
+            # 6288 / 637 = 9.87 → round = 10A
+            assert schedule["charging_schedule_period"][0]["limit"] == 10
 
     @pytest.mark.asyncio
     async def test_zero_power(self, handler):

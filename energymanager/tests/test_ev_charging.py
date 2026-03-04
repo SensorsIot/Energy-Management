@@ -2,36 +2,44 @@
 
 from __future__ import annotations
 
-from src.ev_charging import calculate_ev_power, resolve_phase_gap, snap_to_amp_step
+from src.ev_charging import calculate_ev_power, resolve_phase_gap, snap_to_power_step
 
 
-# --- snap_to_amp_step unit tests ---
+# --- snap_to_power_step unit tests ---
 
 
-class TestSnapToAmpStep:
-    def test_surplus_5000_picks_8a(self):
-        """5000 W surplus → ceil(5000/690) = 8A."""
-        assert snap_to_amp_step(5000, min_amps=6, max_amps=16, phases=3) == 8
+class TestSnapToPowerStep:
+    def test_surplus_5000_picks_4354(self):
+        """5000 W surplus → highest step ≤ 5000 = 4354W (7A)."""
+        assert snap_to_power_step(5000) == 4354
 
-    def test_surplus_below_min_uses_min(self):
-        """2000 W surplus (< 6A×690) → clamps to min_amps=6."""
-        assert snap_to_amp_step(2000, min_amps=6, max_amps=16, phases=3) == 6
+    def test_surplus_below_min_returns_zero(self):
+        """2000 W surplus (< 3962W min) → 0."""
+        assert snap_to_power_step(2000) == 0
 
-    def test_surplus_above_max_uses_max(self):
-        """12000 W surplus (> 16A×690) → clamps to max_amps=16."""
-        assert snap_to_amp_step(12000, min_amps=6, max_amps=16, phases=3) == 16
+    def test_surplus_above_max_picks_max(self):
+        """12000 W surplus → picks 7624W (12A, max step)."""
+        assert snap_to_power_step(12000) == 7624
 
     def test_exact_step_boundary(self):
-        """6900 W = exactly 10A×690 → picks 10A."""
-        assert snap_to_amp_step(6900, min_amps=6, max_amps=16, phases=3) == 10
+        """6288 W = exactly 10A step → picks 6288."""
+        assert snap_to_power_step(6288) == 6288
 
-    def test_single_phase(self):
-        """3000 W / 230 = ceil(13.04) = 14A, capped at max 16."""
-        assert snap_to_amp_step(3000, min_amps=6, max_amps=16, phases=1) == 14
+    def test_custom_power_range(self):
+        """5000 W with min=5117 → 0 (only 4354 fits but below min)."""
+        assert snap_to_power_step(5000, min_power_w=5117) == 0
 
-    def test_custom_amp_range(self):
-        """5000 W → 8A, but min=8 max=12 → 8A."""
-        assert snap_to_amp_step(5000, min_amps=8, max_amps=12, phases=3) == 8
+    def test_custom_max(self):
+        """12000 W with max=6288 → 6288."""
+        assert snap_to_power_step(12000, max_power_w=6288) == 6288
+
+    def test_between_steps(self):
+        """5200 W → highest step ≤ 5200 = 5117 (8A)."""
+        assert snap_to_power_step(5200) == 5117
+
+    def test_just_at_min_step(self):
+        """3962 W exactly → picks 3962."""
+        assert snap_to_power_step(3962) == 3962
 
 
 # --- resolve_phase_gap unit tests ---
@@ -68,19 +76,19 @@ class TestCalculateEvPower:
         assert result.target_power_w == 0
 
     def test_excess_in_gap_snaps_down(self):
-        """3900 W rounds to 3900, then gap snaps to 3680."""
+        """3900 W in gap → snaps to 3680."""
         result = calculate_ev_power(excess_w=3900, battery_full=False)
         assert result.target_power_w == 3680
 
     def test_excess_in_gap_battery_full_snaps_up(self):
-        """3900 W rounds to 3900, then gap snaps to 4140."""
+        """3900 W in gap, battery full → snaps to 4140."""
         result = calculate_ev_power(excess_w=3900, battery_full=True)
         assert result.target_power_w == 4140
 
-    def test_at_gap_hi_rounds_to_4100_stays(self):
-        """4140 W rounds to 4100, which is in gap → snaps to 3680 (default battery not full)."""
+    def test_at_gap_hi_stays(self):
+        """4140 W is exactly at gap boundary (exclusive) → stays 4140."""
         result = calculate_ev_power(excess_w=4140, battery_full=False)
-        assert result.target_power_w == 3680
+        assert result.target_power_w == 4140
 
     def test_normal_excess_unaffected(self):
         result = calculate_ev_power(excess_w=7000)
@@ -104,8 +112,7 @@ class TestPhaseGapStability:
     """
 
     # Simulated cloud fluctuation: 20 readings oscillating within the gap
-    # (3701–4139 W).  After _round_to_step(100) they stay in 3800–4100,
-    # all inside the dead zone → must snap consistently.
+    # (3701–4139 W).  All inside the dead zone → must snap consistently.
     _CLOUD_EXCESS_SERIES = [
         3750, 3850, 4050, 3800, 4000,
         3900, 3950, 4100, 3780, 3920,

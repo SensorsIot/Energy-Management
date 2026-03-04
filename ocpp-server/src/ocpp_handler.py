@@ -38,6 +38,10 @@ class ChargePointHandler(CP):
     METER_SCALE = 0.962115
     METER_OFFSET = 105.6
 
+    # Demand calibration: W→A divisor so round(mbus_w / DEMAND_DIVISOR) = correct amps.
+    # Midpoint of safe range [612, 662] from 2026-03-04 M-Bus calibration sweep.
+    DEMAND_DIVISOR = 637
+
     def __init__(
         self, id: str, connection, on_status_change: Optional[Callable] = None
     ):
@@ -233,18 +237,18 @@ class ChargePointHandler(CP):
         """
         Set charging power limit via SetChargingProfile.
 
-        Converts watts to amps and sends via OCPP 1.6 chargingRateUnit=A.
-        Decimal amps are preserved (e.g. 9.5A) to test wallbox granularity.
+        Converts M-Bus watts to integer amps using calibrated divisor,
+        then sends via OCPP 1.6 chargingRateUnit=A.
 
         Args:
-            power_w: Target power in watts
+            power_w: Target power in watts (M-Bus scale)
             num_phases: Number of phases (1 or 3)
         """
         limit_w = max(0, power_w)
-        limit_a = round(limit_w / (num_phases * 230), 1)
+        limit_a = round(limit_w / self.DEMAND_DIVISOR) if limit_w > 0 else 0
 
         logger.info(
-            f"Setting charging power: {limit_w:.0f}W → {limit_a:.1f}A "
+            f"Setting charging power: {limit_w:.0f}W → {limit_a}A "
             f"({num_phases}-phase)"
         )
 

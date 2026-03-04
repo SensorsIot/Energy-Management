@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.78"
+__version__ = "1.6.79"
 
 import json
 import logging
@@ -26,7 +26,7 @@ from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
 from src.appliance_signal import ApplianceSignal
 from src.ev_state_machine import EVStateMachine, EVInputs, EVState
-from src.ev_charging import snap_to_amp_step
+from src.ev_charging import snap_to_power_step, POWER_STEPS_3P
 from src.influxdb_writer import SimulationWriter
 from src.integration_observer import CycleSnapshot, IntegrationObserver
 from src.notifications import init_telegram, notify_error
@@ -913,13 +913,15 @@ class EnergyManager:
                 battery_will_hit_min = False
             elif ev_charging_source == "forecast":
                 battery_will_be_full, _, _ = self.will_battery_hit_full()
-                candidate_amps = snap_to_amp_step(
-                    surplus_power, self.ev_min_amps, self.ev_max_amps, self.ev_phases
+                ev_min_power = self.ev_min_amps * 230 * self.ev_phases
+                ev_max_power = self.ev_max_amps * 230 * self.ev_phases
+                candidate_power = snap_to_power_step(
+                    surplus_power, ev_min_power, ev_max_power
                 )
 
                 if battery_will_be_full:
                     # Case 1: battery will reach 100% — charge at snapped level
-                    ev_charging_power_w = candidate_amps * 230 * self.ev_phases
+                    ev_charging_power_w = candidate_power
                     reaches_target, soc_at_target = self.check_battery_protection(
                         ev_load_wh=ev_charging_power_w * 0.25
                     )
@@ -929,15 +931,16 @@ class EnergyManager:
                         f"forecast → {ev_charging_power_w:.0f}W (battery full)"
                     )
                 else:
-                    # Case 2: battery won't reach 100% — step down until
-                    # battery checks pass or power drops below ev_min_solar_power
+                    # Case 2: battery won't reach 100% — step down through
+                    # discrete power steps until battery checks pass
                     ev_charging_power_w = 0.0
                     reaches_target, soc_at_target = False, 0.0
                     battery_will_hit_min = False
-                    for try_amps in range(candidate_amps, 0, -1):
-                        try_power = try_amps * 230 * self.ev_phases
-                        if try_power < threshold:
-                            break
+                    candidates = [
+                        s for s in reversed(POWER_STEPS_3P)
+                        if s <= candidate_power and s >= threshold
+                    ]
+                    for try_power in candidates:
                         ev_load_wh = try_power * 0.25
                         reaches_target, soc_at_target = self.check_battery_protection(
                             ev_load_wh=ev_load_wh
@@ -947,7 +950,7 @@ class EnergyManager:
                         )
                         if reaches_target and not battery_will_hit_min:
                             ev_charging_power_w = try_power
-                            stepped = f", stepped {candidate_amps}→{try_amps}A" if try_amps < candidate_amps else ""
+                            stepped = f", stepped {candidate_power}→{try_power}W" if try_power < candidate_power else ""
                             ev_source_reason = (
                                 f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
                                 f"forecast → {ev_charging_power_w:.0f}W{stepped}"
@@ -959,7 +962,7 @@ class EnergyManager:
                         if battery_will_hit_min:
                             reasons.append(
                                 f"battery would hit minimum SOC with "
-                                f"{candidate_amps * 230 * self.ev_phases:.0f}W EV load"
+                                f"{candidate_power:.0f}W EV load"
                             )
                         elif not reaches_target:
                             reasons.append(

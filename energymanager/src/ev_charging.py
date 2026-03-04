@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 _PHASE_GAP_LO = 3680  # single-phase maximum (W) — 16A × 230V
 _PHASE_GAP_HI = 4140  # three-phase minimum (W)
 
+# Valid 3-phase power steps — M-Bus ground truth (2026-03-04 calibration)
+# 6A=3962, 7A=4354, 8A=5117, 9A=5727, 10A=6288, 11A=7034, 12A=7624
+POWER_STEPS_3P = [3962, 4354, 5117, 5727, 6288, 7034, 7624]
+
 
 @dataclass
 class EVChargingResult:
@@ -59,7 +63,6 @@ def calculate_ev_power(
     """
     if excess_w >= min_power_w:
         target = min(excess_w, max_power_w)
-        target = _round_to_step(target)
         target = resolve_phase_gap(target, battery_full)
         return EVChargingResult(
             target_power_w=target,
@@ -74,21 +77,18 @@ def calculate_ev_power(
     )
 
 
-def snap_to_amp_step(
+def snap_to_power_step(
     surplus_w: float,
-    min_amps: int,
-    max_amps: int,
-    phases: int,
+    min_power_w: float = 3962,
+    max_power_w: float = 7624,
 ) -> int:
-    """Snap surplus power to the next wallbox amp level.
+    """Return the highest discrete power step ≤ surplus_w within [min, max].
 
-    Returns amps clamped to [min_amps, max_amps].
+    Picks from POWER_STEPS_3P (M-Bus calibrated values).
+    Returns 0 if no valid step fits.
     """
-    step_w = 230 * phases
-    raw_amps = int(-(-surplus_w // step_w))  # ceil without import
-    return max(min_amps, min(raw_amps, max_amps))
-
-
-def _round_to_step(value: float, step: float = 100) -> float:
-    """Round to nearest step (matches number.wallbox_power_limit step size)."""
-    return round(value / step) * step
+    best = 0
+    for step in POWER_STEPS_3P:
+        if step <= surplus_w and min_power_w <= step <= max_power_w:
+            best = step
+    return best
