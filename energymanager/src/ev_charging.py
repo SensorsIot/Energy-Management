@@ -82,13 +82,19 @@ def snap_to_power_step(
     min_power_w: float = 3962,
     max_power_w: float = 7624,
 ) -> int:
-    """Return the highest discrete power step ≤ surplus_w within [min, max].
+    """Snap surplus to the best discrete power step within [min, max].
 
-    Picks from POWER_STEPS_3P (M-Bus calibrated values).
-    Returns 0 if no valid step fits.
+    Picks highest step ≤ surplus from POWER_STEPS_3P.
+    If surplus is below all steps, returns the minimum step
+    (battery covers the difference).
+    Returns 0 only if no step fits within [min, max].
     """
-    best = 0
-    for step in POWER_STEPS_3P:
-        if step <= surplus_w and min_power_w <= step <= max_power_w:
-            best = step
-    return best
+    valid = [s for s in POWER_STEPS_3P if min_power_w <= s <= max_power_w]
+    if not valid:
+        return 0
+    # Highest step that fits within surplus
+    best = [s for s in valid if s <= surplus_w]
+    if best:
+        return best[-1]
+    # Surplus below all steps — return minimum (battery covers gap)
+    return valid[0]

@@ -13,9 +13,9 @@ class TestSnapToPowerStep:
         """5000 W surplus → highest step ≤ 5000 = 4354W (7A)."""
         assert snap_to_power_step(5000) == 4354
 
-    def test_surplus_below_min_returns_zero(self):
-        """2000 W surplus (< 3962W min) → 0."""
-        assert snap_to_power_step(2000) == 0
+    def test_surplus_below_steps_returns_min(self):
+        """2000 W surplus (< 3962W) → returns min step, battery covers gap."""
+        assert snap_to_power_step(2000) == 3962
 
     def test_surplus_above_max_picks_max(self):
         """12000 W surplus → picks 7624W (12A, max step)."""
@@ -26,8 +26,8 @@ class TestSnapToPowerStep:
         assert snap_to_power_step(6288) == 6288
 
     def test_custom_power_range(self):
-        """5000 W with min=5117 → 0 (only 4354 fits but below min)."""
-        assert snap_to_power_step(5000, min_power_w=5117) == 0
+        """5000 W with min=5117 → returns 5117 (min valid step)."""
+        assert snap_to_power_step(5000, min_power_w=5117) == 5117
 
     def test_custom_max(self):
         """12000 W with max=6288 → 6288."""
