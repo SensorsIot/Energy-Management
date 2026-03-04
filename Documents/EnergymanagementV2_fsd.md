@@ -1805,7 +1805,7 @@ load_percent = extra_load_wh / capacity_wh × 100
 | Example load | Wh | SOC impact (10 kWh battery) |
 |---|---|---|
 | Washing machine | 1500 Wh | −15% |
-| EV at 4140W × 15 min | 1035 Wh | −10.4% |
+| EV at 3962W × 15 min | 991 Wh | −9.9% |
 | EV at 8000W × 15 min | 2000 Wh | −20% |
 | EV at 11040W × 15 min | 2760 Wh | −27.6% |
 
@@ -2044,15 +2044,29 @@ The power calculation branches on whether the battery will reach 100%. Battery c
 
 **`ev_min_solar_power`** is the minimum power gate. The live `sensor.surplus_power` (solar − house load) must exceed this threshold for EV charging to start. It also serves as the step-down floor — below this level, there isn't enough surplus to justify charging.
 
-#### Snap-to-Amp Step
+#### Snap-to-Power Step
 
-The snap-to-amp calculation converts the live `surplus_power` into the next wallbox amp level at or above the surplus (ceiling division), producing one of a fixed set of power levels (4140, 4830, ..., 11040 W) because the car only accepts whole amps (690 W steps on 3-phase). The battery absorbs the gap between the coarse step and the actual surplus.
+The wallbox only charges at integer amp levels. The energymanager picks from a discrete set of **M-Bus calibrated power steps** — the actual power delivered at each amp level, measured via M-Bus ground truth (2026-03-04 calibration sweep):
 
-**Inputs:** `surplus_power` (live measurement from `sensor.surplus_power`), `min_current_a` (default 6A), `max_current_a` (default 16A), `phases` (default 3).
+| Amps | Delivered power (M-Bus W) |
+|-----:|--------------------------:|
+| 6 | 3962 |
+| 7 | 4354 |
+| 8 | 5117 |
+| 9 | 5727 |
+| 10 | 6288 |
+| 11 | 7034 |
+| 12 | 7624 |
 
-**Calculation:** `candidate_amps = ceil(surplus_power / (230 × phases))`, clamped to `[min_current_a, max_current_a]`. Candidate power = `candidate_amps × 230 × phases`.
+These values differ from the nominal `amps × 230V × 3` because real grid voltage is ~220V, not 230V. Using M-Bus values ensures the energymanager's energy accounting (battery protection, surplus calculation) matches what the wallbox actually delivers.
 
-**Battery gating (step-down loop):** In Case 2 (battery won't reach 100%), the candidate amp level is checked against the battery forecast functions (Section 4.4). If the battery cannot sustain the load at the snapped level, the loop steps down one amp at a time and re-checks until either: (a) `reaches_target` AND NOT `will_hit_minimum`, or (b) the power drops below `ev_min_solar_power` (floor). If the winning level is below the wallbox hardware minimum, the hard floor clamp raises it to `wallbox_min_power_w` and the battery covers the difference. In Case 1 (battery will reach 100%), the snapped level is used directly — no step-down needed.
+**Inputs:** `surplus_power` (live measurement from `sensor.surplus_power`).
+
+**Calculation:** `snap_to_power_step(surplus_power)` returns the highest M-Bus step ≤ surplus. If surplus is below all steps but above `ev_min_solar_power`, the minimum step (3962W) is returned — the battery covers the difference.
+
+The OCPP server converts M-Bus watts to integer amps using a calibrated divisor: `round(power_w / 637)`. The divisor 637 (safe range [612, 662]) ensures each M-Bus value maps to the correct amp level.
+
+**Battery gating (step-down loop):** In Case 2 (battery won't reach 100%), the candidate power step is checked against the battery forecast functions (Section 4.4). If the battery cannot sustain the load at the snapped level, the loop steps down through discrete power steps and re-checks until either: (a) `reaches_target` AND NOT `will_hit_minimum`, or (b) no more steps above `ev_min_solar_power` remain. In Case 1 (battery will reach 100%), the snapped level is used directly — no step-down needed.
 
 Because `control_ev_charging()` runs every 10 seconds with live surplus, the system is self-correcting:
 
@@ -2063,7 +2077,7 @@ Because `control_ev_charging()` runs every 10 seconds with live surplus, the sys
 | Load increases | Surplus drops → next cycle adapts down |
 | Load decreases | Surplus rises → next cycle may increase power |
 
-**Rate limiting:** The wallbox power limit (`number.wallbox_power_limit`) is only sent when it differs from the last-sent value **and** at least 60 seconds have passed since the last change. This prevents oscillation at amp-step boundaries (e.g. surplus hovering near 4140/4830W causing the wallbox to flip between 6A and 7A every 10 seconds). 0W (pause) bypasses the rate limit for safety. The dashboard sensor `sensor.ev_target_power` still updates every 10 seconds to show the desired power.
+**Rate limiting:** The wallbox power limit (`number.wallbox_power_limit`) is only sent when it differs from the last-sent value **and** at least 60 seconds have passed since the last change. This prevents oscillation at power-step boundaries (e.g. surplus hovering near 3962/4354W causing the wallbox to flip between 6A and 7A every 10 seconds). 0W (pause) bypasses the rate limit for safety. The dashboard sensor `sensor.ev_target_power` still updates every 10 seconds to show the desired power.
 
 #### Surplus Capture
 
@@ -2077,10 +2091,10 @@ Surplus capture measures real-time grid export and converts it into a wallbox po
 
 | Scenario | What happens |
 |----------|-------------|
-| **Good morning** | Surplus rises above `ev_min_solar_power` → snap-to-amp picks amp level matching surplus. Battery buffers the gap between amp step and actual surplus. |
-| **Afternoon** | Surplus drops each cycle → lower amp level. Eventually surplus drops below `ev_min_solar_power` → 0. |
+| **Good morning** | Surplus rises above `ev_min_solar_power` → snap-to-power-step picks M-Bus power level matching surplus. Battery buffers the gap between the discrete step and actual surplus. |
+| **Afternoon** | Surplus drops each cycle → lower power step. Eventually surplus drops below `ev_min_solar_power` → 0. |
 | **Bad/cloudy day** | Battery forecast checks adapt. Small surplus still charges EV if battery can sustain it. |
-| **Peak solar** | High surplus → high amps. Battery charges the excess between steps. |
+| **Peak solar** | High surplus → higher power step. Battery charges the excess between steps. |
 | **Battery will be full** | Case 1 — snapped surplus level used directly, no step-down needed. Energy would be curtailed anyway. |
 | **Low surplus (e.g. 1000W)** | Below `ev_min_solar_power` → no charging. Not enough to justify starting the wallbox. |
 | **Enphase exporting** | Surplus capture: grid export ≥ `ev_min_solar_power` → 1-phase charging captures the export. |
@@ -3029,15 +3043,28 @@ cd energymanager && python -m pytest tests/test_discharge_blocking.py -v
 
 Test file: `energymanager/tests/test_ev_charging.py`
 
-Tests the `calculate_ev_power()` pure function and `resolve_phase_gap()` logic (Section 4.6).
+Tests the `snap_to_power_step()`, `calculate_ev_power()`, and `resolve_phase_gap()` logic (Section 4.6).
+
+#### `snap_to_power_step()` — Discrete M-Bus Power Steps
+
+| Test | Surplus | Expected | Reason |
+|------|---------|----------|--------|
+| `test_surplus_5000_picks_4354` | 5000 W | 4354 W | Highest step ≤ 5000 (7A) |
+| `test_surplus_below_steps_returns_min` | 2000 W | 3962 W | Below all steps → min (battery covers gap) |
+| `test_surplus_above_max_picks_max` | 12000 W | 7624 W | Max step (12A) |
+| `test_exact_step_boundary` | 6288 W | 6288 W | Exact 10A step |
+| `test_custom_power_range` | 5000 W (min=5117) | 5117 W | Min valid step |
+| `test_custom_max` | 12000 W (max=6288) | 6288 W | Capped at custom max |
+| `test_between_steps` | 5200 W | 5117 W | Highest step ≤ 5200 (8A) |
+| `test_just_at_min_step` | 3962 W | 3962 W | Exact min step (6A) |
 
 #### `resolve_phase_gap()` — Dead Zone Handling
 
 | Test | Input | battery_full | Expected |
 |------|-------|-------------|----------|
-| `test_in_gap_battery_not_full_snaps_down` | 3900 W | False | 3700 W |
+| `test_in_gap_battery_not_full_snaps_down` | 3900 W | False | 3680 W |
 | `test_in_gap_battery_full_snaps_up` | 3900 W | True | 4140 W |
-| `test_at_gap_lo_no_snap` | 3700 W | False | 3700 W (boundary exclusive) |
+| `test_at_gap_lo_no_snap` | 3680 W | False | 3680 W (boundary exclusive) |
 | `test_at_gap_hi_no_snap` | 4140 W | True | 4140 W (boundary exclusive) |
 | `test_below_gap_unaffected` | 2000 W | False | 2000 W |
 | `test_above_gap_unaffected` | 7000 W | True | 7000 W |
@@ -3047,9 +3074,9 @@ Tests the `calculate_ev_power()` pure function and `resolve_phase_gap()` logic (
 | Test | Excess | Expected | Reason |
 |------|--------|----------|--------|
 | `test_below_min_pauses` | 1000 W | 0 W | Below 1400 W minimum |
-| `test_excess_in_gap_snaps_down` | 3900 W | 3700 W | Gap snap (battery not full) |
+| `test_excess_in_gap_snaps_down` | 3900 W | 3680 W | Gap snap (battery not full) |
 | `test_excess_in_gap_battery_full_snaps_up` | 3900 W | 4140 W | Gap snap (battery full) |
-| `test_at_gap_hi_rounds_to_4100_stays` | 4140 W | 3700 W | Rounds to 4100 → in gap → snap |
+| `test_at_gap_hi_stays` | 4140 W | 4140 W | At boundary (exclusive) → stays |
 | `test_normal_excess_unaffected` | 7000 W | 7000 W | Normal pass-through |
 | `test_clamps_to_max` | 15000 W | 11000 W | Clamped to max_power_w |
 
@@ -3057,7 +3084,7 @@ Tests the `calculate_ev_power()` pure function and `resolve_phase_gap()` logic (
 
 | Test | Description | Expected |
 |------|-------------|----------|
-| `test_cloud_fluctuation_battery_not_full` | 20 excess values oscillating in gap (3750–4130 W) | All snap to 3700 W, zero phase switches |
+| `test_cloud_fluctuation_battery_not_full` | 20 excess values oscillating in gap (3750–4130 W) | All snap to 3680 W, zero phase switches |
 | `test_cloud_fluctuation_battery_full` | Same series, battery full | All snap to 4140 W, zero phase switches |
 
 **Run tests:**
@@ -3065,7 +3092,7 @@ Tests the `calculate_ev_power()` pure function and `resolve_phase_gap()` logic (
 cd energymanager && python -m pytest tests/test_ev_charging.py -v
 ```
 
-**All 14 tests passing** (as of v1.6.28)
+**All 20 tests passing** (as of v1.6.80)
 
 ---
 
@@ -3449,6 +3476,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.35: Discrete M-Bus power steps (Section 4.6.6) — replaced nominal `amps × 230 × 3` power steps with M-Bus calibrated values from 2026-03-04 sweep; `snap_to_power_step()` replaces `snap_to_amp_step()`; energymanager works in real-world watts; OCPP server demand calibration converts M-Bus watts to integer amps via `round(W/637)` (v1.6.81, v0.9.47)
 - v2.34: Added step-down loop for Rule 2 battery protection (Section 4.6.6) — when snapped candidate amp level fails battery checks, step down one amp at a time until checks pass or power drops below `ev_min_solar_power`; `will_battery_hit_full()` checked once outside loop; prevents all-or-nothing blocking when a lower amp level would be sustainable (v1.6.75)
 - v2.33: Removed EVChargingStrategy class — EV Rule 2 now uses inline `snap_to_amp_step()` (every 10 s) instead of stale 15-min forecast strategy; removed `ev_forecasted_power_w` and `battery_protection_passed` fields from EVInputs; replaced `forecast_power_w` sensor attribute with `candidate_power_w`; removed `battery_protection` sensor attribute (redundant with `reaches_target`); deleted `ev_strategy.py`; updated observer EC-05/EC-06 detectors (v1.6.74)
 - v2.33: Rate-limit wallbox power limit changes to 60s minimum interval (Section 4.6.6) — prevents oscillation at amp-step boundaries; 0W bypass for safety; ev_target_power still updates every 10s for dashboard

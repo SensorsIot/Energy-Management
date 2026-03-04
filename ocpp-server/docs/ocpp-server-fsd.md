@@ -307,7 +307,7 @@ Non-overlapping ranges provide natural hysteresis.
 
 | Responsibility | Details |
 |----------------|---------|
-| OCPP protocol | W→A conversion, meter power correction (linear regression), SetChargingProfile, RemoteStart |
+| OCPP protocol | W→A demand calibration (`round(W/637)`), meter power correction (linear regression), SetChargingProfile, RemoteStart |
 | Transactions | Auto-start on >0W, keep alive during pause, end on unplug |
 | Re-send | Throttled retries (10s, 30s, 60s) in SuspendedEVSE |
 | Keep-alive | Pulse min power every 25 min in SuspendedEVSE (paused at 0W); wait for Charging confirmation, then revert to 0W |
@@ -412,7 +412,31 @@ Regression on 2026-03-04 sweep (6–14A), max residual ≈ 33W (<0.5%).
 
 15A/16A excluded (solar noise during measurement).
 
-### 7.2 Historical: Grid Meter Calibration (2026-02-11)
+The corrected power is published to `sensor.wallbox_power` as an integer (rounded for display).
+
+### 7.2 Demand Calibration (v0.9.47)
+
+The energymanager sends demand values in M-Bus watts (the actual power delivered at each amp level). The OCPP server converts these to integer amps using a calibrated divisor:
+
+```
+limit_a = round(power_w / 637)
+```
+
+The divisor 637 is the midpoint of the safe range [612, 662], derived from the M-Bus calibration sweep. This ensures each M-Bus power value maps to the correct integer amp:
+
+| M-Bus W | W / 637 | round() | Correct A |
+|--------:|--------:|--------:|----------:|
+| 3962 | 6.22 | 6 | 6 ✓ |
+| 4354 | 6.83 | 7 | 7 ✓ |
+| 5117 | 8.03 | 8 | 8 ✓ |
+| 5727 | 8.99 | 9 | 9 ✓ |
+| 6288 | 9.87 | 10 | 10 ✓ |
+| 7034 | 11.04 | 11 | 11 ✓ |
+| 7624 | 11.97 | 12 | 12 ✓ |
+
+This replaces the previous `round(W / (phases × 230), 1)` formula which produced decimal amps and relied on the wallbox's internal flooring.
+
+### 7.3 Historical: Grid Meter Calibration (2026-02-11)
 
 Measured with AcTec EV-AC22K (FW V1.17.9), 3-phase. Superseded by §7.1.
 
