@@ -307,7 +307,7 @@ Non-overlapping ranges provide natural hysteresis.
 
 | Responsibility | Details |
 |----------------|---------|
-| OCPP protocol | W→A conversion via calibration table, SetChargingProfile, RemoteStart |
+| OCPP protocol | W→A conversion, meter power correction (linear regression), SetChargingProfile, RemoteStart |
 | Transactions | Auto-start on >0W, keep alive during pause, end on unplug |
 | Re-send | Throttled retries (10s, 30s, 60s) in SuspendedEVSE |
 | Keep-alive | Pulse min power every 25 min in SuspendedEVSE (paused at 0W); wait for Charging confirmation, then revert to 0W |
@@ -385,9 +385,36 @@ AcTec always reports `SuspendedEVSE` regardless of whether the charger or car in
 | Entity update latency | < 500ms |
 | Memory | < 100MB RSS |
 
-## 7. Calibration Data
+## 7. Meter Power Correction
 
-Measured 2026-02-11 with AcTec EV-AC22K (FW V1.17.9), 3-phase.
+### 7.1 Linear Regression (v0.9.46)
+
+OCPP MeterValues over-report power compared to M-Bus ground truth.
+Corrected at source in `on_meter_values()` using a single linear formula:
+
+```
+corrected = 0.962115 × raw + 105.6
+```
+
+Regression on 2026-03-04 sweep (6–14A), max residual ≈ 33W (<0.5%).
+
+| Amps | OCPP W | M-Bus W (actual) | Error W |
+|-----:|-------:|-----------------:|--------:|
+|    6 |   3999 |             3962 |     -37 |
+|    7 |   4438 |             4354 |     -84 |
+|    8 |   5175 |             5117 |     -58 |
+|    9 |   5829 |             5727 |    -102 |
+|   10 |   6447 |             6288 |    -159 |
+|   11 |   7211 |             7034 |    -177 |
+|   12 |   7848 |             7624 |    -224 |
+|   13 |   8520 |             8303 |    -217 |
+|   14 |   9245 |             9029 |    -216 |
+
+15A/16A excluded (solar noise during measurement).
+
+### 7.2 Historical: Grid Meter Calibration (2026-02-11)
+
+Measured with AcTec EV-AC22K (FW V1.17.9), 3-phase. Superseded by §7.1.
 
 | Req A | Req W | WB Total W | Meter Diff W | Delta W |
 |------:|------:|-----------:|-------------:|--------:|
@@ -402,8 +429,6 @@ Measured 2026-02-11 with AcTec EV-AC22K (FW V1.17.9), 3-phase.
 |     8 |  5520 |       5019 |         5137 |    +118 |
 |     7 |  4830 |       4311 |         3863 |    -448 |
 |     6 |  4140 |       3970 |         4094 |    +124 |
-
-Wallbox draws ~1A less than requested. Delta ~100–190W (cable losses + background load). 7A outlier: solar transient during measurement.
 
 ## 8. Test Cases
 

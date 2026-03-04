@@ -32,21 +32,11 @@ class ChargePointHandler(CP):
     Handles incoming messages from wallbox and sends commands.
     """
 
-    # 3-phase calibration: (requested_amps, metered_watts_at_grid)
-    # Measured 2026-02-11 on AcTec EV-AC22K, grid meter = EBL M-Bus via gPlug.
-    # 7A excluded (unreliable DTSU transient during measurement).
-    CALIBRATION_3P = [
-        (6, 4094),
-        (8, 5137),
-        (9, 5835),
-        (10, 6445),
-        (11, 7245),
-        (12, 7852),
-        (13, 8545),
-        (14, 9321),
-        (15, 10007),
-        (16, 10623),
-    ]
+    # Linear meter correction: corrected = METER_SCALE * raw + METER_OFFSET
+    # Regression on 2026-03-04 sweep (6–14A): OCPP MeterValues vs M-Bus.
+    # Max residual ≈ 33W (<0.5%).
+    METER_SCALE = 0.962115
+    METER_OFFSET = 105.6
 
     def __init__(
         self, id: str, connection, on_status_change: Optional[Callable] = None
@@ -147,6 +137,8 @@ class ChargePointHandler(CP):
                     if self.on_status_change:
                         self.on_status_change("energy_wh", value)
 
+        total_power = self._correct_meter_power(total_power)
+
         self.last_meter_values_time = time.monotonic()
         self.meter_values_event.set()
 
@@ -227,27 +219,15 @@ class ChargePointHandler(CP):
 
     # ========== Outgoing commands to wallbox ==========
 
-    def _calibrated_current(self, power_w: float, num_phases: int) -> float:
-        """Convert target power to request current using calibration data.
+    def _correct_meter_power(self, raw_w: float) -> float:
+        """Correct OCPP MeterValues power using linear regression.
 
-        For 3-phase: linear interpolation on measured calibration table.
-        For 1-phase or uncalibrated: naive formula power / (230 * phases).
+        corrected = METER_SCALE * raw + METER_OFFSET
+        Returns raw value unchanged when not charging (raw <= 0).
         """
-        if power_w <= 0:
-            return 0.0
-        if num_phases == 3 and self.CALIBRATION_3P:
-            table = self.CALIBRATION_3P
-            if power_w <= table[0][1]:
-                return float(table[0][0])
-            if power_w >= table[-1][1]:
-                return float(table[-1][0])
-            for i in range(len(table) - 1):
-                a1, w1 = table[i]
-                a2, w2 = table[i + 1]
-                if w1 <= power_w <= w2:
-                    ratio = (power_w - w1) / (w2 - w1)
-                    return a1 + ratio * (a2 - a1)
-        return power_w / (230 * num_phases)
+        if raw_w <= 0:
+            return raw_w
+        return self.METER_SCALE * raw_w + self.METER_OFFSET
 
     async def set_charging_power(self, power_w: float, num_phases: int = 3):
         """

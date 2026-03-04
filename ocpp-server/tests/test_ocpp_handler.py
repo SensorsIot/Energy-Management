@@ -68,12 +68,13 @@ class TestMeterValues:
 
     @pytest.mark.asyncio
     async def test_power_meter_value(self, mock_connection):
-        """Power meter value should update current_power_w."""
+        """Power meter value should be corrected and update current_power_w."""
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
         # Power is only accepted during an active transaction
         handler.transaction_id = 1
 
+        # OCPP reports 7000W → corrected = 0.962115 * 7000 + 105.6 = 6840.4
         await handler.on_meter_values(
             connector_id=1,
             meter_value=[
@@ -85,8 +86,11 @@ class TestMeterValues:
             ],
         )
 
-        assert handler.current_power_w == 7000
-        callback.assert_called_with("power_w", 7000)
+        expected = 0.962115 * 7000 + 105.6
+        assert handler.current_power_w == pytest.approx(expected, abs=0.1)
+        callback.assert_called_once()
+        assert callback.call_args[0][0] == "power_w"
+        assert callback.call_args[0][1] == pytest.approx(expected, abs=0.1)
 
     @pytest.mark.asyncio
     async def test_energy_meter_value(self, mock_connection):
