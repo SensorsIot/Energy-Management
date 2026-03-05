@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.48"
+__version__ = "0.9.49"
 
 import asyncio
 import json
@@ -642,7 +642,7 @@ class OCPPServer:
         await self.ha.set_state("sensor.wallbox_phases", self._current_phases)
         if cp:
             await self.ha.set_state("sensor.wallbox_status", cp.current_status)
-            await self.ha.set_state("sensor.wallbox_power", cp.current_power_w)
+            await self.ha.set_state("sensor.wallbox_power", round(cp.current_power_w))
             await self.ha.set_state("sensor.wallbox_energy", cp.session_energy_wh)
             txn = "charging" if cp.transaction_id is not None else "idle"
             await self.ha.set_state("sensor.wallbox_transaction", txn)
