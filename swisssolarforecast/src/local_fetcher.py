@@ -49,15 +49,38 @@ class LocalFetcher:
         self.parameters = parameters or DEFAULT_PARAMETERS
 
     def _find_latest_item(self) -> dict | None:
-        """Find the latest STAC item in the local forecasting collection."""
-        url = f"{STAC_API_URL}/collections/{COLLECTION}/items?limit=1"
+        """Find the STAC item with the most recent forecast run.
+
+        MeteoSwiss groups items by day and doesn't support sortby,
+        so we fetch several recent items and pick the one whose assets
+        contain the highest run timestamp.
+        """
+        url = f"{STAC_API_URL}/collections/{COLLECTION}/items?limit=5"
         try:
             r = requests.get(url, timeout=30)
             r.raise_for_status()
             data = r.json()
             features = data.get("features", [])
-            if features:
-                return features[0]
+            if not features:
+                return None
+
+            # Find the item with the newest run timestamp in its assets
+            best_item = None
+            best_run = ""
+            first_param = next(iter(self.parameters.values()))
+
+            for item in features:
+                for key in item.get("assets", {}):
+                    if first_param in key:
+                        match = re.search(r"(\d{12})", key)
+                        if match and match.group(1) > best_run:
+                            best_run = match.group(1)
+                            best_item = item
+
+            if best_item:
+                logger.debug(f"Selected item with latest run {best_run}")
+            return best_item
+
         except Exception as e:
             logger.error(f"Failed to query local forecasting collection: {e}")
         return None
