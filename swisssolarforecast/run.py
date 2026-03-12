@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
+import pandas as pd
 import requests
 import yaml
 
@@ -38,7 +39,8 @@ from src.scheduler import ForecastScheduler
 from src.influxdb_writer import ForecastWriter
 from src.icon_fetcher import IconFetcher
 from src.grib_parser import load_hybrid_ensemble_forecast
-from src.pv_model import forecast_ensemble_plants
+from src.pv_model import forecast_ensemble_plants, forecast_all_plants
+from src.local_fetcher import LocalFetcher
 from src.config import PVSystemConfig
 from src.accuracy_tracker import AccuracyTracker, create_accuracy_tracker
 from src.shading_tracker import ShadingTracker, create_shading_tracker
@@ -158,6 +160,27 @@ class SwissSolarForecast:
             shading_update=self.update_shading_factors if self.shading_tracker else None,
         )
 
+        # Add local point forecast job (hourly, parallel to GRIB pipeline)
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        self.scheduler.scheduler.add_job(
+            self._local_forecast_job,
+            IntervalTrigger(minutes=60),
+            id="local_forecast",
+            name="Fetch and calculate local forecast",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
+    def _local_forecast_job(self):
+        """Job wrapper for local forecast calculation."""
+        logger.info("Scheduled local forecast starting...")
+        try:
+            self.calculate_local_forecast()
+        except Exception as e:
+            logger.error(f"Local forecast job failed: {e}", exc_info=True)
+
     def fetch_ch1(self):
         """Fetch ICON-CH1 ensemble data."""
         logger.info("Fetching ICON-CH1 data...")
@@ -189,7 +212,7 @@ class SwissSolarForecast:
             variables=["ASOB_S", "T_2M"],
             output_dir=self.data_dir / "icon-ch2",
             hour_start=33,  # Start after CH1 horizon to avoid overlap
-            hour_end=60,    # Must reach next 21:00 cheap tariff (~48h worst case)
+            hour_end=120,   # CH2 max horizon (5 days)
         )
 
         try:
@@ -255,6 +278,58 @@ class SwissSolarForecast:
         except Exception as e:
             logger.error(f"Forecast calculation failed: {e}", exc_info=True)
             raise
+
+    def calculate_local_forecast(self):
+        """Fetch MeteoSwiss local point forecast and calculate PV power."""
+        logger.info("Calculating local point forecast...")
+
+        try:
+            fetcher = LocalFetcher(point_id=441500)
+            weather = fetcher.fetch_latest()
+
+            if weather.empty:
+                logger.warning("No local forecast data available")
+                return
+
+            # Load shading factors if available
+            shading_factors = None
+            if self.shading_tracker:
+                shading_factors = self.shading_tracker.load_shading_factors()
+
+            # Single deterministic forecast through same PV model
+            pv_forecast = forecast_all_plants(
+                weather,
+                plants=self.pv_config.plants,
+                shading_factors=shading_factors,
+            )
+            logger.info(f"Local PV forecast: {len(pv_forecast)} time steps")
+
+            # Wrap as P10=P50=P90 (deterministic, no ensemble spread)
+            output = pd.DataFrame(index=pv_forecast.index)
+            for percentile in ["p10", "p50", "p90"]:
+                output[f"total_ac_power_{percentile}"] = pv_forecast["total_ac_power"]
+                for col in pv_forecast.columns:
+                    if col.endswith("_ac_power") and col != "total_ac_power":
+                        inv_name = col.replace("_ac_power", "")
+                        output[f"{inv_name}_ac_power_{percentile}"] = pv_forecast[col]
+
+            # Copy weather columns
+            for col in ["ghi", "temp_air"]:
+                if col in pv_forecast.columns:
+                    output[col] = pv_forecast[col]
+
+            # Write to InfluxDB with model="local" tag
+            if self.influx_writer:
+                self.influx_writer.write_pv_forecast(
+                    pv_forecast=output,
+                    model="local",
+                    run_time=datetime.now(timezone.utc),
+                    resample_minutes=15,
+                )
+                logger.info("Local forecast written to InfluxDB")
+
+        except Exception as e:
+            logger.error(f"Local forecast failed: {e}", exc_info=True)
 
     def snapshot_forecast(self):
         """Snapshot current forecast for accuracy tracking (21:00 daily)."""
@@ -341,6 +416,12 @@ class SwissSolarForecast:
             self.calculate_forecast()
         except Exception as e:
             logger.warning(f"Initial calculation failed: {e}")
+
+        logger.info("Running initial local forecast...")
+        try:
+            self.calculate_local_forecast()
+        except Exception as e:
+            logger.warning(f"Initial local forecast failed: {e}")
 
         self.running = True
         logger.info("SwissSolarForecast add-on started successfully")
@@ -459,7 +540,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("SwissSolarForecast Add-on v1.2.4")
+    logger.info("SwissSolarForecast Add-on v1.3.0")
     logger.info("=" * 60)
 
     # Load options

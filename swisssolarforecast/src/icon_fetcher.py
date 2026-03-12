@@ -367,11 +367,11 @@ def fetch_hybrid_forecast(
     latitude: float,
     longitude: float,
     output_dir: Path,
-    target_hours: int = 48,
+    target_hours: int = 120,
 ) -> dict:
     """
     Fetch hybrid CH1+CH2 forecast with ensemble data.
-    
+
     - CH1: hours 0-33 (or until target_hours if less)
     - CH2: hours 33-target_hours (to fill the gap)
     
