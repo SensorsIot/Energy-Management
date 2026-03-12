@@ -15,7 +15,7 @@ Phase 2: Evaluation (21:15 daily local time)
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -165,15 +165,20 @@ class AccuracyTracker:
             logger.warning(f"Could not parse numeric value from {entity_id}: {state.get('state')}")
             return None
 
-    def snapshot_forecast(self, decision_time: Optional[datetime] = None) -> bool:
+    def snapshot_forecast(
+        self,
+        decision_time: Optional[datetime] = None,
+        model: str = "hybrid",
+    ) -> bool:
         """
         Snapshot current forecast for the next 24h period at decision time.
 
         This is called at 21:00 daily to freeze the forecast that will be
-        compared with actuals the next day.
+        compared with actuals the next day. Called once per model (hybrid, local).
 
         Args:
             decision_time: Override decision time (default: now)
+            model: Forecast model to snapshot ("hybrid" or "local")
 
         Returns:
             True if snapshot was successful
@@ -185,16 +190,16 @@ class AccuracyTracker:
         snapshot_id = decision_time.strftime("%Y-%m-%d")
         snapshot_type = "battery_21h"
 
-        logger.info(f"Creating forecast snapshot for {snapshot_id}")
+        logger.info(f"Creating forecast snapshot for {snapshot_id} model={model}")
 
         # Define the 24h period to snapshot (21:00 to next day 21:00)
         snapshot_start = decision_time.replace(minute=0, second=0, microsecond=0)
         snapshot_end = snapshot_start + timedelta(hours=24)
 
-        # Query current forecast from pv_forecast bucket
-        forecast_data = self._query_forecast(snapshot_start, snapshot_end)
+        # Query current forecast from pv_forecast bucket, filtered by model
+        forecast_data = self._query_forecast(snapshot_start, snapshot_end, model=model)
         if forecast_data is None or forecast_data.empty:
-            logger.error("No forecast data available for snapshot")
+            logger.error(f"No forecast data available for snapshot (model={model})")
             return False
 
         # Get the run_time from the forecast
@@ -220,6 +225,7 @@ class AccuracyTracker:
                     Point("pv_forecast_snapshot")
                     .tag("snapshot_type", snapshot_type)
                     .tag("snapshot_id", snapshot_id)
+                    .tag("model", model)
                     .tag("inverter", inverter_name)
                     .tag("string", string_name)
                     .tag("forecast_run_time", forecast_run_time)
@@ -230,27 +236,29 @@ class AccuracyTracker:
                 )
                 points.append(point)
 
-        # Write snapshot metadata (decision context)
-        soc = self._get_ha_numeric_value(self.soc_entity)
-        discharge_power = self._get_ha_numeric_value(self.discharge_control_entity)
-        discharge_blocked = discharge_power is not None and discharge_power == 0
+        # Write snapshot metadata (decision context) — only for hybrid (battery decision)
+        if model == "hybrid":
+            soc = self._get_ha_numeric_value(self.soc_entity)
+            discharge_power = self._get_ha_numeric_value(self.discharge_control_entity)
+            discharge_blocked = discharge_power is not None and discharge_power == 0
 
-        meta_point = (
-            Point("pv_forecast_snapshot_meta")
-            .tag("snapshot_type", snapshot_type)
-            .tag("snapshot_id", snapshot_id)
-            .field("soc_at_decision", soc if soc is not None else 0.0)
-            .field("decision_discharge_blocked", discharge_blocked)
-            .field("forecast_run_time", forecast_run_time)
-            .time(decision_time, WritePrecision.S)
-        )
-        points.append(meta_point)
+            meta_point = (
+                Point("pv_forecast_snapshot_meta")
+                .tag("snapshot_type", snapshot_type)
+                .tag("snapshot_id", snapshot_id)
+                .tag("model", model)
+                .field("soc_at_decision", soc if soc is not None else 0.0)
+                .field("decision_discharge_blocked", discharge_blocked)
+                .field("forecast_run_time", forecast_run_time)
+                .time(decision_time, WritePrecision.S)
+            )
+            points.append(meta_point)
 
         # Write all points
         if points:
-            logger.info(f"Writing {len(points)} snapshot points to InfluxDB")
+            logger.info(f"Writing {len(points)} snapshot points for model={model}")
             self.write_api.write(bucket=self.pv_bucket, org=self.influx_org, record=points)
-            logger.info(f"Forecast snapshot {snapshot_id} written successfully")
+            logger.info(f"Forecast snapshot {snapshot_id} model={model} written successfully")
             return True
 
         return False
@@ -302,10 +310,11 @@ class AccuracyTracker:
             return None
 
     def _query_snapshot_for_inverter(
-        self, inverter: str, snapshot_id: str, start: datetime, end: datetime
+        self, inverter: str, snapshot_id: str, start: datetime, end: datetime,
+        model: str = "hybrid",
     ) -> Optional[pd.DataFrame]:
         """
-        Query snapshot forecast data for a specific inverter.
+        Query snapshot forecast data for a specific inverter and model.
 
         For 'total': query string=="total" directly and pivot.
         For 'EastWest'/'South': sum across strings using group() + sum(), then pivot.
@@ -321,6 +330,7 @@ class AccuracyTracker:
               |> range(start: {start_str}, stop: {end_str})
               |> filter(fn: (r) => r._measurement == "pv_forecast_snapshot")
               |> filter(fn: (r) => r.snapshot_id == "{snapshot_id}")
+              |> filter(fn: (r) => r.model == "{model}")
               |> filter(fn: (r) => r.inverter == "total")
               |> filter(fn: (r) => r.string == "total")
               |> filter(fn: (r) => r._field =~ /^forecast_wh_p(10|50|90)$/)
@@ -333,6 +343,7 @@ class AccuracyTracker:
               |> range(start: {start_str}, stop: {end_str})
               |> filter(fn: (r) => r._measurement == "pv_forecast_snapshot")
               |> filter(fn: (r) => r.snapshot_id == "{snapshot_id}")
+              |> filter(fn: (r) => r.model == "{model}")
               |> filter(fn: (r) => r.inverter == "{inverter}")
               |> filter(fn: (r) => r._field =~ /^forecast_wh_p(10|50|90)$/)
               |> group(columns: ["_time", "_field"])
@@ -361,7 +372,8 @@ class AccuracyTracker:
             return None
 
     def _query_snapshot_for_string(
-        self, string_name: str, snapshot_id: str, start: datetime, end: datetime
+        self, string_name: str, snapshot_id: str, start: datetime, end: datetime,
+        model: str = "hybrid",
     ) -> Optional[pd.DataFrame]:
         """
         Query snapshot forecast data for a specific string (e.g. East, West).
@@ -376,6 +388,7 @@ class AccuracyTracker:
           |> range(start: {start_str}, stop: {end_str})
           |> filter(fn: (r) => r._measurement == "pv_forecast_snapshot")
           |> filter(fn: (r) => r.snapshot_id == "{snapshot_id}")
+          |> filter(fn: (r) => r.model == "{model}")
           |> filter(fn: (r) => r.string == "{string_name}")
           |> filter(fn: (r) => r._field =~ /^forecast_wh_p(10|50|90)$/)
           |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
@@ -400,19 +413,23 @@ class AccuracyTracker:
             logger.error(f"Failed to query snapshot for string={string_name}: {e}")
             return None
 
-    def evaluate_forecast(self, evaluation_time: Optional[datetime] = None) -> bool:
+    def evaluate_forecast(
+        self,
+        evaluation_time: Optional[datetime] = None,
+        model: str = "hybrid",
+    ) -> bool:
         """
         Evaluate yesterday's snapshot forecast against actual PV production.
 
-        Called at 21:15 daily. Compares the snapshot taken at yesterday's 21:00
-        with actual production data from the HomeAssistant InfluxDB bucket.
+        Called at 21:15 daily, once per model. Compares the snapshot taken at
+        yesterday's 21:00 with actual production data from HomeAssistant.
 
-        Two-layer calibration: decomposes forecast error into weather error
-        (MeteoSwiss GHI forecast was wrong) and model error (PV model parameters
-        are wrong per-string).
+        Weather factor decomposition (Phase C/D) only runs for hybrid model
+        (ensemble-based, where weather vs model error separation makes sense).
 
         Args:
             evaluation_time: Override evaluation time (default: now). Used for testing.
+            model: Forecast model to evaluate ("hybrid" or "local")
 
         Returns:
             True if evaluation was successful
@@ -437,7 +454,7 @@ class AccuracyTracker:
         snapshot_end = snapshot_end_local.astimezone(timezone.utc)
 
         logger.info(
-            f"Evaluating forecast accuracy for snapshot {snapshot_id} "
+            f"Evaluating forecast accuracy for snapshot {snapshot_id} model={model} "
             f"({snapshot_start.isoformat()} to {snapshot_end.isoformat()})"
         )
 
@@ -454,10 +471,10 @@ class AccuracyTracker:
         for inverter, entity_id in self.ACTUAL_ENTITIES.items():
             # Query snapshot forecast
             snapshot_df = self._query_snapshot_for_inverter(
-                inverter, snapshot_id, snapshot_start, snapshot_end
+                inverter, snapshot_id, snapshot_start, snapshot_end, model=model
             )
             if snapshot_df is None or snapshot_df.empty:
-                logger.warning(f"No snapshot data for inverter={inverter}, skipping")
+                logger.warning(f"No snapshot data for inverter={inverter} model={model}, skipping")
                 continue
 
             # Query actuals
@@ -492,6 +509,7 @@ class AccuracyTracker:
                     Point("pv_accuracy")
                     .tag("snapshot_type", snapshot_type)
                     .tag("snapshot_id", snapshot_id)
+                    .tag("model", model)
                     .tag("inverter", inverter)
                     .tag("string", inverter)
                     .field("forecast_wh_p10", float(row.get("forecast_wh_p10", 0)))
@@ -509,7 +527,7 @@ class AccuracyTracker:
                 )
                 total_points += len(points)
                 logger.info(
-                    f"Wrote {len(points)} accuracy points for inverter={inverter}"
+                    f"Wrote {len(points)} accuracy points for inverter={inverter} model={model}"
                 )
 
         # Per-string evaluation (East, West) where individual actuals are available
@@ -517,10 +535,10 @@ class AccuracyTracker:
             inverter = [s["inverter"] for s in self.STRINGS if s["string"] == string_name][0]
 
             snapshot_df = self._query_snapshot_for_string(
-                string_name, snapshot_id, snapshot_start, snapshot_end
+                string_name, snapshot_id, snapshot_start, snapshot_end, model=model
             )
             if snapshot_df is None or snapshot_df.empty:
-                logger.warning(f"No snapshot data for string={string_name}, skipping")
+                logger.warning(f"No snapshot data for string={string_name} model={model}, skipping")
                 continue
 
             actuals_df = self._query_actuals(entity_id, snapshot_start, snapshot_end)
@@ -549,6 +567,7 @@ class AccuracyTracker:
                     Point("pv_accuracy")
                     .tag("snapshot_type", snapshot_type)
                     .tag("snapshot_id", snapshot_id)
+                    .tag("model", model)
                     .tag("inverter", inverter)
                     .tag("string", string_name)
                     .field("forecast_wh_p10", float(row.get("forecast_wh_p10", 0)))
@@ -566,128 +585,128 @@ class AccuracyTracker:
                 )
                 total_points += len(points)
                 logger.info(
-                    f"Wrote {len(points)} accuracy points for string={string_name}"
+                    f"Wrote {len(points)} accuracy points for string={string_name} model={model}"
                 )
 
-        # --- Phase C: Compute weather factor ---
-        # weather_factor = sum(actual_wh across East+West+South) / sum(forecast_wh_p50 across East+West+South)
-        # Use East + West individual strings + South inverter to cover all strings without double-counting
+        # --- Phase C: Compute weather factor (hybrid only) ---
+        # Weather factor decomposition only makes sense for the ensemble-based GRIB forecast
+        # where we can separate "MeteoSwiss weather was wrong" from "PV model is wrong".
+        # Local forecast is deterministic — error decomposition would be meaningless.
 
-        calibration_sources = {}
-        if "East" in string_joined:
-            calibration_sources["East"] = string_joined["East"]
-        if "West" in string_joined:
-            calibration_sources["West"] = string_joined["West"]
-        if "South" in inverter_joined:
-            calibration_sources["South"] = inverter_joined["South"]
+        if model == "hybrid":
+            calibration_sources = {}
+            if "East" in string_joined:
+                calibration_sources["East"] = string_joined["East"]
+            if "West" in string_joined:
+                calibration_sources["West"] = string_joined["West"]
+            if "South" in inverter_joined:
+                calibration_sources["South"] = inverter_joined["South"]
 
-        weather_factor_series = None
-        if len(calibration_sources) >= 2:
-            # Sum forecast and actual across all available strings per timestamp
-            # Use intersection of timestamps where all sources have data
-            common_index = None
-            for df in calibration_sources.values():
-                if common_index is None:
-                    common_index = df.index
-                else:
-                    common_index = common_index.intersection(df.index)
-
-            if common_index is not None and len(common_index) > 0:
-                sum_forecast = pd.Series(0.0, index=common_index)
-                sum_actual = pd.Series(0.0, index=common_index)
+            weather_factor_series = None
+            if len(calibration_sources) >= 2:
+                common_index = None
                 for df in calibration_sources.values():
-                    sum_forecast += df.loc[common_index, "forecast_wh_p50"]
-                    sum_actual += df.loc[common_index, "actual_wh"]
+                    if common_index is None:
+                        common_index = df.index
+                    else:
+                        common_index = common_index.intersection(df.index)
 
-                # Compute weather factor, skip periods where forecast is zero
-                weather_factor_series = pd.Series(index=common_index, dtype=float)
-                nonzero_mask = sum_forecast > 0
-                weather_factor_series[nonzero_mask] = (
-                    sum_actual[nonzero_mask] / sum_forecast[nonzero_mask]
-                )
-                weather_factor_series[~nonzero_mask] = float("nan")
+                if common_index is not None and len(common_index) > 0:
+                    sum_forecast = pd.Series(0.0, index=common_index)
+                    sum_actual = pd.Series(0.0, index=common_index)
+                    for df in calibration_sources.values():
+                        sum_forecast += df.loc[common_index, "forecast_wh_p50"]
+                        sum_actual += df.loc[common_index, "actual_wh"]
 
-                logger.info(
-                    f"Computed weather_factor for {nonzero_mask.sum()} periods "
-                    f"(mean={weather_factor_series[nonzero_mask].mean():.3f})"
-                )
-
-        # --- Phase D: Write calibration fields ---
-        if weather_factor_series is not None:
-            calibration_points = 0
-
-            # Write for individual strings (East, West) and South inverter
-            calibration_targets = {
-                "East": ("EastWest", string_joined.get("East")),
-                "West": ("EastWest", string_joined.get("West")),
-                "South": ("South", inverter_joined.get("South")),
-                "total": ("total", inverter_joined.get("total")),
-            }
-
-            for tag_string, (tag_inverter, joined_df) in calibration_targets.items():
-                if joined_df is None or joined_df.empty:
-                    continue
-
-                # Only use timestamps where we have both joined data and weather factor
-                common_ts = joined_df.index.intersection(weather_factor_series.dropna().index)
-                if len(common_ts) == 0:
-                    continue
-
-                points = []
-                for ts in common_ts:
-                    wf = float(weather_factor_series[ts])
-                    forecast_p50 = float(joined_df.loc[ts, "forecast_wh_p50"])
-                    actual = float(joined_df.loc[ts, "actual_wh"])
-
-                    weather_adjusted_wh = forecast_p50 * wf
-                    weather_error_wh = forecast_p50 - weather_adjusted_wh
-                    model_error_wh = weather_adjusted_wh - actual
-
-                    timestamp = ts if isinstance(ts, datetime) else pd.Timestamp(ts)
-                    if timestamp.tzinfo is None:
-                        timestamp = timestamp.tz_localize(timezone.utc)
-
-                    point = (
-                        Point("pv_accuracy")
-                        .tag("snapshot_type", snapshot_type)
-                        .tag("snapshot_id", snapshot_id)
-                        .tag("inverter", tag_inverter)
-                        .tag("string", tag_string)
-                        .field("weather_factor", wf)
-                        .field("weather_adjusted_wh", weather_adjusted_wh)
-                        .field("weather_error_wh", weather_error_wh)
-                        .field("model_error_wh", model_error_wh)
-                        .time(timestamp, WritePrecision.S)
+                    weather_factor_series = pd.Series(index=common_index, dtype=float)
+                    nonzero_mask = sum_forecast > 0
+                    weather_factor_series[nonzero_mask] = (
+                        sum_actual[nonzero_mask] / sum_forecast[nonzero_mask]
                     )
-                    points.append(point)
+                    weather_factor_series[~nonzero_mask] = float("nan")
 
-                if points:
-                    self.write_api.write(
-                        bucket=self.pv_bucket, org=self.influx_org, record=points
-                    )
-                    calibration_points += len(points)
                     logger.info(
-                        f"Wrote {len(points)} calibration points for string={tag_string}"
+                        f"Computed weather_factor for {nonzero_mask.sum()} periods "
+                        f"(mean={weather_factor_series[nonzero_mask].mean():.3f})"
                     )
 
-            if calibration_points > 0:
-                total_points += calibration_points
-                logger.info(f"Calibration: {calibration_points} total calibration points written")
-        else:
-            logger.warning("Insufficient data for weather factor computation (need at least 2 of East/West/South)")
+            # --- Phase D: Write calibration fields ---
+            if weather_factor_series is not None:
+                calibration_points = 0
+
+                calibration_targets = {
+                    "East": ("EastWest", string_joined.get("East")),
+                    "West": ("EastWest", string_joined.get("West")),
+                    "South": ("South", inverter_joined.get("South")),
+                    "total": ("total", inverter_joined.get("total")),
+                }
+
+                for tag_string, (tag_inverter, joined_df) in calibration_targets.items():
+                    if joined_df is None or joined_df.empty:
+                        continue
+
+                    common_ts = joined_df.index.intersection(weather_factor_series.dropna().index)
+                    if len(common_ts) == 0:
+                        continue
+
+                    points = []
+                    for ts in common_ts:
+                        wf = float(weather_factor_series[ts])
+                        forecast_p50 = float(joined_df.loc[ts, "forecast_wh_p50"])
+                        actual = float(joined_df.loc[ts, "actual_wh"])
+
+                        weather_adjusted_wh = forecast_p50 * wf
+                        weather_error_wh = forecast_p50 - weather_adjusted_wh
+                        model_error_wh = weather_adjusted_wh - actual
+
+                        timestamp = ts if isinstance(ts, datetime) else pd.Timestamp(ts)
+                        if timestamp.tzinfo is None:
+                            timestamp = timestamp.tz_localize(timezone.utc)
+
+                        point = (
+                            Point("pv_accuracy")
+                            .tag("snapshot_type", snapshot_type)
+                            .tag("snapshot_id", snapshot_id)
+                            .tag("model", model)
+                            .tag("inverter", tag_inverter)
+                            .tag("string", tag_string)
+                            .field("weather_factor", wf)
+                            .field("weather_adjusted_wh", weather_adjusted_wh)
+                            .field("weather_error_wh", weather_error_wh)
+                            .field("model_error_wh", model_error_wh)
+                            .time(timestamp, WritePrecision.S)
+                        )
+                        points.append(point)
+
+                    if points:
+                        self.write_api.write(
+                            bucket=self.pv_bucket, org=self.influx_org, record=points
+                        )
+                        calibration_points += len(points)
+                        logger.info(
+                            f"Wrote {len(points)} calibration points for string={tag_string}"
+                        )
+
+                if calibration_points > 0:
+                    total_points += calibration_points
+                    logger.info(f"Calibration: {calibration_points} total calibration points written")
+            else:
+                logger.warning("Insufficient data for weather factor computation (need at least 2 of East/West/South)")
 
         if total_points > 0:
             logger.info(
-                f"Evaluation complete for snapshot {snapshot_id}: "
+                f"Evaluation complete for snapshot {snapshot_id} model={model}: "
                 f"{total_points} total points written"
             )
             return True
         else:
-            logger.warning(f"No accuracy data written for snapshot {snapshot_id}")
+            logger.warning(f"No accuracy data written for snapshot {snapshot_id} model={model}")
             return False
 
-    def _query_forecast(self, start: datetime, end: datetime) -> Optional[pd.DataFrame]:
-        """Query current PV forecast from InfluxDB."""
+    def _query_forecast(
+        self, start: datetime, end: datetime, model: str = "hybrid"
+    ) -> Optional[pd.DataFrame]:
+        """Query current PV forecast from InfluxDB, filtered by model tag."""
         start_str = start.isoformat()
         end_str = end.isoformat()
 
@@ -695,6 +714,7 @@ class AccuracyTracker:
         from(bucket: "{self.pv_bucket}")
           |> range(start: {start_str}, stop: {end_str})
           |> filter(fn: (r) => r._measurement == "pv_forecast")
+          |> filter(fn: (r) => r.model == "{model}")
           |> filter(fn: (r) => r._field =~ /^(energy_wh_p10|energy_wh_p50|energy_wh_p90|power_w_p10|power_w_p50|power_w_p90)$/)
           |> pivot(rowKey:["_time"], columnKey: ["_field", "inverter"], valueColumn: "_value")
         '''

@@ -332,34 +332,44 @@ class SwissSolarForecast:
             logger.error(f"Local forecast failed: {e}", exc_info=True)
 
     def snapshot_forecast(self):
-        """Snapshot current forecast for accuracy tracking (21:00 daily)."""
+        """Snapshot current forecast for accuracy tracking (21:00 daily).
+
+        Snapshots both GRIB (hybrid) and local forecasts with the same rules
+        so they can be compared apples-to-apples against the same actuals.
+        """
         if not self.accuracy_tracker:
             return
 
-        logger.info("Snapshotting forecast for accuracy tracking...")
-        try:
-            success = self.accuracy_tracker.snapshot_forecast()
-            if success:
-                logger.info("Forecast snapshot completed")
-            else:
-                logger.warning("Forecast snapshot failed")
-        except Exception as e:
-            logger.error(f"Forecast snapshot failed: {e}", exc_info=True)
+        for model in ("hybrid", "local"):
+            logger.info(f"Snapshotting {model} forecast for accuracy tracking...")
+            try:
+                success = self.accuracy_tracker.snapshot_forecast(model=model)
+                if success:
+                    logger.info(f"Forecast snapshot completed (model={model})")
+                else:
+                    logger.warning(f"Forecast snapshot failed (model={model})")
+            except Exception as e:
+                logger.error(f"Forecast snapshot failed (model={model}): {e}", exc_info=True)
 
     def evaluate_forecast(self):
-        """Evaluate forecast accuracy against actuals (21:15 daily)."""
+        """Evaluate forecast accuracy against actuals (21:15 daily).
+
+        Evaluates both GRIB and local forecasts against the same actuals.
+        Weather factor decomposition only runs for hybrid (ensemble-based).
+        """
         if not self.accuracy_tracker:
             return
 
-        logger.info("Evaluating forecast accuracy...")
-        try:
-            success = self.accuracy_tracker.evaluate_forecast()
-            if success:
-                logger.info("Forecast evaluation completed")
-            else:
-                logger.warning("Forecast evaluation returned no data")
-        except Exception as e:
-            logger.error(f"Forecast evaluation failed: {e}", exc_info=True)
+        for model in ("hybrid", "local"):
+            logger.info(f"Evaluating {model} forecast accuracy...")
+            try:
+                success = self.accuracy_tracker.evaluate_forecast(model=model)
+                if success:
+                    logger.info(f"Forecast evaluation completed (model={model})")
+                else:
+                    logger.warning(f"Forecast evaluation returned no data (model={model})")
+            except Exception as e:
+                logger.error(f"Forecast evaluation failed (model={model}): {e}", exc_info=True)
 
     def update_shading_factors(self):
         """Update shading factors from recent accuracy data."""
