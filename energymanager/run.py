@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.81"
+__version__ = "1.6.82"
 
 import json
 import logging
@@ -635,22 +635,27 @@ class EnergyManager:
         return None, target_time
 
     def will_battery_hit_full(self) -> tuple[bool, float | None, datetime]:
-        """Check if battery is forecast to reach 100% before next cheap tariff.
+        """Check if battery is forecast to reach 100% today.
 
-        If the battery will be full, excess solar would be curtailed —
-        better to divert energy to EV or appliances.
+        Only looks at today's solar window (until midnight local time).
+        Tomorrow's forecast is irrelevant — the battery being full tomorrow
+        doesn't justify diverting today's solar to the EV.
 
         Returns:
-            (hits_full, peak_soc or None, target_time)
+            (hits_full, peak_soc or None, end_of_today)
         """
         now = datetime.now(timezone.utc)
-        tariff = self.optimizer.get_tariff_periods(now)
-        target_time = tariff.target
-        target_stop = (target_time + timedelta(minutes=15)).isoformat()
+
+        # Limit to end of today (midnight local time), not next cheap tariff
+        now_local = now.astimezone(SWISS_TZ)
+        end_of_today = now_local.replace(
+            hour=23, minute=59, second=59, microsecond=0
+        ).astimezone(timezone.utc)
+        end_stop = end_of_today.isoformat()
 
         query = f'''
         from(bucket: "{self.output_bucket}")
-          |> range(start: now(), stop: {target_stop})
+          |> range(start: now(), stop: {end_stop})
           |> filter(fn: (r) => r._measurement == "soc_forecast")
           |> filter(fn: (r) => r.scenario == "with_strategy")
           |> filter(fn: (r) => r._field == "soc_percent")
@@ -661,11 +666,11 @@ class EnergyManager:
             peak_soc = result[0].records[0].get_value()
             hits_full = peak_soc >= 99
             logger.debug(
-                f"Peak SOC until {swiss_time(target_time)}: {peak_soc:.0f}%"
+                f"Peak SOC today: {peak_soc:.0f}%"
                 f" → {'battery full' if hits_full else 'not full'}"
             )
-            return hits_full, peak_soc, target_time
-        return False, None, target_time
+            return hits_full, peak_soc, end_of_today
+        return False, None, end_of_today
 
     def will_battery_hit_minimum(
         self, extra_load_wh: float = 0.0
