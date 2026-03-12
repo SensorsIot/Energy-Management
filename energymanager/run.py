@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.82"
+__version__ = "1.6.83"
 
 import json
 import logging
@@ -427,9 +427,10 @@ class EnergyManager:
 
             # Get tariff periods to determine forecast end
             tariff = self.optimizer.get_tariff_periods(now)
-            # Always fetch at least until tomorrow 21:00 for visualization
-            tomorrow_target = (now + timedelta(days=1)).replace(hour=21, minute=0, second=0, microsecond=0)
-            end = max(tariff.target + timedelta(hours=1), tomorrow_target)
+            # Extend to full PV forecast horizon (up to 5 days) for visualization
+            # SOC simulation will naturally stop where load forecast ends
+            pv_horizon = now + timedelta(days=5)
+            end = max(tariff.target + timedelta(hours=1), pv_horizon)
 
             logger.info(f"Fetching forecasts from {swiss_datetime(start)} to {swiss_datetime(end)}")
             logger.info(f"Tariff: cheap={'Yes' if tariff.is_cheap_now else 'No'}, "
