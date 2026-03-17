@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.ev_state_machine import EVInputs, EVOutput, EVState
-from src.notifications import notify_error, notify_info
+from src.notifications import notify_error
 
 logger = logging.getLogger(__name__)
 
@@ -159,19 +159,11 @@ class IntegrationObserver:
                 if tr.status == "pending":
                     tr.status = "passed"
                     changed = True
-                    notify_info(
-                        f"[PASS] {td.test_id}: {td.name}",
-                        tr.evidence,
-                        silent=True,
-                    )
+                    logger.info(f"[PASS] {td.test_id}: {td.name}")
                 elif tr.status == "failed":
                     tr.status = "passed"
                     changed = True
-                    notify_info(
-                        f"[RECOVERY] {td.test_id}: {td.name}",
-                        tr.evidence,
-                        silent=True,
-                    )
+                    logger.info(f"[RECOVERY] {td.test_id}: {td.name}")
             else:
                 tr.fail_count += 1
                 tr.last_failed = now_iso
@@ -469,6 +461,10 @@ class IntegrationObserver:
             return None
         if i.surplus_power_w < i.min_power_w:
             return None  # surplus too low — not protection related
+        # Only evaluate once the wallbox has also stopped drawing (prev was too)
+        # to avoid false fails during the physical ramp-down lag
+        if prev.inputs.ev_charging_power_w > 0:
+            return None  # wallbox was still drawing last cycle — wait for it to settle
         return curr.output.state == EVState.IDLE and curr.output.target_power_w == 0
 
     def _detect_ec12(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
@@ -478,7 +474,10 @@ class IntegrationObserver:
         if curr.output.target_power_w != prev.output.target_power_w:
             return None  # power changed — not the scenario we're testing
         # Power unchanged: last_sent should equal the previous value (no new send)
-        return curr.last_power_limit_sent == prev.last_power_limit_sent
+        # Use int() to avoid float/int mismatch (e.g. 8261.0 vs 8261)
+        def _as_int(v: float | None) -> int | None:
+            return int(v) if v is not None else None
+        return _as_int(curr.last_power_limit_sent) == _as_int(prev.last_power_limit_sent)
 
     def _detect_ec13(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """EC-13: Auto-revert — mode resets to solar after idle timeout."""

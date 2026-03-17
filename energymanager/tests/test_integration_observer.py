@@ -167,22 +167,17 @@ class TestPersistence:
 # ---------------------------------------------------------------------------
 
 class TestNotifications:
-    @patch("src.integration_observer.notify_info")
-    def test_first_pass_sends_silent_info(self, mock_info, tmp_path):
+    def test_first_pass_logs_info(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(wallbox_available=False, charging_mode="solar"),
             output=EVOutput(EVState.IDLE, 0, "No EV charging"),
         )
         obs.observe(snap)
-        mock_info.assert_called()
-        call_args = mock_info.call_args
-        assert "[PASS] NO-01" in call_args[0][0]
-        assert call_args[1].get("silent", call_args[0][2] if len(call_args[0]) > 2 else True)
+        assert obs._results["NO-01"].status == "passed"
 
     @patch("src.integration_observer.notify_error")
-    @patch("src.integration_observer.notify_info")
-    def test_regression_sends_error(self, mock_info, mock_error, tmp_path):
+    def test_regression_sends_error(self, mock_error, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         # First: pass NO-12
         snap_pass = _make_snapshot(
@@ -210,8 +205,7 @@ class TestNotifications:
         ]
         assert len(regression_calls) >= 1
 
-    @patch("src.integration_observer.notify_info")
-    def test_recovery_sends_silent_info(self, mock_info, tmp_path):
+    def test_recovery_logs_info(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         # Force failed state
         obs._results["NO-12"].status = "failed"
@@ -224,8 +218,6 @@ class TestNotifications:
         )
         obs.observe(snap)
         assert obs._results["NO-12"].status == "passed"
-        recovery_calls = [c for c in mock_info.call_args_list if "RECOVERY" in str(c)]
-        assert len(recovery_calls) >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -261,11 +253,13 @@ class TestPreconditions:
 # ---------------------------------------------------------------------------
 
 class TestExceptionSafety:
-    @patch("src.integration_observer.notify_info", side_effect=Exception("boom"))
-    def test_observe_never_raises(self, mock_info, tmp_path):
+    @patch("src.integration_observer.notify_error", side_effect=Exception("boom"))
+    def test_observe_never_raises(self, mock_error, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        # Force a failure scenario so notify_error is called
+        obs._results["NO-01"].status = "passed"
         snap = _make_snapshot(
-            inputs=_make_inputs(wallbox_available=False, charging_mode="solar"),
+            inputs=_make_inputs(wallbox_available=True, charging_mode="solar"),
             output=EVOutput(EVState.IDLE, 0, "No EV charging"),
         )
         # Should not raise even if notification explodes
@@ -387,10 +381,11 @@ class TestDetectors:
         assert obs._detect_ec05(None, snap) is None
 
     def test_ec06_pass(self, tmp_path):
-        """Protection failure while in SOLAR → exits to IDLE."""
+        """Protection failure while in SOLAR → exits to IDLE (wallbox settled)."""
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         prev = _make_snapshot(
-            output=EVOutput(EVState.SOLAR, 3000, "Solar"),
+            inputs=_make_inputs(surplus_power_w=5000, ev_charging_power_w=0),
+            output=EVOutput(EVState.SOLAR, 0, "Solar"),
             prev_state=EVState.SOLAR,
         )
         curr = _make_snapshot(
