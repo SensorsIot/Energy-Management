@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.87"
+__version__ = "1.6.88"
 
 import json
 import logging
@@ -913,13 +913,13 @@ class EnergyManager:
                         POWER_STEPS_3P[0],
                         POWER_STEPS_3P[-1],
                     )
-                    ev_charging_source = "surplus"
+                    ev_charging_source = "battery_full"
                     ev_source_reason = (
                         f"Grid export {grid_export:.0f}W → snap {ev_charging_power_w:.0f}W"
                     )
                 # Rule 2 candidate: snap surplus to amp step (needs battery check)
                 elif surplus_power >= threshold:
-                    ev_charging_source = "forecast"
+                    ev_charging_source = "solar_surplus"
 
             # Step 2: Battery forecast checks WITH the candidate EV load
             if battery_soc >= 100:
@@ -928,7 +928,7 @@ class EnergyManager:
                 battery_will_hit_min = False
                 # Battery full — if forecast path was selected, compute power
                 # (surplus capture already set ev_charging_power_w above)
-                if ev_charging_source == "forecast":
+                if ev_charging_source == "solar_surplus":
                     candidate_power = snap_to_power_step(
                         surplus_power, POWER_STEPS_3P[0], POWER_STEPS_3P[-1]
                     )
@@ -937,7 +937,7 @@ class EnergyManager:
                         f"Surplus {surplus_power:.0f}W ≥ {ev_threshold:.0f}W, "
                         f"forecast → {ev_charging_power_w:.0f}W (battery full)"
                     )
-            elif ev_charging_source == "forecast":
+            elif ev_charging_source == "solar_surplus":
                 battery_will_be_full, _, _ = self.will_battery_hit_full()
                 ev_min_power = POWER_STEPS_3P[0]
                 ev_max_power = POWER_STEPS_3P[-1]
@@ -1137,7 +1137,8 @@ class EnergyManager:
                     "friendly_name": "EV Target Power",
                     "unit_of_measurement": "W",
                     "reason": ev_source_reason,
-                    "ev_charging_source": ev_charging_source,
+                    "ev_charging_rule": ev_charging_source,
+                    "battery_soc": battery_soc,
                     "battery_forecast_soc": self._battery_min_soc_forecast,
                     "battery_will_be_full": battery_will_be_full,
                     "battery_will_hit_min": battery_will_hit_min,
@@ -1145,8 +1146,7 @@ class EnergyManager:
                     "threshold_w": ev_threshold,
                     "surplus_power_w": surplus_power,
                     "grid_export_w": grid_export,
-                    "surplus_capture_w": surplus_capture_power_w,
-                    "candidate_power_w": ev_charging_power_w,
+                    "snap_power_w": ev_charging_power_w,
                     "icon": "mdi:ev-station",
                 },
             )
