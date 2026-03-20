@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.86"
+__version__ = "1.6.87"
 
 import json
 import logging
@@ -906,12 +906,16 @@ class EnergyManager:
                 ) or ev_min_power
                 ev_threshold = threshold
 
-                # Rule 1: surplus capture (exported energy is free — no battery check)
+                # Rule 1: Battery Full — grid export capture (no battery check)
                 if surplus_capture_power_w >= threshold:
-                    ev_charging_power_w = surplus_capture_power_w
+                    ev_charging_power_w = snap_to_power_step(
+                        surplus_capture_power_w,
+                        POWER_STEPS_3P[0],
+                        POWER_STEPS_3P[-1],
+                    )
                     ev_charging_source = "surplus"
                     ev_source_reason = (
-                        f"Grid export {grid_export:.0f}W → capture {ev_charging_power_w:.0f}W"
+                        f"Grid export {grid_export:.0f}W → snap {ev_charging_power_w:.0f}W"
                     )
                 # Rule 2 candidate: snap surplus to amp step (needs battery check)
                 elif surplus_power >= threshold:
