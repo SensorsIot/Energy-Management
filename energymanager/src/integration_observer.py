@@ -471,6 +471,8 @@ class IntegrationObserver:
         """EC-12: Power limit sent only on change."""
         if prev is None:
             return None
+        if prev.last_power_limit_sent is None:
+            return None  # skip after restart — first send is expected
         if curr.output.target_power_w != prev.output.target_power_w:
             return None  # power changed — not the scenario we're testing
         # Power unchanged: last_sent should equal the previous value (no new send)
