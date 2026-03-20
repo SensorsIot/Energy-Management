@@ -1498,3 +1498,161 @@ class TestUniversalWallbox:
             if c.args[0] == "sensor.wallbox_phases"
         ]
         assert phase_calls == []
+
+
+class TestTransactionStopRestart:
+    """Edge cases: car stops transaction and reconnects.
+
+    Regression tests for the 2026-03-20 incident: car sent StopTransaction,
+    wallbox went Preparing, but OCPP server never re-sent power profile
+    because _last_sent_power_w was stale and no HA entity change was detected.
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "test", "power_update_interval_s": 5})
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="4354")
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.set_charging_power = AsyncMock()
+        cp.current_power_w = 4354
+        cp.current_status = "Charging"
+        cp.remote_start = AsyncMock(return_value=True)
+        cp.transaction_started_event = asyncio.Event()
+        cp.transaction_started_event.set()
+        srv.charge_point = cp
+
+        # Simulate previously sent power
+        srv._last_sent_power_w = 4354.0
+        srv._last_power_limit = "4354"
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_transaction_stop_resets_last_sent(self, server):
+        """StopTransaction should reset _last_sent_power_w to 0."""
+        assert server._last_sent_power_w == 4354.0
+
+        server._on_status_change("transaction", "stopped")
+
+        assert server._last_sent_power_w == 0
+
+    @pytest.mark.asyncio
+    async def test_transaction_stop_applies_current_limit(self, server):
+        """After StopTransaction, _apply_current_power_limit should send
+        the current HA value to the wallbox."""
+        server.charge_point.transaction_id = None  # transaction ended
+
+        # HA entity has 4354W
+        server.ha.get_state = AsyncMock(return_value="4354")
+
+        await server._apply_current_power_limit()
+
+        server.charge_point.set_charging_power.assert_called()
+        assert server._last_power_limit == "4354"
+
+    @pytest.mark.asyncio
+    async def test_transaction_stop_zero_limit_does_nothing(self, server):
+        """If HA power limit is 0 after transaction stop, don't send."""
+        server.ha.get_state = AsyncMock(return_value="0")
+
+        await server._apply_current_power_limit()
+
+        server.charge_point.set_charging_power.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_detects_mismatch_after_stop(self, server):
+        """After transaction stop, _last_sent_power_w=0 should cause
+        reconciliation to detect a mismatch with HA value."""
+        server._on_status_change("transaction", "stopped")
+
+        # Simulate reconciliation check
+        ha_power_w = 4354.0
+        assert ha_power_w != server._last_sent_power_w  # 4354 != 0
+
+    @pytest.mark.asyncio
+    async def test_apply_limit_no_wallbox(self, server):
+        """_apply_current_power_limit with no charge point should not crash."""
+        server.charge_point = None
+        server.ha.get_state = AsyncMock(return_value="4354")
+
+        await server._apply_current_power_limit()
+        # Should not raise
+
+
+class TestPostConnectApplyLimit:
+    """Post-connect setup should immediately apply current HA power limit.
+
+    Without this, the OCPP server waits for a _change_ in the HA entity,
+    which may never come if the energymanager already set the value.
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "test", "power_update_interval_s": 5})
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = MagicMock()
+        cp.transaction_id = None
+        cp.set_charging_power = AsyncMock()
+        cp.current_power_w = 0
+        cp.current_status = "Preparing"
+        cp.remote_start = AsyncMock(return_value=True)
+        cp.transaction_started_event = asyncio.Event()
+        cp.transaction_started_event.set()
+        srv.charge_point = cp
+
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_apply_existing_ha_limit_on_connect(self, server):
+        """After connect, if HA already has a power limit, apply it."""
+        server.ha.get_state = AsyncMock(return_value="5117")
+
+        await server._apply_current_power_limit()
+
+        server.charge_point.set_charging_power.assert_called()
+        assert server._last_power_limit == "5117"
+
+    @pytest.mark.asyncio
+    async def test_apply_zero_limit_on_connect_does_nothing(self, server):
+        """After connect, if HA power limit is 0, don't send."""
+        server.ha.get_state = AsyncMock(return_value="0")
+
+        await server._apply_current_power_limit()
+
+        server.charge_point.set_charging_power.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_apply_limit_entity_missing(self, server):
+        """If HA entity doesn't exist yet, don't crash."""
+        server.ha.get_state = AsyncMock(return_value=None)
+
+        await server._apply_current_power_limit()
+
+        server.charge_point.set_charging_power.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_apply_limit_invalid_value(self, server):
+        """If HA entity has non-numeric value, don't crash."""
+        server.ha.get_state = AsyncMock(return_value="unavailable")
+
+        await server._apply_current_power_limit()
+
+        server.charge_point.set_charging_power.assert_not_called()

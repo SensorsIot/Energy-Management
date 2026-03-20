@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.50"
+__version__ = "0.9.51"
 
 import asyncio
 import json
@@ -361,6 +361,8 @@ class OCPPServer:
             if value == "stopped":
                 # Reset so reconciliation detects the mismatch and re-sends
                 self._last_sent_power_w = 0
+                # Re-apply current HA power limit (car may reconnect quickly)
+                asyncio.ensure_future(self._apply_current_power_limit())
         elif key == "power_w":
             state = round(value)
         else:
@@ -514,6 +516,27 @@ class OCPPServer:
                 )
                 cp.current_power_w = 0
                 self._on_status_change("power_w", 0)
+
+    async def _apply_current_power_limit(self):
+        """Read the current HA power limit and apply it immediately.
+
+        Called after post-connect setup and after transaction stop to avoid
+        waiting for a change event in _watch_controls. Resets _last_power_limit
+        so the next _watch_controls cycle won't see a stale match.
+        """
+        power_state = await self.ha.get_state("number.wallbox_power_limit")
+        if power_state is None:
+            return
+        try:
+            power_w = float(power_state)
+        except ValueError:
+            return
+        if power_w > 0:
+            logger.info(
+                f"Applying current HA power limit: {power_w}W"
+            )
+            self._last_power_limit = power_state
+            await self._send_power_to_wallbox(power_w)
 
     async def _send_power_to_wallbox(self, power_w: float):
         """Send power limit to wallbox (phase switching, auto-start, SetChargingProfile).
@@ -864,6 +887,9 @@ class OCPPServer:
         self._setup_complete.set()
         await self._update_car_ready()
         logger.info("Post-connect setup complete")
+
+        # Apply current HA power limit immediately (don't wait for change)
+        await self._apply_current_power_limit()
 
     async def handle_websocket(self, websocket):
         """Handle incoming WebSocket connection from wallbox."""
