@@ -6,14 +6,19 @@ meteoswiss:
   icon_collection: "ch.meteoschweiz.ogd-forecasting-icon-ch2"
 
 panels:
-  - id: "AE455"
-    model: "AE Solar AC-455MH/144V"
-    pdc0: 455
+  - id: "AE445"
+    model: "AE Solar AC-455MH/144V (calibrated 445W)"
+    pdc0: 445
     gamma_pdc: -0.0035
 
-  - id: "Generic400"
-    model: "Generic 400W"
-    pdc0: 400
+  - id: "AE490"
+    model: "AE Solar AC-455MH/144V (calibrated 490W)"
+    pdc0: 490
+    gamma_pdc: -0.0035
+
+  - id: "Generic425"
+    model: "Generic 400W (calibrated 425W)"
+    pdc0: 425
     gamma_pdc: -0.0035
 
 plants:
@@ -26,30 +31,30 @@ plants:
     inverters:
       - name: "EastWest"
         max_power: 10000
-        efficiency: 0.95
+        efficiency: 0.98
         strings:
           - name: "East"
             azimuth: 103.3
             tilt: 15
-            panel: "AE455"
+            panel: "AE445"
             count: 8
           - name: "West"
             azimuth: 283.3
             tilt: 15
-            panel: "AE455"
+            panel: "AE490"
             count: 9
 
       - name: "South"
         max_power: 1500
-        efficiency: 0.96
+        efficiency: 0.98
         strings:
           - name: "SouthFront"
             azimuth: 193.3
             tilt: 70
-            panel: "Generic400"
+            panel: "Generic425"
             count: 3
           - name: "SouthBack"
             azimuth: 193.3
             tilt: 60
-            panel: "Generic400"
+            panel: "Generic425"
             count: 2

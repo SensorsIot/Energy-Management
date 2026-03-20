@@ -1227,6 +1227,128 @@ from(bucket: "pv_forecast")
   |> pivot(rowKey: ["_time"], columnKey: ["inverter"], valueColumn: "_value")
 ```
 
+## 2.13 Shading Correction
+
+### 2.13.1 Problem
+
+Each PV string (East, West, South) experiences physical shading from buildings, trees, and roof edges at certain sun positions. The pvlib PV model calculates power assuming an unobstructed view of the sky. A per-hour, per-string shading factor corrects for the actual obstructions at the installation site.
+
+Shading depends on **sun position** (elevation + azimuth), which changes with hour of day and season. Factors calibrated in February are wrong in June — the sun is much higher and shadows fall differently.
+
+### 2.13.2 Architecture
+
+The shading correction has three layers:
+
+```
+Layer 1: CLEAR-SKY REFERENCE (astronomy, no weather dependency)
+  pvlib.clearsky.ineichen(location, times)
+  → theoretical GHI with no clouds
+  → PV model with clear-sky input, no shading
+  → clearsky_power_w per string per hour
+
+Layer 2: SUNNY HOUR DETECTION (per-hour, not per-day)
+  actual_ghi / clearsky_ghi > 0.85?
+  → yes: this hour is suitable for shading calibration
+  → no: clouds present, skip this hour
+
+Layer 3: SHADING FACTOR CALCULATION
+  On sunny hours:
+  shading_factor = actual_power_w / clearsky_power_w
+  → ratio < 1.0 means physical shading
+  → stored per string, per hour, per date
+```
+
+This design breaks the circular dependency of the previous approach: clear-sky GHI is pure astronomy (no forecast involved), so sunny-hour detection and shading calculation are independent of forecast quality.
+
+### 2.13.3 Clear-Sky Reference
+
+The clear-sky reference uses `pvlib.clearsky.ineichen()` to compute theoretical maximum GHI for the installation location (47.475°N, 7.767°E, 330m altitude). The same PV model pipeline (GHI decomposition → POA → PVWatts DC → inverter efficiency) is run with clear-sky input and **no shading factors**, producing `clearsky_power_w` for each string.
+
+This reference changes only with sun position (time of year, time of day) and atmospheric clarity (Linke turbidity). It does not depend on weather forecasts, historical data, or the current shading factors.
+
+### 2.13.4 Sunny Hour Detection
+
+For each hour with solar production, compare actual GHI against clear-sky GHI:
+
+```
+ghi_ratio = actual_ghi / clearsky_ghi
+sunny = ghi_ratio > 0.85
+```
+
+This is a **per-hour** decision, not per-day. A partly cloudy day can still contribute sunny hours at noon. The GHI comparison uses actual measured irradiance (from HomeAssistant sensor or derived from actual PV production) against the theoretical clear-sky value.
+
+The 0.85 threshold allows for minor atmospheric effects (haze, thin cirrus) while excluding hours with significant cloud cover that would distort the shading measurement.
+
+### 2.13.5 Shading Factor Calculation
+
+On sunny hours, the shading factor for each string is:
+
+```
+shading_factor[string][hour] = actual_power_w / clearsky_power_w
+```
+
+| Factor | Meaning |
+|--------|---------|
+| 1.00 | No shading — string sees full sky |
+| 0.80 | 20% of theoretical power lost to physical shading |
+| 0.50 | Heavy shading — half the sky blocked |
+
+Factors are aggregated over recent sunny observations (last 10 sunny hours per slot) using the median to reject outliers.
+
+### 2.13.6 Strings
+
+Each string has different shading patterns due to orientation and surroundings:
+
+| String | Azimuth | Tilt | Expected pattern |
+|--------|---------|------|-----------------|
+| East | 103.3° | 15° | Shaded in morning (buildings to east), clears by midday |
+| West | 283.3° | 15° | Clear in morning, may shade in late afternoon |
+| South | 193.3° | 60°/70° | Least shading (high tilt catches midday sun) |
+
+### 2.13.7 InfluxDB Storage
+
+All observations are stored for later accuracy evaluation:
+
+**Measurement:** `shading_observations` (bucket: `pv_forecast`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `string` | tag | East / West / South |
+| `hour` | field (int) | Local hour (0–23) |
+| `date` | tag | YYYY-MM-DD |
+| `clearsky_ghi` | field (float) | Theoretical clear-sky GHI (W/m²) |
+| `actual_ghi` | field (float) | Measured GHI (W/m²) |
+| `ghi_ratio` | field (float) | actual_ghi / clearsky_ghi |
+| `clearsky_power_w` | field (float) | PV model output with clear-sky, no shading |
+| `actual_power_w` | field (float) | Actual string production (W) |
+| `shading_factor` | field (float) | actual_power / clearsky_power |
+| `sun_elevation` | field (float) | Solar elevation angle (°) |
+| `sun_azimuth` | field (float) | Solar azimuth angle (°) |
+| `is_sunny` | field (bool) | ghi_ratio > 0.85 |
+
+### 2.13.8 Shading Factor Application
+
+The forecast pipeline applies shading factors after the PV model computes clear-sky power:
+
+```
+forecasted_power = pvlib_model_output × shading_factor[string][hour]
+```
+
+Factors are loaded from `shading_factors.yaml`, which is updated automatically after each evaluation cycle (21:15 daily). The YAML file serves as a cache — if InfluxDB is unavailable, the last-written factors are used.
+
+### 2.13.9 Seasonal Update
+
+Shading factors change with sun elevation throughout the year. The system uses a rolling window of recent sunny observations (last 90 days, weighted toward recent). Factors from winter (low sun, long shadows) are gradually replaced by spring observations as new sunny hours accumulate.
+
+### 2.13.10 Accuracy Evaluation
+
+The stored observations enable retrospective analysis:
+
+- **Per-string shading profiles**: plot `shading_factor` vs `hour` for each string over time
+- **Seasonal drift**: compare factors month-over-month
+- **Model quality**: compare forecast (with shading) against actual — residual error shows non-shading model issues
+- **Sunny hour detection quality**: check `ghi_ratio` distribution to validate the 0.85 threshold
+
 ---
 
 # Chapter 3: LoadForecast Add-on
@@ -3550,6 +3672,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.37: Added Section 2.13 (Shading Correction) — clear-sky reference model using pvlib.clearsky.ineichen(), per-hour sunny detection (actual GHI / clearsky GHI > 0.85), per-string shading factor calculation, InfluxDB storage schema for accuracy evaluation; replaces previous weather-factor-based approach that suffered from circular dependency
 - v2.36: Restructured EV Charging Power Calculation (Section 4.6.6) — two rules based on battery state: Rule 1 (Battery Full) captures grid export, Rule 2 (Solar Surplus Charging) uses surplus with battery protection gate; `snap_to_power_step(available_power_w)` as shared amp-step conversion; decision flowchart; fixed missing power computation when battery full + forecast path (v1.6.85)
 - v2.35: Discrete M-Bus power steps (Section 4.6.6) — replaced nominal `amps × 230 × 3` power steps with M-Bus calibrated values from 2026-03-04 sweep; `snap_to_power_step()` replaces `snap_to_amp_step()`; energymanager works in real-world watts; OCPP server demand calibration converts M-Bus watts to integer amps via `round(W/637)` (v1.6.81, v0.9.47)
 - v2.34: Added step-down loop for Rule 2 battery protection (Section 4.6.6) — when snapped candidate amp level fails battery checks, step down one amp at a time until checks pass or power drops below `ev_min_solar_power`; `will_battery_hit_full()` checked once outside loop; prevents all-or-nothing blocking when a lower amp level would be sustainable (v1.6.75)
