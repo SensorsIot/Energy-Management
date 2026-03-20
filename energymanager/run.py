@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.84"
+__version__ = "1.6.85"
 
 import json
 import logging
@@ -917,6 +917,17 @@ class EnergyManager:
                 reaches_target, soc_at_target = True, 100.0
                 battery_will_be_full = True
                 battery_will_hit_min = False
+                # Battery full — if forecast path was selected, compute power
+                # (surplus capture already set ev_charging_power_w above)
+                if ev_charging_source == "forecast":
+                    candidate_power = snap_to_power_step(
+                        surplus_power, POWER_STEPS_3P[0], POWER_STEPS_3P[-1]
+                    )
+                    ev_charging_power_w = candidate_power
+                    ev_source_reason = (
+                        f"Surplus {surplus_power:.0f}W ≥ {ev_threshold:.0f}W, "
+                        f"forecast → {ev_charging_power_w:.0f}W (battery full)"
+                    )
             elif ev_charging_source == "forecast":
                 battery_will_be_full, _, _ = self.will_battery_hit_full()
                 ev_min_power = POWER_STEPS_3P[0]
