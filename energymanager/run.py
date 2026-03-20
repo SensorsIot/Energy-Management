@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.85"
+__version__ = "1.6.86"
 
 import json
 import logging
@@ -874,16 +874,21 @@ class EnergyManager:
             validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
 
             # Grid convention: positive = export, negative = import.
-            # Feedback correction: when already capturing, compute grid
-            # export as if the wallbox load were removed.
-            if self._surplus_capture_active and wallbox_power > 0:
-                grid_export = max(0.0, grid_power + wallbox_power)
+            # Rule 1 (Battery Full) uses grid export with feedback correction.
+            # Only when battery is full — otherwise battery discharge inflates
+            # the corrected export, causing the wallbox to overdraw.
+            if battery_soc >= 100:
+                if self._surplus_capture_active and wallbox_power > 0:
+                    grid_export = max(0.0, grid_power + wallbox_power)
+                else:
+                    grid_export = max(0.0, grid_power)
             else:
                 grid_export = max(0.0, grid_power)
 
-            # Compute grid surplus capture candidate (FSD 4.6 — grid surplus rule)
+            # Compute grid surplus capture candidate (FSD 4.6.6 — Rule 1: Battery Full)
+            # Only qualifies when battery is full — energy has nowhere to go.
             surplus_capture_power_w = 0.0
-            if ev_mode == "solar":
+            if ev_mode == "solar" and battery_soc >= 100:
                 if grid_export >= ev_min_power and pv_power > 0:
                     surplus_capture_power_w = float(
                         min(max(grid_export, ev_min_power), ev_max_power)
