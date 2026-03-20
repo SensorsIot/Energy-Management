@@ -1005,14 +1005,19 @@ Configuration is defined in `/config/swisssolarforecast.yaml` or via HA add-on o
 
 ```yaml
 panels:
-  - id: "AE455"
-    model: "AE Solar AC-455MH/144V"
-    pdc0: 455
+  - id: "AE445"
+    model: "AE Solar AC-455MH/144V (calibrated 445W)"
+    pdc0: 445
     gamma_pdc: -0.0035
 
-  - id: "Generic400"
-    model: "Generic 400W"
-    pdc0: 400
+  - id: "AE490"
+    model: "AE Solar AC-455MH/144V (calibrated 490W)"
+    pdc0: 490
+    gamma_pdc: -0.0035
+
+  - id: "Generic425"
+    model: "Generic 400W (calibrated 425W)"
+    pdc0: 425
     gamma_pdc: -0.0035
 
 plants:
@@ -1025,34 +1030,44 @@ plants:
     inverters:
       - name: "EastWest"
         max_power: 10000
-        efficiency: 0.82
+        efficiency: 0.98
         strings:
           - name: "East"
-            azimuth: 90
+            azimuth: 103.3
             tilt: 15
-            panel: "AE455"
+            panel: "AE445"
             count: 8
           - name: "West"
-            azimuth: 270
+            azimuth: 283.3
             tilt: 15
-            panel: "AE455"
+            panel: "AE490"
             count: 9
 
       - name: "South"
         max_power: 1500
-        efficiency: 0.80
+        efficiency: 0.98
         strings:
           - name: "SouthFront"
-            azimuth: 180
+            azimuth: 193.3
             tilt: 70
-            panel: "Generic400"
+            panel: "Generic425"
             count: 3
           - name: "SouthBack"
-            azimuth: 180
+            azimuth: 193.3
             tilt: 60
-            panel: "Generic400"
+            panel: "Generic425"
             count: 2
 ```
+
+**Calibration note (2026-03-20):** The Pdc0 values and inverter efficiencies are **model calibration parameters**, not physical panel specifications. The actual panels are unchanged (AE Solar AC-455MH nameplate 455W, Generic 400W). The calibrated values were derived by comparing per-string actual production against the pvlib clear-sky model on sunny days (Mar 17-20, 2026) at noon when no physical shading is present:
+
+| String | Nameplate | Calibrated Pdc0 | Reason |
+|--------|-----------|----------------|--------|
+| East (PV1) | 455W | 445W | Model slightly over-predicts at noon; accounts for wiring/mismatch losses |
+| West (PV2) | 455W | 490W | Panels consistently produce 19% above model with nameplate value; positive power tolerance or panel count uncertainty |
+| South | 400W | 425W | Panels produce 15% above model with nameplate value |
+
+Inverter efficiency raised from 0.95/0.96 to 0.98 for both inverters, matching Huawei SUN2000 and Enphase IQ7 datasheet peak efficiency. The previous values (0.95/0.96) were conservative estimates that compounded with Pdc0 errors.
 
 ## 2.7 Configuration
 
@@ -3672,6 +3687,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.38: Updated Section 2.6 PV System Configuration — calibrated Pdc0 values (E:445W, W:490W, S:425W) and inverter efficiency (0.98) from per-string actual vs clear-sky model on sunny days; these are model calibration parameters, not changes to physical hardware; added calibration note explaining methodology
 - v2.37: Added Section 2.13 (Shading Correction) — clear-sky reference model using pvlib.clearsky.ineichen(), per-hour sunny detection (actual GHI / clearsky GHI > 0.85), per-string shading factor calculation, InfluxDB storage schema for accuracy evaluation; replaces previous weather-factor-based approach that suffered from circular dependency
 - v2.36: Restructured EV Charging Power Calculation (Section 4.6.6) — two rules based on battery state: Rule 1 (Battery Full) captures grid export, Rule 2 (Solar Surplus Charging) uses surplus with battery protection gate; `snap_to_power_step(available_power_w)` as shared amp-step conversion; decision flowchart; fixed missing power computation when battery full + forecast path (v1.6.85)
 - v2.35: Discrete M-Bus power steps (Section 4.6.6) — replaced nominal `amps × 230 × 3` power steps with M-Bus calibrated values from 2026-03-04 sweep; `snap_to_power_step()` replaces `snap_to_amp_step()`; energymanager works in real-world watts; OCPP server demand calibration converts M-Bus watts to integer amps via `round(W/637)` (v1.6.81, v0.9.47)
