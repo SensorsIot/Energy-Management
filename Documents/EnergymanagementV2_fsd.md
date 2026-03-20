@@ -1364,6 +1364,22 @@ The stored observations enable retrospective analysis:
 - **Model quality**: compare forecast (with shading) against actual — residual error shows non-shading model issues
 - **Sunny hour detection quality**: check `ghi_ratio` distribution to validate the 0.85 threshold
 
+### 2.13.11 Calibration History
+
+| Date | Version | Change | Reason |
+|------|---------|--------|--------|
+| 2025-02-09 | v1.3.3 | Initial shading factors from 1 sunny winter day | Baseline |
+| 2026-03-20 | v1.3.4 | Panel params calibrated (E:445W, W:490W, S:425W, eff 0.98) + new shading factors | Forecast under-predicted sunny day peaks by ~35%; per-string analysis showed model error, not weather error |
+
+**Data boundary:** Forecast data in InfluxDB before 2026-03-20 was computed with the old parameters (E:455W, W:455W, S:400W, eff 0.95/0.96, Feb 2025 shading). After 2026-03-20, new parameters apply. Accuracy metrics show a step change at this boundary.
+
+**Retrofitted data:** An approximate retrofit of the Mar 13–20 forecast is stored as `pv_forecast_retrofitted` (model=`hybrid_v1.3.4`) in the `pv_forecast` bucket. This was computed by applying a per-point correction factor (new model / old model at the stored P50 GHI). The retrofit is approximate because:
+- Only the P50 GHI is stored, not per-ensemble-member GHI
+- The old shading factors were baked into the P50 before percentile calculation
+- Correction accuracy: ~28% error on sunny days (vs ~40% old, ~12% expected from full recalculation)
+
+The retrofit is useful for directional comparison but not a substitute for the real new forecast starting 2026-03-21.
+
 ---
 
 # Chapter 3: LoadForecast Add-on
@@ -3687,6 +3703,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.25 - February 2026*
 
 **Changelog:**
+- v2.39: Added Section 2.13.11 (Calibration History) — documents 2026-03-20 parameter change boundary, retrofitted data in InfluxDB (pv_forecast_retrofitted), and retrofit limitations
 - v2.38: Updated Section 2.6 PV System Configuration — calibrated Pdc0 values (E:445W, W:490W, S:425W) and inverter efficiency (0.98) from per-string actual vs clear-sky model on sunny days; these are model calibration parameters, not changes to physical hardware; added calibration note explaining methodology
 - v2.37: Added Section 2.13 (Shading Correction) — clear-sky reference model using pvlib.clearsky.ineichen(), per-hour sunny detection (actual GHI / clearsky GHI > 0.85), per-string shading factor calculation, InfluxDB storage schema for accuracy evaluation; replaces previous weather-factor-based approach that suffered from circular dependency
 - v2.36: Restructured EV Charging Power Calculation (Section 4.6.6) — two rules based on battery state: Rule 1 (Battery Full) captures grid export, Rule 2 (Solar Surplus Charging) uses surplus with battery protection gate; `snap_to_power_step(available_power_w)` as shared amp-step conversion; decision flowchart; fixed missing power computation when battery full + forecast path (v1.6.85)
