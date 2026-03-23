@@ -475,10 +475,15 @@ class IntegrationObserver:
             return None  # skip after restart — first send is expected
         if curr.output.target_power_w != prev.output.target_power_w:
             return None  # power changed — not the scenario we're testing
-        # Power unchanged: last_sent should equal the previous value (no new send)
         # Use int() to avoid float/int mismatch (e.g. 8261.0 vs 8261)
         def _as_int(v: float | None) -> int | None:
             return int(v) if v is not None else None
+        # Skip when previous cycle had a pending rate-limited send
+        # (last_sent hadn't caught up to target yet — the current send is
+        # the delayed catch-up, not a redundant re-send)
+        if _as_int(prev.last_power_limit_sent) != _as_int(prev.output.target_power_w):
+            return None
+        # Power unchanged: last_sent should equal the previous value (no new send)
         return _as_int(curr.last_power_limit_sent) == _as_int(prev.last_power_limit_sent)
 
     def _detect_ec13(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:

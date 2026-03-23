@@ -423,6 +423,19 @@ class TestDetectors:
         )
         assert obs._detect_ec12(prev, curr) is True
 
+    def test_ec12_skip_rate_limited_catchup(self, tmp_path):
+        """EC-12 should skip when previous cycle had a pending rate-limited send."""
+        obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
+        prev = _make_snapshot(
+            output=EVOutput(EVState.SOLAR, 4354, "Solar"),
+            last_sent=3500,  # rate-limited — hasn't caught up to target yet
+        )
+        curr = _make_snapshot(
+            output=EVOutput(EVState.SOLAR, 4354, "Solar"),
+            last_sent=4354,  # catch-up send completed
+        )
+        assert obs._detect_ec12(prev, curr) is None
+
     def test_ec14_faulted(self, tmp_path):
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
