@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.93"
+__version__ = "1.6.94"
 
 import json
 import logging
@@ -1059,10 +1059,6 @@ class EnergyManager:
                     )
                 if reasons:
                     ev_source_reason = "No charging — " + "; ".join(reasons)
-
-            # Hard floor: never send less than wallbox minimum
-            if ev_mode == "solar" and 0 < ev_charging_power_w < ev_min_power:
-                ev_charging_power_w = ev_min_power
 
             # Compute wallbox idle state (all modes)
             if wallbox_power == 0 and wb_status in ("Finishing", "SuspendedEV"):
