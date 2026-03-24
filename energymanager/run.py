@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.92"
+__version__ = "1.6.93"
 
 import json
 import logging
@@ -980,15 +980,25 @@ class EnergyManager:
                         f"forecast → {ev_charging_power_w:.0f}W (battery full)"
                     )
                 else:
-                    # Case 2: battery won't reach 100% — step down through
-                    # discrete power steps until battery checks pass
+                    # Case 2: battery won't reach 100% — try snap-up first
+                    # (next step above surplus), then step down through
+                    # discrete power steps until battery checks pass.
+                    # Snap-up uses battery to cover the gap between surplus
+                    # and the next amp step, maximising solar utilisation.
                     ev_charging_power_w = 0.0
                     reaches_target, soc_at_target = False, 0.0
                     battery_will_hit_min = False
-                    candidates = [
+                    # Include one step above candidate (snap-up)
+                    snap_up = [
+                        s for s in POWER_STEPS_3P
+                        if s > candidate_power and s >= threshold
+                    ]
+                    snap_up_step = [snap_up[0]] if snap_up else []
+                    snap_down = [
                         s for s in reversed(POWER_STEPS_3P)
                         if s <= candidate_power and s >= threshold
                     ]
+                    candidates = snap_up_step + snap_down
                     for try_power in candidates:
                         ev_load_wh = try_power * 0.25
                         reaches_target, soc_at_target = self.check_battery_protection(
@@ -999,10 +1009,15 @@ class EnergyManager:
                         )
                         if reaches_target and not battery_will_hit_min:
                             ev_charging_power_w = try_power
-                            stepped = f", stepped {candidate_power}→{try_power}W" if try_power < candidate_power else ""
+                            if try_power > candidate_power:
+                                detail = f", snap-up {candidate_power}→{try_power}W"
+                            elif try_power < candidate_power:
+                                detail = f", stepped {candidate_power}→{try_power}W"
+                            else:
+                                detail = ""
                             ev_source_reason = (
                                 f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
-                                f"forecast → {ev_charging_power_w:.0f}W{stepped}"
+                                f"forecast → {ev_charging_power_w:.0f}W{detail}"
                             )
                             break
 
