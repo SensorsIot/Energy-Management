@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.90"
+__version__ = "1.6.92"
 
 import json
 import logging
@@ -635,7 +635,9 @@ class EnergyManager:
             return soc, target_time
         return None, target_time
 
-    def will_battery_hit_full(self) -> tuple[bool, float | None, datetime]:
+    def will_battery_hit_full(
+        self,
+    ) -> tuple[bool, float | None, str | None, datetime]:
         """Check if battery is forecast to reach 100% today.
 
         Only looks at today's solar window (until midnight local time).
@@ -643,7 +645,7 @@ class EnergyManager:
         doesn't justify diverting today's solar to the EV.
 
         Returns:
-            (hits_full, peak_soc or None, end_of_today)
+            (hits_full, peak_soc or None, full_time_local or None, end_of_today)
         """
         now = datetime.now(timezone.utc)
 
@@ -666,12 +668,32 @@ class EnergyManager:
         if result and result[0].records:
             peak_soc = result[0].records[0].get_value()
             hits_full = peak_soc >= 99
+
+            # Find the first time SOC reaches 99%
+            full_time_local = None
+            if hits_full:
+                time_query = f'''
+                from(bucket: "{self.output_bucket}")
+                  |> range(start: now(), stop: {end_stop})
+                  |> filter(fn: (r) => r._measurement == "soc_forecast")
+                  |> filter(fn: (r) => r.scenario == "with_strategy")
+                  |> filter(fn: (r) => r._field == "soc_percent")
+                  |> filter(fn: (r) => r._value >= 99.0)
+                  |> first()
+                '''
+                time_result = self.influx_client.query_api().query(time_query)
+                if time_result and time_result[0].records:
+                    full_utc = time_result[0].records[0].get_time()
+                    full_local = full_utc.astimezone(SWISS_TZ)
+                    full_time_local = full_local.strftime("%H:%M")
+
             logger.debug(
                 f"Peak SOC today: {peak_soc:.0f}%"
                 f" → {'battery full' if hits_full else 'not full'}"
+                f"{f' at {full_time_local}' if full_time_local else ''}"
             )
-            return hits_full, peak_soc, end_of_today
-        return False, None, end_of_today
+            return hits_full, peak_soc, full_time_local, end_of_today
+        return False, None, None, end_of_today
 
     def will_battery_hit_minimum(
         self, extra_load_wh: float = 0.0
@@ -751,7 +773,7 @@ class EnergyManager:
 
             # Override: battery will be full → solar curtailed → let EV use it
             if not reaches_target:
-                hits_full, peak_soc, _ = self.will_battery_hit_full()
+                hits_full, peak_soc, _, _ = self.will_battery_hit_full()
                 if hits_full:
                     reaches_target = True
                     logger.info(
@@ -900,6 +922,7 @@ class EnergyManager:
             ev_charging_source = "none"
             ev_source_reason = "no solar mode"
             ev_threshold = 0.0
+            battery_full_time = None
             if ev_mode == "solar":
                 threshold = self.ha_client.get_sensor_value(
                     self.ev_min_solar_power_entity
@@ -938,7 +961,7 @@ class EnergyManager:
                         f"forecast → {ev_charging_power_w:.0f}W (battery full)"
                     )
             elif ev_charging_source == "solar_surplus":
-                battery_will_be_full, _, _ = self.will_battery_hit_full()
+                battery_will_be_full, _, battery_full_time, _ = self.will_battery_hit_full()
                 ev_min_power = POWER_STEPS_3P[0]
                 ev_max_power = POWER_STEPS_3P[-1]
                 candidate_power = snap_to_power_step(
@@ -1001,7 +1024,7 @@ class EnergyManager:
                 reaches_target, soc_at_target = self.check_battery_protection(
                     ev_load_wh=0.0
                 )
-                battery_will_be_full, _, _ = self.will_battery_hit_full()
+                battery_will_be_full, _, battery_full_time, _ = self.will_battery_hit_full()
                 battery_will_hit_min, _, _ = self.will_battery_hit_minimum(
                     extra_load_wh=0.0
                 )
@@ -1141,6 +1164,7 @@ class EnergyManager:
                     "battery_soc": battery_soc,
                     "battery_forecast_soc": self._battery_min_soc_forecast,
                     "battery_will_be_full": battery_will_be_full,
+                    "battery_full_time": battery_full_time,
                     "battery_will_hit_min": battery_will_hit_min,
                     "reaches_target": reaches_target,
                     "threshold_w": ev_threshold,

@@ -122,6 +122,12 @@ class EVStateMachine:
     # -------------------------------------------------------------------
 
     def _step_solar(self, i: EVInputs) -> EVOutput:
+        # S0: wallbox unavailable — back to IDLE (NO-01)
+        if not i.wallbox_available:
+            self._set_state(EVState.IDLE)
+            return EVOutput(EVState.IDLE, 0,
+                            "Wallbox unavailable — back to IDLE")
+
         # S1: car finished — wallbox idle
         if i.wallbox_idle:
             self._set_state(EVState.IDLE)
@@ -157,6 +163,12 @@ class EVStateMachine:
     # -------------------------------------------------------------------
 
     def _step_cheap(self, i: EVInputs) -> EVOutput:
+        # C0: wallbox unavailable — back to IDLE
+        if not i.wallbox_available:
+            self._set_state(EVState.IDLE)
+            return EVOutput(EVState.IDLE, 0,
+                            "Wallbox unavailable — back to IDLE")
+
         # C1: car finished — wallbox idle
         if i.wallbox_idle:
             self._set_state(EVState.IDLE)
@@ -180,6 +192,12 @@ class EVStateMachine:
     # -------------------------------------------------------------------
 
     def _step_max(self, i: EVInputs) -> EVOutput:
+        # M0: wallbox unavailable — back to IDLE
+        if not i.wallbox_available:
+            self._set_state(EVState.IDLE)
+            return EVOutput(EVState.IDLE, 0,
+                            "Wallbox unavailable — back to IDLE")
+
         # M1: car finished — wallbox idle
         if i.wallbox_idle:
             self._set_state(EVState.IDLE)

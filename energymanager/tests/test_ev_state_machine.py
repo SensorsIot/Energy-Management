@@ -348,6 +348,29 @@ class TestWallboxAvailable:
         out = sm.step(make_inputs(wallbox_available=False))
         assert out.state == EVState.IDLE
 
+    def test_solar_exits_to_idle_without_wallbox(self):
+        """NO-01 regression: SOLAR must exit to IDLE when wallbox disappears."""
+        sm = make_sm(EVState.SOLAR)
+        out = sm.step(make_inputs(wallbox_available=False, ev_charging_power_w=5000))
+        assert out.state == EVState.IDLE
+        assert out.target_power_w == 0
+
+    def test_cheap_exits_to_idle_without_wallbox(self):
+        sm = make_sm(EVState.CHEAP)
+        out = sm.step(make_inputs(
+            charging_mode="cheap", wallbox_available=False, is_cheap_tariff=True,
+        ))
+        assert out.state == EVState.IDLE
+        assert out.target_power_w == 0
+
+    def test_immediate_exits_to_idle_without_wallbox(self):
+        sm = make_sm(EVState.IMMEDIATE)
+        out = sm.step(make_inputs(
+            charging_mode="immediate", wallbox_available=False,
+        ))
+        assert out.state == EVState.IDLE
+        assert out.target_power_w == 0
+
 
 # ===================================================================
 # Idle detection (wallbox_idle exits to IDLE)
