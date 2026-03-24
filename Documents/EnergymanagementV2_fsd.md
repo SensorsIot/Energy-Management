@@ -2183,8 +2183,7 @@ When the state machine is in SOLAR mode, this calculation determines the wallbox
 | Parameter | HA Entity / Source | Default | Description |
 |-----------|-------------------|---------|-------------|
 | `ev_min_solar_power` | `input_number.ev_min_solar_power` | 1380 W | Minimum power to start solar EV charging. Gate for both sources. |
-| `surplus_power` | `sensor.surplus_power` | — | Live surplus (solar − house load). Must exceed `ev_min_solar_power` for Rule 2 (Solar Surplus Charging). |
-| `surplus_capture_power_w` | Surplus capture, every 10 s | — | Wallbox power derived from measured grid export |
+| `surplus_power` | `sensor.surplus_power` | — | Live surplus (solar − house load, rolling 30s average). Input for both Rule 1 and Rule 2. |
 
 **Output:** `ev_charging_power_w` — the wallbox power setpoint in watts (0 = don't charge).
 
@@ -2196,12 +2195,11 @@ Both rules are gated by `ev_min_solar_power` (threshold) — below this level, t
 
 #### Selection Rules
 
-The deciding factor is **battery state**: is the battery full, or is it still charging?
+The deciding factor is **battery state**: is the battery full, or is it still charging? Both rules use the same input signal: `surplus_power` (PV − house load, rolling 30s average). This avoids the feedback loop where grid export drops when the wallbox is already consuming solar.
 
 ```
                       INPUTS
-  grid_export      = M-Bus meter (or DTSU fallback)
-  surplus          = rolling 1-min avg of (PV - load)
+  surplus          = rolling 30s avg of (PV - load)
   threshold        = ev_min_solar_power (e.g. 3400W)
   battery_soc      = current battery %
   pv_forecast      = forecasted PV production (Section 4.4)
@@ -2218,28 +2216,33 @@ The deciding factor is **battery state**: is the battery full, or is it still ch
               ┌────────────────────┐
               │  Battery full?     │
               │  (SOC ≥ 100%)      │
+              │  AND surplus ≥     │
+              │  threshold?        │
               └──┬──────────────┬──┘
               YES│              │NO
                  ▼              ▼
   ┌──────────────────────┐  ┌──────────────────────────┐
-  │ Rule 1: BATTERY FULL │  │ Rule 2: SOLAR SURPLUS    │
-  │                      │  │         CHARGING         │
-  │ corrected_export =   │  │                          │
-  │   grid_export +      │  │ surplus ≥ threshold?     │
-  │   wallbox_power      │  └────┬────────────────┬────┘
-  │   (if already        │    YES│                │NO
-  │    charging)         │       ▼                ▼
+  │ Rule 1: BATTERY FULL │  │ surplus ≥ threshold?     │
+  │                      │  └────┬────────────────┬────┘
+  │ snap_to_power_step(  │    YES│                │NO
+  │   surplus)           │       ▼                ▼
   │                      │  ┌────────────────┐  power = 0
-  │ snap_to_power_step(  │  │ Battery will   │
-  │   corrected_export)  │  │ reach 100%     │
-  │                      │  │ today?         │
-  │ No battery check.    │  └──┬──────────┬──┘
-  └──────────┬───────────┘  YES│          │NO
+  │ No battery check.    │  │ Rule 2: SOLAR  │
+  └──────────┬───────────┘  │ SURPLUS        │
+             │              │                │
+             │              │ Battery will   │
+             │              │ reach 100%     │
+             │              │ today?         │
+             │              └──┬──────────┬──┘
+             │              YES│          │NO
              │                 ▼          ▼
              │  ┌──────────────────┐  ┌──────────────────┐
-             │  │ Use candidate    │  │ STEP-DOWN        │
-             │  │ snap_to_power_   │  │ For each step    │
-             │  │ step(surplus)    │  │ highest → lowest:│
+             │  │ Use candidate    │  │ SNAP-UP then     │
+             │  │ snap_to_power_   │  │ STEP-DOWN        │
+             │  │ step(surplus)    │  │ Try step above   │
+             │  │                  │  │ surplus first,   │
+             │  │                  │  │ then highest →   │
+             │  │                  │  │ lowest:          │
              │  │                  │  │  battery checks  │
              │  │                  │  │  pass? → use it  │
              │  └────────┬─────────┘  │ None pass → 0W   │
@@ -2255,19 +2258,18 @@ The deciding factor is **battery state**: is the battery full, or is it still ch
 
 ##### Rule 1: Battery Full
 
-The battery is full — energy has nowhere to go and is being exported to the grid.
+The battery is full — energy has nowhere to go and would be curtailed.
 
-- **Input**: corrected grid export = measured grid export + wallbox power (if already charging)
-- **Power**: `snap_to_power_step(corrected_grid_export)` → charging power
+- **Input**: surplus power (PV − house load)
+- **Condition**: `battery_soc >= 100 AND surplus >= threshold AND pv_power > 0`
+- **Power**: `snap_to_power_step(surplus)` → charging power
 - **Battery check**: none — energy would be wasted
-
-The feedback correction prevents oscillation: when the wallbox is already charging, its load reduces the measured grid export. Adding the wallbox's current power back reconstructs the true available export.
 
 ##### Rule 2: Solar Surplus Charging
 
 The battery is still charging — surplus exists (PV > house load) but the battery needs the energy too.
 
-- **Input**: surplus power (PV − house load, rolling 1-min average)
+- **Input**: surplus power (PV − house load, rolling 30s average)
 - **Power**: `snap_to_power_step(surplus)` → candidate charging power
 - **Battery protection** decides whether to allow:
 
@@ -2304,11 +2306,11 @@ These values differ from the nominal `amps × 230V × 3` because real grid volta
 
 **Inputs:** `surplus_power` (live measurement from `sensor.surplus_power`).
 
-**Calculation:** `snap_to_power_step(surplus_power)` returns the highest M-Bus step ≤ surplus. If surplus is below all steps but above `ev_min_solar_power`, the minimum step (3962W) is returned — the battery covers the difference.
+**Calculation:** `snap_to_power_step(surplus_power)` returns the highest M-Bus step ≤ surplus. If surplus is below all steps but above `ev_min_solar_power`, the minimum step (3962W) is returned — the battery covers the difference. In the step-down loop (Rule 2, battery won't be full), the loop first tries the **next step above** the snap-down result (snap-up) — if battery protection passes at the higher load, the battery covers the small gap, maximising solar utilisation.
 
 The OCPP server converts M-Bus watts to integer amps using a calibrated divisor: `round(power_w / 637)`. The divisor 637 (safe range [612, 662]) ensures each M-Bus value maps to the correct amp level.
 
-**Battery gating (step-down loop):** In Case 2 (battery won't reach 100%), the candidate power step is checked against the battery forecast functions (Section 4.4). If the battery cannot sustain the load at the snapped level, the loop steps down through discrete power steps and re-checks until either: (a) `reaches_target` AND NOT `will_hit_minimum`, or (b) no more steps above `ev_min_solar_power` remain. In Case 1 (battery will reach 100%), the snapped level is used directly — no step-down needed.
+**Battery gating (snap-up then step-down loop):** In Case 2 (battery won't reach 100%), the loop first tries the **next step above** the snap-down candidate (snap-up — battery covers the small gap between surplus and the higher step). If that fails battery protection, it steps down through lower steps until either: (a) `reaches_target` AND NOT `will_hit_minimum`, or (b) no more steps above `ev_min_solar_power` remain. In Case 1 (battery will reach 100%), the snapped level is used directly — no snap-up or step-down needed.
 
 Because `control_ev_charging()` runs every 10 seconds with live surplus, the system is self-correcting:
 
@@ -2319,20 +2321,19 @@ Because `control_ev_charging()` runs every 10 seconds with live surplus, the sys
 | Load increases | Surplus drops → next cycle adapts down |
 | Load decreases | Surplus rises → next cycle may increase power |
 
-**Rate limiting:** The wallbox power limit (`number.wallbox_power_limit`) is only sent when it differs from the last-sent value **and** at least 60 seconds have passed since the last change. This prevents oscillation at power-step boundaries (e.g. surplus hovering near 3962/4354W causing the wallbox to flip between 6A and 7A every 10 seconds). 0W (pause) bypasses the rate limit for safety. The dashboard sensor `sensor.ev_target_power` still updates every 10 seconds to show the desired power.
+**Rate limiting:** The wallbox power limit (`number.wallbox_power_limit`) is only sent when it differs from the last-sent value **and** at least 30 seconds have passed since the last change. This prevents oscillation at power-step boundaries (e.g. surplus hovering near 3962/4354W causing the wallbox to flip between 6A and 7A every 10 seconds). 0W (pause) bypasses the rate limit for safety. The dashboard sensor `sensor.ev_target_power` still updates every 10 seconds to show the desired power.
 
 #### Scenarios
 
 | Scenario | Rule | What happens |
 |----------|------|-------------|
-| **Battery full, sunny** | 1 | Grid export captured → `snap_to_power_step(corrected_export)` → wallbox charges |
-| **Good morning** | 2 | Surplus rises above threshold → `snap_to_power_step(surplus)` → battery buffers the gap between discrete step and actual surplus |
+| **Battery full, sunny** | 1 | Surplus → `snap_to_power_step(surplus)` → wallbox charges, no battery check |
+| **Good morning** | 2 | Surplus rises above threshold → snap-up tries next step above surplus (battery covers gap) |
 | **Afternoon decline** | 2 | Surplus drops each cycle → lower power step. Below threshold → 0W |
 | **Bad/cloudy day** | 2 | Battery forecast checks adapt. Small surplus still charges EV if battery can sustain it |
 | **Peak solar** | 1 or 2 | High surplus → higher power step. Battery charges the excess between steps |
 | **Battery will reach 100%** | 2 | Candidate step used directly — energy would be curtailed later |
-| **Low surplus (e.g. 1000W)** | Below `ev_min_solar_power` → no charging. Not enough to justify starting the wallbox. |
-| **Enphase exporting** | Surplus capture: grid export ≥ `ev_min_solar_power` → 1-phase charging captures the export. |
+| **Low surplus (e.g. 1000W)** | — | Below `ev_min_solar_power` → no charging. Not enough to justify starting the wallbox |
 
 ## 4.6 Smart Car SOC Polling
 
@@ -3708,9 +3709,10 @@ See Section 4.6 for adaptive polling logic.
 
 **End of Document**
 
-*Version 2.40 - March 2026*
+*Version 2.41 - March 2026*
 
 **Changelog:**
+- v2.41: Both rules use surplus_power (PV − house load) as input (Section 4.6.6) — eliminates grid_export feedback loop; snap-up tries next amp step above surplus if battery protected; surplus smoothing 60s→30s, rate limit 60s→30s; removed stale power floor clamp; updated flowchart, scenarios, and snap description (v1.6.93–v1.6.96)
 - v2.40: Added S0/C0/M0 wallbox-unavailable guards to all active state transitions (Section 4.6.5.2); `will_battery_hit_full()` now returns `full_time_local` HH:MM (Section 4.4.2); updated NO-01 test scope (Appendix D.7.1) (v1.6.92)
 - v2.39: Added Section 2.13.11 (Calibration History) — documents 2026-03-20 parameter change boundary, retrofitted data in InfluxDB (pv_forecast_retrofitted), and retrofit limitations
 - v2.38: Updated Section 2.6 PV System Configuration — calibrated Pdc0 values (E:445W, W:490W, S:425W) and inverter efficiency (0.98) from per-string actual vs clear-sky model on sunny days; these are model calibration parameters, not changes to physical hardware; added calibration note explaining methodology
