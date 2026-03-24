@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.94"
+__version__ = "1.6.95"
 
 import json
 import logging
@@ -189,7 +189,7 @@ class EnergyManager:
         self._last_ev_power_limit_at: float = 0.0  # monotonic timestamp
         self._ev_sm = EVStateMachine()
         self._surplus_capture_active: bool = False
-        self._surplus_samples: list[float] = []  # rolling 1-min avg (6 × 10 s)
+        self._surplus_samples: list[float] = []  # rolling 30s avg (3 × 10 s)
         self.ev_min_solar_power_entity = ev_opts.get(
             "min_solar_power_entity", "input_number.ev_min_solar_power"
         )
@@ -889,7 +889,7 @@ class EnergyManager:
 
             # Rolling 1-minute average of surplus (6 samples × 10 s)
             self._surplus_samples.append(surplus_power_raw)
-            if len(self._surplus_samples) > 6:
+            if len(self._surplus_samples) > 3:
                 self._surplus_samples.pop(0)
             surplus_power = sum(self._surplus_samples) / len(self._surplus_samples)
 
@@ -1103,11 +1103,11 @@ class EnergyManager:
                 self._ev_idle_since = None
 
             # Send power limit to OCPP (on change only; OCPP server handles re-sends)
-            # Rate limit: min 60s between changes to prevent wallbox oscillation
-            # at amp-step boundaries (e.g. 4140↔4830W). 0W bypasses (safety).
+            # Rate limit: min 30s between changes to prevent wallbox oscillation
+            # at amp-step boundaries. 0W bypasses (safety).
             if output.target_power_w != self._last_ev_power_limit:
                 since_last = time.monotonic() - self._last_ev_power_limit_at
-                if output.target_power_w == 0 or since_last >= 60:
+                if output.target_power_w == 0 or since_last >= 30:
                     success = self.ha_client.set_sensor_state(
                         self.wallbox_power_limit_entity,
                         int(output.target_power_w),
