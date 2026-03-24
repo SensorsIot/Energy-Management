@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.52"
+__version__ = "0.9.53"
 
 import asyncio
 import json
@@ -231,9 +231,6 @@ class OCPPServer:
         self._cloud_charging_entity: str = options.get("cloud_charging_entity", "")
         self._cloud_poll_task: Optional[asyncio.Task] = None
         self._synthesized_suspended_ev: bool = False
-
-        # Keep-alive pulse for paused transactions
-        self._keepalive_last_pulse: float = 0.0
 
         # Periodic reconciliation of HA power limit vs wallbox
         self._last_reconcile_at: float = 0.0
@@ -641,17 +638,7 @@ class OCPPServer:
 
         self._pending_power_w = None
         self._last_sent_power_w = power_w
-        if power_w > 0:
-            self._keepalive_last_pulse = 0.0
         logger.info(f"Sent power profile: {power_w}W")
-
-    async def _wait_for_charging_status(self):
-        """Wait until the wallbox reports Charging via StatusNotification."""
-        while self.charge_point:
-            self.charge_point.status_event.clear()
-            if self.charge_point.current_status == "Charging":
-                return
-            await self.charge_point.status_event.wait()
 
     async def _sync_ha_state(self):
         """Re-publish current wallbox state to HA after entity recovery."""
@@ -771,51 +758,6 @@ class OCPPServer:
                         await self._send_power_to_wallbox(self._last_sent_power_w)
                         self._resend_retry_count += 1
                         self._last_change_at = time.monotonic()
-
-                # Keep-alive pulse: briefly charge to keep session alive while paused.
-                # Send min power, wait for wallbox to confirm Charging via
-                # StatusNotification, then immediately revert to 0W.
-                # DISABLED: testing wallbox firmware update behaviour without pulse
-                KEEPALIVE_CHARGING_TIMEOUT_S = 15
-                if False and (
-                    self._last_sent_power_w == 0
-                    and self.charge_point
-                    and self.charge_point.current_status == "SuspendedEVSE"
-                    and (time.monotonic() - self._keepalive_last_pulse) >= 1500
-                ):
-                    min_power_w = self.min_current_a * 230 * self._current_phases
-                    logger.info(
-                        f"Keep-alive pulse: sending {min_power_w}W, "
-                        f"waiting for Charging status"
-                    )
-                    self.charge_point.status_event.clear()
-                    await self.charge_point.set_charging_power(
-                        min_power_w, num_phases=self._current_phases
-                    )
-                    # Wait for wallbox to confirm Charging via StatusNotification
-                    charged = False
-                    try:
-                        await asyncio.wait_for(
-                            self._wait_for_charging_status(),
-                            timeout=KEEPALIVE_CHARGING_TIMEOUT_S,
-                        )
-                        charged = True
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            f"Keep-alive pulse: Charging status not received "
-                            f"within {KEEPALIVE_CHARGING_TIMEOUT_S}s"
-                        )
-                    await self.charge_point.set_charging_power(
-                        0, num_phases=self._current_phases
-                    )
-                    if self.charge_point:
-                        self.charge_point.current_power_w = 0
-                        self._on_status_change("power_w", 0)
-                    self._keepalive_last_pulse = time.monotonic()
-                    logger.info(
-                        f"Keep-alive pulse complete, reverted to 0W "
-                        f"(charging confirmed: {charged})"
-                    )
 
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")
