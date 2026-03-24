@@ -1914,17 +1914,22 @@ soc_at_target -= extra_load_wh / capacity_wh × 100
 
 ### 4.4.2 `will_battery_hit_full()`
 
-Returns whether the **peak SOC** reaches 100% between now and the next cheap tariff start.
+Returns whether the **peak SOC** reaches 100% between now and end of today, plus the **time** it first reaches 100%.
 
-- Queries `max(soc_percent)` from now until `tariff.target`
+- Queries `max(soc_percent)` from now until end of today (midnight local)
 - If peak ≥ 99% → battery will be full → excess solar would be curtailed
+- If full: queries `first()` where `soc_percent >= 99` to find the time
 
 ```
-peak_soc = query(max soc_forecast from now to tariff.target)
+peak_soc = query(max soc_forecast from now to end_of_today)
 hits_full = peak_soc >= 99%
+if hits_full:
+    full_time = query(first soc_forecast >= 99% from now to end_of_today)._time
 ```
 
-**Used by:** EV charging Rule 2 — if battery will be full, allow EV charging even if SOC at 21:00 drops below protection target. That energy would be wasted otherwise.
+**Returns:** `(hits_full, peak_soc, full_time_local "HH:MM" or None, end_of_today)`
+
+**Used by:** EV charging Rule 2 — if battery will be full, allow EV charging even if SOC at 21:00 drops below protection target. That energy would be wasted otherwise. `full_time_local` is published as `battery_full_time` attribute on `sensor.ev_target_power` for dashboard display.
 
 ### 4.4.3 `will_battery_hit_minimum(extra_load_wh)`
 
@@ -2112,6 +2117,7 @@ The machine stays in its current state unless one of the listed conditions trigg
 
 | # | Condition | → New State |
 |---|-----------|-------------|
+| S0 | `NOT wallbox_available` | IDLE |
 | S1 | `wallbox_idle` | IDLE |
 | S2 | `charging_mode == "immediate"` | IMMEDIATE |
 | S3 | `charging_mode == "cheap"` | CHEAP |
@@ -2120,6 +2126,7 @@ The machine stays in its current state unless one of the listed conditions trigg
 
 | # | Condition | → New State |
 |---|-----------|-------------|
+| C0 | `NOT wallbox_available` | IDLE |
 | C1 | `wallbox_idle` | IDLE |
 | C2 | `charging_mode != "cheap"` | IDLE |
 
@@ -2129,6 +2136,7 @@ Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expe
 
 | # | Condition | → New State |
 |---|-----------|-------------|
+| M0 | `NOT wallbox_available` | IDLE |
 | M1 | `wallbox_idle` | IDLE |
 | M2 | `charging_mode != "immediate"` | IDLE |
 
@@ -3389,7 +3397,7 @@ Report version: **3** (bumped when test definitions change — invalidates stale
 
 | ID | Name | Preconditions | Pass condition |
 |----|------|---------------|----------------|
-| NO-01 | IDLE stays when wallbox unavailable | mode=solar, wallbox unavailable | state=IDLE, power=0 |
+| NO-01 | IDLE when wallbox unavailable | mode=solar, wallbox unavailable (any prev state) | state=IDLE, power=0 |
 | NO-02 | IDLE→SOLAR on charging power>0 | prev=IDLE, mode=solar, available, ev_charging_power_w>0 | state=SOLAR |
 | NO-05 | SOLAR power equals charging power | state=SOLAR, ev_charging_power_w>0 | target_power_w == ev_charging_power_w |
 | NO-06 | IDLE→IMMEDIATE | prev=IDLE, mode=immediate, available | state=IMMEDIATE, power=max |
@@ -3700,9 +3708,10 @@ See Section 4.6 for adaptive polling logic.
 
 **End of Document**
 
-*Version 2.25 - February 2026*
+*Version 2.40 - March 2026*
 
 **Changelog:**
+- v2.40: Added S0/C0/M0 wallbox-unavailable guards to all active state transitions (Section 4.6.5.2); `will_battery_hit_full()` now returns `full_time_local` HH:MM (Section 4.4.2); updated NO-01 test scope (Appendix D.7.1) (v1.6.92)
 - v2.39: Added Section 2.13.11 (Calibration History) — documents 2026-03-20 parameter change boundary, retrofitted data in InfluxDB (pv_forecast_retrofitted), and retrofit limitations
 - v2.38: Updated Section 2.6 PV System Configuration — calibrated Pdc0 values (E:445W, W:490W, S:425W) and inverter efficiency (0.98) from per-string actual vs clear-sky model on sunny days; these are model calibration parameters, not changes to physical hardware; added calibration note explaining methodology
 - v2.37: Added Section 2.13 (Shading Correction) — clear-sky reference model using pvlib.clearsky.ineichen(), per-hour sunny detection (actual GHI / clearsky GHI > 0.85), per-string shading factor calculation, InfluxDB storage schema for accuracy evaluation; replaces previous weather-factor-based approach that suffered from circular dependency
