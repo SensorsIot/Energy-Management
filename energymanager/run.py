@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.95"
+__version__ = "1.6.96"
 
 import json
 import logging
@@ -188,7 +188,6 @@ class EnergyManager:
         self._last_ev_power_limit = None
         self._last_ev_power_limit_at: float = 0.0  # monotonic timestamp
         self._ev_sm = EVStateMachine()
-        self._surplus_capture_active: bool = False
         self._surplus_samples: list[float] = []  # rolling 30s avg (3 × 10 s)
         self.ev_min_solar_power_entity = ev_opts.get(
             "min_solar_power_entity", "input_number.ev_min_solar_power"
@@ -895,29 +894,13 @@ class EnergyManager:
 
             validate_power_readings(grid_w=grid_power, wallbox_w=wallbox_power)
 
-            # Grid convention: positive = export, negative = import.
-            # Rule 1 (Battery Full) uses grid export with feedback correction.
-            # Only when battery is full — otherwise battery discharge inflates
-            # the corrected export, causing the wallbox to overdraw.
-            if battery_soc >= 100:
-                if self._surplus_capture_active and wallbox_power > 0:
-                    grid_export = max(0.0, grid_power + wallbox_power)
-                else:
-                    grid_export = max(0.0, grid_power)
-            else:
-                grid_export = max(0.0, grid_power)
-
-            # Compute grid surplus capture candidate (FSD 4.6.6 — Rule 1: Battery Full)
-            # Only qualifies when battery is full — energy has nowhere to go.
-            surplus_capture_power_w = 0.0
-            if ev_mode == "solar" and battery_soc >= 100:
-                if grid_export >= ev_min_power and pv_power > 0:
-                    surplus_capture_power_w = float(
-                        min(max(grid_export, ev_min_power), ev_max_power)
-                    )
-            self._surplus_capture_active = surplus_capture_power_w > 0
+            # Grid export: for dashboard display only (not used in decisions)
+            grid_export = max(0.0, grid_power)
 
             # Step 1: Determine candidate EV power (what we'd charge at)
+            # Both rules use surplus_power (PV - house load) as the input.
+            # Surplus is independent of wallbox consumption, avoiding the
+            # feedback loop where grid_export drops when the wallbox charges.
             ev_charging_power_w = 0.0
             ev_charging_source = "none"
             ev_source_reason = "no solar mode"
@@ -929,16 +912,16 @@ class EnergyManager:
                 ) or ev_min_power
                 ev_threshold = threshold
 
-                # Rule 1: Battery Full — grid export capture (no battery check)
-                if surplus_capture_power_w >= threshold:
+                # Rule 1: Battery Full — surplus capture (no battery check)
+                if battery_soc >= 100 and surplus_power >= threshold and pv_power > 0:
                     ev_charging_power_w = snap_to_power_step(
-                        surplus_capture_power_w,
+                        surplus_power,
                         POWER_STEPS_3P[0],
                         POWER_STEPS_3P[-1],
                     )
                     ev_charging_source = "battery_full"
                     ev_source_reason = (
-                        f"Grid export {grid_export:.0f}W → snap {ev_charging_power_w:.0f}W"
+                        f"Surplus {surplus_power:.0f}W → snap {ev_charging_power_w:.0f}W"
                     )
                 # Rule 2 candidate: snap surplus to amp step (needs battery check)
                 elif surplus_power >= threshold:
@@ -949,17 +932,7 @@ class EnergyManager:
                 reaches_target, soc_at_target = True, 100.0
                 battery_will_be_full = True
                 battery_will_hit_min = False
-                # Battery full — if forecast path was selected, compute power
-                # (surplus capture already set ev_charging_power_w above)
-                if ev_charging_source == "solar_surplus":
-                    candidate_power = snap_to_power_step(
-                        surplus_power, POWER_STEPS_3P[0], POWER_STEPS_3P[-1]
-                    )
-                    ev_charging_power_w = candidate_power
-                    ev_source_reason = (
-                        f"Surplus {surplus_power:.0f}W ≥ {ev_threshold:.0f}W, "
-                        f"forecast → {ev_charging_power_w:.0f}W (battery full)"
-                    )
+                # Rule 1 already set ev_charging_power_w above
             elif ev_charging_source == "solar_surplus":
                 battery_will_be_full, _, battery_full_time, _ = self.will_battery_hit_full()
                 ev_min_power = POWER_STEPS_3P[0]
@@ -1048,17 +1021,11 @@ class EnergyManager:
 
             if ev_charging_source == "none" and ev_mode == "solar":
                 # Explain why neither rule fired
-                reasons = []
-                if surplus_capture_power_w < ev_threshold:
-                    reasons.append(
-                        f"grid export {grid_export:.0f}W < {ev_threshold:.0f}W"
-                    )
                 if surplus_power < ev_threshold:
-                    reasons.append(
-                        f"surplus {surplus_power:.0f}W < {ev_threshold:.0f}W"
+                    ev_source_reason = (
+                        f"No charging — surplus {surplus_power:.0f}W"
+                        f" < {ev_threshold:.0f}W"
                     )
-                if reasons:
-                    ev_source_reason = "No charging — " + "; ".join(reasons)
 
             # Compute wallbox idle state (all modes)
             if wallbox_power == 0 and wb_status in ("Finishing", "SuspendedEV"):
