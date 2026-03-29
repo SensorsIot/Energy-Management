@@ -143,7 +143,7 @@ The wallbox reports its state via OCPP `StatusNotification`. These states drive 
 | `Authorize` | Accept all tags |
 | `StartTransaction` | Assign transaction ID |
 | `StopTransaction` | Clear transaction |
-| `MeterValues` | Sum per-phase power → `sensor.wallbox_power`. Energy-only messages (e.g. `Sample.Clock` at 15-min boundaries) update energy but do **not** change power. |
+| `MeterValues` | Sum per-phase power → `sensor.wallbox_power`. Energy-only messages (e.g. `Sample.Clock` at 15-min boundaries) update energy but do **not** change power. **Stale filter:** readings with wallbox timestamps older than 5 minutes are dropped (the Actec replays its internal meter-log queue after reconnects, e.g. DST reboots, delivering readings from hours/days ago). |
 
 **Outgoing (Server → Wallbox):**
 
@@ -463,6 +463,7 @@ Measured with AcTec EV-AC22K (FW V1.17.9), 3-phase. Superseded by §7.1.
 | TC-04 | Power limit change (transaction active) | SetChargingProfile only |
 | TC-05 | MeterValues during transaction | Per-phase power summed → wallbox_power |
 | TC-05b | Energy-only MeterValues (Sample.Clock) | Energy updated, power unchanged (not zeroed) |
+| TC-05c | Stale MeterValues (timestamp > 5 min old) | Dropped with log message, no state update |
 | TC-06 | Wallbox disconnect | connected=off, transaction cleared |
 | TC-07 | Phase switch: <4140W | Relay OFF, 1-phase, phases=1 |
 | TC-08 | Phase switch: ≥4140W | Relay ON, 3-phase, phases=3 |
@@ -548,3 +549,4 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 | 3.4 | 2026-03-03 | Simplified keep-alive pulse: fixed-duration sleep instead of MeterValues sync (tunable `KEEPALIVE_PULSE_DURATION_S`) |
 | 3.5 | 2026-03-03 | Keep-alive pulse waits for Charging StatusNotification instead of fixed sleep; reverts immediately after confirmation |
 | 3.6 | 2026-03-24 | Removed keep-alive pulse — Actec confirmed to maintain sessions at 0W indefinitely without periodic nudging (tested 2026-03-24) |
+| 3.7 | 2026-03-29 | Stale MeterValues filter: drop readings with wallbox timestamps > 5 min old. Actec replays buffered meter-log queue after reconnects (e.g. DST reboot), causing energy counter jumps that corrupt daily statistics. TC-05c |

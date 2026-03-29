@@ -109,6 +109,13 @@ class ChargePointHandler(CP):
                     self.on_status_change("power_w", 0)
         return call_result.StatusNotification()
 
+    # Maximum age (seconds) for MeterValues timestamps.  The Actec wallbox
+    # replays its internal meter-log queue after server restarts or long idle
+    # periods, delivering readings with timestamps from hours or days ago.
+    # Accepting those stale readings creates impossible energy-counter jumps
+    # (e.g. 70 → 6980 Wh in one second) that corrupt daily statistics.
+    METER_VALUES_MAX_AGE_S = 300  # 5 minutes
+
     @on(Action.meter_values)
     async def on_meter_values(self, connector_id: int, meter_value: list, **kwargs):
         """Wallbox sent meter values (power, energy, etc.)."""
@@ -129,6 +136,25 @@ class ChargePointHandler(CP):
         total_power = 0.0
         has_power_measurand = False
         for mv in meter_value:
+            # Reject stale MeterValues based on wallbox timestamp
+            mv_timestamp = mv.get("timestamp")
+            if mv_timestamp:
+                try:
+                    mv_time = datetime.fromisoformat(
+                        mv_timestamp.replace("Z", "+00:00")
+                    )
+                    age_s = (
+                        datetime.now(timezone.utc) - mv_time
+                    ).total_seconds()
+                    if age_s > self.METER_VALUES_MAX_AGE_S:
+                        logger.info(
+                            f"Dropping stale MeterValues "
+                            f"(age={age_s:.0f}s, timestamp={mv_timestamp})"
+                        )
+                        continue
+                except (ValueError, TypeError):
+                    pass  # unparseable timestamp — process normally
+
             for sampled in mv.get("sampled_value", []):
                 measurand = sampled.get("measurand", "Energy.Active.Import.Register")
                 value = float(sampled.get("value", 0))
