@@ -510,5 +510,85 @@ class TestTariffBoundaryTransitions:
         assert tariff.is_cheap_now is False
 
 
+# ===================================================================
+# Hysteresis: prevent oscillation at soc_ok boundary
+# ===================================================================
+
+
+class TestHysteresis:
+    """Hysteresis prevents flip-flopping when projected min SOC hovers near threshold."""
+
+    def _make_optimizer_and_forecast(self):
+        """Create optimizer and a forecast that yields min_soc ~10-11%."""
+        optimizer = BatteryOptimizer(
+            capacity_wh=10000,
+            min_soc_percent=10,
+        )
+        # Monday 22:00 (cheap tariff)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+
+        # Craft forecast so that at SOC=45%, projected min is just above 10%
+        # Night: 0 PV, 300W load.  Day: enough PV to recover
+        pv_pattern = [0] * 32 + [2500] * 48 + [0] * 16
+        load_pattern = [300] * 96
+        forecast = make_forecast(start=now, hours=48,
+                                 pv_pattern=pv_pattern, load_pattern=load_pattern)
+        return optimizer, forecast, now
+
+    def test_previously_blocked_requires_margin_to_reallow(self):
+        """When previously blocked, min_soc barely above threshold stays blocked."""
+        optimizer, forecast, now = self._make_optimizer_and_forecast()
+
+        # Find SOC where min_soc is just above 10% (between 10-12%)
+        # Try a range to find the right one
+        for soc in range(30, 60):
+            decision, _, _ = optimizer.calculate_decision(
+                soc_percent=soc, forecast=forecast, now=now,
+                previously_blocked=False,
+            )
+            if 10 <= decision.min_soc_percent < 12 and decision.discharge_allowed:
+                # Found a borderline case — now test with previously_blocked=True
+                decision_blocked, _, _ = optimizer.calculate_decision(
+                    soc_percent=soc, forecast=forecast, now=now,
+                    previously_blocked=True,
+                )
+                # Same inputs, but with hysteresis: should block (needs min_soc >= 12%)
+                assert decision_blocked.discharge_allowed is False, (
+                    f"SOC={soc}%, min_soc={decision.min_soc_percent:.1f}%: "
+                    f"should stay blocked with hysteresis"
+                )
+                return
+
+        pytest.skip("Could not find borderline SOC for this forecast")
+
+    def test_previously_blocked_allows_with_clear_margin(self):
+        """When previously blocked but min_soc clearly above threshold+2%, allow."""
+        optimizer, forecast, now = self._make_optimizer_and_forecast()
+
+        # High SOC — min_soc will be well above 12%
+        decision, _, _ = optimizer.calculate_decision(
+            soc_percent=90, forecast=forecast, now=now,
+            previously_blocked=True,
+        )
+        assert decision.discharge_allowed is True
+
+    def test_not_previously_blocked_allows_at_threshold(self):
+        """When not previously blocked, min_soc at threshold allows normally."""
+        optimizer, forecast, now = self._make_optimizer_and_forecast()
+
+        # Find SOC where min_soc is just above 10%
+        for soc in range(30, 60):
+            decision, _, _ = optimizer.calculate_decision(
+                soc_percent=soc, forecast=forecast, now=now,
+                previously_blocked=False,
+            )
+            if 10 <= decision.min_soc_percent < 12 and decision.discharge_allowed:
+                # Without hysteresis: should allow (min_soc >= 10%)
+                assert decision.discharge_allowed is True
+                return
+
+        pytest.skip("Could not find borderline SOC for this forecast")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.96"
+__version__ = "1.6.97"
 
 import json
 import logging
@@ -455,6 +455,7 @@ class EnergyManager:
                 soc_percent=current_soc,
                 forecast=forecast,
                 now=now,
+                previously_blocked=self._discharge_blocked_by_protection,
             )
 
             # Debug: log first few simulation points

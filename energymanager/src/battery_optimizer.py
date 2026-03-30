@@ -318,6 +318,7 @@ class BatteryOptimizer:
         soc_percent: float,
         forecast: pd.DataFrame,
         now: datetime,
+        previously_blocked: bool = False,
     ) -> Tuple[DischargeDecision, pd.DataFrame, pd.DataFrame]:
         """
         Calculate battery discharge decision.
@@ -329,11 +330,14 @@ class BatteryOptimizer:
            - If yes: allow discharge
            - If no: block discharge
         4. Re-check every 15 minutes (self-correcting)
+        5. Hysteresis: once blocked, require projected min SOC >= threshold + 2%
+           to re-allow, preventing oscillation as the simulation window shrinks
 
         Args:
             soc_percent: Current SOC (0-100)
             forecast: DataFrame with pv_energy_wh, load_energy_wh, net_energy_wh
             now: Current time
+            previously_blocked: Whether discharge was blocked in the last cycle
 
         Returns:
             (decision, sim_no_strategy, sim_with_strategy)
@@ -374,11 +378,19 @@ class BatteryOptimizer:
             min_soc_percent = min_soc_wh / self.capacity_wh * 100
             min_soc_time = expensive_periods["soc_wh"].idxmin()
 
-        # Simple yes/no: does SOC stay above threshold?
-        soc_ok = min_soc_percent >= self.min_soc_percent
+        # Hysteresis: once blocked, require projected min SOC to clear
+        # threshold by a margin before re-allowing.  The simulation window
+        # shrinks by 15 min each cycle, causing the projection to wobble
+        # ~0.5% around the threshold — enough to flip the decision every
+        # cycle without a dead-band.
+        hysteresis = 2.0  # percent
+        threshold = self.min_soc_percent + hysteresis if previously_blocked else self.min_soc_percent
+        soc_ok = min_soc_percent >= threshold
 
         logger.info(f"Min SOC during expensive hours: {min_soc_percent:.0f}% at {swiss_time(min_soc_time)}, "
-                   f"threshold: {self.min_soc_percent:.0f}%, OK: {soc_ok}")
+                   f"threshold: {threshold:.0f}%"
+                   f"{' (incl. 2% hysteresis)' if previously_blocked else ''}"
+                   f", OK: {soc_ok}")
 
         # Step 3: Decision logic - simple yes/no
         if not tariff.is_cheap_now:

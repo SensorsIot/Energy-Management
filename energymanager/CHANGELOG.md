@@ -1,5 +1,15 @@
 # EnergyManager Changelog
 
+## [1.6.97] - 2026-03-30
+
+### Fixed
+- Battery discharge oscillation at night: added 2% hysteresis to soc_ok
+  threshold. Once blocked, projected min SOC must reach 12% (not 10%) to
+  re-allow. The shrinking simulation window caused min_soc to wobble ~0.5%
+  around the threshold every 15 min, flip-flopping the discharge limit
+  between 0W and 5000W all night and draining the battery through the
+  "allowed" windows.
+
 ## [1.6.23] - 2026-02-17
 
 ### Fixed

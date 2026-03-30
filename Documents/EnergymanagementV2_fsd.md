@@ -1771,7 +1771,12 @@ Each mechanism only touches its own flag. `control_battery()` is called with the
    - Ignore SOC values during cheap hours (21:00-06:00)
    - Ignore weekend/holiday days entirely (all-day cheap → no expensive hours)
 
-   IF min_soc_in_expensive_hours >= min_soc (10%):
+   IF previously_blocked:
+      threshold = min_soc + 2%   (hysteresis — require clear margin to re-allow)
+   ELSE:
+      threshold = min_soc
+
+   IF min_soc_in_expensive_hours >= threshold:
       → blocked_by_protection = False
       → Skip to step 4
 
@@ -1843,6 +1848,11 @@ APPLY combined decision (see above)
 - On weekends/holidays, the entire day is cheap—no expensive hours exist
 - Weekend SOC dips are irrelevant: only the next weekday's expensive hours matter
 - The min_soc reserve (10%) ensures capacity for forecast errors and unexpected loads
+
+**Threshold hysteresis (2% dead-band):**
+- When the projected min SOC hovers near the 10% threshold, the simulation window shrinks by 15 min each cycle, causing the projection to wobble ~0.5% — enough to flip the decision every cycle
+- Once blocked (`previously_blocked=True`), the threshold rises to 12% — the projection must clearly exceed the margin before re-allowing discharge
+- Without this, the discharge limit oscillates between 0W and 5000W every 15 minutes, and the battery drains all night through the "allowed" windows
 
 **Signal hysteresis:**
 - Control signal only sent when the combined decision changes (not every cycle)
@@ -3048,6 +3058,14 @@ Test file: `energymanager/tests/test_battery_optimizer.py`
 | `test_weekday_night_is_cheap` | Weekday 23:00 should be cheap tariff | Monday 23:00 | `tariff.is_cheap_now=True` |
 | `test_holiday_is_cheap` | Configured holidays should be all-day cheap | 2026-01-01 12:00, holidays=["2026-01-01"] | `is_holiday=True`, `is_cheap_day=True` |
 
+#### Hysteresis (prevent oscillation at soc_ok boundary)
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_previously_blocked_requires_margin_to_reallow` | When previously blocked, min_soc barely above 10% stays blocked | Cheap tariff, min_soc 10-12%, `previously_blocked=True` | `discharge_allowed=False` |
+| `test_previously_blocked_allows_with_clear_margin` | When previously blocked but min_soc clearly above 12%, allow | Cheap tariff, SOC 90%, `previously_blocked=True` | `discharge_allowed=True` |
+| `test_not_previously_blocked_allows_at_threshold` | When not previously blocked, min_soc at 10% allows normally | Cheap tariff, min_soc 10-12%, `previously_blocked=False` | `discharge_allowed=True` |
+
 #### Dataclass Validation
 
 | Test | Description | Conditions | Expected Result |
@@ -3059,7 +3077,7 @@ Test file: `energymanager/tests/test_battery_optimizer.py`
 cd energymanager && python -m pytest tests/test_battery_optimizer.py -v
 ```
 
-**All 14 tests passing** (as of v1.5.0)
+**All 24 tests passing** (as of v1.6.97)
 
 ---
 
@@ -3712,6 +3730,7 @@ See Section 4.6 for adaptive polling logic.
 *Version 2.41 - March 2026*
 
 **Changelog:**
+- v2.42: Added 2% hysteresis to discharge soc_ok threshold (Section 4.3.2) — once blocked, projected min SOC must reach 12% (not 10%) to re-allow; prevents oscillation where shrinking simulation window causes min_soc to wobble ~0.5% around threshold every 15 min, flip-flopping discharge limit between 0W/5000W all night; 3 new tests (Appendix D.1) (v1.6.97)
 - v2.41: Both rules use surplus_power (PV − house load) as input (Section 4.6.6) — eliminates grid_export feedback loop; snap-up tries next amp step above surplus if battery protected; surplus smoothing 60s→30s, rate limit 60s→30s; removed stale power floor clamp; updated flowchart, scenarios, and snap description (v1.6.93–v1.6.96)
 - v2.40: Added S0/C0/M0 wallbox-unavailable guards to all active state transitions (Section 4.6.5.2); `will_battery_hit_full()` now returns `full_time_local` HH:MM (Section 4.4.2); updated NO-01 test scope (Appendix D.7.1) (v1.6.92)
 - v2.39: Added Section 2.13.11 (Calibration History) — documents 2026-03-20 parameter change boundary, retrofitted data in InfluxDB (pv_forecast_retrofitted), and retrofit limitations
