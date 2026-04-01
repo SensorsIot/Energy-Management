@@ -1,6 +1,6 @@
 # Home Installation
 
-**Last Updated:** 2026-02-19
+**Last Updated:** 2026-03-31
 
 ## 1. Overview
 This document consolidates operational knowledge needed to maintain the home infrastructure and automation stack.
@@ -27,17 +27,22 @@ Secrets store (proposal)
 
 
 Notes / gaps to resolve
-- Hardware inventory (hosts, CPUs, disks, Zigbee coordinator, smart meter hardware).
-- Network inventory (hostnames, static IPs, VLANs, Wi-Fi SSIDs).
-- Service owners and access methods (SSH, web UIs, VPN).
+- ~~Hardware inventory~~ Proxmox host documented in §4, devices in §15.
+- ~~Network inventory~~ Full MikroTik config in §3 (VLANs, IPs, firewall, NAT).
+- ~~Service owners and access methods~~ SSH, web UIs documented throughout.
+- ~~Wi-Fi SSIDs and IoT network segmentation~~ Documented in §3.3.
+- ~~Firewall rules and port forwarding~~ Documented in §3.4, §3.6.
 - Backup policy and storage targets (locations, retention, restore drills).
+- ~~DHCP static lease device identification~~ Full inventory in §3.7 (5 devices still unidentified: .128, .130, .131, .146, .151).
 
 ## 2. Architecture and data flow
-High-level service graph (as described in legacy docs)
-- Proxmox host runs VM(s)/containers for core services.
-- IoTstack provides containerized services: MQTT, Node-RED, InfluxDB, Grafana, Zigbee2MQTT, optional Pi-hole/Wireguard.
-- Home Assistant runs either inside IoTstack or as a dedicated HA OS VM (both are referenced; verify current deployment).
-- Field systems: Zigbee devices, smart meter (gPlug/Tasmota), PV plant (Huawei SUN2000), wallbox (OCPP via ESP32).
+High-level service graph
+- Proxmox host (192.168.0.230) runs 8 VMs + 1 LXC container.
+- **HA OS VM** (192.168.0.202): Home Assistant with add-ons (ESPHome, Frigate, Modbus-proxy, Energy forecasting, OCPP Server, Nginx Proxy Manager).
+- **IoTstack VM** (192.168.0.203): Docker containers for Mosquitto (MQTT), Node-RED, InfluxDB 2.x, Grafana, Portainer.
+- **Zigbee:** ZHA integration directly in HA (not Zigbee2MQTT). USB coordinator passed through from Proxmox.
+- **Field devices:** ESPHome (alarm bell, water meter, mailbox, BT proxy), Tasmota (Enphase), Shelly (3EM, 2PM), Zigbee sensors, 433 MHz weather gateway.
+- **External:** MS365 Calendar, MeteoSwiss weather, Smart #1 car (smarthashtag), Telegram notifications.
 
 ASCII diagrams (support view)
 Proxmox layout (VMs in parallel)
@@ -98,7 +103,8 @@ HA OS VM (core + add-ons)
 ```
 
 Primary data flow (support view)
-- Zigbee devices -> Zigbee2MQTT -> MQTT broker -> Home Assistant and Node-RED.
+- Zigbee devices -> ZHA -> Home Assistant (direct, no Zigbee2MQTT).
+- Tasmota/433 MHz devices -> MQTT broker -> Home Assistant.
 - Node-RED -> InfluxDB (time series storage) -> Grafana (dashboards).
 - Home Assistant -> InfluxDB (HomeAssistant bucket) -> energy bucket consolidation tasks.
 - Huawei SUN2000 data -> InfluxDB (HuaweiNew bucket) -> EnergyV1 bucket via InfluxDB tasks.
@@ -117,57 +123,214 @@ Notes / gaps to resolve
 - Confirm InfluxDB version split (v1 vs v2) and which services connect to which.
 
 ## 3. Network and addressing
-Support view (what must be documented here)
-- Fixed IP addresses for Proxmox, IoTstack VM, HA OS VM, MQTT broker, InfluxDB, Grafana, Zigbee2MQTT.
-- Network segments/VLANs (e.g., LAN vs IoT), routing rules, firewall rules.
-- Wi-Fi SSIDs and which devices are on each SSID.
-- VPN access (Wireguard, Zerotier) endpoints and allowed routes.
 
-### IP Address Reference
+### 3.1 Router
+
+| Item | Value |
+|------|-------|
+| Model | MikroTik RB5009UPr+S+ |
+| RouterOS | 7.20.1 |
+| Serial | HEJ08KP6767 |
+| Management IP | 192.168.0.1 |
+| WebFig HTTPS | port 8443 (www-ssl with Let's Encrypt cert) |
+| SSH | port 22 (restricted to 192.168.0.0/24 and WireGuard) |
+| WAN | P1-WAN (DHCP client to ISP) |
+| DNS | AdGuard (192.168.0.101) primary, 1.1.1.1 fallback |
+| NTP | ch.pool.ntp.org, broadcasts to all networks |
+| DynDNS | MikroTik Cloud (`/ip cloud ddns-enabled=yes`), hostname: hej08kp6767.sn.mynetname.net |
+| Config export | `C:\Users\AndreasSpiess\Downloads\config.rsc` (2026-03-31) |
+
+### 3.2 VLANs and Network Segments
+
+All VLANs are tagged on the bridge and trunked to APs via CAPsMAN.
+
+| VLAN | Name | Subnet | Gateway | DHCP Pool | Purpose |
+|------|------|--------|---------|-----------|---------|
+| 100 | Intern | 192.168.0.0/24 | 192.168.0.1 | .2–.229 | Main LAN — all servers, PCs, HA, Proxmox |
+| 200 | Guest | 172.16.0.0/24 | 172.16.0.1 | .10–.250 | Guest Wi-Fi (internet only, no LAN access) |
+| 555 | IoT | 10.0.0.0/24 | 10.0.0.1 | .5–.200 | IoT devices Wi-Fi |
+| 300 | Remote | 10.99.4.0/24 | 10.99.4.1 | .2–.254 | Remote station (Flex radio) |
+| 20 | VoIP | - | - | - | VoIP phones (AREDN) |
+| 2 | DtD | - | - | - | Device-to-Device (AREDN mesh) |
+| 400 | AREDN-Mgmt | - | - | - | AREDN management consoles |
+
+**Bridge port assignments:**
+
+| Port | Label | PVID | Tagged VLANs | Notes |
+|------|-------|------|-------------|-------|
+| P1 | P1-WAN | - | - | WAN uplink (not bridged) |
+| P2 | P2-Proxmox | 100 | 2,20,100,200,555,300,400 | Proxmox host (trunk) |
+| P3 | P3-AP2-Keller | - | 2,20,100,200,555,300,400 | AP basement (trunk) |
+| P4 | P4-2-Stock | - | 2,20,100,200,555,300,400 | AP 2nd floor (trunk) |
+| P5 | P5-PC | 100 | 20,40 | Main PC |
+| P6 | P6-Desk-Gelb | 100 | 2,20,300,400 | Desk (yellow cable) |
+| P7 | P7-Keller | 100 | - | Basement wired |
+| P8 | P8-REOLINK | 100 | - | Camera |
+| SFP+ | sfp-sfpplus1 | 100 | - | 2.5G uplink |
+
+### 3.3 Wi-Fi SSIDs (CAPsMAN)
+
+| SSID | Band | VLAN | Security | Purpose |
+|------|------|------|----------|---------|
+| `private-2G` | 2.4 GHz | 100 | WPA2-PSK | Main network |
+| `private-5G` | 5 GHz | 100 | WPA2-PSK | Main network |
+| `Guest-2G` | 2.4 GHz | 200 | WPA2-PSK | Guest (internet only) |
+| `Guest-5G` | 5 GHz | 200 | WPA2-PSK | Guest (internet only) |
+| `IoT` | 2.4 GHz | 555 | WPA2-PSK | IoT devices |
+| `VoIP-2G` | 2.4 GHz | 20 | WPA/WPA2-PSK | VoIP phones |
+| `VoIP-5G` | 5 GHz | 20 | WPA/WPA2-PSK | VoIP phones |
+| `Birch` | 2.4 GHz | 300 | WPA/WPA2-PSK | Remote station |
+
+Wi-Fi passwords stored in Secrets Store (`D:\Dropbox\Documentation\AAHome\Secrets Store.md`).
+
+### 3.4 Port Forwarding (NAT)
+
+| WAN Port | Protocol | Destination | Purpose |
+|----------|----------|-------------|---------|
+| 443 | TCP | 192.168.0.202:443 | HA Nginx HTTPS |
+| 8443 | TCP | 192.168.0.202:443 | HA Nginx HTTPS (alt port for DynDNS) |
+| 80 | TCP | 192.168.0.202:80 | HA Nginx HTTP |
+| 5525 | TCP | 192.168.0.208 | AREDN tunnel server |
+| 5525–5570 | UDP | 192.168.0.208 | AREDN WireGuard tunnels |
+| 6526–6550 | UDP | 192.168.0.199 | AREDN supernodes |
+| 51820 | UDP | 192.168.0.174:51820 | LEG-Provisioning WireGuard |
+| 5000 | TCP | 192.168.0.174:5000 | LEG-Provisioning API |
+
+### 3.5 VPN
+
+**WireGuard** (port 13231 on router):
+
+| Peer | Allowed addresses | Status |
+|------|------------------|--------|
+| iPhone | 10.99.5.2/32 | Disabled |
+| toBirch | 192.168.32.2/32, 10.99.6.0/24 | Disabled |
+| ToTeltonika | 10.99.7.2/32, 10.99.6.1/24 | Disabled |
+| toRUTX14 | 10.99.7.3/32, 10.99.6.0/24 | Active |
+| toATL | 10.99.7.33/32, 10.99.5.0/24, 192.168.0.0/24 | Active |
+
+**MikroTik Cloud VPN** (back-to-home-vpn, port 58859): Enabled for remote access via MikroTik Cloud.
+
+**ZeroTier** (zt1): Two networks configured but **disabled**.
+
+### 3.6 Firewall Rules Summary
+
+- **Guest network:** DNS, DHCP, NTP allowed; all other LAN access blocked; internet only.
+- **IoT network:** Classified as Guest in interface list (same restrictions apply).
+- **WAN input:** WireGuard (13231/UDP), established/related accepted; all else dropped.
+- **WAN forward:** Only DSTNAT traffic forwarded; invalid dropped.
+- **Fast-track:** Enabled for established/related connections with hardware offload.
+- **IPv6:** Disabled (`disable-ipv6=yes`).
+- **SMB:** Allowed from LAN only (port 445).
+
+### 3.7 IP Address Reference
+
+**Key services:**
 
 | Device | IP | Port | Service |
 |--------|-----|------|---------|
+| Router | 192.168.0.1 | 8443 | WebFig HTTPS |
 | Home Assistant | 192.168.0.202 | 8123 | Web UI |
+| HA Nginx Proxy Manager | 192.168.0.202 | 81 | NPM Admin |
 | Modbus Proxy | 192.168.0.202 | 502 | Huawei Modbus |
 | IOTstack | 192.168.0.203 | - | Docker host |
 | InfluxDB | 192.168.0.203 | 8087 | API |
 | Grafana | 192.168.0.203 | 3000 | Dashboards |
 | MQTT | 192.168.0.203 | 1883 | Broker |
 | Node-RED | 192.168.0.203 | 1880 | Flows |
-| Wallbox | 192.168.0.81 | 80 | API |
-| ESP32 OCPP Server | (Ethernet) | MQTT | Wallbox bridge |
-| gPlug Smart Meter | 192.168.0.52 | 80 | Captive portal/API |
-| gPlug Provisioning | provision.dhamstack.com | 5000/8883 | HTTP API / MQTT TLS |
+| Portainer | 192.168.0.203 | 9000 | Container mgmt |
 | Proxmox | 192.168.0.230 | 8006 | Management |
 | PBS | 192.168.0.236 | 8007 | Backup Server |
-| AdGuard | 192.168.0.101 | 80 | DNS/adblock |
+| AdGuard (DNS) | 192.168.0.101 | 80/53 | DNS + adblock |
+| Dev VM (dev-1) | 192.168.0.160 | 22 | Development |
+| RTL_433 Gateway | 192.168.0.15 | MQTT | 433 MHz receiver |
+| Wallbox | 192.168.0.81 | 80 | API |
+| gPlug Smart Meter | 192.168.0.52 | 80 | Captive portal |
+| gPlug Provisioning | provision.dhamstack.com | 5000/8883 | HTTP/MQTT TLS |
+| HA External URL | hej08kp6767.sn.mynetname.net | 8443 | DynDNS |
 
-Known values from legacy docs
-- HA UI URL: http://192.168.0.202:8123
-- Home Assistant WebSocket: ws://192.168.0.202:8123/api/websocket
-- Wallbox API IP: 192.168.0.81
-- ESP32 OCPP Server: Wallbox via Ethernet, MQTT via WiFi (see OCPP-ESP32-Server repo)
-- Proxmox host: 192.168.0.230 (vmbr0, gateway 192.168.0.1)
-- Proxmox Backup Server: 192.168.0.236
+**DHCP static and dynamic leases** (all devices on VLAN 100, inventory 2026-03-31):
 
-Key hosts (SSH access with master ed25519 key)
-| Host | User | Private Key | Public Key (authorized) |
-| --- | --- | --- | --- |
-| ESP32 OCPP Server | - | - | - (configured via captive portal) |
-| provision.dhamstack.com | root | ✓ | ✓ |
-| 192.168.0.202 (Home Assistant) | root | ✓ | ✓ |
-| 192.168.0.203 (hub) | pi | ✓ | ✓ |
-| 192.168.0.230 (Proxmox) | root | ✓ | ✓ |
-| 192.168.0.69 (esp-idf) | root | ✓ | ✓ |
-| 192.168.0.21 (aredn-dev) | root | ✓ | ✓ |
-| 192.168.0.101 (adguard) | root | ✓ | ✓ |
-| GitHub | SensorsIot | - | ✓ |
+| IP | MAC | Device | Manufacturer | Function |
+|----|-----|--------|-------------|----------|
+| 192.168.0.3 | 34:5F:45:AB:E4:58 | ESPHome AlarmBell | Espressif | Meeting bell → HA (ESPHome) |
+| 192.168.0.9 | 88:FC:A6:23:5D:21 | Devolo Magic Powerline | Devolo | Network infra (powerline) |
+| 192.168.0.10 | F0:2F:74:D0:D4:43 | Andreas WiFi (ASUS PC) | ASUSTek | User workstation |
+| 192.168.0.11 | B4:2E:99:96:43:85 | DESKTOP-HB9BLA | Gigabyte | User workstation |
+| 192.168.0.12 | 88:FC:A6:21:29:09 | Devolo Magic Powerline | Devolo | Network infra (powerline) |
+| 192.168.0.13 | 54:2B:1C:BF:CC:7A | MikroTik AP-1 (alt IP) | MikroTik | CAPsMAN AP (also .180) |
+| 192.168.0.15 | D4:D4:DA:9D:7C:D8 | RTL_433 WeatherStation | Espressif | 433 MHz → MQTT → HA |
+| 192.168.0.17 | 88:71:B1:6A:2F:E4 | UPC-TV-BOX | UPC | TV set-top box |
+| 192.168.0.20 | AC:67:B2:F9:C4:38 | ESP32 Bluetooth Proxy | Espressif | BLE proxy → HA (ESPHome) |
+| 192.168.0.23 | 00:23:24:9E:43:D0 | Unknown ESP (APKIZ21606) | Espressif | Unknown — responds to ping |
+| 192.168.0.33 | 30:AE:A4:84:5A:4C | tablet_switch | Espressif | Tablet charging control → HA (ESPHome) |
+| 192.168.0.49 | 3A:5D:77:EF:B1:D2 | Android phone | Android | Mobile device |
+| 192.168.0.52 | B0:81:84:25:22:5C | gPlug Smart Meter | gPlug | MBUS smart meter → HA |
+| 192.168.0.72 | D0:CF:13:09:65:80 | IOS-Keyboard Debug ESP32 | Espressif | Custom ESP32 project |
+| 192.168.0.87 | 00:E0:4C:53:44:58 | Raspberry Pi 2W (Workbench) | Raspberry Pi | Workbench PC |
+| 192.168.0.98 | 74:D4:DD:1F:BC:8D | FlexRadio 6600 | FlexRadio | Ham radio transceiver |
+| 192.168.0.99 | 10:05:01:4F:8A:57 | DESKTOP-HB9BLA (alt NIC) | Intel | User workstation (wired) |
+| 192.168.0.100 | 4C:82:A9:E8:D7:58 | Brother MFC-L3760CDW | Brother | Laser printer |
+| 192.168.0.101 | BC:24:11:CF:08:6E | AdGuard DNS (LXC) | Proxmox | DNS/adblock server |
+| 192.168.0.110 | 30:05:05:DE:29:02 | Grosser Laptop WLAN | ASUS | Laptop (wireless) |
+| 192.168.0.120 | 54:32:04:77:6D:AC | Wallbox ESP32 (OCPP) | AcTec | Wallbox controller → HA |
+| 192.168.0.128 | 06:76:66:31:03:BE | Unknown | Unknown | Responds to ping, no services |
+| 192.168.0.130 | 4E:4D:AF:7C:34:CD | Unknown | Unknown | Offline |
+| 192.168.0.131 | 12:BE:9F:AF:3F:E3 | Unknown | Unknown | Offline |
+| 192.168.0.132 | B4:E6:2D:57:BE:65 | ESPHome AlarmBell (dynamic) | Espressif | Duplicate of .3 (dynamic lease) |
+| 192.168.0.146 | 98:0D:AF:27:91:BC | sensorsiot | Unknown | Unknown sensor — offline |
+| 192.168.0.150 | BC:24:11:9B:18:3D | EVCC (EV Charge Controller) | Proxmox | EV charging management → HA |
+| 192.168.0.151 | 7C:9E:BD:F2:14:C8 | Unknown ESP32 (F214C8) | Espressif | Unknown |
+| 192.168.0.160 | BC:24:11:09:78:43 | Dev VM (dev-1) | Proxmox | Development VM |
+| 192.168.0.171 | EA:F6:0A:CB:5A:48 | SMLIGHT SLZB-MR1U | SMLIGHT | Zigbee coordinator → HA (ZHA) |
+| 192.168.0.172 | 3C:0B:59:36:EE:42 | EARU Breaker (ESPHome) | ESPHome | Wallbox phase switch → HA |
+| 192.168.0.173 | D0:CF:13:30:F8:34 | Unknown ESP32 | Espressif | Offline |
+| 192.168.0.174 | BC:24:11:48:70:B9 | LEG-Provisioner VM | Proxmox | AREDN LEG provisioning |
+| 192.168.0.175 | 24:6F:28:4E:D8:A4 | Unknown ESP32 (4ED8A4) | Espressif | Offline |
+| 192.168.0.176 | 10:06:1C:98:A5:54 | BLLED (Bambu Lab LED) | Espressif | 3D printer LED control |
+| 192.168.0.177 | 94:A9:90:47:5B:48 | Modbus Proxy ESP32 | Espressif | Huawei SUN2000 → HA (Modbus) |
+| 192.168.0.178 | 5C:15:C5:02:12:B7 | Netgear GS108 Switch | Netgear | Network infra (managed switch) |
+| 192.168.0.179 | B4:E6:2D:85:96:65 | ESPHome Water Meter | Espressif | Pulse counter → HA (ESPHome) |
+| 192.168.0.180 | 74:4D:28:13:7E:A5 | MikroTik AP-2 (CAPsMAN) | MikroTik | Wi-Fi access point |
+| 192.168.0.181 | 74:4D:28:13:87:34 | MikroTik AP-1 (CAPsMAN) | MikroTik | Wi-Fi access point |
+| 192.168.0.182 | 04:91:62:58:A2:6C | Judo water treatment | Microchip | eWAC water softener (web UI) |
+| 192.168.0.183 | EC:71:DB:2A:88:DB | Reolink Camera | Reolink | IP camera (nginx web UI) |
+| 192.168.0.184 | C4:DE:E2:0F:F5:18 | Sonoff POW Elite (Enphase) | Espressif | Tasmota energy monitor → HA |
+| 192.168.0.185 | 60:01:94:98:DA:EF | LabLight Sonoff Dual | Espressif | Lab lighting → HA (ESPHome) |
+| 192.168.0.186 | 44:17:93:A7:CF:34 | Shelly 2PM White | Espressif | Lab lights relay → HA (Shelly) |
+| 192.168.0.187 | 24:62:AB:CA:1A:C8 | Mailbox Notifier | Espressif | BME280 + reed switch → HA (ESPHome) |
+| 192.168.0.191 | EC:FA:BC:C7:F0:F5 | Shelly 3EM | Espressif | 3-phase energy monitor → HA |
+| 192.168.0.192 | D8:A0:1D:40:4A:50 | APRS iGate HB9BLA-10 | Espressif | Ham radio APRS gateway |
+| 192.168.0.193 | F4:12:FA:D9:4D:8C | NTRIP-X | Espressif | GNSS NTRIP caster |
+| 192.168.0.195 | B8:27:EB:63:9F:B1 | NTP Server (Raspberry Pi) | Raspberry Pi | Network time server |
+| 192.168.0.196 | 78:9A:18:A8:E6:69 | RoofTop MikroTik | MikroTik | Rooftop router (RouterOS) |
+| 192.168.0.197 | 08:C2:24:24:22:FE | Amazon Fire Tablet | Amazon | HA Kiosk display (Fully Kiosk) |
+| 192.168.0.198 | 02:1C:F4:42:3E:79 | HB9BLA-VM-1 | Proxmox | AREDN mesh node VM |
+| 192.168.0.199 | 02:34:61:A4:78:24 | HB9BLA-BASEL-SUPERNODE | Proxmox | AREDN mesh supernode VM |
+| 192.168.0.200 | D8:A0:1D:40:49:D0 | TinyGS | Espressif | Satellite ground station |
+| 192.168.0.202 | 96:53:6C:2A:85:8E | Home Assistant OS VM | Proxmox | Core home automation |
+| 192.168.0.203 | D6:7D:B2:2E:94:B7 | IOTstack (Docker host) | Proxmox | MQTT/InfluxDB/Grafana/Node-RED |
+| 192.168.0.204 | B8:27:EB:5E:02:0E | Pi-Star (DMR Hotspot) | Raspberry Pi | Ham radio DMR hotspot |
+| 192.168.0.205 | E8:4E:06:26:BD:6F | TTN LoRa Gateway | Raspberry Pi | LoRaWAN gateway |
+| 192.168.0.206 | A4:17:8B:1F:F1:49 | Huawei WiFi Dongle (Andreas) | Huawei | SUN2000 WiFi dongle |
+| 192.168.0.207 | A4:17:8B:1F:F1:4D | Huawei WiFi Dongle (Hugo) | Huawei | SUN2000 WiFi dongle |
+| 192.168.0.208 | 92:E6:52:0D:E8:AA | HB9BLA-VM-TUNNELSERVER | Proxmox | AREDN tunnel server VM |
+| 192.168.0.209 | DC:A6:32:00:6C:74 | kxyTrack (Raspberry Pi) | Raspberry Pi | Tracking device — offline |
+| 192.168.0.211 | 56:95:72:3B:00:1D | FreePBX | Proxmox | VoIP PBX |
+| 192.168.0.213 | 18:FD:74:4F:F5:65 | MikroTik CRS310 | MikroTik | 10G network switch |
+| 192.168.0.230 | F8:75:A4:05:58:E3 | Proxmox Server (Lenovo) | Lenovo | Hypervisor host |
+| 192.168.0.237 | 24:58:7C:DF:E0:C8 | Bambu Lab P1S | Bambu Labs | 3D printer |
 
-Notes / gaps to resolve
-- Confirm the subnet (assumed 192.168.0.0/24, but not documented).
-- Document all static IP reservations and hostnames.
-- Document VLAN separation and firewalling (if any).
-- List DNS/DHCP server location and config.
+**SSH access** (master ed25519 key):
+
+| Host | User |
+|------|------|
+| 192.168.0.202 (Home Assistant) | root |
+| 192.168.0.203 (IOTstack) | pi |
+| 192.168.0.230 (Proxmox) | root |
+| 192.168.0.160 (dev-1) | dev |
+| 192.168.0.101 (AdGuard) | root |
+| provision.dhamstack.com | root |
+| GitHub | SensorsIot |
 
 ## 4. Proxmox host
 Support summary (from legacy Proxmox doc)
@@ -178,18 +341,18 @@ Support summary (from legacy Proxmox doc)
 
 Current host details (from 192.168.0.230)
 - Hostname: Proxmox
-- Proxmox VE: 8.4.0 (kernel 6.8.12-17-pve)
+- Proxmox VE: 8.4.14 (kernel 6.8.12-17-pve)
 - Hardware:
   - CPU: Intel Core i5-8400T @ 1.70GHz (6 cores, 6 threads)
   - RAM: 32 GB total
-  - Running VMs/CTs use ~19 GB, ~12 GB available
+  - Running VMs/CTs use ~25 GB, ~6 GB available
 - Management settings: email_from asarumba@gmail.com, keyboard de-ch
 - Network:
   - vmbr0: 192.168.0.230/24, gateway 192.168.0.1, bridge to eno1
   - eno1 EEE off; TSO/GSO off (via ethtool post-up)
 - Storage:
-  - local: /var/lib/vz (iso, vztmpl, backup) - 94 GB total, 18% used
-  - local-lvm: LVM thinpool (images, rootdir) - 794 GB total, 32% used
+  - local: /var/lib/vz (iso, vztmpl, backup) - 94 GB total, 19% used
+  - local-lvm: LVM thinpool (images, rootdir) - 794 GB total
   - pbs: Proxmox Backup Server at 192.168.0.236 (datastore Backup)
   - ext: /mnt/ext (backup) - 94 GB total, 18% used
 - Backup job:
@@ -207,31 +370,35 @@ Notes / gaps to resolve
 
 ## 5. Proxmox
 ### VM and LXC overview
-All VMs and containers (inventory 2026-01-25)
-- QEMU VMs: 100 HA, 101 IOTstack, 103 AREDN-local, 104 AREDN-Tunnel, 105 AREDN-Supernode, 107 FreePBX, 108 debian-ztnet, 119 dev-1, 1000 debian-cloudinit.
-- LXC CTs: 113 aredn-dev, 115 esp-idf, 118 adguard.
+All VMs and containers (inventory 2026-03-27)
+- QEMU VMs: 100 HA, 101 IOTstack, 102 Birch, 103 AREDN-local, 104 AREDN-Tunnel, 105 AREDN-Supernode, 107 FreePBX, 108 debian-ztnet, 119 dev-1, 1000 debian-cloudinit.
+- LXC CTs: 106 LEG-Provisioner, 113 aredn-dev, 114 reverse, 115 esp-idf, 117 evcc (decommissioned), 118 adguard, 130 MasterOfDesaster.
 
 Memory allocation summary:
 - Total host RAM: 32 GB
-- Running VMs: ~27 GB allocated (HA 6GB, IOTstack 14GB, AREDN nodes 768MB, FreePBX 2GB, dev-1 4GB)
+- Running VMs: ~30 GB allocated (HA 6GB, IOTstack 14GB, Birch 2GB, AREDN nodes 768MB, FreePBX 2GB, dev-1 5GB)
 - Running LXC: ~512 MB allocated (adguard)
 
-Inventory table (updated 2026-01-25)
+Inventory table (updated 2026-03-27)
 | ID | Type | Name | Memory | Disk | Status | Description | Remark |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 100 | VM | HA | 6 GB | 50 GB | running | Home Assistant OS VM (core + add-ons). | USB passthrough for Zigbee dongle. |
 | 101 | VM | IOTstack | 14 GB | 92 GB | running | IoTstack VM hosting docker-compose services (MQTT, Node-RED, InfluxDB, Grafana, Zigbee2MQTT). |  |
+| 102 | VM | Birch | 2 GB | 40 GB | running | Birch VM. |  |
 | 103 | VM | AREDN-local | 256 MB | - | running | AREDN node (local). |  |
 | 104 | VM | AREDN-Tunnel | 256 MB | 0.5 GB | running | AREDN tunnel node. |  |
 | 105 | VM | AREDN-Supernode | 256 MB | 0.5 GB | running | AREDN supernode. |  |
 | 107 | VM | FreePBX | 2 GB | 32 GB | running | FreePBX VoIP server. |  |
 | 108 | VM | debian-ztnet | 2 GB | 4 GB | stopped | Debian helper VM (proxmox-helper-scripts). |  |
-| 119 | VM | dev-1 | 4 GB | 100 GB | running | Development VM. |  |
+| 119 | VM | dev-1 | 5 GB | 100 GB | running | Development VM (Claude Code). |  |
 | 1000 | VM | debian-cloudinit | 1 GB | 10 GB | stopped | Cloud-init template VM. |  |
+| 106 | LXC | LEG-Provisioner | - | - | stopped | LEG provisioning container. |  |
 | 113 | LXC | aredn-dev | 2 GB | - | stopped | AREDN dev container. |  |
+| 114 | LXC | reverse | - | - | stopped | Reverse proxy container. |  |
 | 115 | LXC | esp-idf | 2 GB | - | stopped | ESP-IDF build/dev container. | Passthrough: /dev/ttyACM0, /dev/ttyUSB0. |
 | 117 | LXC | ~~evcc~~ | 2 GB | - | decommissioned | Replaced by ESP32 OCPP Server (dedicated hardware). | Can be deleted. |
 | 118 | LXC | adguard | 512 MB | - | running | AdGuard (DNS/adblock). |  |
+| 130 | LXC | MasterOfDesaster | - | - | stopped | MasterOfDesaster container. |  |
 
 ### Backup (Proxmox topic)
 - Backup job: vzdump at 01:00, snapshot mode, storage `pbs`, prune keep-all=1.
@@ -250,19 +417,19 @@ Inventory table (updated 2026-01-25)
 
 ## 6. IoTstack (192.168.0.203)
 
-**Last inventory:** 2026-01-25
+**Last inventory:** 2026-03-27
 
 ### 6.1 Host details
 
 | Property | Value |
 |----------|-------|
 | Hostname | hub |
-| OS | Debian 5.10.0-19-amd64 |
+| OS | Debian 11 (Bullseye), kernel 5.10.0-19-amd64 |
 | IP | 192.168.0.203/24 (ens18, DHCP) |
 | Proxmox VM | 101 IOTstack |
-| Memory | 14 GB allocated, ~2.8 GB used |
+| Memory | 14 GB allocated, ~5.2 GB used |
 | Swap | 8 GB |
-| Disk | 89 GB total, 36 GB used (43%) |
+| Disk | 89 GB total, 38 GB used (44%) |
 
 ### 6.2 Docker containers
 
@@ -293,7 +460,7 @@ Operations:
 **Buckets:**
 | Bucket | Retention | Purpose |
 |--------|-----------|---------|
-| HomeData | infinite | Primary energy data (migrated from EnergyV1) |
+| HomeData | infinite | Primary energy data (consolidated) |
 | HomeAssistant | 1 year | Raw HA sensor data |
 | EnergyV1 | infinite | Legacy energy data (archive) |
 | energy_manager | infinite | Energy manager decisions/signals |
@@ -302,6 +469,9 @@ Operations:
 | Water | infinite | Water meter data |
 | Weight | infinite | Weight data |
 | weather/autogen | infinite | Weather data |
+| HugoNew | infinite | Hugo data |
+| TempEnergy | infinite | Temporary energy data |
+| YOUTUBE/autogen | infinite | YouTube data |
 
 **Active tasks:**
 | Task | Interval | Purpose |
@@ -317,18 +487,22 @@ Operations:
 | Password | admin |
 | API | Basic auth: `-u admin:admin` |
 
-**Dashboards:**
-| UID | Name | Purpose |
-|-----|------|---------|
-| LbosmjiR | Huawei | Main energy dashboard |
-| LbosmjiRo | Huawei Longterm | Long-term energy analysis |
-| df9feonzp10xsc | LoadForecast | Load prediction display |
-| cf9druxb33yf4e | Forecast | PV/Solar forecast |
-| ce5ncpdixp24gb | Forecast comparison | Forecast accuracy |
-| afasawqszcz5sd | ForecastAccuracy | Forecast metrics |
-| BZuC4SZRk | Weather | Weather data |
-| ce5xr0eidnbpce | Water | Water consumption |
-| leg-* | LEG Community/Grid/Houses | LEG community dashboards |
+**Dashboards (updated 2026-03-27):**
+| UID | Name | Tags | Purpose |
+|-----|------|------|---------|
+| LbosmjiR | Huawei | - | Main energy dashboard |
+| LbosmjiRo | Huawei Longterm | - | Long-term energy analysis |
+| df9feonzp10xsc | BatteryForecast | energy, forecast, load, pv | Battery/load/PV forecast display |
+| afasawqszcz5sd | ForecastAccuracy | accuracy, forecast, pv | Forecast accuracy metrics |
+| BZuC4SZRk | Weather | - | Weather data |
+| ce5xr0eidnbpce | Water | - | Water consumption |
+| leg-community | LEG Community | LEG, community, energy | LEG community overview |
+| leg-grid | LEG Grid | LEG, energy, grid | LEG grid data |
+| leg-house-1 | LEG House 1 | LEG, energy, house | LEG House 1 data |
+| leg-house-2 | LEG House 2 | LEG, energy, house | LEG House 2 data |
+| leg-house-3 | LEG House 3 | LEG, energy, house | LEG House 3 data |
+| leg-house-4 | LEG House 4 | LEG, energy, house | LEG House 4 data |
+| leg-house-5 | LEG House 5 | LEG, energy, house | LEG House 5 data |
 
 ### 6.5 Mosquitto (MQTT)
 
@@ -395,25 +569,29 @@ cleansession true
 
 ### 7.1 System overview and versions
 
-**Last inventory:** 2026-01-22
+**Last inventory:** 2026-03-27
 
-| Component | Version | Latest | Status |
-|-----------|---------|--------|--------|
-| Core | 2025.7.4 | 2026.1.2 | Update available |
-| Supervisor | 2026.01.1 | 2026.01.1 | Current |
-| OS | 16.0 | 17.0 | Update available |
-| Machine | qemux86-64 (KVM) | - | Healthy |
-| Architecture | amd64 | - | - |
+| Component | Version | Status |
+|-----------|---------|--------|
+| Core | 2026.3.4 | Current |
+| Supervisor | 2026.03.2 | Current |
+| OS | 17.1 | Current |
+| Docker | 29.1.3 | Current |
+| Machine | qemux86-64 (KVM) | Healthy |
+| Architecture | amd64 | - |
+
+**Resolution issues:** No current backup (suggestion: create full backup).
 
 - Recorder: purge_keep_days=7, auto_purge=true
 - Timezone: Europe/Zurich
 - Country: CH
 
 ### 7.2 Network and access
-- Primary LAN IP: 192.168.0.202/24, gateway 192.168.0.1.
-- HA UI: http://192.168.0.202:8123 (SSL false).
-- SSH access via Advanced SSH & Web Terminal add-on.
-- Supervisor network: hassio 172.30.32.0/23, docker 172.30.232.0/23.
+- Primary LAN IP: 192.168.0.202/24 (enp0s18, auto), gateway 192.168.0.1, DNS 192.168.0.1.
+- HA UI: http://192.168.0.202:8123 (internal).
+- External URL: https://hej08kp6767.sn.mynetname.net:8443 (via Nginx Proxy Manager).
+- SSH access via Advanced SSH & Web Terminal add-on (v23.0.3).
+- Supervisor network: hassio 172.30.32.0/23, docker DNS 172.30.32.3.
 
 ### 7.3 File layout and key artifacts
 - Root config: `/homeassistant` (symlink `/config`).
@@ -424,21 +602,22 @@ cleansession true
 
 ### 7.4 Add-ons (active)
 
-**Last inventory:** 2026-01-22
+**Last inventory:** 2026-03-27
 
-| Add-on | Version | Latest | State | Repository | Description |
-|--------|---------|--------|-------|------------|-------------|
-| ESPHome Device Builder | 2025.7.4 | 2026.1.0 | ✅ started | ESPHome | Build smart home devices |
-| File editor | 5.8.0 | 5.8.0 | ✅ started | Core | Browser-based file editor |
-| Advanced SSH & Web Terminal | 21.0.2 | 22.0.3 | ✅ started | Community | SSH & terminal access |
-| Studio Code Server | 5.19.3 | 6.0.1 | ✅ started | Community | VS Code in browser |
-| Matter Server | 8.0.0 | 8.2.0 | ✅ started | Core | Matter protocol support |
-| Frigate | 0.16.3 | 0.16.3 | ✅ started | Frigate | NVR with object detection |
-| modbus-proxy | 1.0.18 | 1.0.18 | ✅ started | Modbus Proxy | Multi-client Modbus proxy |
-| SwissSolarForecast | 1.1.6 | 1.1.6 | ✅ started | Energy Management | PV power forecasting |
-| LoadForecast | 1.2.3 | 1.2.3 | ✅ started | Energy Management | Load consumption forecasting |
-| EnergyManager | 1.4.16 | 1.4.16 | ✅ started | Energy Management | Energy optimization signals |
-| Nginx Proxy Manager | 2.1.0 | 2.1.0 | ✅ started | Community | Reverse proxy management |
+| Add-on | Version | State | Repository | Description |
+|--------|---------|-------|------------|-------------|
+| ESPHome Device Builder | 2026.3.1 | ✅ started | ESPHome (5c53de3b) | Build smart home devices |
+| File editor | 5.8.0 | ✅ started | Core | Browser-based file editor |
+| Advanced SSH & Web Terminal | 23.0.3 | ✅ started | Community (a0d7b954) | SSH & terminal access |
+| Studio Code Server | 6.0.1 | ✅ started | Community (a0d7b954) | VS Code in browser |
+| Matter Server | 8.3.0 | ✅ started | Core | Matter protocol support |
+| Frigate | 0.17.1 | ✅ started | Frigate (ccab4aaf) | NVR with object detection |
+| modbus-proxy | 1.0.18 | ✅ started | Modbus Proxy (bc3b947b) | Multi-client Modbus proxy |
+| SwissSolarForecast | 1.3.4 | ✅ started | Energy Management (8d023bea) | PV power forecasting |
+| LoadForecast | 1.2.4 | ✅ started | Energy Management (8d023bea) | Load consumption forecasting |
+| EnergyManager | 1.6.96 | ✅ started | Energy Management (8d023bea) | Energy optimization signals |
+| OCPP Server | 0.9.53 | ✅ started | Energy Management (8d023bea) | OCPP 1.6j wallbox server |
+| Nginx Proxy Manager | 2.1.0 | ✅ started | Community (a0d7b954) | Reverse proxy management |
 
 **Add-on Repositories:**
 
@@ -456,7 +635,7 @@ cleansession true
 
 ### 7.5 Integrations (configured)
 
-**Last inventory:** 2026-01-22
+**Last inventory:** 2026-03-27
 
 #### Energy & Solar
 
@@ -588,23 +767,21 @@ cleansession true
 
 ### 7.7 Custom components (HACS)
 
-Custom components installed in `/config/custom_components/`:
+Custom components installed in `/config/custom_components/` (updated 2026-03-27):
 
 | Component | Purpose | Integration |
 |-----------|---------|-------------|
-| `bambu_lab` | Bambu Lab 3D printer | - |
-| `browser_mod` | Browser-based controls | - |
 | `hacs` | Home Assistant Community Store | ✅ |
-| `huawei_solar` | Huawei SUN2000 inverter (v2.0.0b2) | ✅ |
-| `localtuya` | Local Tuya device control | - |
+| `huawei_solar` | Huawei SUN2000 inverter | ✅ |
 | `meteoswiss` | MeteoSwiss weather | ✅ |
 | `ms365_calendar` | Microsoft 365 calendar | ✅ |
 | `simpleicons` | Simple Icons library | ✅ |
 | `smarthashtag` | Smart car integration | ✅ |
-| `spook` | HA enhancements (v4.0.1) | ✅ |
-| `spook_inverse` | Spook inverse helpers (v4.0.1) | ✅ |
-| `tuya_ble` | Tuya BLE devices | - |
+| `spook` | HA enhancements | ✅ |
+| `spook_inverse` | Spook inverse helpers | ✅ |
 | `watchman` | Config watcher | ✅ |
+
+**Removed since last inventory:** `bambu_lab`, `browser_mod`, `localtuya`, `tuya_ble`.
 
 **Notes:**
 - MS365 calendars stored in `/homeassistant/ms365_storage/ms365_calendars_HomeAssistant.yaml`
@@ -927,15 +1104,16 @@ mqtt:
 **Current issues (2026-01-22):**
 - `appliance_signal.py` referenced in configuration.yaml but script is missing
 
-**Pending updates:**
-| Component | Current | Available |
-|-----------|---------|-----------|
-| HA Core | 2025.7.4 | 2026.1.2 |
-| HA OS | 16.0 | 17.0 |
-| ESPHome | 2025.7.4 | 2026.1.0 |
-| SSH Terminal | 21.0.2 | 22.0.3 |
-| VS Code Server | 5.19.3 | 6.0.1 |
-| Matter Server | 8.0.0 | 8.2.0 |
+**Current versions (2026-03-31):**
+| Component | Version |
+|-----------|---------|
+| HA Core | 2026.3.4 |
+| HA OS | 17.1 |
+| ESPHome | 2026.3.1 |
+| SSH Terminal | 23.0.3 |
+| VS Code Server | 6.0.1 |
+| Matter Server | 8.3.0 |
+| Frigate | 0.17.1 |
 
 ---
 
@@ -1035,7 +1213,7 @@ msg.payload.DC_W_tot = msg.payload.DC_W + global.get("Enphase_Power");
 
 ### 11.1 Overview
 
-**Last inventory:** 2026-01-22
+**Last inventory:** 2026-03-27
 
 | Property | Value |
 |----------|-------|
@@ -1423,11 +1601,12 @@ gPlug data path:
 
 ### 12.1 Overview
 
-**Last inventory:** 2026-01-22
+**Last inventory:** 2026-03-27
 
 | Property | Value |
 |----------|-------|
 | Container | grafana |
+| Version | 11.1.4 |
 | Host | 192.168.0.203 |
 | Port | 3000 |
 | URL | http://192.168.0.203:3000 |
@@ -1435,7 +1614,7 @@ gPlug data path:
 
 ### 12.2 Data Sources
 
-**Last inventory:** 2026-01-22
+**Last inventory:** 2026-03-27
 
 #### InfluxDB v2 (Flux) - Recommended
 
@@ -1472,7 +1651,7 @@ gPlug data path:
 
 ### 12.3 Dashboards
 
-**Last inventory:** 2026-01-22
+**Last inventory:** 2026-03-27
 
 All dashboards are in the General folder (no subfolders).
 
@@ -1482,10 +1661,10 @@ All dashboards are in the General folder (no subfolders).
 |-----------|-----|------|---------|---------|
 | **Huawei** | LbosmjiR | - | ⭐ | Real-time solar, battery, grid monitoring |
 | **Huawei Longterm** | LbosmjiRo | - | - | Monthly/daily aggregates, self-consumption |
-| **LoadForecast** | df9feonzp10xsc | energy, forecast, load, pv | - | PV/load forecasts with SOC simulation |
-| **Forecast** | cf9druxb33yf4e | forecast, pv, solar | - | Solar forecast overview with weather |
-| **Forecast comparison** | ce5ncpdixp24gb | - | - | Compare forecast models |
+| **BatteryForecast** | df9feonzp10xsc | energy, forecast, load, pv | - | Battery/PV/load forecasts with SOC simulation |
 | **ForecastAccuracy** | afasawqszcz5sd | accuracy, forecast, pv | - | Forecast vs actual comparison |
+
+**Removed dashboards:** Forecast (cf9druxb33yf4e), Forecast comparison (ce5ncpdixp24gb) — no longer present in Grafana.
 
 #### Utility Dashboards
 
@@ -1601,11 +1780,13 @@ Quick access links:
 |-----------|-----|
 | Huawei | http://192.168.0.203:3000/d/LbosmjiR/huawei |
 | Huawei Longterm | http://192.168.0.203:3000/d/LbosmjiRo/huawei-longterm |
-| LoadForecast | http://192.168.0.203:3000/d/df9feonzp10xsc/loadforecast |
-| Forecast | http://192.168.0.203:3000/d/cf9druxb33yf4e/forecast |
+| BatteryForecast | http://192.168.0.203:3000/d/df9feonzp10xsc/batteryforecast |
 | ForecastAccuracy | http://192.168.0.203:3000/d/afasawqszcz5sd/forecastaccuracy |
 | Water | http://192.168.0.203:3000/d/ce5xr0eidnbpce/water |
 | Weather | http://192.168.0.203:3000/d/BZuC4SZRk/weather |
+| LEG Community | http://192.168.0.203:3000/d/leg-community/leg-community |
+| LEG Grid | http://192.168.0.203:3000/d/leg-grid/leg-grid |
+| LEG House 1-5 | http://192.168.0.203:3000/d/leg-house-1/leg-house-1 (through leg-house-5) |
 
 ### 12.6 API Access
 
@@ -1798,7 +1979,7 @@ python -m esptool --chip esp32c3 --port COM79 --baud 921600 \
 | Phase B Power | `sensor.power_meter_phase_b_active_power` | L2 net power |
 | Phase C Power | `sensor.power_meter_phase_c_active_power` | L3 net power |
 
-### 13.5 Wallbox and EV Charging (OCPP via ESP32)
+### 13.5 Wallbox and EV Charging (OCPP via HA Add-on)
 
 **Hardware:**
 - Wallbox: AcTec (OCPP 1.6J)
@@ -1807,11 +1988,11 @@ python -m esptool --chip esp32c3 --port COM79 --baud 921600 \
 - Chargepoint ID: `AcTec001`
 - Wallbox IP: 192.168.0.81
 
-**OCPP Bridge:** [ESP32 OCPP Server](https://github.com/SensorsIot/OCPP-ESP32-Server) on WT32-ETH01
-- Ethernet to wallbox (OCPP 1.6J WebSocket)
-- WiFi to home network (MQTT to broker at 192.168.0.203:1883)
-- GPIO relay for 1-phase/3-phase switching
-- Configured via captive portal (WiFi AP mode)
+**OCPP Server:** HA add-on `OCPP Server` (v0.9.53) — replaces standalone ESP32 OCPP Server.
+- Communicates with wallbox via OCPP 1.6J WebSocket
+- Publishes HA entities via REST API
+- MQTT integration for status/commands (broker at 192.168.0.203:1883)
+- See `ocpp-server/docs/ocpp-server-fsd.md` for full spec
 
 **MQTT Topics** (base: `ocpp/AcTec001/`):
 
@@ -1838,7 +2019,7 @@ python -m esptool --chip esp32c3 --port COM79 --baud 921600 \
 **Vehicle:**
 - Smart #5
 - Battery: 66 kWh
-- SOC: `input_number.ev_soc` (manual input or car API)
+- SOC: `input_number.ev_soc` (manual input or via `smarthashtag` integration)
 
 **Type 2 Charging Protocol (CP Signal):**
 
@@ -2053,21 +2234,415 @@ command_line:
 
 ---
 
+## 14. Microsoft 365 Calendar Integration
+
+### 14.1 Overview
+The Home Assistant instance uses the **MS365-Calendar** HACS integration (by RogerSelwyn) to surface Microsoft 365 / Outlook calendars as HA calendar entities. This enables automations based on calendar events (e.g. presence, heating schedules).
+
+| Item | Value |
+|------|-------|
+| HA integration ID | `ms365_calendar` |
+| HACS component path | `custom_components/ms365_calendar/` |
+| Token file | `/config/ms365_storage/.MS365-token-cache/ms365_calendar_HomeAssistant.token` |
+| Config entry ID | `01JEKXE1JTDJ7K0APGGB91GY3B` |
+| Entity name prefix | `HomeAssistant` |
+
+### 14.2 Azure App Registration (prerequisite)
+The integration authenticates via OAuth 2.0 against Microsoft Entra ID (formerly Azure AD). A registered application is required.
+
+1. Sign in to the **Azure Portal** → **Microsoft Entra ID** → **App registrations** → **New registration**.
+2. Set:
+   - **Name:** `HomeAssistant` (or any descriptive name).
+   - **Supported account types:** *Accounts in this organizational directory only* (single tenant) — or *Personal Microsoft accounts* if using a personal Outlook.com account.
+   - **Redirect URI:** Select **Web**, enter the HA external URL callback:
+     ```
+     https://hej08kp6767.sn.mynetname.net:8443/api/ms365
+     ```
+     (This must match the external URL configured in HA. If the external URL is unreachable during auth, see §14.4 for the manual token exchange workaround.)
+3. After creation, note the **Application (client) ID** and **Directory (tenant) ID** from the Overview page.
+4. Go to **Certificates & secrets** → **New client secret** → set an expiry (e.g. 24 months) → copy the **Value** immediately (it is shown only once).
+5. Go to **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated permissions** → add:
+   - `Calendars.ReadWrite`
+   - `offline_access`
+   - `User.Read`
+6. Click **Grant admin consent** (if you are the tenant admin), or have an admin approve.
+
+Current registration values:
+
+| Item | Value |
+|------|-------|
+| Application (client) ID | `51e5d6a3-f143-44dd-9924-7d1bc2d2b1fd` |
+| Tenant | `common` (multi-tenant) |
+| Redirect URI | `https://hej08kp6767.sn.mynetname.net:8443/api/ms365` |
+
+Store the **client ID**, **tenant ID**, and **client secret** in the Secrets Store (`D:\Dropbox\Documentation\AAHome\Secrets Store.md`).
+
+### 14.3 HA Integration Setup
+
+1. Ensure HACS is installed and working (see §7.7).
+2. In HACS → **Integrations** → search for **MS365 Calendar** → **Install**.
+3. Restart Home Assistant.
+4. Go to **Settings** → **Devices & Services** → **Add Integration** → search **MS365 Calendar**.
+5. Enter:
+   - **Entity Name** — `HomeAssistant` (used as a prefix for entity IDs and storage files).
+   - **Client ID** — from the Azure app registration.
+   - **Client Secret** — from Certificates & secrets.
+   - **Alt Auth Method** — enable this (required when HA's external URL handles the OAuth redirect).
+   - **Enable Update** — enable to get update notifications for the integration.
+   - **Basic Calendar** — disable (allows full calendar features).
+6. HA will display an **authorization URL**. Open it in a browser, sign in with the Microsoft account that owns the calendars, and **Accept** the permissions.
+7. After signing in, Microsoft redirects to the HA external URL with an authorization code. If the redirect succeeds, the token is stored automatically.
+8. The integration stores the resulting OAuth tokens in `/config/ms365_storage/.MS365-token-cache/ms365_calendar_HomeAssistant.token`.
+
+### 14.4 Re-authorization (token expired or secret rotated)
+
+OAuth tokens are refreshed automatically via the refresh token. Re-authorization is needed when:
+- The **client secret** has expired (check expiry in Azure Portal → App registrations → Certificates & secrets).
+- The **token file** is deleted or corrupted (`/config/ms365_storage/.MS365-token-cache/ms365_calendar_HomeAssistant.token`).
+- API permissions were changed.
+
+**Symptom:** All `calendar.homeassistant_*` entities show **unavailable**, and HA logs contain:
+```
+WARNING [custom_components.ms365_calendar.classes.permissions] Could not locate token at
+/config/ms365_storage/.MS365-token-cache/ms365_calendar_HomeAssistant.token
+```
+
+**Method A — Via HA UI (when external URL is reachable):**
+
+1. If the client secret expired, create a new one in the Azure Portal (§14.2 step 4) and update the Secrets Store.
+2. In HA → **Settings** → **Devices & Services** → find the **MS365 Calendar** entry → **Reconfigure** (or delete and re-add the integration).
+3. Enter the new client secret when prompted.
+4. Complete the OAuth consent flow again (sign in + Accept).
+5. Verify calendars reappear as entities under `calendar.*`.
+
+**Method B — Manual token exchange (when external URL is unreachable, e.g. ERR_CONNECTION_REFUSED):**
+
+When the HA external URL (`hej08kp6767.sn.mynetname.net:8443`) is not reachable from the browser, the OAuth redirect fails. The authorization code is still present in the browser URL bar and can be exchanged manually:
+
+1. Start a new config flow via the HA API (or use Claude Code to do it):
+   ```bash
+   source ~/.secrets/env
+   # Start the flow
+   curl -s -X POST -H "Authorization: Bearer $HA_TOKEN" -H "Content-Type: application/json" \
+     "$HA_URL/api/config/config_entries/flow" \
+     -d '{"handler":"ms365_calendar"}'
+   # Submit credentials (use the flow_id from the response)
+   curl -s -X POST -H "Authorization: Bearer $HA_TOKEN" -H "Content-Type: application/json" \
+     "$HA_URL/api/config/config_entries/flow/<flow_id>" \
+     -d '{"entity_name":"HomeAssistant","client_id":"<CLIENT_ID>","client_secret":"<CLIENT_SECRET>","alt_auth_method":true,"enable_update":true,"basic_calendar":false,"groups":false,"shared_mailbox":""}'
+   ```
+2. The response contains `description_placeholders.auth_url` — open that URL in a browser and sign in.
+3. After sign-in, the browser redirects to the external URL which fails. **Copy the full URL from the browser address bar** — it contains the `code=` parameter.
+4. Exchange the authorization code for a token manually:
+   ```bash
+   curl -s -X POST "https://login.microsoftonline.com/common/oauth2/v2.0/token" \
+     -d "client_id=<CLIENT_ID>" \
+     -d "client_secret=<CLIENT_SECRET>" \
+     -d "grant_type=authorization_code" \
+     -d "redirect_uri=https://hej08kp6767.sn.mynetname.net:8443/api/ms365" \
+     -d "scope=offline_access User.Read Calendars.ReadWrite" \
+     -d "code=<CODE_FROM_URL>" > token.json
+   ```
+5. Upload the token to Home Assistant:
+   ```bash
+   ssh root@192.168.0.202 "mkdir -p /config/ms365_storage/.MS365-token-cache"
+   cat token.json | ssh root@192.168.0.202 \
+     "cat > /config/ms365_storage/.MS365-token-cache/ms365_calendar_HomeAssistant.token"
+   ```
+6. Abort the config flow (since the existing config entry is still valid):
+   ```bash
+   curl -s -X DELETE -H "Authorization: Bearer $HA_TOKEN" \
+     "$HA_URL/api/config/config_entries/flow/<flow_id>"
+   ```
+7. Reload the integration:
+   ```bash
+   curl -s -X POST -H "Authorization: Bearer $HA_TOKEN" \
+     "$HA_URL/api/config/config_entries/entry/<entry_id>/reload"
+   ```
+   Current entry ID: `01JEKXE1JTDJ7K0APGGB91GY3B`
+
+8. Verify calendars come back online.
+
+### 14.5 Calendar Configuration
+
+Calendars are managed via the integration's options flow: **Settings** → **Devices & Services** → **MS365 Calendar** → **Configure**. Each calendar can be individually enabled/disabled with configurable time offsets.
+
+Current calendars (as of 2026-03-31):
+
+| Calendar | Entity ID |
+|----------|-----------|
+| Kalender | `calendar.homeassistant_kalender` |
+| Feiertage in Schweiz | `calendar.homeassistant_feiertage_in_schweiz` |
+| Garbage | `calendar.homeassistant_garbage` |
+| Geburtstage | `calendar.homeassistant_geburtstage` |
+| Polar Trainingsergebnisse | `calendar.homeassistant_polar_trainingsergebnisse` |
+| Polar Trainingsziele | `calendar.homeassistant_polar_trainingsziele` |
+
+Calendars can also be added/removed via the HA API options flow:
+```bash
+source ~/.secrets/env
+# Start options flow
+curl -s -X POST -H "Authorization: Bearer $HA_TOKEN" -H "Content-Type: application/json" \
+  "$HA_URL/api/config/config_entries/options/flow" \
+  -d '{"handler":"01JEKXE1JTDJ7K0APGGB91GY3B"}'
+# Select calendars (submit with the flow_id from response)
+curl -s -X POST -H "Authorization: Bearer $HA_TOKEN" -H "Content-Type: application/json" \
+  "$HA_URL/api/config/config_entries/options/flow/<flow_id>" \
+  -d '{"calendar_list":["Kalender","Feiertage in Schweiz","Geburtstage","Polar Trainingsergebnisse","Garbage","Polar Trainingsziele"],"track_new_calendar":true}'
+# Then confirm defaults for each calendar when prompted
+```
+
+### 14.6 Migration Notes
+
+The current `ms365_calendar` integration (by RogerSelwyn) replaced an older integration called `o365`. If orphaned entities from the old integration appear (entity IDs ending in `_account1`, platform `o365`, `config_entry_id: null`), they can be removed by:
+
+1. Stop HA: `ssh root@192.168.0.202 "ha core stop"`
+2. Edit `/config/.storage/core.entity_registry` — remove entries with `"platform": "o365"`.
+3. Start HA: `ssh root@192.168.0.202 "ha core start"`
+
+HA must be stopped before editing the entity registry, otherwise it overwrites the file on shutdown.
+
+### 14.7 Troubleshooting
+
+| Symptom | Check |
+|---------|-------|
+| "Could not locate token" / entities unavailable | Token file missing — re-authorize (§14.4) |
+| "Insufficient privileges" | Verify API permissions + admin consent in Azure Portal |
+| No calendars after setup | Check options flow — calendars may not be selected |
+| Integration not found in HACS | Ensure HACS is up to date; search for "MS365" (not "Office 365") |
+| OAuth redirect fails (ERR_CONNECTION_REFUSED) | External URL unreachable — use manual token exchange (§14.4 Method B) |
+| Orphaned `_account1` entities showing unavailable | Old `o365` integration remnants — see §14.6 |
+
+---
+
+## 15. Devices and Protocols
+
+### 15.1 Zigbee (ZHA)
+
+Home Assistant uses the **ZHA** (Zigbee Home Automation) integration with a USB coordinator passed through from Proxmox to the HA VM.
+
+**Active Zigbee devices:**
+
+| Device | Entity prefix | Type | Status |
+|--------|--------------|------|--------|
+| LUMI motion sensor (PIR_PC) | `binary_sensor.lumi_lumi_sensor_motion_aq2` | Aqara motion + illuminance | Working (battery 73%) |
+| LUMI motion sensor (PIR_Bench) | `sensor.pir_bench_illuminance` | Illuminance | Working |
+| LUMI motion sensor (PIR_Entry) | `sensor.pir_entry_illuminance` | Illuminance | Working |
+| LUMI door sensor | `binary_sensor.lumi_lumi_sensor_magnet_aq2` | Aqara door/window | Unavailable |
+| LUMI button | `sensor.lumi_lumi_sensor_switch_battery` | Aqara wireless button | Working (battery 75%) |
+| Xiaomi Switch1 | `sensor.xiaomi_switch1_battery` | Wireless switch | Working (battery 68%) |
+| Espressif ZigbeeTempSensor | `sensor.espressif_zigbeetempsensor_*` | Custom temp/humidity | Unavailable |
+| Sonoff SNZB-02 (sonoff_3) | `sensor.sonoff_3_*` | Temp/humidity | Working (19.5°C, 34%) |
+| Sonoff SNZB-02 (sonoff_4) | `sensor.sonoff_4_*` | Temp/humidity | Unavailable |
+| Plant Sensor 87F7 | `sensor.plant_sensor_87f7_*` | Xiaomi BLE plant (via ZHA or BLE proxy) | Working |
+
+**Notes:**
+- The old `Zigbee2MQTT` setup (referenced in legacy docs) has been replaced by ZHA directly in HA.
+- Legacy Zigbee doc (`D:\Dropbox\Documentation\Zigbee\Zigbee.docx`) describes the old Zigbee2MQTT device list — no longer applicable.
+
+### 15.2 ESPHome Devices
+
+Managed via the ESPHome Device Builder add-on in HA. YAML configs stored in `/homeassistant/esphome/`.
+
+| Device | Function | Key entities | Status |
+|--------|----------|-------------|--------|
+| **AlarmBell** | Office meeting bell (rings for calendar events) | `switch.esphome_alarmbell_bell` | Working |
+| **Water Meter** | Pulse counter on water meter | `sensor.esphome_water_meter_consumption` (18826 L), `sensor.esphome_water_meter_flow` | Working |
+| **Mailbox Notifier** (esphome-web-10fcf4) | BME280 (temp/humidity/pressure) + mailbox reed switch | `binary_sensor.esphome_web_10fcf4_mailbox_state`, `sensor.esphome_web_10fcf4_bme280_*` | Partially unavailable |
+| **RTL_433 Gateway** (esphome-web-4ed8d0) | 433 MHz receiver with SSD1306 display | `switch.esphome_web_4ed8d0_*` | Unavailable |
+| **Bluetooth Proxy** (esp32-bluetooth-proxy-f9c438) | BLE proxy for Xiaomi sensors | `button.esp32_bluetooth_proxy_f9c438_*` | Working |
+| **Earu Breaker** | Wallbox phase switch (BL0942 energy monitor) | `sensor.earu_breaker_*`, `switch.earu_breaker_wallbox_phase_switch` | Unavailable |
+| **p1s-mains** | Bambu Lab P1S printer mains power control | Related automations | Working |
+| **iphoneswitch** | CatBowl control | `switch.iphone_switch` | Unavailable |
+
+### 15.3 Tasmota / MQTT Devices
+
+Devices flashed with Tasmota firmware, communicating via MQTT to the Mosquitto broker on IOTstack.
+
+| Device | Function | Key entities | Status |
+|--------|----------|-------------|--------|
+| **Enphase** | Micro-inverter energy monitor (Sonoff POW with HLW8012) | `sensor.enphase_energy_*` (power, voltage, current, today/total) | Working (213W currently) |
+| **sonoff-s26** | Smart plug | `light.sonoff_s20_green_led_2`, `switch.*` | Unavailable |
+
+**MQTT topic conventions:**
+- Tasmota devices publish to `tele/<device>/SENSOR`, `stat/<device>/RESULT`
+- Tasmota discovery: `tasmota/discovery/#`
+
+**Legacy note:** The `D:\Dropbox\Documentation\Tasmota.docx` contains generic flashing instructions and the XY-WFUSB template. The `Lab Sonoffs Setup.docx` covers Espurna/Tasmota firmware for Sonoff POW (HLW8012 pin mapping). These are historical reference only.
+
+### 15.4 Shelly Devices
+
+Native Shelly integration in HA (auto-discovered).
+
+| Device | Function | Key entities | Status |
+|--------|----------|-------------|--------|
+| **Shelly 3EM** (shelly3em) | 3-phase energy monitoring | `switch.3em`, `binary_sensor.3em_overpowering` | Working |
+| **Shelly 2PM White** | Dual relay for lab lights | `light.lab_bench` (Bench), `light.lab_pc` (Desk) | Working |
+
+### 15.5 RTL_433 Weather Gateway
+
+An ESP32 device (at **192.168.0.15**) running an RTL_433-to-MQTT gateway, receiving 433 MHz weather sensor signals and publishing via MQTT.
+
+| Item | Value |
+|------|-------|
+| IP Address | 192.168.0.15 |
+| Entity prefix | `433_*` or `sensor.433_*` |
+| Display | SSD1306 OLED (brightness controllable via `number.433_ssd1306_brightness`) |
+| MQTT connectivity | `binary_sensor.433_sys_connectivity` |
+
+**Legacy note:** The `D:\Dropbox\Documentation\RTL_433&Node-Red&InfluxDB&Grafana.docx` describes the old Raspberry Pi-based RTL_433 stack. This has been replaced by the ESP32 gateway publishing directly to MQTT.
+
+### 15.6 Bluetooth / BLE Devices
+
+| Device | Integration | Key entities | Status |
+|--------|------------|-------------|--------|
+| **ESP32 Bluetooth Proxy** (bathroom) | `esphome` | Proxies BLE advertisements to HA | Working |
+| **Xiaomi Mi Smart Scale** | `xiaomi_ble` | `sensor.mi_smart_scale_32c7_mass` | Working |
+| **Plant Sensor 87F7** | `xiaomi_ble` | temp, moisture, conductivity, illuminance, battery (43%) | Working |
+| **iBeacon trackers** | `ibeacon` | `device_tracker.wgx_ibeacon_*` | Unavailable |
+
+## 16. Notifications, Presence, and UI
+
+### 16.1 Telegram Bot
+
+The `telegram_bot` integration sends notifications for sensor events.
+
+**Active automations:**
+
+| Automation | Trigger | Message |
+|-----------|---------|---------|
+| Telegram: Mail arrived | `binary_sensor.esphome_web_10fcf4_mailbox_state` → on | Mail notification |
+| Telegram: Mailbox emptied | Mailbox → off | Mailbox emptied |
+| Mailbox Timeout | Mailbox sensor unavailable for 40s | Warning |
+| Telegram: Water Counter Timeout | `sensor.esphome_water_meter_flow` → unavailable for 40s | Warning |
+
+**Configuration:** Bot token stored in Secrets Store. Notify service: `notify.sensorsiotha_andreas_spiess_876235944`.
+
+### 16.2 Presence Detection
+
+| Entity | Method | Status |
+|--------|--------|--------|
+| `person.andreas_spiess` | Mobile app (iPhone, iPad, HD1900, Kitchen) | home |
+| `person.brigitte_sutter` | Mobile app | unknown |
+| `device_tracker.smart` | Smart #1 car (smarthashtag integration) | home |
+
+### 16.3 Fire Tablet Dashboard (Fully Kiosk)
+
+An **Amazon Fire Tablet** runs as a wall-mounted HA dashboard using the **Fully Kiosk Browser** integration.
+
+| Item | Value |
+|------|-------|
+| Integration | `fully_kiosk` |
+| Dashboard URL | `http://192.168.0.202:8123/lovelace-amazonfire/` |
+| Features | Camera, screenshot, kiosk lock, motion detection, screen brightness |
+| Charging automations | `automation.start_charging`, `automation.stop_charging` (currently off) |
+
+**Dashboard views:** AmazonFire (main), Map, Portainer, Zigbee2MQTT, Grafana.
+
+### 16.4 Waste Collection Indicators
+
+Calendar-driven waste collection reminders displayed on the Fire Tablet dashboard.
+
+**Flow:** MS365 Garbage calendar event starts (18:00 day before) → `calendar.homeassistant_garbage` turns on → automation checks event name → sets `input_boolean.indicator_*` → conditional card appears on dashboard → user taps to dismiss.
+
+| Indicator | Entity | Collection type |
+|-----------|--------|----------------|
+| Green | `input_boolean.indicator_green` | Bio-/Grünsammlung (green waste) |
+| Cardboard | `input_boolean.indicator_cardboard` | Kartonsammlung |
+| Paper | `input_boolean.indicator_paper` | Papiersammlung |
+| Cat | `input_boolean.indicator_cat` | (custom reminder) |
+
+**Automation:** `automation.minute_by_minute_trash_collection_reminderx` — triggers on `calendar.homeassistant_garbage` state change to `on`.
+
+**Calendar events:** Created for all 2026 collection dates from Entsorgungskalender Lausen 2026 (source PDF: `C:\Users\AndreasSpiess\Downloads\Entsorgungskalender-2026 (1).pdf`). Events are at 18:00 the evening before collection, 1 hour duration.
+
+## 17. External Integrations
+
+### 17.1 Smart #1 Car (smarthashtag)
+
+HACS integration `smarthashtag` for the Smart #1 EV.
+
+| Entity type | Examples |
+|-------------|---------|
+| Climate | `climate.smart_hesya4c44sg200806_conditioning` (A/C + seat heating) |
+| Binary sensors | Central locking, trunk lock/open status |
+| Device tracker | `device_tracker.smart` |
+| Sensors | Various vehicle status |
+
+### 17.2 MeteoSwiss Weather
+
+HACS integration `meteoswiss` providing Swiss weather forecasts.
+
+| Entity | Location |
+|--------|----------|
+| `weather.8_edletenstrasse_lausen` | Home (Lausen) |
+| `weather.5_bugl_da_la_nina_samedan` | Samedan (vacation) |
+
+### 17.3 Frigate NVR
+
+Frigate add-on runs as a container for camera-based object detection.
+
+| Item | Value |
+|------|-------|
+| Add-on | `ccab4aaf_frigate` v0.17.1 |
+| Update entity | `update.frigate_update` |
+| Cameras | 1 active (`sensor.cameras`: 1) |
+
+### 17.4 Remote Access
+
+| Component | Details |
+|-----------|---------|
+| External URL | `https://hej08kp6767.sn.mynetname.net:8443` |
+| Nginx Proxy Manager | HA add-on on port 81, handles SSL termination and reverse proxy |
+| DynDNS | mynetname.net (Swisscom router DynDNS) |
+| AdGuard | LXC container 118 at 192.168.0.101 — DNS ad-blocking |
+
+### 17.5 Other Proxmox Services
+
+These VMs/LXCs run on the Proxmox host but are not directly part of the HA automation stack:
+
+| VMID | Name | Purpose | Status |
+|------|------|---------|--------|
+| 102 | Birch | General purpose | Running |
+| 103 | AREDN-local | AREDN mesh node (local) | Running |
+| 104 | AREDN-Tunnel | AREDN mesh node (tunnel) | Running |
+| 105 | AREDN-Supernode | AREDN mesh supernode | Running |
+| 107 | FreePBX | PBX telephone system | Running |
+| 119 | dev-1 | Development VM (5 GB RAM, 100 GB disk) | Running |
+| 118 | adguard (LXC) | AdGuard DNS | Running |
+
+### 17.6 USB/IP for Proxmox Development
+
+Raspberry Pi devices serve as remote USB hosts for flashing microcontrollers from Proxmox VMs via USB/IP.
+
+**Architecture:** Pi runs USB/IP server → binds USB device → Proxmox VM attaches via network.
+
+**Reference docs:**
+- `D:\Dropbox\Documentation\USB via Ethernet for Proxmox.md`
+- `D:\Dropbox\Documentation\Instructions for Raspberry Pi USBIP Integration with Proxmox.md`
+
+Key setup: systemd services on Pi (usbipd daemon, device bind) and VM (auto-attach, watchdog). Standard kernel required (not cloud kernel) for USB/IP kernel modules.
+
+---
+
 ## 18. Troubleshooting and known issues
 
 ### General
 - ~~evcc add-on~~ Decommissioned, replaced by ESP32 OCPP Server. `evcc_intg` custom component removed (2026-02-19).
 - ~~Node-RED companion~~ (`nodered` custom component) removed 2026-02-19. Weather sensors migrated to native MQTT sensors. Node-RED container still runs on IOTstack but is no longer used by HA.
 - `appliance_signal.py` referenced but missing
+- Custom components removed (2026-03-27): `bambu_lab`, `browser_mod`, `localtuya`, `tuya_ble` — no longer installed.
+- HA resolution: no current backup — run `ha backups new --name "full"` to resolve.
 
 ### Energy System
-- Wallbox OCPP issues: check ESP32 serial console (`status` command) or MQTT `ocpp/AcTec001/status`
+- Wallbox OCPP now managed by OCPP Server HA add-on (v0.9.53), no longer via standalone ESP32.
+- Wallbox OCPP issues: check MQTT `ocpp/AcTec001/status`
 - Phase switching: check MQTT `ocpp/AcTec001/phase/result` for errors
 - Smart meter not reporting: check Tasmota console, verify MBUS wiring
 
 ### InfluxDB
 - Query errors: verify bucket names (`Huawei/autogen` vs `HuaweiV2`)
-- Data gaps: check Node-RED flows and HA influxdb integration
+- Data gaps: check HA influxdb integration (Node-RED no longer writes to InfluxDB)
 
 ---
 
@@ -2201,7 +2776,7 @@ Smart meter grid power flows through HA and the InfluxDB consolidation task:
 
 ### Current InfluxDB Bucket Schemas
 
-**Last updated:** 2026-01-25
+**Last updated:** 2026-03-27
 
 #### Bucket Overview
 
@@ -2209,12 +2784,16 @@ Smart meter grid power flows through HA and the InfluxDB consolidation task:
 |--------|-----------|---------|
 | HomeData | infinite | Primary energy data (consolidated) |
 | HomeAssistant | 1 year | Raw HA sensor data |
+| EnergyV1 | infinite | Legacy energy data (archive) |
 | energy_manager | infinite | EnergyManager addon decisions |
 | load_forecast | 30 days | Load predictions (P10/P50/P90) |
 | pv_forecast | 30 days | PV predictions (P10/P50/P90) |
 | Water | infinite | Water meter data |
 | Weight | infinite | Weight data |
 | weather/autogen | infinite | Weather data |
+| HugoNew | infinite | Hugo data |
+| TempEnergy | infinite | Temporary energy data |
+| YOUTUBE/autogen | infinite | YouTube data |
 
 #### HomeData Bucket
 

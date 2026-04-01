@@ -24,6 +24,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set Python path
 ENV PATH="/home/dev/.local/bin:${PATH}"
 
+# SSH quiet config
+RUN mkdir -p /home/dev/.ssh \
+    && printf 'Host *\n    StrictHostKeyChecking accept-new\n    LogLevel ERROR\n' > /home/dev/.ssh/config \
+    && chmod 700 /home/dev/.ssh \
+    && chmod 600 /home/dev/.ssh/config \
+    && chown -R dev:dev /home/dev/.ssh
+
 USER dev
 
 # Set default working directory for both docker exec and SSH logins
