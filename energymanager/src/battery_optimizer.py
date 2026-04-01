@@ -54,7 +54,7 @@ class BatteryOptimizer:
     def __init__(
         self,
         capacity_wh: float = 10000,
-        min_soc_percent: float = 10,
+        min_soc_percent: float = 0,
         charge_efficiency: float = 0.95,
         discharge_efficiency: float = 0.95,
         max_charge_w: float = 5000,

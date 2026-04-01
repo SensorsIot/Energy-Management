@@ -62,7 +62,7 @@ class TestExpensiveTariff:
         """At 12:00 (expensive), discharge should be allowed regardless of SOC forecast."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
         )
 
         # Midday on a weekday - expensive tariff
@@ -89,7 +89,7 @@ class TestExpensiveTariff:
         """Even with low SOC during expensive tariff, discharge is allowed."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
         )
 
         now = datetime(2026, 1, 26, 14, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
@@ -117,7 +117,7 @@ class TestCheapTariffAllow:
         """At 22:00 (cheap), with good PV forecast, discharge should be allowed."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
         )
 
         # Evening on a weekday - cheap tariff
@@ -148,7 +148,7 @@ class TestCheapTariffAllow:
         """With 100% SOC and good PV, should allow discharge."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
         )
 
         now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
@@ -179,10 +179,10 @@ class TestCheapTariffBlock:
     """During cheap tariff: BLOCK if SOC would drop below min during expensive hours."""
 
     def test_cheap_tariff_low_pv_blocks_discharge(self):
-        """At 22:00 (cheap), with poor PV forecast, discharge should be blocked."""
+        """At 22:00 (cheap), with poor PV forecast and hysteresis active, discharge should be blocked."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
         )
 
         now = datetime(2026, 1, 26, 21, 30, tzinfo=SWISS_TZ).astimezone(timezone.utc)
@@ -198,20 +198,22 @@ class TestCheapTariffBlock:
             load_pattern=load_pattern,
         )
 
+        # With 0% reserve, blocking only happens via hysteresis (previously_blocked)
         decision, _, _ = optimizer.calculate_decision(
             soc_percent=50,  # Medium SOC
             forecast=forecast,
             now=now,
+            previously_blocked=True,
         )
 
         assert decision.discharge_allowed is False
         assert "Block" in decision.reason
 
     def test_cheap_tariff_low_soc_blocks_discharge(self):
-        """At 22:00 (cheap), with low starting SOC, discharge should be blocked."""
+        """At 22:00 (cheap), with low starting SOC and hysteresis active, discharge should be blocked."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
         )
 
         now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
@@ -227,10 +229,12 @@ class TestCheapTariffBlock:
             load_pattern=load_pattern,
         )
 
+        # With 0% reserve, blocking only happens via hysteresis (previously_blocked)
         decision, _, _ = optimizer.calculate_decision(
             soc_percent=20,  # Low starting SOC
             forecast=forecast,
             now=now,
+            previously_blocked=True,
         )
 
         assert decision.discharge_allowed is False
@@ -277,7 +281,7 @@ class TestDischargeFloor:
         """
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
         )
         now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
 
@@ -296,10 +300,10 @@ class TestDischargeFloor:
         assert "floor" in decision.reason.lower() or "stays >=" in decision.reason.lower()
 
     def test_low_soc_at_floor_blocks(self):
-        """SOC at or below floor → block discharge."""
+        """SOC at or below floor → block discharge (with hysteresis active)."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
         )
         now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
 
@@ -310,9 +314,10 @@ class TestDischargeFloor:
         forecast = make_forecast(start=now, hours=48,
                                  pv_pattern=pv_pattern, load_pattern=load_pattern)
 
-        # Very low SOC — at or below the calculated floor
+        # With 0% reserve, blocking only happens via hysteresis (previously_blocked)
         decision, _, _ = optimizer.calculate_decision(
             soc_percent=12, forecast=forecast, now=now,
+            previously_blocked=True,
         )
         assert decision.discharge_allowed is False
         assert "block" in decision.reason.lower()
@@ -325,7 +330,7 @@ class TestSelfCorrecting:
         """If initially blocked, later check with better SOC should allow."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
         )
 
         now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
@@ -396,7 +401,7 @@ class TestEdgeCases:
         """On weekends, daytime SOC dips should not block discharge (all-day cheap)."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
             weekend_all_day_cheap=True,
         )
 
@@ -519,15 +524,15 @@ class TestHysteresis:
     """Hysteresis prevents flip-flopping when projected min SOC hovers near threshold."""
 
     def _make_optimizer_and_forecast(self):
-        """Create optimizer and a forecast that yields min_soc ~10-11%."""
+        """Create optimizer and a forecast that yields min_soc ~0-1%."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
-            min_soc_percent=10,
+            min_soc_percent=0,
         )
         # Monday 22:00 (cheap tariff)
         now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
 
-        # Craft forecast so that at SOC=45%, projected min is just above 10%
+        # Craft forecast so that at low SOC, projected min is just above 0%
         # Night: 0 PV, 300W load.  Day: enough PV to recover
         pv_pattern = [0] * 32 + [2500] * 48 + [0] * 16
         load_pattern = [300] * 96
@@ -539,20 +544,20 @@ class TestHysteresis:
         """When previously blocked, min_soc barely above threshold stays blocked."""
         optimizer, forecast, now = self._make_optimizer_and_forecast()
 
-        # Find SOC where min_soc is just above 10% (between 10-12%)
+        # Find SOC where min_soc is just above 0% (between 0-2%)
         # Try a range to find the right one
-        for soc in range(30, 60):
+        for soc in range(1, 40):
             decision, _, _ = optimizer.calculate_decision(
                 soc_percent=soc, forecast=forecast, now=now,
                 previously_blocked=False,
             )
-            if 10 <= decision.min_soc_percent < 12 and decision.discharge_allowed:
+            if 0 <= decision.min_soc_percent < 2 and decision.discharge_allowed:
                 # Found a borderline case — now test with previously_blocked=True
                 decision_blocked, _, _ = optimizer.calculate_decision(
                     soc_percent=soc, forecast=forecast, now=now,
                     previously_blocked=True,
                 )
-                # Same inputs, but with hysteresis: should block (needs min_soc >= 12%)
+                # Same inputs, but with hysteresis: should block (needs min_soc >= 2%)
                 assert decision_blocked.discharge_allowed is False, (
                     f"SOC={soc}%, min_soc={decision.min_soc_percent:.1f}%: "
                     f"should stay blocked with hysteresis"
@@ -565,7 +570,7 @@ class TestHysteresis:
         """When previously blocked but min_soc clearly above threshold+2%, allow."""
         optimizer, forecast, now = self._make_optimizer_and_forecast()
 
-        # High SOC — min_soc will be well above 12%
+        # High SOC — min_soc will be well above 2%
         decision, _, _ = optimizer.calculate_decision(
             soc_percent=90, forecast=forecast, now=now,
             previously_blocked=True,
@@ -576,14 +581,14 @@ class TestHysteresis:
         """When not previously blocked, min_soc at threshold allows normally."""
         optimizer, forecast, now = self._make_optimizer_and_forecast()
 
-        # Find SOC where min_soc is just above 10%
-        for soc in range(30, 60):
+        # Find SOC where min_soc is just above 0%
+        for soc in range(1, 40):
             decision, _, _ = optimizer.calculate_decision(
                 soc_percent=soc, forecast=forecast, now=now,
                 previously_blocked=False,
             )
-            if 10 <= decision.min_soc_percent < 12 and decision.discharge_allowed:
-                # Without hysteresis: should allow (min_soc >= 10%)
+            if 0 <= decision.min_soc_percent < 2 and decision.discharge_allowed:
+                # Without hysteresis: should allow (min_soc >= 0%)
                 assert decision.discharge_allowed is True
                 return
 

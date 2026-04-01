@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.6.97"
+__version__ = "1.6.98"
 
 import json
 import logging
@@ -113,7 +113,7 @@ class EnergyManager:
 
         self.optimizer = BatteryOptimizer(
             capacity_wh=battery_opts.get("capacity_kwh", 10.0) * 1000,
-            min_soc_percent=battery_opts.get("reserve_percent", 10),
+            min_soc_percent=battery_opts.get("reserve_percent", 0),
             charge_efficiency=battery_opts.get("charge_efficiency", 0.95),
             discharge_efficiency=battery_opts.get("discharge_efficiency", 0.95),
             max_charge_w=battery_opts.get("max_charge_w", 5000),
