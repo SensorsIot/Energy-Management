@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.54"
+__version__ = "0.9.55"
 
 import asyncio
 import json
@@ -213,6 +213,7 @@ class OCPPServer:
         self._phase_threshold_w = self.min_current_a * 230 * 3
         self._phase_switching_disabled = False
         self._last_sent_power_w: float = 0.0
+        self._last_requested_power_w: float = 0.0  # pre-clamping HA value
         self._last_phase_switch_time: float = 0.0
         self.PHASE_SWITCH_LOCK_S = 300  # 5-minute time lock after phase switch
 
@@ -358,6 +359,7 @@ class OCPPServer:
             if value == "stopped":
                 # Reset so reconciliation detects the mismatch and re-sends
                 self._last_sent_power_w = 0
+                self._last_requested_power_w = 0
                 # Re-apply current HA power limit (car may reconnect quickly)
                 asyncio.ensure_future(self._apply_current_power_limit())
         elif key == "power_w":
@@ -545,6 +547,8 @@ class OCPPServer:
             logger.warning("No wallbox connected, ignoring power limit")
             return
 
+        self._last_requested_power_w = power_w  # before clamping
+
         # Gap clamping: 3681–4139W is unreachable (above 1φ max, below 3φ min)
         if 3681 <= power_w <= 4139:
             if self._current_phases == 1:
@@ -731,10 +735,10 @@ class OCPPServer:
                         ha_power_w = float(power_state)
                     except ValueError:
                         ha_power_w = None
-                    if ha_power_w is not None and ha_power_w != self._last_sent_power_w:
+                    if ha_power_w is not None and ha_power_w != self._last_requested_power_w:
                         logger.warning(
                             f"Reconciliation: HA says {ha_power_w}W but wallbox has "
-                            f"{self._last_sent_power_w}W — re-sending"
+                            f"{self._last_requested_power_w}W — re-sending"
                         )
                         await self._send_power_to_wallbox(ha_power_w)
                     self._last_reconcile_at = time.monotonic()
