@@ -69,7 +69,7 @@ MeteoSwiss STAC API                    InfluxDB (HomeAssistant bucket)
 │                 │                    │                 │
 │ • Fetch ICON    │                    │ • Query 90 days │
 │ • Parse GRIB    │                    │ • Build profile │
-│ • Calculate PV  │                    │ • Generate 48h  │
+│ • Calculate PV  │                    │ • Generate 120h │
 │   with pvlib    │                    │   forecast      │
 └────────┬────────┘                    └────────┬────────┘
          │                                      │
@@ -81,8 +81,8 @@ MeteoSwiss STAC API                    InfluxDB (HomeAssistant bucket)
 │  pv_forecast bucket          load_forecast bucket                   │
 │  • power_w_p10/p50/p90       • power_w_p10/p50/p90                 │
 │  • energy_wh_p10/p50/p90     • Per 15-min periods                  │
-│  • Per-inverter data         • 48h horizon                          │
-│  • 48h horizon                                                      │
+│  • Per-inverter data         • 120h (5-day) horizon                 │
+│  • 120h (5-day) horizon                                             │
 └──────────────────────────────┬──────────────────────────────────────┘
                                │
                                │ Query forecasts + measurements
@@ -815,7 +815,7 @@ def load_config(config_path: str) -> dict:
 | `influxdb.target_bucket` | load_forecast | Output bucket name |
 | `load_sensor.entity_id` | sensor.house_load_power | HA entity ID for load power |
 | `forecast.history_days` | 90 | Days of history for profile |
-| `forecast.horizon_hours` | 48 | Forecast horizon (hours) |
+| `forecast.horizon_hours` | 120 | Forecast horizon (hours) — matches PV forecast |
 | `schedule.cron` | 15 * * * * | Cron schedule for forecast runs |
 | `log_level` | info | Logging level |
 
@@ -1224,7 +1224,7 @@ APScheduler>=3.10.0        # Task scheduling
 **PV Power Forecast with uncertainty band:**
 ```flux
 from(bucket: "pv_forecast")
-  |> range(start: now(), stop: 48h)
+  |> range(start: now(), stop: 120h)
   |> filter(fn: (r) => r._measurement == "pv_forecast")
   |> filter(fn: (r) => r.inverter == "total")
   |> filter(fn: (r) => r._field == "power_w_p10" or
@@ -1236,7 +1236,7 @@ from(bucket: "pv_forecast")
 **Per-inverter comparison:**
 ```flux
 from(bucket: "pv_forecast")
-  |> range(start: now(), stop: 48h)
+  |> range(start: now(), stop: 120h)
   |> filter(fn: (r) => r._measurement == "pv_forecast")
   |> filter(fn: (r) => r._field == "power_w_p50")
   |> pivot(rowKey: ["_time"], columnKey: ["inverter"], valueColumn: "_value")
@@ -1402,7 +1402,7 @@ LoadForecast generates statistical household load consumption forecasts using hi
 - **Historical Analysis**: Uses 90 days of consumption data
 - **Probabilistic Output**: P10/P50/P90 percentiles for uncertainty bands
 - **15-Minute Resolution**: Aligned with EnergyManager optimization timestep
-- **48-Hour Horizon**: Sufficient for next-day planning
+- **120-Hour (5-Day) Horizon**: Matches PV forecast range for consistent SOC simulation
 
 ## 3.3 Architecture
 
@@ -1458,7 +1458,7 @@ For each of the 96 slots:
 
 ### Forecast Generation
 
-For each future timestamp in the 48-hour horizon:
+For each future timestamp in the 120-hour (5-day) horizon:
 1. Calculate the slot number from the timestamp
 2. Look up P10/P50/P90 values from the profile
 3. Convert power (W) to per-period energy (Wh): `power × 0.25h`
@@ -1486,7 +1486,7 @@ load_sensor:
 
 forecast:
   history_days: 90                   # Days of history to analyze
-  horizon_hours: 48                  # Forecast horizon
+  horizon_hours: 120                 # Forecast horizon (matches PV)
 
 schedule:
   cron: "15 * * * *"                 # Run at :15 every hour
@@ -1553,7 +1553,7 @@ croniter>=1.3.0            # Cron expression parsing
 **Load Forecast with uncertainty band:**
 ```flux
 from(bucket: "load_forecast")
-  |> range(start: now(), stop: 48h)
+  |> range(start: now(), stop: 120h)
   |> filter(fn: (r) => r._measurement == "load_forecast")
   |> filter(fn: (r) => r._field == "power_w_p10" or
                        r._field == "power_w_p50" or
@@ -1602,7 +1602,7 @@ The EnergyManager requires three inputs to calculate energy decisions:
 
 ```flux
 from(bucket: "pv_forecast")
-  |> range(start: now(), stop: 48h)
+  |> range(start: now(), stop: 120h)
   |> filter(fn: (r) => r._measurement == "pv_forecast")
   |> filter(fn: (r) => r._field == "power_w_p50")
 ```
@@ -1617,7 +1617,7 @@ from(bucket: "pv_forecast")
 
 ```flux
 from(bucket: "load_forecast")
-  |> range(start: now(), stop: 48h)
+  |> range(start: now(), stop: 120h)
   |> filter(fn: (r) => r._measurement == "load_forecast")
   |> filter(fn: (r) => r._field == "energy_wh_p50")
 ```
@@ -1645,7 +1645,7 @@ The current SOC is **always read live** at the start of each simulation cycle. T
 
 Holidays: Read from calendar integration (future: HA calendar entity).
 
-**Why 48h forecast horizon:** The controller must always see until tomorrow's 21:00 cheap tariff start. Worst case: at 06:00 (expensive tariff starts), we need to see until 21:00 the next day = 39 hours. The 48h horizon provides buffer for forecast update delays and ensures visibility across a full expensive→cheap→expensive cycle.
+**Why 120h (5-day) forecast horizon:** Both PV and load forecasts cover 120 hours. This ensures the SOC simulation can look ahead to the next weekday's expensive hours even from a Friday evening (worst case: Fri 21:00 → Mon 21:00 = 72 hours). The extended horizon also enables 5-day Grafana visualization of the energy balance and SOC trajectory.
 
 ---
 
@@ -1656,7 +1656,7 @@ The SOC simulation predicts battery state over the forecast horizon. This is the
 ### 4.2.1 Basic Loop (net = PV - Load → battery flow)
 
 ```
-FOR each 15-minute timestep from NOW to target (48h):
+FOR each 15-minute timestep from NOW to target (up to 120h):
 
   1. Get forecast values
      pv_wh = pv_forecast[t]       (Wh produced in 15 min)
@@ -1711,7 +1711,7 @@ The simulation writes only the SOC trajectory to InfluxDB (PV/Load already in in
 
 ```flux
 from(bucket: "energy_manager")
-  |> range(start: now(), stop: 48h)
+  |> range(start: now(), stop: 120h)
   |> filter(fn: (r) => r._measurement == "soc_forecast")
 ```
 
@@ -2446,13 +2446,13 @@ Example: At 21:00, forecast is written for 21:00→21:00 next day. At 23:00, onl
 ```flux
 # SOC forecast - with strategy (what will happen)
 from(bucket: "energy_manager")
-  |> range(start: -1h, stop: 48h)
+  |> range(start: -1h, stop: 120h)
   |> filter(fn: (r) => r._measurement == "soc_forecast")
   |> filter(fn: (r) => r.scenario == "with_strategy")
 
 # SOC forecast - without strategy (why we block)
 from(bucket: "energy_manager")
-  |> range(start: -1h, stop: 48h)
+  |> range(start: -1h, stop: 120h)
   |> filter(fn: (r) => r._measurement == "soc_forecast")
   |> filter(fn: (r) => r.scenario == "without_strategy")
 
@@ -2469,7 +2469,7 @@ from(bucket: "HomeData")
 
 # Energy balance with cumulative
 from(bucket: "energy_manager")
-  |> range(start: -1h, stop: 48h)
+  |> range(start: -1h, stop: 120h)
   |> filter(fn: (r) => r._measurement == "energy_balance")
   |> filter(fn: (r) => r._field == "cumulative_wh")
 ```
