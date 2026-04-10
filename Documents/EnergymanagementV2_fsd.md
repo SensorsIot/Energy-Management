@@ -1754,22 +1754,41 @@ Each mechanism only touches its own flag. `control_battery()` is called with the
 
 #### Protection flag — set every 15 minutes by `run_optimization()`
 
+The algorithm handles 4 time-of-day cases. All times are local (Europe/Zurich).
+
+| Case | Time window | Target | What is checked |
+|------|-------------|--------|-----------------|
+| 1. Weekday daytime | 06:00-21:00 | — | Nothing — always allow discharge |
+| 2. Weekday evening | 21:00-23:59 | Next day 21:00 | Expensive hours only (next day 06:15-21:00) |
+| 3. Weekday night | 00:00-06:00 | Today 21:00 | Expensive hours only (today 06:15-21:00) |
+| 4. Weekend/holiday | Fri 21:00 → Mon 06:00 | Mon 21:00 | Expensive hours only (Mon 06:15-21:00) |
+
+The same logic applies to cases 2, 3, and 4 — only the target time differs.
+On weekends, `filter_expensive_periods()` naturally returns only Monday's
+expensive hours since Saturday and Sunday are all-day cheap.
+
 ```
 1. CHECK CURRENT TARIFF
-   IF expensive tariff (06:00-21:00):
+   IF expensive tariff (06:00-21:00 on a weekday):
       → blocked_by_protection = False
       → Skip to step 4
 
-2. SIMULATE SOC (only during cheap tariff 21:00-06:00)
-   - Simulate from NOW until end of next expensive period (21:00)
+2. SIMULATE SOC (cheap tariff — cases 2, 3, 4)
+   - Determine target: next weekday 21:00 (see table above)
+   - Simulate from NOW until target
    - Assume free discharge (no blocking)
    - Use current SOC as starting point
    - Apply PV and load forecasts
 
-   CHECK: Does SOC stay >= min_soc during ALL expensive hours?
-   - Extract minimum SOC from all 06:00-21:00 periods in simulation
+   IMPORTANT: The simulation is limited to the target time. A separate
+   5-day simulation is used for Grafana visualization only — it must NOT
+   feed into the discharge decision.
+
+   CHECK: Does SOC stay >= min_soc during expensive hours?
+   - Extract minimum SOC from weekday 06:15-21:00 periods in simulation
    - Ignore SOC values during cheap hours (21:00-06:00)
    - Ignore weekend/holiday days entirely (all-day cheap → no expensive hours)
+   - SOC dips during cheap hours (including entire weekends) are acceptable
 
    IF previously_blocked:
       threshold = min_soc + 2%   (hysteresis — require clear margin to re-allow)
@@ -1787,9 +1806,9 @@ Each mechanism only touches its own flag. `control_battery()` is called with the
    the next morning's expensive hours.
 
    a) Run a REFERENCE simulation from cheap_end (06:00) starting at 100%
-      using the morning/daytime forecast. This measures the true "morning
-      drop" — how much SOC falls from cheap_end to the expensive-hours
-      minimum before PV production recovers it.
+      using the morning/daytime forecast up to the target. This measures
+      the true "morning drop" — how much SOC falls from cheap_end to the
+      expensive-hours minimum before PV production recovers it.
 
    b) soc_floor = min(min_soc + morning_drop, 100%)
 
@@ -1843,15 +1862,21 @@ APPLY combined decision (see above)
 - Re-simulation with current SOC naturally adapts to reality
 - The floor comparison (`current_soc > soc_floor?`) naturally transitions from "allow" to "block" as the battery discharges through the evening
 
-**Why only check expensive hours on weekdays:**
-- During cheap tariff (21:00-06:00), low SOC is acceptable—grid electricity is inexpensive
-- On weekends/holidays, the entire day is cheap—no expensive hours exist
+**Why only check expensive hours (uniform rule for weekday and weekend):**
+- During cheap tariff (21:00-06:00), low SOC is acceptable — grid electricity is inexpensive
+- On weekends/holidays, the entire day is cheap — no expensive hours exist
 - Weekend SOC dips are irrelevant: only the next weekday's expensive hours matter
-- The min_soc reserve (10%) ensures capacity for forecast errors and unexpected loads
+- The same `filter_expensive_periods()` call works for all cases: on weekday nights it returns tomorrow's 06:15-21:00; on weekends it returns Monday's 06:15-21:00
+- The battery can freely discharge on weekends; PV recharges it before Monday morning
+
+**Why limit the decision simulation to `tariff.target`:**
+- A separate 5-day simulation is used for Grafana chart visualization
+- If this 5-day simulation also fed the decision logic, it would check Mon+Tue+Wed+Thu expensive hours — a 10 kWh battery cannot sustain 4 days of weekday consumption, so it would always block on weekends
+- The decision must only consider the NEXT target (e.g. Monday 21:00)
 
 **Threshold hysteresis (2% dead-band):**
-- When the projected min SOC hovers near the 10% threshold, the simulation window shrinks by 15 min each cycle, causing the projection to wobble ~0.5% — enough to flip the decision every cycle
-- Once blocked (`previously_blocked=True`), the threshold rises to 12% — the projection must clearly exceed the margin before re-allowing discharge
+- When the projected min SOC hovers near the threshold, the simulation window shrinks by 15 min each cycle, causing the projection to wobble ~0.5% — enough to flip the decision every cycle
+- Once blocked (`previously_blocked=True`), the threshold rises by 2% — the projection must clearly exceed the margin before re-allowing discharge
 - Without this, the discharge limit oscillates between 0W and 5000W every 15 minutes, and the battery drains all night through the "allowed" windows
 
 **Signal hysteresis:**
