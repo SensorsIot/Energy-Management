@@ -38,6 +38,7 @@ class TariffPeriod:
     cheap_end: datetime
     target: datetime
     is_cheap_now: bool
+    is_weekend_window: bool  # cheap period spans a weekend/holiday
 
 
 @dataclass
@@ -153,7 +154,7 @@ class BatteryOptimizer:
 
         # Check if today is a cheap day (weekend/holiday)
         if self.is_cheap_day(now):
-            # Find next Monday (or next non-holiday weekday)
+            # Case 4: Weekend/holiday — all day cheap
             check_day = today + timedelta(days=1)
             while self.is_cheap_day(check_day):
                 check_day += timedelta(days=1)
@@ -167,6 +168,7 @@ class BatteryOptimizer:
             # Cheap started at previous evening or start of weekend
             cheap_start = now  # Already in cheap period
             is_cheap_now = True
+            is_weekend_window = True
 
         else:
             # Weekday
@@ -182,7 +184,7 @@ class BatteryOptimizer:
             if now.hour < self.cheap_end_hour or (
                 now.hour == self.cheap_end_hour and now.minute < self.cheap_end_minute
             ):
-                # Before 06:00 - in cheap period from last night
+                # Case 3: Weekday night (00:00-06:00)
                 cheap_start = (today - timedelta(days=1)).replace(
                     hour=self.cheap_start_hour,
                     minute=self.cheap_start_minute
@@ -190,9 +192,12 @@ class BatteryOptimizer:
                 cheap_end = today_cheap_end
                 target = today.replace(hour=21, minute=0)
                 is_cheap_now = True
+                # Check if yesterday was a weekend (e.g. Sunday 02:00 → Mon 06:00)
+                yesterday = today - timedelta(days=1)
+                is_weekend_window = self.is_cheap_day(yesterday)
 
             elif now.hour >= self.cheap_start_hour:
-                # After 21:00 - in cheap period
+                # Case 2: Weekday evening (21:00-23:59)
                 cheap_start = today_cheap_start
 
                 # Check if tomorrow is weekend/holiday
@@ -207,17 +212,19 @@ class BatteryOptimizer:
                         minute=self.cheap_end_minute
                     )
                     target = check_day.replace(hour=21, minute=0)
+                    is_weekend_window = True
                 else:
                     cheap_end = tomorrow.replace(
                         hour=self.cheap_end_hour,
                         minute=self.cheap_end_minute
                     )
                     target = tomorrow.replace(hour=21, minute=0)
+                    is_weekend_window = False
 
                 is_cheap_now = True
 
             else:
-                # Daytime expensive period (06:00 - 21:00)
+                # Case 1: Daytime expensive period (06:00 - 21:00)
                 cheap_start = today_cheap_start
                 cheap_end = (today + timedelta(days=1)).replace(
                     hour=self.cheap_end_hour,
@@ -226,12 +233,14 @@ class BatteryOptimizer:
                 # Target is tomorrow 21:00 (end of next expensive period)
                 target = (today + timedelta(days=1)).replace(hour=21, minute=0)
                 is_cheap_now = False
+                is_weekend_window = False
 
         return TariffPeriod(
             cheap_start=cheap_start,
             cheap_end=cheap_end,
             target=target,
-            is_cheap_now=is_cheap_now
+            is_cheap_now=is_cheap_now,
+            is_weekend_window=is_weekend_window,
         )
 
     def simulate_soc(
@@ -359,24 +368,34 @@ class BatteryOptimizer:
                 pd.DataFrame(),
             )
 
-        # Step 1: Always simulate full trajectory from NOW to target
-        # This gives us the complete picture for visualization
+        # Step 1: Always simulate full trajectory for visualization
         sim_full = self.simulate_soc(soc_percent, forecast)
 
-        # Step 2: Find minimum SOC during EXPENSIVE hours only
-        # During cheap hours (21:00-06:00), low SOC is fine - electricity is cheap
-        # During expensive hours (06:15-21:00 on weekdays), SOC must stay >= min_soc
-        # Weekend/holiday days are excluded entirely (all-day cheap)
-        expensive_periods = self.filter_expensive_periods(sim_full)
+        # Step 2: Decision simulation — limited to tariff.target
+        # The full sim may extend 5 days for charts, but the discharge decision
+        # must only consider the NEXT target period (e.g. Monday 21:00).
+        decision_forecast = forecast[forecast.index <= tariff.target]
+        sim_decision = self.simulate_soc(soc_percent, decision_forecast)
 
-        if expensive_periods.empty:
-            # No expensive periods in simulation
-            min_soc_percent = 100.0
-            min_soc_time = sim_full.index[0]
+        # Step 2b: Find minimum SOC in the decision window
+        # Weekend window: check ALL hours (battery must not hit 0% at any point)
+        # Weekday night: check only expensive hours (cheap-hour dips are fine)
+        if tariff.is_weekend_window:
+            check_periods = sim_decision
+            period_label = "all hours (weekend window)"
         else:
-            min_soc_wh = expensive_periods["soc_wh"].min()
+            check_periods = self.filter_expensive_periods(sim_decision)
+            period_label = "expensive hours"
+
+        if check_periods.empty:
+            min_soc_percent = 100.0
+            min_soc_time = sim_decision.index[0] if not sim_decision.empty else forecast.index[0]
+        else:
+            min_soc_wh = check_periods["soc_wh"].min()
             min_soc_percent = min_soc_wh / self.capacity_wh * 100
-            min_soc_time = expensive_periods["soc_wh"].idxmin()
+            min_soc_time = check_periods["soc_wh"].idxmin()
+
+        logger.info(f"Checking {period_label} until {swiss_time(tariff.target)}")
 
         # Hysteresis: once blocked, require projected min SOC to clear
         # threshold by a margin before re-allowing.  The simulation window
@@ -407,28 +426,38 @@ class BatteryOptimizer:
         else:
             # CHEAP TARIFF + SOC NOT OK: Calculate discharge floor
             # Instead of blocking immediately, find the SOC level at which to block.
-            # The battery can discharge to the floor, then hold for expensive hours.
+            # The battery can discharge to the floor, then hold.
             #
-            # Use a reference simulation from cheap_end at 100% to measure the true
-            # morning consumption (how much SOC drops from cheap_end to the minimum).
-            # This avoids the distortion from the free-discharge sim where the battery
-            # may already be at 0% before cheap_end.
-            morning_forecast = forecast[forecast.index >= tariff.cheap_end]
-            if not morning_forecast.empty:
-                sim_ref = self.simulate_soc(100.0, morning_forecast)
-                exp_ref = self.filter_expensive_periods(sim_ref)
-                if not exp_ref.empty:
-                    ref_min = exp_ref["soc_percent"].min()
-                    morning_drop = 100.0 - ref_min
+            # Weekend window: reference from NOW at 100% across all hours
+            # Weekday night: reference from cheap_end at 100% across expensive hours
+            if tariff.is_weekend_window:
+                # Weekend: how much does SOC drop from now to target across all hours?
+                ref_forecast = decision_forecast
+                if not ref_forecast.empty:
+                    sim_ref = self.simulate_soc(100.0, ref_forecast)
+                    ref_min = sim_ref["soc_percent"].min()
+                    total_drop = 100.0 - ref_min
+                else:
+                    total_drop = 0
+                soc_floor = min(self.min_soc_percent + total_drop, 100.0)
+                logger.info(f"SOC floor: {soc_floor:.0f}% (need {self.min_soc_percent:.0f}% + "
+                           f"{total_drop:.0f}% weekend drop)")
+            else:
+                # Weekday night: morning drop from cheap_end through expensive hours
+                morning_forecast = decision_forecast[decision_forecast.index >= tariff.cheap_end]
+                if not morning_forecast.empty:
+                    sim_ref = self.simulate_soc(100.0, morning_forecast)
+                    exp_ref = self.filter_expensive_periods(sim_ref)
+                    if not exp_ref.empty:
+                        ref_min = exp_ref["soc_percent"].min()
+                        morning_drop = 100.0 - ref_min
+                    else:
+                        morning_drop = 0
                 else:
                     morning_drop = 0
-            else:
-                morning_drop = 0
-
-            soc_floor = min(self.min_soc_percent + morning_drop, 100.0)
-
-            logger.info(f"SOC floor: {soc_floor:.0f}% (need {self.min_soc_percent:.0f}% + "
-                       f"{morning_drop:.0f}% morning drop)")
+                soc_floor = min(self.min_soc_percent + morning_drop, 100.0)
+                logger.info(f"SOC floor: {soc_floor:.0f}% (need {self.min_soc_percent:.0f}% + "
+                           f"{morning_drop:.0f}% morning drop)")
 
             if soc_percent > soc_floor:
                 # Above floor — allow discharge, re-check in 15 min
