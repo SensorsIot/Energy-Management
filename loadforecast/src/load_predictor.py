@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
-import pytz
 from influxdb_client import InfluxDBClient
 
 logger = logging.getLogger(__name__)
@@ -41,7 +40,6 @@ class LoadPredictor:
         self.load_entity = load_entity
         self.history_days = history_days
         self.local_timezone = local_timezone
-        self.tz = pytz.timezone(local_timezone)
         self.client: Optional[InfluxDBClient] = None
         self.profile: Optional[pd.DataFrame] = None
         logger.info(f"Using timezone: {local_timezone} for time-of-day profiles")
