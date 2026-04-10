@@ -157,10 +157,6 @@ class ForecastReader:
             logger.warning("Missing forecast data")
             return pd.DataFrame()
 
-        # Extend load forecast to cover PV horizon using daily pattern
-        if not pv.empty and not load.empty and pv.index.max() > load.index.max():
-            load = self._extend_load_with_daily_pattern(load, pv.index)
-
         # Align on common timestamps
         df = pd.DataFrame({"pv_energy_wh": pv, "load_energy_wh": load})
         df = df.dropna()
@@ -194,46 +190,6 @@ class ForecastReader:
         logger.info(f"Loaded {len(df)} forecast periods from {df.index.min()} to {df.index.max()}")
 
         return df
-
-    @staticmethod
-    def _extend_load_with_daily_pattern(
-        load: pd.Series, target_index: pd.DatetimeIndex
-    ) -> pd.Series:
-        """Extend load forecast by repeating the last full day's pattern.
-
-        The statistical load forecast only covers ~36h. For multi-day SOC
-        simulation, fill the gap by cycling the last 24h of load data.
-        """
-        # Build a time-of-day lookup from the last 24h of load data
-        last_24h = load[load.index >= load.index.max() - pd.Timedelta(hours=24)]
-        if last_24h.empty:
-            return load
-
-        # Map by (hour, minute) for 15-min resolution
-        pattern = {}
-        for t, v in last_24h.items():
-            pattern[(t.hour, t.minute)] = v
-
-        # Fill missing timestamps from target_index
-        missing = target_index.difference(load.index)
-        if missing.empty:
-            return load
-
-        fill_values = {}
-        for t in missing:
-            key = (t.hour, t.minute)
-            if key in pattern:
-                fill_values[t] = pattern[key]
-
-        if fill_values:
-            fill_series = pd.Series(fill_values, name=load.name)
-            load = pd.concat([load, fill_series]).sort_index()
-            logger.info(
-                f"Extended load forecast by {len(fill_values)} periods "
-                f"(to {load.index.max()})"
-            )
-
-        return load
 
     def get_current_soc(
         self,

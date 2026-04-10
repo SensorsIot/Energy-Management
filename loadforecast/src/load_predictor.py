@@ -124,7 +124,7 @@ class LoadPredictor:
     def generate_forecast(
         self,
         start_time: Optional[datetime] = None,
-        hours: int = 48,
+        hours: int = 120,
     ) -> pd.DataFrame:
         """
         Generate load forecast with P10/P50/P90.
