@@ -1721,9 +1721,7 @@ from(bucket: "energy_manager")
 
 ### 4.3.1 Problem
 
-The battery must maintain a minimum State of Charge (min_soc, default 10%) during expensive tariff hours (06:00-21:00) to ensure:
-1. Reserve capacity for unexpected consumption spikes
-2. Protection against forecast errors
+The battery must maintain a minimum State of Charge (min_soc, default 0%) during expensive tariff hours (06:00-21:00). A higher reserve (e.g. 10%) can be configured via `reserve_percent` to provide a buffer for forecast errors and unexpected consumption spikes, but the default is 0% to allow maximum discharge flexibility.
 
 During cheap tariff (night), SOC can drop to any level since grid electricity is inexpensive.
 
@@ -1782,7 +1780,9 @@ expensive hours since Saturday and Sunday are all-day cheap.
 
    IMPORTANT: The simulation is limited to the target time. A separate
    5-day simulation is used for Grafana visualization only — it must NOT
-   feed into the discharge decision.
+   feed into the discharge decision (the `discharge_allowed` boolean).
+   The 5-day sim may be used to estimate the deferred-block start time
+   for the Grafana chart, but this is purely visual.
 
    CHECK: Does SOC stay >= min_soc during expensive hours?
    - Extract minimum SOC from weekday 06:15-21:00 periods in simulation
