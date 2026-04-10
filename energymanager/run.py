@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.7.1"
+__version__ = "1.7.2"
 
 import json
 import logging
@@ -282,19 +282,23 @@ class EnergyManager:
             return
 
         # Write energy balance data from forecast DataFrame
-        # Calculate cumulative as running sum of net_energy_wh
+        # Includes PV/load power and cumulative net energy
         points = []
         cumulative_wh = 0.0
         for t in forecast.index:
             ts = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
             row = forecast.loc[t]
 
+            pv_wh = float(row.get("pv_energy_wh", 0))
+            load_wh = float(row.get("load_energy_wh", 0))
             net_wh = float(row.get("net_energy_wh", 0))
             cumulative_wh += net_wh
 
             points.append(
                 Point("energy_balance")
                 .field("cumulative_wh", cumulative_wh)
+                .field("pv_power_w", pv_wh * 4)       # Wh per 15min → W
+                .field("load_power_w", load_wh * 4)    # Wh per 15min → W
                 .time(ts, WritePrecision.S)
             )
 
