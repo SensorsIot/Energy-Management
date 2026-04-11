@@ -2028,7 +2028,7 @@ High-power appliances (washing machine 2.5 kW) should run when there's sufficien
 
 ### 4.5.2 Algorithm
 
-Uses the battery forecast functions (Section 4.4) to check if the battery can absorb the appliance load.
+Uses the same SOC simulation as the battery protection logic (Section 4.4). The simulation (`sim_no_strategy`) is already computed every 15 minutes — the appliance signal subtracts the appliance energy and checks the resulting minimum SOC.
 
 ```
 Every 15 minutes:
@@ -2037,12 +2037,12 @@ Every 15 minutes:
    → excess = current_pv - current_load
    → Run now with pure solar
 
-2. ORANGE: will_battery_hit_minimum(appliance_energy_wh) == false
-   → Battery stays above reserve with appliance load
-   → Safe to run from battery
+2. ORANGE: min SOC in simulation − appliance_load_percent > 0%
+   → No grid import needed until 21:00 even with appliance
+   → Safe to run
 
-3. RED: will_battery_hit_minimum(appliance_energy_wh) == true
-   → Running the appliance would deplete battery below reserve
+3. RED: min SOC in simulation − appliance_load_percent ≤ 0%
+   → Running the appliance would require grid import before 21:00
 ```
 
 ### 4.5.3 Output: sensor.appliance_signal
@@ -2050,8 +2050,8 @@ Every 15 minutes:
 | State | Meaning |
 |-------|---------|
 | `green` | Pure solar available now (excess > 2500W) |
-| `orange` | Safe to run: battery stays above reserve with appliance load |
-| `red` | Running the appliance would deplete battery below reserve |
+| `orange` | No grid import needed until 21:00 with appliance load |
+| `red` | Running the appliance would require grid import before 21:00 |
 
 ### 4.5.4 Sensor Attributes
 
@@ -2109,7 +2109,7 @@ From the EnergyManager's perspective, the wallbox is controlled through HA entit
 
 ### 4.6.4 Charging Mode Selection
 
-The user selects one of three charging modes via the kitchen dashboard (Amazon Fire tablet). The mode is persistent — it stays selected until the user changes it.
+The user selects one of three charging modes via the kitchen dashboard (Amazon Fire tablet). The mode is persistent — it stays selected until the user changes it. The `input_select` entity is preserved by HA across add-on restarts; the EnergyManager reads (not overwrites) the current mode on startup.
 
 | Mode | `input_select` value | Dashboard Label | Description |
 |------|---------------------|----------------|-------------|
@@ -3766,6 +3766,7 @@ See Section 4.6 for adaptive polling logic.
 - v2.34: Added step-down loop for Rule 2 battery protection (Section 4.6.6) — when snapped candidate amp level fails battery checks, step down one amp at a time until checks pass or power drops below `ev_min_solar_power`; `will_battery_hit_full()` checked once outside loop; prevents all-or-nothing blocking when a lower amp level would be sustainable (v1.6.75)
 - v2.33: Removed EVChargingStrategy class — EV Rule 2 now uses inline `snap_to_amp_step()` (every 10 s) instead of stale 15-min forecast strategy; removed `ev_forecasted_power_w` and `battery_protection_passed` fields from EVInputs; replaced `forecast_power_w` sensor attribute with `candidate_power_w`; removed `battery_protection` sensor attribute (redundant with `reaches_target`); deleted `ev_strategy.py`; updated observer EC-05/EC-06 detectors (v1.6.74)
 - v2.33: Rate-limit wallbox power limit changes to 60s minimum interval (Section 4.6.6) — prevents oscillation at amp-step boundaries; 0W bypass for safety; ev_target_power still updates every 10s for dashboard
+- v2.33: Appliance signal now uses battery protection logic — orange = no grid import needed until 21:00 (uses sim_no_strategy min SOC), red = would need grid import; charging mode preserved across add-on restarts (Section 4.6.4)
 - v2.32: Restructured sections 4.4–4.6 — new Section 4.4 (Battery Forecast Functions) extracts `get_forecast_soc_at_target()`, `will_battery_hit_full()`, `will_battery_hit_minimum()` as reusable functions with `extra_load_wh` parameter; simplified Section 4.5 (Appliance Signal) to use Section 4.4 functions; renumbered EV Charging from 4.5 → 4.6; EV Rule 2 now uses three battery checks (`reaches_target`, `battery_will_be_full`, `battery_will_hit_min`); updated all cross-references
 - v2.31: Solar Decision card shows rule-by-rule evaluation with actual numbers and pass/fail (Section 4.8.3) — each rule displayed with live sensor values, ✅/❌ per sub-check; added `threshold_w` and `reaches_target` sensor attributes (v1.6.61)
 - v2.30: Solar Decision dashboard card (Section 4.8.3) — live EV charging decision inputs, reasoning, and source; replaced static markdown explanation
