@@ -120,11 +120,17 @@ class ChargePointHandler(CP):
     async def on_meter_values(self, connector_id: int, meter_value: list, **kwargs):
         """Wallbox sent meter values (power, energy, etc.)."""
         # Recover transaction_id from MeterValues (e.g. after server restart)
-        # Only recover if wallbox status indicates active charging — stale
-        # MeterValues from a completed transaction may carry an old txn_id
+        # Recover if wallbox status indicates a car is connected — SuspendedEVSE
+        # and SuspendedEV also have active transactions
+        ACTIVE_STATUSES = {
+            "Charging", "SuspendedEV", "SuspendedEVSE",
+            ChargePointStatus.charging,
+            ChargePointStatus.suspended_ev,
+            ChargePointStatus.suspended_evse,
+        }
         txn_id = kwargs.get("transaction_id")
         if txn_id is not None and self.transaction_id is None:
-            if self.current_status in ("Charging", ChargePointStatus.charging):
+            if self.current_status in ACTIVE_STATUSES:
                 self.transaction_id = txn_id
                 self.transaction_started_event.set()
                 logger.info(f"Recovered transaction_id={txn_id} from MeterValues")
@@ -147,10 +153,14 @@ class ChargePointHandler(CP):
                         datetime.now(timezone.utc) - mv_time
                     ).total_seconds()
                     if age_s > self.METER_VALUES_MAX_AGE_S:
-                        logger.info(
-                            f"Dropping stale MeterValues "
-                            f"(age={age_s:.0f}s, timestamp={mv_timestamp})"
+                        logger.warning(
+                            f"STALE MeterValues dropped: "
+                            f"age={age_s:.0f}s, timestamp={mv_timestamp}, "
+                            f"status={self.current_status}, "
+                            f"txn={self.transaction_id} "
+                            f"— triggering fresh reading"
                         )
+                        asyncio.ensure_future(self.trigger_meter_values())
                         continue
                 except (ValueError, TypeError):
                     pass  # unparseable timestamp — process normally
