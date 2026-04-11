@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.7.4"
+__version__ = "1.7.5"
 
 import json
 import logging
@@ -1266,15 +1266,13 @@ class EnergyManager:
         # Ensure all sensors exist in HA before anything else
         self._publish_initial_sensors()
 
-        # Ensure EV charging mode starts as "solar" (FSD 4.6.4 default)
+        # Read current EV charging mode from HA (preserve user's choice across restarts)
         if self.ev_charging_enabled:
             try:
-                self.ha_client.set_input_select(
-                    self.ev_charging_mode_entity, "solar"
-                )
-                logger.info("EV charging mode set to solar (startup default)")
+                ev_mode = self.ha_client.get_input_select(self.ev_charging_mode_entity)
+                logger.info(f"EV charging mode on startup: {ev_mode}")
             except Exception as e:
-                logger.warning(f"Failed to set EV charging mode on startup: {e}")
+                logger.warning(f"Failed to read EV charging mode on startup: {e}")
 
         # Run immediately
         self.run_optimization()
