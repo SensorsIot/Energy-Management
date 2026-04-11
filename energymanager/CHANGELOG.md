@@ -1,5 +1,20 @@
 # EnergyManager Changelog
 
+## [1.7.5] - 2026-04-11
+
+### Fixed
+- Preserve EV charging mode across add-on restarts. Previously startup
+  forced mode to "solar", overwriting user's cheap/immediate selection
+  mid-charge.
+
+## [1.7.4] - 2026-04-11
+
+### Changed
+- Appliance signal now uses battery protection logic: green = PV excess
+  covers appliance, orange = no grid import needed until 21:00, red =
+  would need grid import. Previously orange/red compared against
+  reserve_percent (0%) which was almost always orange.
+
 ## [1.6.97] - 2026-03-30
 
 ### Fixed
