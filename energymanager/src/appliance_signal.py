@@ -1,10 +1,10 @@
 """
 Appliance signal dataclass for washing machine / dishwasher.
 
-Signal logic (implemented in run.py using InfluxDB forecast functions):
+Signal logic (implemented in run.py):
 - GREEN: Current PV excess > appliance power (can run directly from solar)
-- ORANGE: Forecast min SOC with appliance load stays above reserve%
-- RED: Otherwise (running the appliance would deplete battery below reserve)
+- ORANGE: Appliance won't cause grid import until 21:00 next evening
+- RED: Appliance would require grid import before 21:00
 """
 
 from __future__ import annotations

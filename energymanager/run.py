@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.7.3"
+__version__ = "1.7.4"
 
 import json
 import logging
@@ -499,8 +499,10 @@ class EnergyManager:
     def calculate_appliance_signal(self, current_soc: float, simulation: pd.DataFrame):
         """Calculate and output appliance signal to Home Assistant.
 
-        Uses the InfluxDB forecast functions with extra_load_wh to check
-        whether the battery can absorb the appliance load.
+        Signal logic:
+        - GREEN: Immediate PV excess > appliance power (run from solar)
+        - ORANGE: Appliance won't cause grid import until 21:00 next evening
+        - RED: Appliance would require grid import before 21:00
         """
         try:
             # Get current PV and load from HA
@@ -508,45 +510,44 @@ class EnergyManager:
             current_load = self.ha_client.get_sensor_value(self.load_power_entity) or 0.0
             excess_power = current_pv - current_load
 
+            # Forecast min SOC with appliance load
+            load_percent = self._extra_load_percent(self.appliance_energy_wh)
+            if not simulation.empty and "soc_percent" in simulation.columns:
+                min_soc = simulation["soc_percent"].min() - load_percent
+                min_soc = max(0.0, min_soc)
+            else:
+                min_soc = 0.0
+
             # GREEN: Current PV excess covers the appliance directly
             if excess_power > self.appliance_power_w:
                 signal = ApplianceSignal(
                     signal="green",
                     reason=f"PV excess {int(excess_power)}W > {int(self.appliance_power_w)}W",
                     excess_power_w=excess_power,
-                    min_soc_percent=0,
+                    min_soc_percent=min_soc,
+                )
+            elif min_soc > 0:
+                # ORANGE: appliance won't cause grid import until 21:00
+                signal = ApplianceSignal(
+                    signal="orange",
+                    reason=(
+                        f"No grid import needed "
+                        f"(min SOC {min_soc:.0f}% with appliance)"
+                    ),
+                    excess_power_w=excess_power,
+                    min_soc_percent=min_soc,
                 )
             else:
-                # Check forecast: will battery hit minimum with appliance load?
-                hits_min, min_soc, _ = self.will_battery_hit_minimum(
-                    extra_load_wh=self.appliance_energy_wh
+                # RED: appliance would require grid import
+                signal = ApplianceSignal(
+                    signal="red",
+                    reason=(
+                        f"Would need grid import "
+                        f"(min SOC 0% with −{load_percent:.0f}% appliance load)"
+                    ),
+                    excess_power_w=excess_power,
+                    min_soc_percent=0.0,
                 )
-                load_percent = self._extra_load_percent(self.appliance_energy_wh)
-
-                if not hits_min and min_soc is not None:
-                    # ORANGE: battery can absorb appliance load
-                    signal = ApplianceSignal(
-                        signal="orange",
-                        reason=(
-                            f"SOC with appliance ≥ {self.reserve_percent:.0f}% "
-                            f"(min {min_soc:.0f}% after −{load_percent:.0f}%)"
-                        ),
-                        excess_power_w=excess_power,
-                        min_soc_percent=min_soc,
-                    )
-                else:
-                    # RED: appliance would deplete battery below reserve
-                    actual_min = min_soc if min_soc is not None else 0.0
-                    signal = ApplianceSignal(
-                        signal="red",
-                        reason=(
-                            f"SOC with appliance {actual_min:.0f}% "
-                            f"< reserve {self.reserve_percent:.0f}% "
-                            f"(−{load_percent:.0f}% appliance load)"
-                        ),
-                        excess_power_w=excess_power,
-                        min_soc_percent=actual_min,
-                    )
 
             logger.info(f"Appliance signal: {signal.signal} - {signal.reason}")
 
