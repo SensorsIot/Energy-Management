@@ -72,6 +72,8 @@ ev_charging:
 smart_car:
   enabled: true
   soc_entity: "sensor.smart_battery"
+  capacity_kwh: 100.0          # EV usable battery capacity
+  charge_efficiency: 0.9       # end-to-end surplus→car efficiency (Car SOC Forecast)
 
 # Schedule settings
 schedule:

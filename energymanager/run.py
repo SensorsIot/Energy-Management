@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.7.5"
+__version__ = "1.7.6"
 
 import json
 import logging
@@ -227,6 +227,10 @@ class EnergyManager:
         self.smart_car_soc_entity = smart_opts.get(
             "soc_entity", "sensor.smart_battery"
         )
+        self.smart_car_capacity_kwh = float(smart_opts.get("capacity_kwh", 100.0))
+        self.smart_car_charge_efficiency = float(
+            smart_opts.get("charge_efficiency", 0.9)
+        )
         self._last_wallbox_status: str | None = None
         self._last_ev_charging_mode: str | None = None
         self._last_car_soc_poll: float = 0.0
@@ -272,17 +276,59 @@ class EnergyManager:
 
         return current_soc
 
-    def write_energy_balance(self, forecast):
-        """Write energy balance to InfluxDB for visualization.
+    def _read_car_soc_with_fallback(self) -> float | None:
+        """Read EV SOC with fallback to last-known value from InfluxDB.
+
+        The smarthashtag integration goes unavailable when the car is asleep.
+        We then use the last numeric reading from the last 7 days so the
+        car-SOC forecast remains usable.
+        """
+        raw = self.ha_client.get_sensor_value(self.smart_car_soc_entity)
+        if raw is not None:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+
+        cached = self._query_last_value(self.smart_car_soc_entity)
+        if cached is not None:
+            try:
+                return float(cached)
+            except (TypeError, ValueError):
+                pass
+
+        logger.warning(
+            f"No EV SOC available from {self.smart_car_soc_entity} "
+            "(neither live nor cached) — skipping car SOC forecast"
+        )
+        return None
+
+    def write_energy_balance(self, forecast, house_soc: float | None = None):
+        """Write energy balance + car SOC forecast to InfluxDB.
+
+        Car SOC model: the house battery is a buffer. Surplus first refills
+        the house battery; the overflow past 100% goes to the car at
+        charge_efficiency. Deficits drain the house battery (the car is
+        unaffected). Starts from the current car SOC.
 
         Args:
-            forecast: DataFrame with pv_energy_wh, load_energy_wh, net_energy_wh columns
+            forecast: DataFrame with pv_energy_wh, load_energy_wh, net_energy_wh
+            house_soc: current house battery SOC (%); if None, car curve is skipped
         """
         if forecast.empty:
             return
 
-        # Write energy balance data from forecast DataFrame
-        # Includes PV/load power and cumulative net energy
+        car_soc = self._read_car_soc_with_fallback() if self.smart_car_enabled else None
+        sim_car = (
+            car_soc is not None
+            and house_soc is not None
+            and self.smart_car_capacity_kwh > 0
+        )
+        if sim_car:
+            house_cap_kwh = self.capacity_wh / 1000
+            house_kwh = max(0.0, min(house_cap_kwh, house_soc / 100 * house_cap_kwh))
+            car_kwh_added = 0.0
+
         points = []
         cumulative_wh = 0.0
         for t in forecast.index:
@@ -294,16 +340,37 @@ class EnergyManager:
             net_wh = float(row.get("net_energy_wh", 0))
             cumulative_wh += net_wh
 
-            points.append(
+            point = (
                 Point("energy_balance")
                 .field("cumulative_wh", cumulative_wh)
-                .field("pv_power_w", pv_wh * 4)       # Wh per 15min → W
-                .field("load_power_w", load_wh * 4)    # Wh per 15min → W
+                .field("pv_power_w", pv_wh * 4)
+                .field("load_power_w", load_wh * 4)
                 .time(ts, WritePrecision.S)
             )
 
+            if sim_car:
+                net_kwh = net_wh / 1000
+                if net_kwh >= 0:
+                    headroom = house_cap_kwh - house_kwh
+                    to_house = min(net_kwh, headroom)
+                    house_kwh += to_house
+                    overflow = net_kwh - to_house
+                    car_kwh_added += overflow * self.smart_car_charge_efficiency
+                else:
+                    house_kwh = max(0.0, house_kwh + net_kwh)
+                car_soc_pct = min(
+                    100.0,
+                    car_soc + car_kwh_added / self.smart_car_capacity_kwh * 100,
+                )
+                point = point.field("car_soc_percent", float(car_soc_pct))
+
+            points.append(point)
+
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=points)
-        logger.info(f"Written {len(points)} energy balance points")
+        logger.info(
+            f"Written {len(points)} energy balance points"
+            + (f" (car SOC forecast from {car_soc:.0f}%)" if sim_car else "")
+        )
 
     def write_decision(self, decision, current_soc: float):
         """Write discharge decision to InfluxDB."""
@@ -481,8 +548,8 @@ class EnergyManager:
             # Write forecast snapshot for accuracy tracking
             # Only overwrites from NOW onwards - earlier points preserved for comparison with actual SOC
             self.simulation_writer.write_forecast_snapshot(sim_with_strategy)
-            # Write energy balance for cumulative visualization
-            self.write_energy_balance(forecast)
+            # Write energy balance + car SOC forecast for visualization
+            self.write_energy_balance(forecast, house_soc=current_soc)
             self.write_decision(decision, current_soc)
 
             # Control battery (protection flag — combined with EV flag)
