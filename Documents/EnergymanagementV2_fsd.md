@@ -2407,6 +2407,59 @@ On any API exception, the cached client is cleared (`self._smart_car_client = No
 - **Wallbox status tracking** via `_last_wallbox_status` detects connection events (transition to `Preparing`)
 - **Mode tracking** via `_last_ev_charging_mode` detects charging mode changes (skips first cycle to avoid false trigger on startup)
 
+### 4.6.4 Last-Known Value Fallback
+
+The Hello Smart integration drops to `unavailable` when the car goes to sleep (minutes after last charge/drive). Downstream consumers (Car SOC Forecast, dashboard cards) still need a number. Two layers of fallback keep them working:
+
+**Python side (`_read_car_soc_with_fallback()` in `run.py`):**
+1. Read live state of `smart_car.soc_entity`; return its numeric value if present.
+2. If unavailable/unknown, call `_query_last_value()` to read the last numeric value from the `HomeAssistant` InfluxDB bucket over the past 7 days.
+3. If nothing found, return `None` and skip the car SOC forecast for this cycle (logged at WARN).
+
+**HA dashboard side (trigger-based template sensor):**
+
+A `sensor.smart_battery_last_known` sensor in `/config/templates.yaml` caches the last numeric reading of `sensor.smart_battery`:
+
+```yaml
+- trigger:
+    - platform: state
+      entity_id: sensor.smart_battery
+      not_to: ["unavailable", "unknown", "none", ""]
+  sensor:
+    - name: "Smart Battery Last Known"
+      unique_id: smart_battery_last_known
+      unit_of_measurement: "%"
+      device_class: battery
+      state_class: measurement
+      state: "{{ trigger.to_state.state }}"
+```
+
+Because the trigger filters invalid transitions, the sensor retains its last value across `unavailable` periods. The Lausen Amazon Fire dashboard (`lovelace-amazonfire`) references `sensor.smart_battery_last_known` in all cards and button-card JS logic instead of `sensor.smart_battery`.
+
+### 4.6.5 Car SOC Forecast
+
+A 15-min time-series forecast of the EV battery SOC over the next 5 days, written to InfluxDB and displayed in Grafana.
+
+**Model:** The house battery is treated as a buffer. For each 15-min interval:
+
+1. `surplus_kwh = (pv_energy_wh − load_energy_wh) / 1000`
+2. If surplus ≥ 0 (daytime excess):
+   - fill the house battery up to its usable capacity
+   - any overflow × `smart_car.charge_efficiency` is added to the car
+3. If surplus < 0 (night deficit):
+   - drain the house battery (clamped at 0 %)
+   - the car is unaffected
+
+**Starting state:**
+- `car_soc_percent` at t₀ = current `smart_car.soc_entity` value (with the fallback above)
+- `house_kwh` at t₀ = current `battery.soc_entity` × `battery.capacity_kwh` / 100
+
+**Why the house buffer matters:** on days where the house battery does not reach 100 %, the car never charges — because all surplus is absorbed by the house. On days where it does reach 100 %, the only "cost" is the initial headroom top-up and each night's refill the next morning. A sanity check: if the house reaches 100 % each day and ends where it started, `car_kwh ≈ Σ surplus × efficiency` (the cumulative-energy-balance shortcut).
+
+**Efficiency (0.9 default):** lumps three real losses — AC→DC at the wallbox (~3 %), house-battery round-trip for the fraction of surplus that cycles through it (~5 %), and standby/phantom loads during the day (~2 %).
+
+**What the forecast intentionally omits:** the strict `ev_min_solar_power` threshold, amp-step snapping, and battery-protection gating from Section 4.6 live EV charging logic. Those rules operate on the 10-second decision loop; the forecast is a best-case multi-day outlook and would become overly pessimistic (≈40 % final SOC in a typical 2-day window) if it copied them.
+
 ## 4.7 InfluxDB Storage
 
 **Bucket:** `energy_manager`
@@ -2417,7 +2470,7 @@ On any API exception, the cached client is cleared (`self._smart_car_client = No
 |-------------|---------|------|--------|
 | `soc_forecast` | Rolling SOC trajectory (overwritten every 15 min) | `scenario` | `soc_percent` |
 | `soc_forecast_snapshot` | Persistent forecast for accuracy tracking | (none) | `soc_percent` |
-| `energy_balance` | Energy flow per timestep | (none) | `pv_wh`, `load_wh`, `net_wh`, `cumulative_wh` |
+| `energy_balance` | Energy flow + Car SOC Forecast per timestep | (none) | `pv_power_w`, `load_power_w`, `cumulative_wh`, `car_soc_percent` |
 | `discharge_decision` | Battery control decisions | (none) | `allowed`, `reason`, `min_soc_percent`, `min_soc_time`, `current_soc` |
 | `appliance_signal` | Appliance signal output | (none) | `signal`, `reason`, `excess_power_w`, `final_soc_percent` |
 
@@ -2472,6 +2525,12 @@ from(bucket: "energy_manager")
   |> range(start: -1h, stop: 120h)
   |> filter(fn: (r) => r._measurement == "energy_balance")
   |> filter(fn: (r) => r._field == "cumulative_wh")
+
+# Car SOC Forecast (replaces the old Cumulative Energy Balance Grafana panel)
+from(bucket: "energy_manager")
+  |> range(start: -1h, stop: 120h)
+  |> filter(fn: (r) => r._measurement == "energy_balance")
+  |> filter(fn: (r) => r._field == "car_soc_percent")
 ```
 
 ## 4.8 Dashboard
@@ -3527,6 +3586,12 @@ ev_charging:
   max_power_w: 11000
   protection_soc_percent: 80                      # Target SOC at 21:00 on good days
 
+smart_car:
+  enabled: true
+  soc_entity: "sensor.smart_battery"              # EV SOC sensor (with InfluxDB fallback when unavailable)
+  capacity_kwh: 100.0                             # EV usable battery capacity, used by Car SOC Forecast (Section 4.6.5)
+  charge_efficiency: 0.9                          # End-to-end surplus → car efficiency (wallbox + house-battery cycle + standby)
+
 schedule:
   update_interval_minutes: 15
 
@@ -3752,9 +3817,10 @@ See Section 4.6 for adaptive polling logic.
 
 **End of Document**
 
-*Version 2.41 - March 2026*
+*Version 2.43 - April 2026*
 
 **Changelog:**
+- v2.43: Car SOC Forecast (new Sections 4.6.4, 4.6.5) — multi-day prediction of EV SOC written to `energy_balance.car_soc_percent` every 15 min. House battery modelled as buffer: surplus first refills the house, overflow × efficiency goes to the car. New `smart_car.capacity_kwh` and `smart_car.charge_efficiency` config. Last-known-value fallback for `sensor.smart_battery` via InfluxDB (Python side) and `sensor.smart_battery_last_known` trigger-based template sensor (HA side). Grafana BatteryForecast panel 4 "Cumulative Energy Balance (Wh)" replaced by "Car SOC Forecast". Amazon Fire dashboard updated to reference the cached template sensor (v1.7.6)
 - v2.42: Added 2% hysteresis to discharge soc_ok threshold (Section 4.3.2) — once blocked, projected min SOC must reach 12% (not 10%) to re-allow; prevents oscillation where shrinking simulation window causes min_soc to wobble ~0.5% around threshold every 15 min, flip-flopping discharge limit between 0W/5000W all night; 3 new tests (Appendix D.1) (v1.6.97)
 - v2.41: Both rules use surplus_power (PV − house load) as input (Section 4.6.6) — eliminates grid_export feedback loop; snap-up tries next amp step above surplus if battery protected; surplus smoothing 60s→30s, rate limit 60s→30s; removed stale power floor clamp; updated flowchart, scenarios, and snap description (v1.6.93–v1.6.96)
 - v2.40: Added S0/C0/M0 wallbox-unavailable guards to all active state transitions (Section 4.6.5.2); `will_battery_hit_full()` now returns `full_time_local` HH:MM (Section 4.4.2); updated NO-01 test scope (Appendix D.7.1) (v1.6.92)
