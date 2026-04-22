@@ -169,9 +169,11 @@ def _setup_ev_charging(manager, *, mode: str, wb_status: str = "Charging",
 
     # Grid power = 0 (no excess)
     manager._read_grid_power = MagicMock(return_value=0.0)
-    manager.will_battery_hit_full = MagicMock(return_value=(False, 80.0, None, None))
     manager.ev_battery_optimizer = MagicMock()
     manager.ev_battery_optimizer.check_ev_safe = MagicMock(return_value=(True, 80.0))
+    manager.ev_battery_optimizer.will_battery_hit_full = MagicMock(
+        return_value=(False, 80.0, None, None)
+    )
 
     manager.control_ev_charging()
 

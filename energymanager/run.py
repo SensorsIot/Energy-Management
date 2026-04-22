@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 import json
 import logging
@@ -674,66 +674,6 @@ class EnergyManager:
             return 0.0
         return extra_load_wh / self.capacity_wh * 100
 
-    def will_battery_hit_full(
-        self,
-    ) -> tuple[bool, float | None, str | None, datetime]:
-        """Check if battery is forecast to reach 100% today.
-
-        Only looks at today's solar window (until midnight local time).
-        Tomorrow's forecast is irrelevant — the battery being full tomorrow
-        doesn't justify diverting today's solar to the EV.
-
-        Returns:
-            (hits_full, peak_soc or None, full_time_local or None, end_of_today)
-        """
-        now = datetime.now(timezone.utc)
-
-        # Limit to end of today (midnight local time), not next cheap tariff
-        now_local = now.astimezone(SWISS_TZ)
-        end_of_today = now_local.replace(
-            hour=23, minute=59, second=59, microsecond=0
-        ).astimezone(timezone.utc)
-        end_stop = end_of_today.isoformat()
-
-        query = f'''
-        from(bucket: "{self.output_bucket}")
-          |> range(start: now(), stop: {end_stop})
-          |> filter(fn: (r) => r._measurement == "soc_forecast")
-          |> filter(fn: (r) => r.scenario == "with_strategy")
-          |> filter(fn: (r) => r._field == "soc_percent")
-          |> max()
-        '''
-        result = self.influx_client.query_api().query(query)
-        if result and result[0].records:
-            peak_soc = result[0].records[0].get_value()
-            hits_full = peak_soc >= 99
-
-            # Find the first time SOC reaches 99%
-            full_time_local = None
-            if hits_full:
-                time_query = f'''
-                from(bucket: "{self.output_bucket}")
-                  |> range(start: now(), stop: {end_stop})
-                  |> filter(fn: (r) => r._measurement == "soc_forecast")
-                  |> filter(fn: (r) => r.scenario == "with_strategy")
-                  |> filter(fn: (r) => r._field == "soc_percent")
-                  |> filter(fn: (r) => r._value >= 99.0)
-                  |> first()
-                '''
-                time_result = self.influx_client.query_api().query(time_query)
-                if time_result and time_result[0].records:
-                    full_utc = time_result[0].records[0].get_time()
-                    full_local = full_utc.astimezone(SWISS_TZ)
-                    full_time_local = full_local.strftime("%H:%M")
-
-            logger.debug(
-                f"Peak SOC today: {peak_soc:.0f}%"
-                f" → {'battery full' if hits_full else 'not full'}"
-                f"{f' at {full_time_local}' if full_time_local else ''}"
-            )
-            return hits_full, peak_soc, full_time_local, end_of_today
-        return False, None, None, end_of_today
-
     def control_ev_charging(self):
         """Control EV charging via state machine (FSD 4.5)."""
         if not self.ev_charging_enabled:
@@ -886,7 +826,7 @@ class EnergyManager:
                 min_soc_forecast = 100.0
                 battery_will_be_full = True
             elif ev_charging_source == "solar_surplus":
-                battery_will_be_full, _, battery_full_time, _ = self.will_battery_hit_full()
+                battery_will_be_full, _, battery_full_time, _ = self.ev_battery_optimizer.will_battery_hit_full()
                 ev_min_power = POWER_STEPS_3P[0]
                 ev_max_power = POWER_STEPS_3P[-1]
                 candidate_power = snap_to_power_step(
@@ -936,7 +876,7 @@ class EnergyManager:
                     ev_charging_source = "none"
             else:
                 # No EV candidate — still compute diagnostics for dashboard
-                battery_will_be_full, _, battery_full_time, _ = self.will_battery_hit_full()
+                battery_will_be_full, _, battery_full_time, _ = self.ev_battery_optimizer.will_battery_hit_full()
                 ev_safe, min_soc_forecast = (
                     self.ev_battery_optimizer.check_ev_safe(ev_load_wh=0.0)
                 )

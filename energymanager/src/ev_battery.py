@@ -15,12 +15,14 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from influxdb_client import InfluxDBClient
 
 logger = logging.getLogger(__name__)
 
+SWISS_TZ = ZoneInfo("Europe/Zurich")
 EV_SAFETY_HORIZON = timedelta(hours=48)
 
 
@@ -93,3 +95,60 @@ class EVBatteryOptimizer:
         if extra_load_wh <= 0 or self.capacity_wh <= 0:
             return 0.0
         return extra_load_wh / self.capacity_wh * 100
+
+    def will_battery_hit_full(
+        self,
+    ) -> tuple[bool, float | None, str | None, datetime]:
+        """Check if the home battery is forecast to reach 100% today.
+
+        Only looks at today's solar window (until midnight local time).
+        Tomorrow's forecast is irrelevant — the battery being full tomorrow
+        doesn't justify diverting today's solar to the EV.
+
+        Returns:
+            (hits_full, peak_soc or None, full_time_local "HH:MM" or None, end_of_today)
+        """
+        now = datetime.now(timezone.utc)
+        now_local = now.astimezone(SWISS_TZ)
+        end_of_today = now_local.replace(
+            hour=23, minute=59, second=59, microsecond=0
+        ).astimezone(timezone.utc)
+        end_stop = end_of_today.isoformat()
+
+        query = f"""
+        from(bucket: "{self.bucket}")
+          |> range(start: now(), stop: {end_stop})
+          |> filter(fn: (r) => r._measurement == "soc_forecast")
+          |> filter(fn: (r) => r.scenario == "with_strategy")
+          |> filter(fn: (r) => r._field == "soc_percent")
+          |> max()
+        """
+        result = self.influx_client.query_api().query(query)
+        if not result or not result[0].records:
+            return False, None, None, end_of_today
+
+        peak_soc = result[0].records[0].get_value()
+        hits_full = peak_soc >= 99
+
+        full_time_local = None
+        if hits_full:
+            time_query = f"""
+            from(bucket: "{self.bucket}")
+              |> range(start: now(), stop: {end_stop})
+              |> filter(fn: (r) => r._measurement == "soc_forecast")
+              |> filter(fn: (r) => r.scenario == "with_strategy")
+              |> filter(fn: (r) => r._field == "soc_percent")
+              |> filter(fn: (r) => r._value >= 99.0)
+              |> first()
+            """
+            time_result = self.influx_client.query_api().query(time_query)
+            if time_result and time_result[0].records:
+                full_utc = time_result[0].records[0].get_time()
+                full_time_local = full_utc.astimezone(SWISS_TZ).strftime("%H:%M")
+
+        logger.debug(
+            f"Peak SOC today: {peak_soc:.0f}% → "
+            f"{'battery full' if hits_full else 'not full'}"
+            f"{f' at {full_time_local}' if full_time_local else ''}"
+        )
+        return hits_full, peak_soc, full_time_local, end_of_today

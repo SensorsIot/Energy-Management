@@ -2163,6 +2163,16 @@ The battery is full — energy has nowhere to go and would be curtailed.
 - **Power**: `snap_to_power_step(surplus)` → charging power
 - **Battery check**: none — energy would be wasted
 
+##### `will_battery_hit_full()` — dashboard diagnostic
+
+Lives on `EVBatteryOptimizer`. Returns whether the **peak home-battery SOC** reaches 100 % between now and end of today (midnight local), plus the **time** it first reaches 100 %.
+
+- Queries `max(soc_percent)` from now until end of today against the `with_strategy` forecast
+- If peak ≥ 99 % → battery will be full; queries `first()` where `soc_percent >= 99` to find the time
+- Returns `(hits_full, peak_soc, full_time_local "HH:MM" or None, end_of_today)`
+
+**Used by:** `full_time_local` is published as the `battery_full_time` attribute on `sensor.ev_target_power` for dashboard display. The boolean is informational only — it does **not** gate EV charging; the 48-h safety rule below is the sole gate.
+
 ##### Rule 2: Solar Surplus Charging
 
 The battery is still charging — surplus exists (PV > house load) but the battery needs the energy too. A single safety rule decides whether the EV may draw from that surplus.
@@ -2372,51 +2382,7 @@ Every 15 minutes:
 
 ---
 
-## 4.5 Shared Forecast Helpers
-
-All consumer-gating decisions (EV charging, appliance signal) consume the same home-battery SOC forecast produced by `run_optimization()` (Layer 1). The forecast is re-computed every 15 minutes from the current SOC and stored in InfluxDB as `soc_forecast` with tag `scenario="with_strategy"` (discharge-block applied) and `scenario="without_strategy"` (raw simulation).
-
-Shared query helpers:
-
-### 4.5.1 `will_battery_hit_full()`
-
-Returns whether the **peak SOC** reaches 100% between now and end of today, plus the **time** it first reaches 100%.
-
-- Queries `max(soc_percent)` from now until end of today (midnight local)
-- If peak ≥ 99% → battery will be full → excess solar would otherwise be curtailed
-- If full: queries `first()` where `soc_percent >= 99` to find the time
-
-```
-peak_soc = query(max soc_forecast from now to end_of_today)
-hits_full = peak_soc >= 99%
-if hits_full:
-    full_time = query(first soc_forecast >= 99% from now to end_of_today)._time
-```
-
-**Returns:** `(hits_full, peak_soc, full_time_local "HH:MM" or None, end_of_today)`
-
-**Used by:** EV charging — `full_time_local` is published as the `battery_full_time` attribute on `sensor.ev_target_power` for dashboard display. The boolean is informational; it does not gate EV charging in the new safety rule.
-
-### 4.5.2 Load Conversion
-
-Extra load in Wh is converted to SOC percentage via a simple ratio:
-
-```
-load_percent = extra_load_wh / capacity_wh × 100
-```
-
-| Example load | Wh | SOC impact (20 kWh battery) |
-|---|---|---|
-| Washing machine | 1500 Wh | −7.5% |
-| EV at 3962W × 15 min | 991 Wh | −5.0% |
-| EV at 8000W × 15 min | 2000 Wh | −10% |
-| EV at 11040W × 15 min | 2760 Wh | −13.8% |
-
-> Note (v1.8.0): `get_forecast_soc_at_target()` and `will_battery_hit_minimum()` were removed. Their only consumer was the former EV battery-protection logic, which is replaced by the 48-h min-SOC rule described in Section 4.3.6. Appliance signal computes its min SOC inline from the already-in-memory simulation DataFrame, so it never needed a separate query helper.
-
----
-
-## 4.6 InfluxDB Storage
+## 4.5 InfluxDB Storage
 
 **Bucket:** `energy_manager`
 
@@ -2430,7 +2396,7 @@ load_percent = extra_load_wh / capacity_wh × 100
 | `discharge_decision` | Battery control decisions | (none) | `allowed`, `reason`, `min_soc_percent`, `min_soc_time`, `current_soc` |
 | `appliance_signal` | Appliance signal output | (none) | `signal`, `reason`, `excess_power_w`, `final_soc_percent` |
 
-### 4.6.1 SOC Forecast Scenarios
+### 4.5.1 SOC Forecast Scenarios
 
 The `soc_forecast` measurement uses a `scenario` tag to store two curves:
 
@@ -2439,7 +2405,7 @@ The `soc_forecast` measurement uses a `scenario` tag to store two curves:
 | `with_strategy` | What will happen with discharge blocking applied | Green (solid) |
 | `without_strategy` | What would happen without any blocking | Orange (dashed) |
 
-### 4.6.2 Forecast Snapshot for Accuracy Tracking
+### 4.5.2 Forecast Snapshot for Accuracy Tracking
 
 The `soc_forecast_snapshot` measurement provides persistent forecast storage:
 
@@ -2489,9 +2455,9 @@ from(bucket: "energy_manager")
   |> filter(fn: (r) => r._field == "car_soc_percent")
 ```
 
-## 4.7 Dashboard
+## 4.6 Dashboard
 
-### 4.7.1 Wallbox Status Display
+### 4.6.1 Wallbox Status Display
 
 The EV card on the kitchen dashboard maps the raw OCPP `sensor.wallbox_status` to user-friendly labels. The OCPP server publishes only raw status strings; the dashboard handles all display logic.
 
@@ -2511,7 +2477,7 @@ The EV card on the kitchen dashboard maps the raw OCPP `sensor.wallbox_status` t
 
 **Error indicator:** Background turns red when power limit > 0 but actual power deviates by > 1000 W and SOC < target (wallbox not responding to setpoint), or when power limit = 0 but actual power > 100 W (wallbox not stopping).
 
-### 4.7.2 Kitchen Dashboard (Mushroom Cards)
+### 4.6.2 Kitchen Dashboard (Mushroom Cards)
 
 ```yaml
 type: horizontal-stack
@@ -2546,7 +2512,7 @@ cards:
       {{ 'green' if is_state('binary_sensor.battery_discharge_allowed', 'on') else 'orange' }}
 ```
 
-### 4.7.3 Solar Decision Card (Amazon Fire Dashboard)
+### 4.6.3 Solar Decision Card (Amazon Fire Dashboard)
 
 Displays EV charging decision with case evaluation and pass/fail status. Uses `sensor.ev_target_power` attributes.
 
@@ -2595,9 +2561,9 @@ Surplus: 800W  Threshold: 1380W  ❌
 
 **Result icons:** ⚡ Rule 1 (Battery Full), 📊 Rule 2 (Solar Surplus), ⏸️ no charging.
 
-## 4.8 Error Handling and Notifications
+## 4.7 Error Handling and Notifications
 
-### 4.8.1 Battery Control Retry Logic
+### 4.7.1 Battery Control Retry Logic
 
 When controlling the battery via Home Assistant, the system implements retry logic to handle transient communication failures:
 
@@ -2615,7 +2581,7 @@ When controlling the battery via Home Assistant, the system implements retry log
 | HTTP Error | Retry after delay |
 | No HA Token | Fail immediately (no retry) |
 
-### 4.8.2 Telegram Notifications
+### 4.7.2 Telegram Notifications
 
 If all retry attempts fail, a Telegram notification is sent to alert the user.
 
@@ -2632,7 +2598,7 @@ Error: [error details]
 The battery may not be in the expected state!
 ```
 
-### 4.8.3 Error Flow
+### 4.7.3 Error Flow
 
 ```
 control_battery(discharge_allowed)
@@ -2649,7 +2615,7 @@ control_battery(discharge_allowed)
     (last_discharge_allowed unchanged - will retry next cycle)
 ```
 
-### 4.8.4 Underlying Communication Chains
+### 4.7.4 Underlying Communication Chains
 
 **Battery discharge control:**
 ```
@@ -3773,9 +3739,10 @@ See Section 4.3.7 for adaptive polling logic.
 
 **End of Document**
 
-*Version 2.45 - April 2026*
+*Version 2.46 - April 2026*
 
 **Changelog:**
+- v2.46: Moved `will_battery_hit_full()` from the main runtime class into `EVBatteryOptimizer` (its only caller). Dropped the misnamed "Shared Forecast Helpers" section — it had no shared helpers left. Folded the `will_battery_hit_full` description into Section 4.3.6 as a dashboard-diagnostic subsection. Renumbered 4.6 → 4.5, 4.7 → 4.6, 4.8 → 4.7 for InfluxDB Storage / Dashboard / Error Handling. Also: `_extra_load_percent` remains a private helper on each consumer class (one line of `wh / capacity_wh × 100`) — not worth extracting. 2 new unit tests covering the moved method. (v1.8.1)
 - v2.45: Restructured Chapter 4 into a consumer-oriented layout — each decision block (home battery, EV battery, washer) is now a self-contained section covering its forecasts and rules. New **Section 4.1 Prerequisites** consolidates all shared inputs (PV forecast, load forecast, live SOC, tariff schedule, battery configuration, time/unit conventions) previously scattered across the chapter. Former separate sections collapsed into one per consumer: 4.2 Home Battery (sim + discharge rule), 4.3 EV Battery (state machine + power calc + 48-h safety rule + car SOC polling + car SOC forecast — merges the previous duplicate "## 4.6" numbering bug), 4.4 Washer (Appliance Signal), 4.5 Shared Forecast Helpers. Renumbered downstream: 4.6 InfluxDB Storage, 4.7 Dashboard, 4.8 Error Handling. Documentation-only; no code changes.
 - v2.44: Replaced the EV battery-protection gate with a self-correcting 48-h min-SOC rule (Section 4.3.6). Root cause: the old rule targeted `tariff.target`, which during daytime (06:00–21:00) resolved to **tomorrow's** 21:00 — giving the forecast a full extra sun-day of headroom, so `reaches_target` stayed true all day even as the actual battery never climbed past ~48%. New rule: EV is allowed only while the home-battery SOC forecast stays ≥ `battery.reserve_percent` at every point across the next 48 h, with one 15-min slot of the candidate EV load subtracted as worst case. Re-evaluated every 15 min — if the forecast drops below the floor, EV stops and the battery (now EV-free) rides the remaining forecast back up. New module `src/ev_battery.py` (`EVBatteryOptimizer.check_ev_safe`); deleted `check_battery_protection`, `will_battery_hit_minimum`, `get_forecast_soc_at_target`; removed `ev_charging.battery_protection_soc` config (no per-EV target needed). Sensor attrs: `reaches_target`/`battery_will_hit_min`/`battery_forecast_soc` → `ev_safe`/`battery_min_soc_forecast_48h`/`battery_min_soc_floor`. 8 new unit tests (`test_ev_battery.py`); `test_power_calculation.py` `battery_check_fn` signature collapsed from `(bool,bool)` to `bool` (v1.8.0)
 - v2.43: Car SOC Forecast (new Sections 4.6.4, 4.6.5) — multi-day prediction of EV SOC written to `energy_balance.car_soc_percent` every 15 min. House battery modelled as buffer: surplus first refills the house, overflow × efficiency goes to the car. New `smart_car.capacity_kwh` and `smart_car.charge_efficiency` config. Last-known-value fallback for `sensor.smart_battery` via InfluxDB (Python side) and `sensor.smart_battery_last_known` trigger-based template sensor (HA side). Grafana BatteryForecast panel 4 "Cumulative Energy Balance (Wh)" replaced by "Car SOC Forecast". Amazon Fire dashboard updated to reference the cached template sensor (v1.7.6)

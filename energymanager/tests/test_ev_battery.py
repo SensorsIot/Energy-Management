@@ -93,3 +93,40 @@ class TestSafetyGate:
         opt = _make_optimizer(min_soc_in_window=10.0, min_soc_percent=10.0)
         safe, _ = opt.check_ev_safe()
         assert safe is True
+
+
+class TestWillBatteryHitFull:
+    """Dashboard diagnostic — not a gate."""
+
+    def test_below_threshold(self):
+        """Peak SOC 85% → not full."""
+        client = MagicMock()
+        record = MagicMock()
+        record.get_value.return_value = 85.0
+        table = MagicMock()
+        table.records = [record]
+        client.query_api.return_value.query.return_value = [table]
+        opt = EVBatteryOptimizer(
+            influx_client=client,
+            bucket="energy_manager",
+            capacity_wh=20_000,
+            min_soc_percent=10.0,
+        )
+        hits_full, peak, full_time, _ = opt.will_battery_hit_full()
+        assert hits_full is False
+        assert peak == 85.0
+        assert full_time is None
+
+    def test_no_records(self):
+        client = MagicMock()
+        client.query_api.return_value.query.return_value = []
+        opt = EVBatteryOptimizer(
+            influx_client=client,
+            bucket="energy_manager",
+            capacity_wh=20_000,
+            min_soc_percent=10.0,
+        )
+        hits_full, peak, full_time, _ = opt.will_battery_hit_full()
+        assert hits_full is False
+        assert peak is None
+        assert full_time is None
