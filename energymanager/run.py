@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.3"
+__version__ = "1.8.4"
 
 import json
 import logging
@@ -571,6 +571,15 @@ class EnergyManager:
             # Write forecast snapshot for accuracy tracking
             # Only overwrites from NOW onwards - earlier points preserved for comparison with actual SOC
             self.simulation_writer.write_forecast_snapshot(sim_with_strategy)
+
+            # Prime the EV safety cache so the 10-s EV loop can show real
+            # values on the dashboard without hitting InfluxDB every cycle.
+            # Safe to call even when EV is disabled — method handles missing
+            # data with a block-as-precaution default.
+            if self.ev_battery_optimizer is not None:
+                self._ev_safe, self._battery_min_soc_forecast = (
+                    self.ev_battery_optimizer.check_ev_safe(ev_load_wh=0.0)
+                )
             # Write energy balance + car SOC forecast for visualization
             self.write_energy_balance(forecast, house_soc=current_soc)
             self.write_decision(decision, current_soc)
