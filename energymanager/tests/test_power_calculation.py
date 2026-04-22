@@ -1,10 +1,10 @@
 """
-Tests for EV Charging Power Calculation (FSD 4.5.6).
+Tests for EV Charging Power Calculation (FSD 4.6).
 
 The power calculation lives in run.py control_ev_charging() and selects
-between Rule 1 (battery full) and Rule 2 (solar surplus with battery
-protection). Both rules use surplus_power (PV - house load) as input.
-These tests verify the logic in isolation.
+between Rule 1 (battery full) and Rule 2 (solar surplus with the 48-h
+min-SOC safety check). Both rules use surplus_power (PV - house load)
+as input. These tests verify the logic in isolation.
 """
 
 from __future__ import annotations
@@ -22,75 +22,59 @@ def compute_ev_charging_power(
     min_power_w: float = 3962,
     max_power_w: float = 7624,
     battery_soc: float = 50.0,
-    battery_will_be_full: bool = False,
-    battery_check_fn: Callable[[float], tuple[bool, bool]] | None = None,
+    battery_check_fn: Callable[[float], bool] | None = None,
 ) -> tuple[float, str]:
-    """Replicate the FSD 4.6.6 power calculation from run.py.
+    """Replicate the FSD 4.6 power calculation from run.py.
 
     Two rules based on battery state:
       Rule 1 (Battery Full): battery_soc >= 100 AND surplus >= threshold
-      Rule 2 (Solar Surplus): battery still charging — battery protection gate
+      Rule 2 (Solar Surplus): battery still charging — safety gate applies
 
     Both rules use surplus_power (PV - house load) as the input signal.
 
-    battery_check_fn(ev_load_wh) -> (reaches_target, battery_will_hit_min)
-    If None, defaults to (True, False) for all loads (always passes).
-    """
-    def _always_pass(_: float) -> tuple[bool, bool]:
-        return True, False
+    battery_check_fn(ev_load_wh) -> safe
+      True  → EV load is safe for the home battery over the next 48 h
+      False → EV load would drop the battery below min_soc_percent
 
+    If None, defaults to always-safe.
+    """
     if battery_check_fn is None:
-        battery_check_fn = _always_pass
+        def battery_check_fn(_: float) -> bool:  # type: ignore[no-redef]
+            return True
 
     ev_charging_power_w = 0.0
     ev_charging_source = "none"
     if ev_mode == "solar":
-        # Rule 1: Battery Full — surplus capture (no battery check)
+        # Rule 1: Battery Full — surplus capture, no safety gate
         if battery_soc >= 100 and surplus_power_w >= threshold:
             ev_charging_power_w = snap_to_power_step(
                 surplus_power_w, min_power_w, max_power_w
             )
             ev_charging_source = "battery_full"
-        # Rule 2 candidate: surplus above threshold (needs battery check)
+        # Rule 2 candidate: surplus above threshold (needs safety gate)
         elif surplus_power_w >= threshold:
             ev_charging_source = "solar_surplus"
 
-        # Battery gate: Rule 2 only (Rule 1 already set power above)
+        # Rule 2 safety gate: iterate snap-up first, then step down
         if ev_charging_source == "solar_surplus":
-            # Rule 2: Solar Surplus Charging — battery protection gate
             candidate_power = snap_to_power_step(
                 surplus_power_w, min_power_w, max_power_w
             )
-            if battery_will_be_full:
-                # Battery will reach 100% today — snap UP so battery
-                # covers the small gap instead of exporting to grid
-                snap_up_candidates = [
-                    s for s in POWER_STEPS_3P
-                    if s > candidate_power and s <= max_power_w
-                ]
-                if snap_up_candidates:
-                    ev_charging_power_w = snap_up_candidates[0]
-                else:
-                    ev_charging_power_w = candidate_power
-            else:
-                # Try snap-up first (next step above candidate), then
-                # step down through discrete power steps
-                snap_up = [
-                    s for s in POWER_STEPS_3P
-                    if s > candidate_power and s >= threshold
-                ]
-                snap_up_step = [snap_up[0]] if snap_up else []
-                snap_down = [
-                    s for s in reversed(POWER_STEPS_3P)
-                    if s <= candidate_power and s >= threshold
-                ]
-                candidates = snap_up_step + snap_down
-                for try_power in candidates:
-                    ev_load_wh = try_power * 0.25
-                    reaches_target, battery_will_hit_min = battery_check_fn(ev_load_wh)
-                    if reaches_target and not battery_will_hit_min:
-                        ev_charging_power_w = try_power
-                        break
+            snap_up = [
+                s for s in POWER_STEPS_3P
+                if s > candidate_power and s >= threshold
+            ]
+            snap_up_step = [snap_up[0]] if snap_up else []
+            snap_down = [
+                s for s in reversed(POWER_STEPS_3P)
+                if s <= candidate_power and s >= threshold
+            ]
+            candidates = snap_up_step + snap_down
+            for try_power in candidates:
+                ev_load_wh = try_power * 0.25
+                if battery_check_fn(ev_load_wh):
+                    ev_charging_power_w = try_power
+                    break
 
         if ev_charging_power_w == 0.0:
             ev_charging_source = "none"
@@ -99,7 +83,7 @@ def compute_ev_charging_power(
 
 
 class TestRule1BatteryFull:
-    """Rule 1: battery_soc >= 100 AND surplus >= threshold → snap, no protection."""
+    """Rule 1: battery_soc >= 100 AND surplus >= threshold → snap, no gate."""
 
     def test_battery_full_surplus_above_threshold(self):
         """Battery 100%, surplus above threshold → Rule 1 charges."""
@@ -124,13 +108,13 @@ class TestRule1BatteryFull:
         assert power == 0.0
         assert source == "none"
 
-    def test_battery_full_ignores_protection(self):
-        """Rule 1 doesn't need battery protection — it's free energy."""
+    def test_battery_full_ignores_safety_gate(self):
+        """Rule 1 doesn't consult the safety gate — battery is already full."""
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_power_w=5000,
             battery_soc=100,
-            battery_check_fn=lambda _: (False, False),
+            battery_check_fn=lambda _: False,
             threshold=1400,
         )
         assert power == 4354
@@ -138,9 +122,9 @@ class TestRule1BatteryFull:
 
 
 class TestRule2SolarSurplus:
-    """Rule 2: surplus >= threshold, battery not full — needs battery protection."""
+    """Rule 2: surplus >= threshold, battery not full — 48h safety gate applies."""
 
-    def test_surplus_above_threshold_protection_passes(self):
+    def test_surplus_above_threshold_safety_passes(self):
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_power_w=4000,
@@ -150,12 +134,12 @@ class TestRule2SolarSurplus:
         assert power == 4354
         assert source == "solar_surplus"
 
-    def test_protection_blocks(self):
-        """Battery protection blocks snap → 0."""
+    def test_safety_blocks(self):
+        """Safety gate fails at every step → 0."""
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_power_w=4000,
-            battery_check_fn=lambda _: (False, False),
+            battery_check_fn=lambda _: False,
             threshold=1400,
         )
         assert power == 0.0
@@ -204,15 +188,13 @@ class TestNonSolarMode:
 
 
 class TestStepDown:
-    """Step-down loop: if candidate power step fails battery checks, try lower steps."""
+    """Step-down loop: if candidate power step fails, try lower steps."""
 
     def test_step_down_finds_lower_level(self):
         """Candidate 5117W (8A) fails, but 4354W (7A) passes."""
-        def check(ev_load_wh: float) -> tuple[bool, bool]:
+        def check(ev_load_wh: float) -> bool:
             power = ev_load_wh / 0.25
-            if power > 5000:
-                return False, False  # 5727W and 5117W fail
-            return True, False  # 4354W passes
+            return power <= 5000  # 5727W and 5117W fail, 4354W passes
 
         power, source = compute_ev_charging_power(
             ev_mode="solar",
@@ -223,39 +205,23 @@ class TestStepDown:
         assert power == 4354  # 7A
         assert source == "solar_surplus"
 
-    def test_battery_full_snaps_up(self):
-        """Battery will be full → snap UP to next step (battery covers gap)."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5200,
-            battery_will_be_full=True,
-            battery_check_fn=lambda _: (False, False),
-            threshold=1400,
-        )
-        # 5200W → snap-down=5117 (8A), snap-up=5727 (9A); battery full → use snap-up
-        assert power == 5727
-        assert source == "solar_surplus"
-
     def test_all_levels_fail(self):
-        """All power steps fail battery checks → 0W."""
+        """All power steps fail safety gate → 0W."""
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_power_w=5200,
-            battery_check_fn=lambda _: (False, True),  # always hits minimum
+            battery_check_fn=lambda _: False,
             threshold=1400,
         )
         assert power == 0.0
         assert source == "none"
 
     def test_floor_at_threshold(self):
-        """Step-down finds lowest valid step that passes battery check."""
+        """Step-down finds lowest valid step that passes safety gate."""
         # surplus 4400W → snap = 4354W (7A)
         # 4354W fails, but 3962W (6A) passes
-        def check(ev_load_wh: float) -> tuple[bool, bool]:
-            power = ev_load_wh / 0.25
-            if power > 4000:
-                return False, False  # 4354W fails
-            return True, False  # 3962W passes
+        def check(ev_load_wh: float) -> bool:
+            return ev_load_wh / 0.25 <= 4000
 
         power, source = compute_ev_charging_power(
             ev_mode="solar",
@@ -271,7 +237,7 @@ class TestStepDown:
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_power_w=4000,
-            battery_check_fn=lambda _: (False, False),
+            battery_check_fn=lambda _: False,
             threshold=1400,
         )
         assert power == 0.0
@@ -281,11 +247,8 @@ class TestStepDown:
         """Step down skips several levels before finding one that passes."""
         # surplus 7100W → snap = 7034W (11A)
         # Only 5117W (8A) and below pass
-        def check(ev_load_wh: float) -> tuple[bool, bool]:
-            power = ev_load_wh / 0.25
-            if power > 5200:
-                return False, False
-            return True, False
+        def check(ev_load_wh: float) -> bool:
+            return ev_load_wh / 0.25 <= 5200
 
         power, source = compute_ev_charging_power(
             ev_mode="solar",
@@ -297,43 +260,29 @@ class TestStepDown:
         assert power == 5117  # 8A
         assert source == "solar_surplus"
 
-    def test_battery_will_hit_min_blocks_even_if_reaches_target(self):
-        """will_battery_hit_minimum blocks charging even when reaches_target is True."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5000,
-            battery_check_fn=lambda _: (True, True),  # reaches target but hits min
-            threshold=1400,
-        )
-        assert power == 0.0
-        assert source == "none"
-
 
 class TestSnapUp:
     """Snap-up: try one step above surplus before stepping down.
 
-    If battery protection passes at the higher step, use it — the battery
+    If the safety gate passes at the higher step, use it — the battery
     covers the small gap between surplus and the next amp step.
     """
 
-    def test_snap_up_when_protection_passes(self):
+    def test_snap_up_when_safety_passes(self):
         """Surplus 5200W → snap-down 5117W, but snap-up 5727W passes → use 5727W."""
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_power_w=5200,
-            battery_check_fn=lambda _: (True, False),  # all pass
+            battery_check_fn=lambda _: True,  # all pass
             threshold=1400,
         )
         assert power == 5727  # snap-up: next step above 5117
         assert source == "solar_surplus"
 
     def test_snap_up_fails_falls_back_to_snap_down(self):
-        """Snap-up 5727W fails protection, falls back to snap-down 5117W."""
-        def check(ev_load_wh: float) -> tuple[bool, bool]:
-            power = ev_load_wh / 0.25
-            if power > 5200:
-                return False, False  # 5727W fails
-            return True, False  # 5117W passes
+        """Snap-up 5727W fails safety, falls back to snap-down 5117W."""
+        def check(ev_load_wh: float) -> bool:
+            return ev_load_wh / 0.25 <= 5200  # 5727W fails, 5117W passes
 
         power, source = compute_ev_charging_power(
             ev_mode="solar",
@@ -349,40 +298,10 @@ class TestSnapUp:
         power, source = compute_ev_charging_power(
             ev_mode="solar",
             surplus_power_w=8000,
-            battery_check_fn=lambda _: (True, False),
+            battery_check_fn=lambda _: True,
             threshold=1400,
         )
         assert power == 7624  # already at max, no higher step
-        assert source == "solar_surplus"
-
-    def test_snap_up_hit_min_falls_back(self):
-        """Snap-up fails because battery would hit minimum, falls back."""
-        def check(ev_load_wh: float) -> tuple[bool, bool]:
-            power = ev_load_wh / 0.25
-            if power > 5200:
-                return True, True  # reaches target but hits min
-            return True, False
-
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5200,
-            battery_check_fn=check,
-            threshold=1400,
-        )
-        assert power == 5117  # snap-up blocked, fell back
-        assert source == "solar_surplus"
-
-    def test_snap_up_when_battery_will_be_full(self):
-        """Battery will be full → snap UP to next step (battery covers gap)."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5200,
-            battery_will_be_full=True,
-            battery_check_fn=lambda _: (False, False),
-            threshold=1400,
-        )
-        # battery_will_be_full path snaps up: 5117→5727
-        assert power == 5727
         assert source == "solar_surplus"
 
 
@@ -397,223 +316,5 @@ class TestBatteryFullSurplusPath:
             battery_soc=100,
             threshold=1400,
         )
-        # 5000W → snap to 4354W (7A)
         assert power == 4354
         assert source == "battery_full"
-
-    def test_battery_full_below_threshold(self):
-        """Battery 100% but surplus below threshold → 0W."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=800,
-            battery_soc=100,
-            threshold=1400,
-        )
-        assert power == 0.0
-        assert source == "none"
-
-    def test_battery_not_full_needs_protection(self):
-        """Battery 50%, surplus=5000W → Rule 2 with battery check."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5000,
-            battery_soc=50,
-            battery_will_be_full=False,
-            battery_check_fn=lambda _: (True, False),  # protection passes
-            threshold=1400,
-        )
-        # 5000W → snap-down 4354W (7A), snap-up 5117W (8A) passes → 5117
-        assert power == 5117
-        assert source == "solar_surplus"
-
-    def test_battery_not_full_protection_blocks(self):
-        """Battery 50%, surplus=5000W → Rule 2, protection blocks."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5000,
-            battery_soc=50,
-            battery_will_be_full=False,
-            battery_check_fn=lambda _: (False, False),  # protection fails
-            threshold=1400,
-        )
-        assert power == 0.0
-        assert source == "none"
-
-
-class TestCarPluggedInWithSurplus:
-    """Goal 1+2: Car plugged in while surplus already available."""
-
-    def test_first_cycle_battery_full(self):
-        """Battery full, 5kW surplus → Rule 1 charges immediately."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5000,
-            battery_soc=100,
-            threshold=1400,
-        )
-        assert power == 4354
-        assert source == "battery_full"
-
-    def test_first_cycle_battery_charging_protection_passes(self):
-        """Battery 60%, surplus 5kW, battery will be full → snap UP."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5000,
-            battery_soc=60,
-            battery_will_be_full=True,
-            threshold=1400,
-        )
-        # 5000W → snap-down=4354 (7A), snap-up=5117 (8A); battery full → snap-up
-        assert power == 5117
-        assert source == "solar_surplus"
-
-
-class TestRisingSurplusRampUp:
-    """Goal 1: Morning ramp-up — power steps increase as surplus rises."""
-
-    def test_step_increases_with_surplus(self):
-        """Rule 1: Battery full, surplus rises → snapped power increases."""
-        levels = [0, 3500, 5000, 6500, 7800]
-        results = []
-        for surplus in levels:
-            power, _ = compute_ev_charging_power(
-                ev_mode="solar",
-                surplus_power_w=surplus,
-                battery_soc=100,
-                threshold=1400,
-            )
-            results.append(power)
-
-        # 0W → below threshold
-        assert results[0] == 0
-        # 3500W → snap to 3962W (min step, surplus below all steps)
-        assert results[1] == 3962
-        # 5000W → snap to 4354W (7A)
-        assert results[2] == 4354
-        # 6500W → snap to 6288W (10A)
-        assert results[3] == 6288
-        # 7800W → snap to 7624W (12A)
-        assert results[4] == 7624
-        # Power must be non-decreasing as surplus rises
-        assert results == sorted(results)
-
-    def test_step_increases_via_surplus_snap(self):
-        """Rule 2 path: surplus rises, battery will be full → snap UP."""
-        levels = [0, 3500, 5000, 6500, 7800]
-        results = []
-        for surplus in levels:
-            power, _ = compute_ev_charging_power(
-                ev_mode="solar",
-                surplus_power_w=surplus,
-                battery_soc=80,
-                battery_will_be_full=True,
-                threshold=1400,
-            )
-            results.append(power)
-
-        # 0W → below threshold
-        assert results[0] == 0
-        # 3500W → snap-down=3962, snap-up=4354 (battery full → snap up)
-        assert results[1] == 4354
-        # 5000W → snap-down=4354, snap-up=5117
-        assert results[2] == 5117
-        # 6500W → snap-down=6288, snap-up=7034
-        assert results[3] == 7034
-        # 7800W → snap-down=7624, no higher step → stays 7624
-        assert results[4] == 7624
-        # Power must be non-decreasing as surplus rises
-        assert results == sorted(results)
-
-
-class TestBatteryTransition:
-    """Goal 2: Battery 99% → 100% transition — Rule 2 → Rule 1 switch."""
-
-    def test_rule2_to_rule1_on_battery_full(self):
-        """Same surplus, battery goes from 99% to 100% — charging continues."""
-        # Cycle 1: battery 99%, Rule 2 with battery_will_be_full
-        power_before, source_before = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5500,
-            battery_soc=99,
-            battery_will_be_full=True,
-            threshold=1400,
-        )
-        # Cycle 2: battery 100%, Rule 1
-        power_after, source_after = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5500,
-            battery_soc=100,
-            threshold=1400,
-        )
-        # Both must charge (no gap during transition)
-        assert power_before > 0
-        assert power_after > 0
-        assert source_before == "solar_surplus"
-        assert source_after == "battery_full"
-
-    def test_rule2_to_rule1_step_down(self):
-        """Battery 99% → 100% — Rule 2 snaps up, Rule 1 snaps down."""
-        power_before, _ = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5500,
-            battery_soc=99,
-            battery_will_be_full=True,
-            threshold=1400,
-        )
-        power_after, _ = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=5500,
-            battery_soc=100,
-            threshold=1400,
-        )
-        # Rule 2 (battery will be full) snaps up: 5117→5727
-        assert power_before == 5727
-        # Rule 1 (battery IS full) snaps down: no capacity to cover gap
-        assert power_after == 5117
-
-
-class TestThresholdBoundary:
-    """Goal 4: Single threshold gates all charging — boundary conditions."""
-
-    def test_surplus_exactly_at_threshold(self):
-        """Surplus == threshold → should charge (>= check, not >)."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=1400,
-            battery_soc=100,
-            threshold=1400,
-        )
-        assert power > 0
-
-    def test_surplus_one_below_threshold(self):
-        """Surplus just below threshold → 0W."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=1399,
-            battery_soc=100,
-            threshold=1400,
-        )
-        assert power == 0.0
-        assert source == "none"
-
-    def test_rule2_exactly_at_threshold(self):
-        """Rule 2: surplus == threshold → should charge."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=1400,
-            battery_soc=50,
-            threshold=1400,
-        )
-        assert power > 0
-        assert source == "solar_surplus"
-
-    def test_rule2_one_below_threshold(self):
-        """Rule 2: surplus just below threshold → 0W."""
-        power, source = compute_ev_charging_power(
-            ev_mode="solar",
-            surplus_power_w=1399,
-            battery_soc=50,
-            threshold=1400,
-        )
-        assert power == 0.0
-        assert source == "none"

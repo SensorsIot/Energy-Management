@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.7.6"
+__version__ = "1.8.0"
 
 import json
 import logging
@@ -25,6 +25,7 @@ from src.forecast_reader import ForecastReader
 from src.ha_client import HAClient
 from src.battery_optimizer import BatteryOptimizer
 from src.appliance_signal import ApplianceSignal
+from src.ev_battery import EVBatteryOptimizer
 from src.ev_state_machine import EVStateMachine, EVInputs, EVState
 from src.ev_charging import snap_to_power_step, POWER_STEPS_3P
 from src.influxdb_writer import SimulationWriter
@@ -214,12 +215,13 @@ class EnergyManager:
             "car_ready_entity", "binary_sensor.car_ready"
         )
         self.ev_auto_reset_timeout_min = ev_opts.get("auto_reset_timeout_min", 5)
-        self.ev_battery_protection_soc = ev_opts.get("battery_protection_soc", 80)
         self._ev_idle_since: datetime | None = None
         self._observer = IntegrationObserver() if self.ev_charging_enabled else None
         self._last_mode_error_notified: str | None = None
-        self._battery_reaches_target: bool = False
+        self._ev_safe: bool = False
         self._battery_min_soc_forecast: float = 0.0
+        # Layer-2 EV decision helper — bound in connect() once influx_client exists
+        self.ev_battery_optimizer: EVBatteryOptimizer | None = None
 
         # Smart car config (FSD 4.5 Step 2 — hourly SOC readback)
         smart_opts = options.get("smart_car", {})
@@ -246,6 +248,12 @@ class EnergyManager:
         )
         self.write_api = self.influx_client.write_api(write_options=SYNCHRONOUS)
         self.simulation_writer.connect()
+        self.ev_battery_optimizer = EVBatteryOptimizer(
+            influx_client=self.influx_client,
+            bucket=self.output_bucket,
+            capacity_wh=self.capacity_wh,
+            min_soc_percent=self.optimizer.min_soc_percent,
+        )
         logger.info("Connected successfully")
 
     def close(self):
@@ -666,47 +674,6 @@ class EnergyManager:
             return 0.0
         return extra_load_wh / self.capacity_wh * 100
 
-    def get_forecast_soc_at_target(
-        self, extra_load_wh: float = 0.0
-    ) -> tuple[float | None, datetime]:
-        """Query forecasted SOC at the next cheap tariff start (21:00).
-
-        Looks up the SOC forecast written by run_optimization in InfluxDB.
-        Uses tariff.target which always points to the *next* 21:00,
-        regardless of the current time of day.
-
-        Args:
-            extra_load_wh: Additional load to subtract (e.g. 1500Wh wash,
-                           1000Wh for one EV 15-min interval). Subtracted
-                           as worst-case from the forecasted SOC.
-
-        Returns:
-            (soc_percent or None if no data, target_time)
-        """
-        now = datetime.now(timezone.utc)
-        tariff = self.optimizer.get_tariff_periods(now)
-        target_time = tariff.target
-        query_api = self.influx_client.query_api()
-
-        window_start = (target_time - timedelta(minutes=15)).isoformat()
-        window_stop = (target_time + timedelta(minutes=15)).isoformat()
-
-        query = f'''
-        from(bucket: "{self.output_bucket}")
-          |> range(start: {window_start}, stop: {window_stop})
-          |> filter(fn: (r) => r._measurement == "soc_forecast")
-          |> filter(fn: (r) => r.scenario == "with_strategy")
-          |> filter(fn: (r) => r._field == "soc_percent")
-          |> last()
-        '''
-
-        result = query_api.query(query)
-        if result and result[0].records:
-            soc = result[0].records[0].get_value()
-            soc = max(0.0, soc - self._extra_load_percent(extra_load_wh))
-            return soc, target_time
-        return None, target_time
-
     def will_battery_hit_full(
         self,
     ) -> tuple[bool, float | None, str | None, datetime]:
@@ -766,99 +733,6 @@ class EnergyManager:
             )
             return hits_full, peak_soc, full_time_local, end_of_today
         return False, None, None, end_of_today
-
-    def will_battery_hit_minimum(
-        self, extra_load_wh: float = 0.0
-    ) -> tuple[bool, float | None, datetime]:
-        """Check if battery SOC drops below reserve before next cheap tariff.
-
-        Answers: "if we add this extra load, will the battery be depleted?"
-
-        Args:
-            extra_load_wh: Additional load to subtract (e.g. 1500Wh wash,
-                           2000Wh for one EV 15-min interval).
-
-        Returns:
-            (hits_minimum, min_soc or None, target_time)
-        """
-        now = datetime.now(timezone.utc)
-        tariff = self.optimizer.get_tariff_periods(now)
-        target_time = tariff.target
-        target_stop = (target_time + timedelta(minutes=15)).isoformat()
-
-        query = f'''
-        from(bucket: "{self.output_bucket}")
-          |> range(start: now(), stop: {target_stop})
-          |> filter(fn: (r) => r._measurement == "soc_forecast")
-          |> filter(fn: (r) => r.scenario == "with_strategy")
-          |> filter(fn: (r) => r._field == "soc_percent")
-          |> min()
-        '''
-        result = self.influx_client.query_api().query(query)
-        if result and result[0].records:
-            min_soc = result[0].records[0].get_value()
-            min_soc = max(0.0, min_soc - self._extra_load_percent(extra_load_wh))
-            hits_min = min_soc < self.reserve_percent
-            load_note = f" (with {extra_load_wh:.0f}Wh load)" if extra_load_wh > 0 else ""
-            logger.debug(
-                f"Min SOC until {swiss_time(target_time)}: {min_soc:.0f}%{load_note}"
-                f" → {'below reserve' if hits_min else 'OK'}"
-            )
-            return hits_min, min_soc, target_time
-        return True, None, target_time
-
-    def check_battery_protection(self, ev_load_wh: float = 0.0) -> tuple[bool, float]:
-        """Check if battery SOC at next cheap tariff start meets protection target.
-
-        Args:
-            ev_load_wh: EV energy consumption in Wh for the next 15-min interval,
-                        subtracted from the forecast as worst-case load.
-
-        EV forecast path is allowed if:
-        1. SOC at target >= protection target (default 80%), OR
-        2. Battery will hit 100% before target (excess solar would be
-           curtailed — better to divert to EV)
-
-        Returns:
-            (reaches_target, soc_at_target) tuple
-        """
-        try:
-            soc_at_target, target_time = self.get_forecast_soc_at_target(
-                extra_load_wh=ev_load_wh
-            )
-
-            if soc_at_target is None:
-                logger.warning(
-                    f"No SOC forecast at {swiss_time(target_time)} "
-                    "— blocking EV as precaution"
-                )
-                return False, 0.0
-
-            reaches_target = soc_at_target >= self.ev_battery_protection_soc
-            ev_note = f" (with EV {ev_load_wh:.0f}Wh)" if ev_load_wh > 0 else ""
-            logger.info(
-                f"Battery protection: forecast SOC at {swiss_time(target_time)}="
-                f"{soc_at_target:.0f}%{ev_note} "
-                f"(target={self.ev_battery_protection_soc}%) → "
-                f"{'EV allowed' if reaches_target else 'EV blocked'}"
-            )
-
-            # Override: battery will be full → solar curtailed → let EV use it
-            if not reaches_target:
-                hits_full, peak_soc, _, _ = self.will_battery_hit_full()
-                if hits_full:
-                    reaches_target = True
-                    logger.info(
-                        "Battery protection override: peak SOC %.0f%% "
-                        "(battery full before target) → EV allowed",
-                        peak_soc,
-                    )
-
-            return reaches_target, soc_at_target
-
-        except Exception as e:
-            logger.error(f"Battery protection check failed: {e}")
-            return False, 0.0
 
     def control_ev_charging(self):
         """Control EV charging via state machine (FSD 4.5)."""
@@ -1000,12 +874,17 @@ class EnergyManager:
                 elif surplus_power >= threshold:
                     ev_charging_source = "solar_surplus"
 
-            # Step 2: Battery forecast checks WITH the candidate EV load
+            # Step 2: Battery safety check WITH the candidate EV load.
+            # Rule: EV is allowed only if the home-battery SOC forecast
+            # stays >= min_soc_percent across the next 48 h with the EV
+            # load subtracted. Re-evaluated every 15 min (self-correcting).
+            min_soc_floor = self.optimizer.min_soc_percent
             if battery_soc >= 100:
-                reaches_target, soc_at_target = True, 100.0
+                # Battery already full (Rule 1 set power above). No safety
+                # check needed — SOC can only go down from here.
+                ev_safe = True
+                min_soc_forecast = 100.0
                 battery_will_be_full = True
-                battery_will_hit_min = False
-                # Rule 1 already set ev_charging_power_w above
             elif ev_charging_source == "solar_surplus":
                 battery_will_be_full, _, battery_full_time, _ = self.will_battery_hit_full()
                 ev_min_power = POWER_STEPS_3P[0]
@@ -1013,96 +892,56 @@ class EnergyManager:
                 candidate_power = snap_to_power_step(
                     surplus_power, ev_min_power, ev_max_power
                 )
+                # Try one step above surplus first (snap-up uses battery
+                # to bridge the gap to the next amp step), then step down
+                # through discrete power steps until the safety check passes.
+                snap_up = [
+                    s for s in POWER_STEPS_3P
+                    if s > candidate_power and s >= threshold
+                ]
+                snap_up_step = [snap_up[0]] if snap_up else []
+                snap_down = [
+                    s for s in reversed(POWER_STEPS_3P)
+                    if s <= candidate_power and s >= threshold
+                ]
+                candidates = snap_up_step + snap_down
 
-                if battery_will_be_full:
-                    # Case 1: battery will reach 100% — snap UP so battery
-                    # covers the small gap instead of exporting to grid
-                    snap_up_candidates = [
-                        s for s in POWER_STEPS_3P
-                        if s > candidate_power and s <= ev_max_power
-                    ]
-                    if snap_up_candidates:
-                        ev_charging_power_w = snap_up_candidates[0]
-                    else:
-                        ev_charging_power_w = candidate_power
-                    reaches_target, soc_at_target = self.check_battery_protection(
-                        ev_load_wh=ev_charging_power_w * 0.25
+                ev_charging_power_w = 0.0
+                ev_safe = False
+                min_soc_forecast = 0.0
+                for try_power in candidates:
+                    ev_load_wh = try_power * 0.25
+                    ev_safe, min_soc_forecast = (
+                        self.ev_battery_optimizer.check_ev_safe(ev_load_wh=ev_load_wh)
                     )
-                    battery_will_hit_min = False
-                    if ev_charging_power_w > candidate_power:
-                        detail = f", snap-up {candidate_power}→{ev_charging_power_w}W"
-                    else:
-                        detail = ""
+                    if ev_safe:
+                        ev_charging_power_w = try_power
+                        if try_power > candidate_power:
+                            detail = f", snap-up {candidate_power}→{try_power}W"
+                        elif try_power < candidate_power:
+                            detail = f", stepped {candidate_power}→{try_power}W"
+                        else:
+                            detail = ""
+                        ev_source_reason = (
+                            f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
+                            f"forecast → {ev_charging_power_w:.0f}W{detail}"
+                        )
+                        break
+
+                if ev_charging_power_w == 0.0:
                     ev_source_reason = (
-                        f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
-                        f"forecast → {ev_charging_power_w:.0f}W (battery full{detail})"
+                        f"No charging — min SOC forecast "
+                        f"{min_soc_forecast:.0f}% < floor {min_soc_floor:.0f}%"
                     )
-                else:
-                    # Case 2: battery won't reach 100% — try snap-up first
-                    # (next step above surplus), then step down through
-                    # discrete power steps until battery checks pass.
-                    # Snap-up uses battery to cover the gap between surplus
-                    # and the next amp step, maximising solar utilisation.
-                    ev_charging_power_w = 0.0
-                    reaches_target, soc_at_target = False, 0.0
-                    battery_will_hit_min = False
-                    # Include one step above candidate (snap-up)
-                    snap_up = [
-                        s for s in POWER_STEPS_3P
-                        if s > candidate_power and s >= threshold
-                    ]
-                    snap_up_step = [snap_up[0]] if snap_up else []
-                    snap_down = [
-                        s for s in reversed(POWER_STEPS_3P)
-                        if s <= candidate_power and s >= threshold
-                    ]
-                    candidates = snap_up_step + snap_down
-                    for try_power in candidates:
-                        ev_load_wh = try_power * 0.25
-                        reaches_target, soc_at_target = self.check_battery_protection(
-                            ev_load_wh=ev_load_wh
-                        )
-                        battery_will_hit_min, _, _ = self.will_battery_hit_minimum(
-                            extra_load_wh=ev_load_wh
-                        )
-                        if reaches_target and not battery_will_hit_min:
-                            ev_charging_power_w = try_power
-                            if try_power > candidate_power:
-                                detail = f", snap-up {candidate_power}→{try_power}W"
-                            elif try_power < candidate_power:
-                                detail = f", stepped {candidate_power}→{try_power}W"
-                            else:
-                                detail = ""
-                            ev_source_reason = (
-                                f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
-                                f"forecast → {ev_charging_power_w:.0f}W{detail}"
-                            )
-                            break
-
-                    if ev_charging_power_w == 0.0:
-                        reasons = []
-                        if battery_will_hit_min:
-                            reasons.append(
-                                f"battery would hit minimum SOC with "
-                                f"{candidate_power:.0f}W EV load"
-                            )
-                        elif not reaches_target:
-                            reasons.append(
-                                f"battery protection blocked (SOC forecast {soc_at_target:.0f}%)"
-                            )
-                        ev_source_reason = "No charging — " + "; ".join(reasons)
-                        ev_charging_source = "none"
+                    ev_charging_source = "none"
             else:
-                # No EV load — check battery without it
-                reaches_target, soc_at_target = self.check_battery_protection(
-                    ev_load_wh=0.0
-                )
+                # No EV candidate — still compute diagnostics for dashboard
                 battery_will_be_full, _, battery_full_time, _ = self.will_battery_hit_full()
-                battery_will_hit_min, _, _ = self.will_battery_hit_minimum(
-                    extra_load_wh=0.0
+                ev_safe, min_soc_forecast = (
+                    self.ev_battery_optimizer.check_ev_safe(ev_load_wh=0.0)
                 )
-            self._battery_reaches_target = reaches_target
-            self._battery_min_soc_forecast = soc_at_target
+            self._ev_safe = ev_safe
+            self._battery_min_soc_forecast = min_soc_forecast
 
             if ev_charging_source == "none" and ev_mode == "solar":
                 # Explain why neither rule fired
@@ -1225,11 +1064,11 @@ class EnergyManager:
                     "reason": ev_source_reason,
                     "ev_charging_rule": ev_charging_source,
                     "battery_soc": battery_soc,
-                    "battery_forecast_soc": self._battery_min_soc_forecast,
+                    "battery_min_soc_forecast_48h": self._battery_min_soc_forecast,
+                    "battery_min_soc_floor": self.optimizer.min_soc_percent,
                     "battery_will_be_full": battery_will_be_full,
                     "battery_full_time": battery_full_time,
-                    "battery_will_hit_min": battery_will_hit_min,
-                    "reaches_target": reaches_target,
+                    "ev_safe": self._ev_safe,
                     "threshold_w": ev_threshold,
                     "surplus_power_w": surplus_power,
                     "grid_export_w": grid_export,

@@ -59,7 +59,9 @@ ev_charging:
   # Wallbox power limits (1-phase: 1400–3700, 3-phase: 4100–11000, switchable: 1400–11000)
   min_power_w: 1400
   max_power_w: 11000
-  battery_protection_soc: 80        # Block EV until battery forecast reaches this %
+  # EV safety rule: charging is allowed only while the home-battery SOC
+  # forecast stays >= battery.reserve_percent across the next 48 h (with
+  # the candidate EV load subtracted). No per-EV threshold is required.
   auto_reset_timeout_min: 5         # Minutes of 0W before auto-revert to solar
 
   # Entity overrides (defaults should work for most setups)

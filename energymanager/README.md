@@ -56,8 +56,13 @@ ev_charging:
   enabled: true
   min_power_w: 1400       # 1-phase 6A
   max_power_w: 11000      # 3-phase 16A
-  battery_protection_soc: 80
 ```
+
+EV safety rule: charging is allowed only while the home-battery SOC forecast stays
+≥ `battery.reserve_percent` across the next 48 h (with the candidate EV load
+subtracted). The check re-runs every 15 min — if the forecast drops below the
+floor, EV charging stops immediately and the battery (now EV-free) rides the
+remaining forecast back up.
 
 ### Sensors
 
