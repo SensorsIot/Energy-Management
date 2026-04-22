@@ -6,6 +6,7 @@ import logging
 import warnings
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from influxdb_client import InfluxDBClient
@@ -13,6 +14,16 @@ from influxdb_client.client.warnings import MissingPivotFunction
 
 # Suppress InfluxDB pivot warning - we handle the data format ourselves
 warnings.filterwarnings("ignore", category=MissingPivotFunction)
+
+SWISS_TZ = ZoneInfo("Europe/Zurich")
+
+
+def _swiss(ts) -> str:
+    """Format a timezone-aware timestamp (or naive UTC) in Swiss local time."""
+    if getattr(ts, "tzinfo", None) is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(SWISS_TZ).strftime("%Y-%m-%d %H:%M")
+
 
 logger = logging.getLogger(__name__)
 
@@ -161,9 +172,6 @@ class ForecastReader:
         df = pd.DataFrame({"pv_energy_wh": pv, "load_energy_wh": load})
         df = df.dropna()
 
-        # Filter to requested time range (InfluxDB may return extra data)
-        logger.info(f"DEBUG: Before filter: {len(df)} rows, range {df.index.min()} to {df.index.max()}")
-
         # Ensure start/end are timezone-aware UTC for comparison with df.index
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
@@ -174,20 +182,24 @@ class ForecastReader:
         else:
             end = end.astimezone(timezone.utc)
 
-        # Ensure df.index is UTC
+        # Ensure df.index is UTC (internal convention; logs render Swiss local)
         if df.index.tz is None:
             df.index = df.index.tz_localize('UTC')
         else:
             df.index = df.index.tz_convert('UTC')
 
-        logger.info(f"DEBUG: Filtering to start={start}, end={end}")
+        logger.debug(
+            f"Filter: {len(df)} rows pre, window {_swiss(start)} → {_swiss(end)}"
+        )
         df = df[(df.index >= start) & (df.index < end)]
-        logger.info(f"DEBUG: After filter: {len(df)} rows")
 
         # Calculate net energy (positive = surplus, negative = deficit)
         df["net_energy_wh"] = df["pv_energy_wh"] - df["load_energy_wh"]
 
-        logger.info(f"Loaded {len(df)} forecast periods from {df.index.min()} to {df.index.max()}")
+        logger.info(
+            f"Loaded {len(df)} forecast periods from "
+            f"{_swiss(df.index.min())} to {_swiss(df.index.max())}"
+        )
 
         return df
 

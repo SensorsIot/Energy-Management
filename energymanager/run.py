@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.4"
+__version__ = "1.8.5"
 
 import json
 import logging
@@ -512,7 +512,7 @@ class EnergyManager:
         try:
             # Get current SOC
             current_soc = self.get_current_soc()
-            logger.info(f"DEBUG: Current battery SOC from get_current_soc(): {current_soc:.1f}%")
+            logger.debug(f"Current battery SOC: {current_soc:.1f}%")
 
             # Get forecast
             now = datetime.now(timezone.utc)
@@ -541,8 +541,10 @@ class EnergyManager:
                 return
 
             logger.info(f"Got {len(forecast)} forecast periods")
-            logger.info(f"DEBUG: Forecast first timestamp: {forecast.index[0]}")
-            logger.info(f"DEBUG: Forecast last timestamp: {forecast.index[-1]}")
+            logger.debug(
+                f"Forecast range: {swiss_datetime(forecast.index[0])} → "
+                f"{swiss_datetime(forecast.index[-1])}"
+            )
 
             # Calculate discharge decision
             decision, sim_no_strategy, sim_with_strategy = self.optimizer.calculate_decision(
@@ -552,10 +554,11 @@ class EnergyManager:
                 previously_blocked=self._discharge_blocked_by_protection,
             )
 
-            # Debug: log first few simulation points
             if not sim_no_strategy.empty:
-                logger.info(f"DEBUG: Simulation first timestamp: {sim_no_strategy.index[0]}")
-                logger.info(f"DEBUG: Simulation first SOC: {sim_no_strategy['soc_percent'].iloc[0]:.1f}%")
+                logger.debug(
+                    f"Simulation first: {swiss_datetime(sim_no_strategy.index[0])} "
+                    f"SOC={sim_no_strategy['soc_percent'].iloc[0]:.1f}%"
+                )
 
             # Log decision
             logger.info(f"Decision: discharge_allowed={decision.discharge_allowed}, "
@@ -1233,7 +1236,7 @@ class EnergyManager:
         # Log next run time
         job = self.scheduler.get_job("optimization")
         if job:
-            logger.info(f"Next optimization at {job.next_run_time}")
+            logger.info(f"Next optimization at {swiss_datetime(job.next_run_time)}")
 
     def stop(self):
         """Stop the scheduler."""

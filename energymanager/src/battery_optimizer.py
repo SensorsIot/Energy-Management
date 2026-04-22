@@ -344,8 +344,8 @@ class BatteryOptimizer:
         """
         tariff = self.get_tariff_periods(now)
 
-        logger.info(f"Tariff: cheap={tariff.is_cheap_now}, "
-                   f"cheap_end={tariff.cheap_end}, target={tariff.target}")
+        logger.debug(f"Tariff: cheap={tariff.is_cheap_now}, "
+                    f"cheap_end={tariff.cheap_end}, target={tariff.target}")
 
         if forecast.empty:
             logger.warning("No forecast data available")
