@@ -9,18 +9,18 @@ Household energy optimizer for PV self-consumption, battery discharge control, E
 
 ## Features
 
-- **Battery Discharge Control**: Blocks discharge during cheap tariff hours when PV forecast is insufficient, ensuring stored energy covers expensive-hour consumption
-- **EV Charging (4 modes)**: Solar excess tracking (closed-loop), immediate, cheap-tariff, and normal (off)
+- **Battery Discharge Control**: Blocks discharge during cheap tariff hours when the PV forecast is insufficient, so stored energy covers expensive-hour consumption
+- **EV Charging (4 modes)**: Solar surplus with a 48-h min-SOC safety rule, immediate, cheap-tariff, and off
 - **Appliance Signal**: Traffic-light signal (GREEN/ORANGE/RED) indicating whether to run high-power appliances
-- **Smart Car SOC**: Reads EV battery level from Hello Smart API and publishes as HA sensor
+- **Smart Car SOC**: Reads EV battery level from the Hello Smart API and publishes as a HA sensor
 - **SOC Simulation**: Forward-looking battery state-of-charge simulation using PV and load forecasts
 - **InfluxDB Output**: Writes decisions and SOC forecasts for Grafana dashboards
 
 ## How It Works
 
-1. **Every 15 minutes**: Fetches PV and load forecasts from InfluxDB, simulates battery SOC forward, decides whether to block discharge, computes appliance signal
-2. **Every 60 seconds**: Reads grid power and wallbox state, calculates solar excess, adjusts wallbox power limit via closed-loop control
-3. **Adaptive Smart car SOC polling**: Every 1 minute during active charging, immediately on car connection, every 60 minutes otherwise. Authenticated client is cached to reduce API calls (2 requests per cached poll vs 6 for full re-auth)
+1. **Every 15 minutes**: fetches PV and load forecasts from InfluxDB, simulates home-battery SOC forward, decides whether to block discharge, computes the appliance signal, and primes the EV safety cache
+2. **Every 10 seconds**: reads live `sensor.surplus_power` (PV − house_load), evaluates the EV charging rule, and sets the wallbox power limit. The 48-h safety gate reads the cached SOC forecast rather than re-querying InfluxDB every cycle
+3. **Adaptive Smart car SOC polling**: every 60 s while charging, immediately on car connection or mode change, every 60 min otherwise. The authenticated client is cached (2 requests per cached poll vs 6 for full re-auth)
 
 ## Installation
 
@@ -83,19 +83,19 @@ Control via `input_select.ev_charging_mode`:
 
 | Mode | Behavior |
 |------|----------|
-| **solar** | Track solar excess via grid meter feedback. Battery protection blocks EV if forecast SOC at 21:00 < 80% |
-| **immediate** | Charge at max power |
+| **solar** | Follow `sensor.surplus_power` (PV − house_load). EV runs only while the 48-h min home-battery SOC forecast stays ≥ `ev_charging.reserve_percent` (default 20 %) |
+| **immediate** | Charge at max power regardless of tariff |
 | **cheap** | Charge at max during cheap tariff, pause during expensive |
 
 ## Appliance Signal
 
-Published as `sensor.appliance_signal`:
+Published as `sensor.appliance_signal`. Reuses the home-battery SOC simulation and subtracts the appliance energy:
 
 | Signal | Meaning |
 |--------|---------|
-| **GREEN** | PV excess above appliance threshold right now |
-| **ORANGE** | Battery forecast stays above reserve threshold |
-| **RED** | Insufficient energy — defer appliance use |
+| **GREEN** | Current PV excess exceeds appliance power — run on pure solar |
+| **ORANGE** | Running now would *not* force grid import before 21:00 (battery covers it) |
+| **RED** | Running now would force grid import before 21:00 — defer |
 
 ## Requirements
 
