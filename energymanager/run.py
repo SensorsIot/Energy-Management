@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.2"
+__version__ = "1.8.3"
 
 import json
 import logging
@@ -70,6 +70,11 @@ logging.basicConfig(
 # Apply Swiss formatter to root logger
 for handler in logging.root.handlers:
     handler.setFormatter(SwissFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
+
+# Silence apscheduler's per-cycle "Running job…" / "executed successfully"
+# chatter (and its UTC timestamps). Warnings still surface.
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
 
 logger = logging.getLogger("energymanager")
 
@@ -226,6 +231,10 @@ class EnergyManager:
         self._last_mode_error_notified: str | None = None
         self._ev_safe: bool = False
         self._battery_min_soc_forecast: float = 0.0
+        # Log dedup: one INFO line per state/power change; DEBUG between,
+        # with an INFO heartbeat every 60 s so the log stays alive while idle.
+        self._ev_log_signature: tuple | None = None
+        self._ev_log_last_info_monotonic: float = 0.0
         # Layer-2 EV decision helper — bound in connect() once influx_client exists
         self.ev_battery_optimizer: EVBatteryOptimizer | None = None
 
@@ -881,11 +890,14 @@ class EnergyManager:
                     )
                     ev_charging_source = "none"
             else:
-                # No EV candidate — still compute diagnostics for dashboard
-                battery_will_be_full, _, battery_full_time, _ = self.ev_battery_optimizer.will_battery_hit_full()
-                ev_safe, min_soc_forecast = (
-                    self.ev_battery_optimizer.check_ev_safe(ev_load_wh=0.0)
-                )
+                # No EV candidate (surplus below threshold, mode not solar,
+                # or wallbox unplugged). Skip the Influx queries — ~17k
+                # unnecessary Flux round-trips per day when idle. Use
+                # cached/default values for the dashboard.
+                ev_safe = self._ev_safe
+                min_soc_forecast = self._battery_min_soc_forecast
+                battery_will_be_full = False
+                battery_full_time = None
             self._ev_safe = ev_safe
             self._battery_min_soc_forecast = min_soc_forecast
 
@@ -928,10 +940,49 @@ class EnergyManager:
             prev_ev_state = self._ev_sm.state
             output = self._ev_sm.step(inputs)
 
-            logger.info(
-                f"EV [{output.state.value}] {output.target_power_w:.0f}W "
-                f"({ev_charging_source}) — {ev_source_reason}"
+            # Dense one-line decision log with all inputs needed to
+            # reconstruct the verdict. Deduped: INFO on state/power
+            # change, DEBUG otherwise, with a 60 s INFO heartbeat.
+            parts = [f"EV [{output.state.value}] {output.target_power_w:.0f}W"]
+            parts.append(f"mode={ev_mode}")
+            if ev_mode == "solar":
+                op = (
+                    "≥" if surplus_power >= ev_threshold else "<"
+                ) if ev_threshold else "="
+                parts.append(
+                    f"surplus={surplus_power:.0f}W{op}{ev_threshold:.0f}W"
+                )
+                parts.append(f"batt={battery_soc:.0f}%")
+                if ev_charging_source != "none" or ev_safe is False:
+                    floor_op = (
+                        "≥" if min_soc_forecast >= self.ev_reserve_percent else "<"
+                    )
+                    parts.append(
+                        f"min48h={min_soc_forecast:.0f}%"
+                        f"{floor_op}{self.ev_reserve_percent:.0f}%"
+                    )
+            else:
+                parts.append(f"batt={battery_soc:.0f}%")
+            parts.append(f"src={ev_charging_source}")
+            ev_log_line = "  ".join(parts)
+
+            signature = (
+                output.state.value,
+                int(output.target_power_w),
+                ev_charging_source,
+                ev_safe,
             )
+            now_mono = time.monotonic()
+            changed = signature != self._ev_log_signature
+            heartbeat_due = (
+                now_mono - self._ev_log_last_info_monotonic >= 60
+            )
+            if changed or heartbeat_due:
+                logger.info(ev_log_line)
+                self._ev_log_signature = signature
+                self._ev_log_last_info_monotonic = now_mono
+            else:
+                logger.debug(ev_log_line)
 
             # Auto-revert: immediate/cheap idle timeout → switch mode back to solar
             if wallbox_idle and ev_mode in ("immediate", "cheap"):

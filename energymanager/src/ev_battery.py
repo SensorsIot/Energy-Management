@@ -80,7 +80,7 @@ class EVBatteryOptimizer:
 
             hours = self.horizon.total_seconds() / 3600
             load_note = f" (with EV {ev_load_wh:.0f}Wh)" if ev_load_wh > 0 else ""
-            logger.info(
+            logger.debug(
                 f"EV safety: min SOC over next {hours:.0f}h={min_soc:.0f}%"
                 f"{load_note} (floor={self.min_soc_percent:.0f}%) → "
                 f"{'EV allowed' if safe else 'EV blocked'}"
