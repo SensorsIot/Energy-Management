@@ -5,7 +5,7 @@ EnergyManager Add-on for Home Assistant.
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.1"
+__version__ = "1.8.2"
 
 import json
 import logging
@@ -215,6 +215,12 @@ class EnergyManager:
             "car_ready_entity", "binary_sensor.car_ready"
         )
         self.ev_auto_reset_timeout_min = ev_opts.get("auto_reset_timeout_min", 5)
+        # EV safety rule floor — independent from battery.reserve_percent.
+        # The nightly battery-discharge block uses battery.reserve_percent
+        # to gate discharge during expensive hours; the EV safety rule uses
+        # this higher floor to keep a buffer for house consumption before
+        # it diverts surplus to the car. See FSD 4.3.6.
+        self.ev_reserve_percent = ev_opts.get("reserve_percent", 20)
         self._ev_idle_since: datetime | None = None
         self._observer = IntegrationObserver() if self.ev_charging_enabled else None
         self._last_mode_error_notified: str | None = None
@@ -252,7 +258,7 @@ class EnergyManager:
             influx_client=self.influx_client,
             bucket=self.output_bucket,
             capacity_wh=self.capacity_wh,
-            min_soc_percent=self.optimizer.min_soc_percent,
+            min_soc_percent=self.ev_reserve_percent,
         )
         logger.info("Connected successfully")
 
@@ -818,7 +824,7 @@ class EnergyManager:
             # Rule: EV is allowed only if the home-battery SOC forecast
             # stays >= min_soc_percent across the next 48 h with the EV
             # load subtracted. Re-evaluated every 15 min (self-correcting).
-            min_soc_floor = self.optimizer.min_soc_percent
+            min_soc_floor = self.ev_reserve_percent
             if battery_soc >= 100:
                 # Battery already full (Rule 1 set power above). No safety
                 # check needed — SOC can only go down from here.
@@ -1005,7 +1011,7 @@ class EnergyManager:
                     "ev_charging_rule": ev_charging_source,
                     "battery_soc": battery_soc,
                     "battery_min_soc_forecast_48h": self._battery_min_soc_forecast,
-                    "battery_min_soc_floor": self.optimizer.min_soc_percent,
+                    "battery_min_soc_floor": self.ev_reserve_percent,
                     "battery_will_be_full": battery_will_be_full,
                     "battery_full_time": battery_full_time,
                     "ev_safe": self._ev_safe,

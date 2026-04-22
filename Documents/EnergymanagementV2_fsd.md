@@ -1628,16 +1628,24 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 
 `BatteryOptimizer.get_tariff_periods(now)` returns `(cheap_start, cheap_end, target, is_cheap_now)`. `target` is used only by the home-battery discharge rule; EV and washer rules do not consult it. Holidays come from a calendar integration (future: HA calendar entity).
 
-### 4.1.4 Battery configuration (YAML `battery`)
+### 4.1.4 Battery configuration
+
+**YAML `battery`:**
 
 | Key | Default | Used by |
 |---|---|---|
 | `capacity_kwh` | 10.0 | Simulator (Wh conversions), EV safety (load → SOC % conversion) |
-| `reserve_percent` | 10 | Home-battery discharge floor AND EV safety floor (shared *value*, independent *rules*) |
+| `reserve_percent` | 0 | Home-battery discharge floor during expensive hours (Section 4.2.2) |
 | `charge_efficiency` | 0.95 | Simulator (charge branch) |
 | `discharge_efficiency` | 0.95 | Simulator (discharge branch) |
 | `soc_entity` | `sensor.battery_state_of_capacity` | Current SOC readback |
 | `discharge_control_entity` | `number.battery_maximum_discharging_power` | Control output |
+
+**YAML `ev_charging` — safety-rule floor (independent from `battery.reserve_percent`):**
+
+| Key | Default | Used by |
+|---|---|---|
+| `reserve_percent` | 20 | EV safety rule floor (Section 4.3.6) — 48-h min-SOC threshold below which EV charging stops |
 
 ### 4.1.5 Time and unit conventions
 
@@ -2110,7 +2118,7 @@ The deciding factor is **battery state**: is the battery full, or is it still ch
   battery_soc      = current battery %
   pv_forecast      = forecasted PV production (Section 4.1.1)
   load_forecast    = forecasted household load (Section 4.1.1)
-  min_soc_floor    = battery.reserve_percent (shared value, independent rule)
+  min_soc_floor    = ev_charging.reserve_percent (default 20%)
   horizon          = 48 hours
 
                       OUTPUTS
@@ -2181,7 +2189,7 @@ The battery is still charging — surplus exists (PV > house load) but the batte
 - **Safety rule** (Layer 2, `EVBatteryOptimizer.check_ev_safe`):
 
 > Allow EV charging only if the forecast home-battery SOC stays
-> **≥ `min_soc_percent` (= `battery.reserve_percent`) at every point across
+> **≥ `ev_charging.reserve_percent` (default 20 %) at every point across
 > the next 48 hours**, with the candidate EV load (power × 0.25h) subtracted
 > from the forecast as worst-case.
 
@@ -2197,7 +2205,7 @@ The battery is still charging — surplus exists (PV > house load) but the batte
 
 The iteration tries the step **above** the snapped surplus first (snap-up — the battery bridges the small gap for maximum solar utilisation), then steps down through lower amp levels until a step passes or the threshold is reached.
 
-**Independence from nightly battery protection.** The nightly battery-discharge block (Section 4.2.2) and this EV safety gate share only the *value* `min_soc_percent`. They answer different questions: the discharge gate guards against grid import during expensive hours by filtering the simulation to expensive-hour points; this EV gate guards against grid import at any time by taking the min across the full 48-h horizon. The two rules evolve independently.
+**Independence from nightly battery protection.** The nightly battery-discharge block (Section 4.2.2) uses `battery.reserve_percent`; this EV safety gate uses `ev_charging.reserve_percent`. They are **separate config values**: the discharge gate defends the last sliver of battery during expensive hours; the EV gate keeps a larger buffer for house consumption before diverting surplus to the car (default **20 %** vs typically 5–10 % for the discharge floor). The two rules evolve independently.
 
 #### Snap-to-Power Step
 
@@ -3739,9 +3747,10 @@ See Section 4.3.7 for adaptive polling logic.
 
 **End of Document**
 
-*Version 2.46 - April 2026*
+*Version 2.47 - April 2026*
 
 **Changelog:**
+- v2.47: Split the EV safety floor from `battery.reserve_percent`. Added **`ev_charging.reserve_percent`** (default **20 %**) — an independent config option for the 48-h EV safety rule. Rationale: `battery.reserve_percent` = 0 (site default) makes the old shared rule toothless because the simulator clamps SOC at 0, so `min_soc >= 0` is always true. The two floors now answer different questions and evolve independently. Updated Section 4.1.4 (Battery configuration), Section 4.3.6 (Safety rule + "Independence from nightly battery protection"), example YAML, and README. (v1.8.2)
 - v2.46: Moved `will_battery_hit_full()` from the main runtime class into `EVBatteryOptimizer` (its only caller). Dropped the misnamed "Shared Forecast Helpers" section — it had no shared helpers left. Folded the `will_battery_hit_full` description into Section 4.3.6 as a dashboard-diagnostic subsection. Renumbered 4.6 → 4.5, 4.7 → 4.6, 4.8 → 4.7 for InfluxDB Storage / Dashboard / Error Handling. Also: `_extra_load_percent` remains a private helper on each consumer class (one line of `wh / capacity_wh × 100`) — not worth extracting. 2 new unit tests covering the moved method. (v1.8.1)
 - v2.45: Restructured Chapter 4 into a consumer-oriented layout — each decision block (home battery, EV battery, washer) is now a self-contained section covering its forecasts and rules. New **Section 4.1 Prerequisites** consolidates all shared inputs (PV forecast, load forecast, live SOC, tariff schedule, battery configuration, time/unit conventions) previously scattered across the chapter. Former separate sections collapsed into one per consumer: 4.2 Home Battery (sim + discharge rule), 4.3 EV Battery (state machine + power calc + 48-h safety rule + car SOC polling + car SOC forecast — merges the previous duplicate "## 4.6" numbering bug), 4.4 Washer (Appliance Signal), 4.5 Shared Forecast Helpers. Renumbered downstream: 4.6 InfluxDB Storage, 4.7 Dashboard, 4.8 Error Handling. Documentation-only; no code changes.
 - v2.44: Replaced the EV battery-protection gate with a self-correcting 48-h min-SOC rule (Section 4.3.6). Root cause: the old rule targeted `tariff.target`, which during daytime (06:00–21:00) resolved to **tomorrow's** 21:00 — giving the forecast a full extra sun-day of headroom, so `reaches_target` stayed true all day even as the actual battery never climbed past ~48%. New rule: EV is allowed only while the home-battery SOC forecast stays ≥ `battery.reserve_percent` at every point across the next 48 h, with one 15-min slot of the candidate EV load subtracted as worst case. Re-evaluated every 15 min — if the forecast drops below the floor, EV stops and the battery (now EV-free) rides the remaining forecast back up. New module `src/ev_battery.py` (`EVBatteryOptimizer.check_ev_safe`); deleted `check_battery_protection`, `will_battery_hit_minimum`, `get_forecast_soc_at_target`; removed `ev_charging.battery_protection_soc` config (no per-EV target needed). Sensor attrs: `reaches_target`/`battery_will_hit_min`/`battery_forecast_soc` → `ev_safe`/`battery_min_soc_forecast_48h`/`battery_min_soc_floor`. 8 new unit tests (`test_ev_battery.py`); `test_power_calculation.py` `battery_check_fn` signature collapsed from `(bool,bool)` to `bool` (v1.8.0)

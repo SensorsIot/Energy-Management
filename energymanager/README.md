@@ -54,15 +54,18 @@ battery:
 ```yaml
 ev_charging:
   enabled: true
-  min_power_w: 1400       # 1-phase 6A
-  max_power_w: 11000      # 3-phase 16A
+  min_power_w: 1400        # 1-phase 6A
+  max_power_w: 11000       # 3-phase 16A
+  reserve_percent: 20      # EV safety floor (independent of battery.reserve_percent)
 ```
 
 EV safety rule: charging is allowed only while the home-battery SOC forecast stays
-≥ `battery.reserve_percent` across the next 48 h (with the candidate EV load
+≥ `ev_charging.reserve_percent` across the next 48 h (with the candidate EV load
 subtracted). The check re-runs every 15 min — if the forecast drops below the
 floor, EV charging stops immediately and the battery (now EV-free) rides the
-remaining forecast back up.
+remaining forecast back up. Set this **higher** than `battery.reserve_percent`:
+the nightly discharge gate defends the last sliver of battery; this gate keeps
+a buffer for house consumption before diverting surplus to the car.
 
 ### Sensors
 

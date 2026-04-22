@@ -60,8 +60,11 @@ ev_charging:
   min_power_w: 1400
   max_power_w: 11000
   # EV safety rule: charging is allowed only while the home-battery SOC
-  # forecast stays >= battery.reserve_percent across the next 48 h (with
-  # the candidate EV load subtracted). No per-EV threshold is required.
+  # forecast stays >= reserve_percent across the next 48 h (with the
+  # candidate EV load subtracted). Independent of battery.reserve_percent
+  # (which gates nightly discharge) — set this higher to keep a buffer
+  # for house consumption before diverting surplus to the car.
+  reserve_percent: 20
   auto_reset_timeout_min: 5         # Minutes of 0W before auto-revert to solar
 
   # Entity overrides (defaults should work for most setups)
