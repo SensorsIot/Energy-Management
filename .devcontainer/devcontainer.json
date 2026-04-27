@@ -1,10 +1,10 @@
 {
-    "name": "Energy-Management - Python Development",
+    "name": "HomeAssistant - Python Development",
     "build": {
         "dockerfile": "Dockerfile",
         "context": ".."
     },
-    "workspaceFolder": "/workspaces/Energy-Management",
+    "workspaceFolder": "/workspaces/HomeAssistant",
     "customizations": {
         "vscode": {
             "extensions": [
@@ -37,7 +37,7 @@
             "version": "latest"
         }
     },
-    "runArgs": ["--name", "energy-management"],
+    "runArgs": ["--name", "homeassistant"],
     "appPort": ["2224:2222"],
     "postStartCommand": "sudo /etc/init.d/ssh start",
     "postCreateCommand": "git config --global credential.helper store && git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' && (git clone https://github.com/SensorsIot/claude.git ~/.claude 2>/dev/null || (cd ~/.claude && git pull)) && npm install -g @anthropic-ai/claude-code && claude install && mkdir -p ~/.claude-data/projects && ln -sf ~/.claude-data/.credentials.json ~/.claude/.credentials.json && ln -sf ~/.claude-data/history.jsonl ~/.claude/history.jsonl && rm -rf ~/.claude/projects && ln -sf ~/.claude-data/projects ~/.claude/projects && ln -sf ~/.claude-data/.claude.json ~/.claude.json && echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc && echo 'alias superclaude=\"claude --dangerously-skip-permissions\"' >> ~/.bashrc && pip install --break-system-packages -r requirements-dev.txt",

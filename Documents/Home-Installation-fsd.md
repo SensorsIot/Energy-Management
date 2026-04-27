@@ -1,6 +1,6 @@
 # Home Installation
 
-**Last Updated:** 2026-03-31
+**Last Updated:** 2026-04-27
 
 ## 1. Overview
 This document consolidates operational knowledge needed to maintain the home infrastructure and automation stack.
@@ -8,7 +8,7 @@ This document consolidates operational knowledge needed to maintain the home inf
 Key scope
 - Host and virtualization: Proxmox with VMs/containers for services.
 - Core services: IoTstack, Home Assistant, MQTT, InfluxDB, Grafana.
-- Field systems: Zigbee devices, smart meter (MBUS/gPlug/Tasmota), PV plant (Huawei SUN2000), wallbox/EV charging (OCPP via ESP32 OCPP Server).
+- Field systems: Zigbee devices, smart meter (MBUS/gPlug/Tasmota), PV plant (Huawei SUN2000), wallbox/EV charging (OCPP Server add-on).
 - Data flow: sensor data -> MQTT -> HA/InfluxDB -> Grafana/HA dashboards.
 
 Support goals
@@ -18,6 +18,7 @@ Support goals
 
 Operational notes
 - Credentials and tokens exist across the legacy docs; consolidate into a secured secret store and remove from plaintext references.
+- ESPHome YAML credentials were migrated to `!secret` references on 2026-04-27. Rotate previously exposed values later and keep reusable credentials in `/homeassistant/esphome/secrets.yaml`.
 - Use a change log for system modifications and document versions.
 
 Secrets store (proposal)
@@ -38,7 +39,7 @@ Notes / gaps to resolve
 ## 2. Architecture and data flow
 High-level service graph
 - Proxmox host (192.168.0.230) runs 8 VMs + 1 LXC container.
-- **HA OS VM** (192.168.0.202): Home Assistant with add-ons (ESPHome, Frigate, Modbus-proxy, Energy forecasting, OCPP Server, Nginx Proxy Manager).
+- **HA OS VM** (192.168.0.202): Home Assistant with add-ons (ESPHome, Modbus-proxy, Energy forecasting, OCPP Server, Nginx Proxy Manager).
 - **IoTstack VM** (192.168.0.203): Docker containers for Mosquitto (MQTT), Node-RED, InfluxDB 2.x, Grafana, Portainer.
 - **Zigbee:** ZHA integration directly in HA (not Zigbee2MQTT). USB coordinator passed through from Proxmox.
 - **Field devices:** ESPHome (alarm bell, water meter, mailbox, BT proxy), Tasmota (Enphase), Shelly (3EM, 2PM), Zigbee sensors, 433 MHz weather gateway.
@@ -91,15 +92,16 @@ HA OS VM (core + add-ons)
                    |
           +--------+-----------------------------+
           |            HA Add-ons                |
-          |  - ESPHome, Frigate                  |
+          |  - ESPHome                           |
           |  - modbus-proxy (:502)               |
           |  - SwissSolarForecast, LoadForecast  |
+          |  - EnergyManager, OCPP Server        |
           +--------+-----------------------------+
                    |
       +------------+-------------+-------------+
       |                          |             |
   Smart meter                  PV plant       Wallbox
-  (gPlug/Tasmota)              (SUN2000)      (OCPP/ESP32)
+  (gPlug/Tasmota)              (SUN2000)      (OCPP add-on)
 ```
 
 Primary data flow (support view)
@@ -109,7 +111,7 @@ Primary data flow (support view)
 - Home Assistant -> InfluxDB (HomeAssistant bucket) -> energy bucket consolidation tasks.
 - Huawei SUN2000 data -> InfluxDB (HuaweiNew bucket) -> EnergyV1 bucket via InfluxDB tasks.
 - Smart meter (gPlug) -> MQTT bridge from provisioning server -> local MQTT -> Home Assistant -> InfluxDB.
-- Wallbox -> ESP32 OCPP Server -> MQTT broker -> Home Assistant (status/controls).
+- Wallbox -> OCPP Server add-on -> Home Assistant (status/controls and power limit).
 
 Important paths/locations for support
 - InfluxDB data: /var/lib/influxdb
@@ -396,7 +398,7 @@ Inventory table (updated 2026-03-27)
 | 113 | LXC | aredn-dev | 2 GB | - | stopped | AREDN dev container. |  |
 | 114 | LXC | reverse | - | - | stopped | Reverse proxy container. |  |
 | 115 | LXC | esp-idf | 2 GB | - | stopped | ESP-IDF build/dev container. | Passthrough: /dev/ttyACM0, /dev/ttyUSB0. |
-| 117 | LXC | ~~evcc~~ | 2 GB | - | decommissioned | Replaced by ESP32 OCPP Server (dedicated hardware). | Can be deleted. |
+| 117 | LXC | ~~evcc~~ | 2 GB | - | decommissioned | Replaced by OCPP Server HA add-on. | Can be deleted. |
 | 118 | LXC | adguard | 512 MB | - | running | AdGuard (DNS/adblock). |  |
 | 130 | LXC | MasterOfDesaster | - | - | stopped | MasterOfDesaster container. |  |
 
@@ -569,18 +571,15 @@ cleansession true
 
 ### 7.1 System overview and versions
 
-**Last inventory:** 2026-03-27
+**Last inventory:** 2026-04-26
 
 | Component | Version | Status |
 |-----------|---------|--------|
-| Core | 2026.3.4 | Current |
-| Supervisor | 2026.03.2 | Current |
-| OS | 17.1 | Current |
-| Docker | 29.1.3 | Current |
+| Core | 2026.3.4 | (latest 2026.4.4 — pending) |
+| Supervisor | 2026.4.2 | Current |
+| OS | 17.2 | Current |
 | Machine | qemux86-64 (KVM) | Healthy |
 | Architecture | amd64 | - |
-
-**Resolution issues:** No current backup (suggestion: create full backup).
 
 - Recorder: purge_keep_days=7, auto_purge=true
 - Timezone: Europe/Zurich
@@ -602,22 +601,33 @@ cleansession true
 
 ### 7.4 Add-ons (active)
 
-**Last inventory:** 2026-03-27
+**Last inventory:** 2026-04-26
 
 | Add-on | Version | State | Repository | Description |
 |--------|---------|-------|------------|-------------|
-| ESPHome Device Builder | 2026.3.1 | ✅ started | ESPHome (5c53de3b) | Build smart home devices |
-| File editor | 5.8.0 | ✅ started | Core | Browser-based file editor |
-| Advanced SSH & Web Terminal | 23.0.3 | ✅ started | Community (a0d7b954) | SSH & terminal access |
+| ESPHome Device Builder | 2026.3.3 | ✅ started | ESPHome (5c53de3b) | Build smart home devices |
+| File editor | 6.0.0 | ✅ started | Core | Browser-based file editor |
+| Advanced SSH & Web Terminal | 23.0.6 | ✅ started | Community (a0d7b954) | SSH & terminal access |
 | Studio Code Server | 6.0.1 | ✅ started | Community (a0d7b954) | VS Code in browser |
-| Matter Server | 8.3.0 | ✅ started | Core | Matter protocol support |
-| Frigate | 0.17.1 | ✅ started | Frigate (ccab4aaf) | NVR with object detection |
-| modbus-proxy | 1.0.18 | ✅ started | Modbus Proxy (bc3b947b) | Multi-client Modbus proxy |
+| Matter Server | 8.4.0 | ✅ started | Core | Matter protocol support (no devices paired yet) |
+| modbus-proxy | 1.0.18 | ✅ started | Modbus Proxy (bc3b947b) | Multi-client Modbus proxy (Huawei inverter) |
 | SwissSolarForecast | 1.3.4 | ✅ started | Energy Management (8d023bea) | PV power forecasting |
-| LoadForecast | 1.2.4 | ✅ started | Energy Management (8d023bea) | Load consumption forecasting |
-| EnergyManager | 1.6.96 | ✅ started | Energy Management (8d023bea) | Energy optimization signals |
-| OCPP Server | 0.9.53 | ✅ started | Energy Management (8d023bea) | OCPP 1.6j wallbox server |
+| LoadForecast | 1.2.6 | ✅ started | Energy Management (8d023bea) | Load consumption forecasting |
+| EnergyManager | 1.8.5 | ✅ started | Energy Management (8d023bea) | Energy optimization signals |
+| OCPP Server | 0.9.56 | ✅ started | Energy Management (8d023bea) | OCPP 1.6j wallbox server |
 | Nginx Proxy Manager | 2.1.0 | ✅ started | Community (a0d7b954) | Reverse proxy management |
+
+**Energy Management add-on documentation:**
+
+| Add-on | Short role in this installation | Detailed FSD |
+|--------|---------------------------------|--------------|
+| SwissSolarForecast | Produces PV forecast data from MeteoSwiss ICON models and writes it to InfluxDB. | [SwissSolarForecast FSD](../swisssolarforecast/Documents/swisssolarforecast-fsd.md) |
+| LoadForecast | Produces statistical household load forecasts from historical InfluxDB data. | [LoadForecast FSD](../loadforecast/Documents/loadforecast-fsd.md) |
+| EnergyManager | Consumes PV/load forecasts and live HA state to control battery discharge, EV charging, and appliance signals. | [EnergyManager FSD](../energymanager/Documents/energymanager-fsd.md) |
+| OCPP Server | Hosts the OCPP wallbox connection and exposes wallbox state/control entities to HA. | [OCPP Server FSD](../ocpp-server/Documents/ocpp-server-fsd.md) |
+
+**Removed since previous inventory:**
+- `Frigate` — uninstalled 2026-04-26 (NVR add-on with no camera connected; no Frigate entities in HA).
 
 **Add-on Repositories:**
 
@@ -626,7 +636,7 @@ cleansession true
 | Official add-ons | core | Core HA add-ons |
 | Home Assistant Community Add-ons | a0d7b954 | Community maintained |
 | ESPHome | 5c53de3b | ESPHome builder |
-| Energy Management Add-ons | 8d023bea | SwissSolarForecast, LoadForecast, EnergyManager |
+| Energy Management Add-ons | 8d023bea | SwissSolarForecast, LoadForecast, EnergyManager, OCPP Server |
 | Frigate Add-ons | ccab4aaf | Frigate NVR |
 | Modbus Proxy Repository | bc3b947b | Modbus proxy for Huawei |
 | Home Assistant Google Drive Backup | cebe7a76 | Google Drive backups |
@@ -635,7 +645,7 @@ cleansession true
 
 ### 7.5 Integrations (configured)
 
-**Last inventory:** 2026-03-27
+**Last inventory:** 2026-04-26 (post-cleanup audit)
 
 #### Energy & Solar
 
@@ -697,11 +707,10 @@ cleansession true
 
 | Integration | Title | Host/IP | Type |
 |-------------|-------|---------|------|
-| fully_kiosk | Fire Tablet | 192.168.0.197 | Kiosk display |
-| braviatv | KD-49XF9005 | 192.168.0.26 | Sony TV (ignored) |
-| androidtv_remote | KD-49XF9005 | 192.168.0.26 | Android TV remote (ignored) |
-| dlna_dmr | KD-49XF9005 | 192.168.0.26 | DLNA renderer (ignored) |
-| cast | Google Cast | - | Chromecast (ignored) |
+| fully_kiosk | Fire Tablet | 192.168.0.197 | Kiosk display (kitchen tablet) |
+
+**Configured but unused** — kept for reference only, no live entities, not used in any automation/dashboard:
+`braviatv`, `androidtv_remote`, `dlna_dmr`, `cast` (all KD-49XF9005 / generic Cast). Safe to remove via Settings → Devices & services if desired.
 
 #### Devices - Printers
 
@@ -735,8 +744,11 @@ cleansession true
 
 | Integration | Title | Details | Status |
 |-------------|-------|---------|--------|
-| smarthashtag | Smart HESYA4C44SG200806 | Smart EV | ✅ Enabled |
-| tuya | andreas.spiess@arumba.com | Tuya Cloud | ✅ Enabled |
+| smarthashtag | Smart HESYA4C44SG200806 | Smart EV (custom integration; runs with local pysmarthashtag patch — see § 7.7.1) | ✅ Enabled |
+
+**Removed since previous inventory:**
+- `evcc_intg` — uninstalled 2026-04-26. EV management is fully covered by the OCPP Server add-on + smarthashtag; the evcc bridge added 131 entities with no consumer.
+- `tuya` — uninstalled previously (no Tuya devices in use).
 
 #### System & Utilities
 
@@ -744,13 +756,14 @@ cleansession true
 |-------------|-------|---------|--------|
 | hassio | Supervisor | Add-on management | ✅ System |
 | backup | Backup | Backup management | ✅ System |
-| go2rtc | go2rtc | Video streaming | ✅ System |
 | hacs | HACS | Custom components | ✅ Enabled |
 | watchman | Watchman | Config monitoring | ✅ Enabled |
-| spook | Spook | HA enhancements (v4.0.1) | ✅ Enabled |
-| simpleicons | Simple Icons | Icon library | ✅ Enabled |
+| spook | Spook | HA enhancements | ✅ Enabled |
 | threshold | surplus_ok | Power threshold sensor | ✅ Enabled |
-| radio_browser | Radio Browser | Internet radio | ✅ Enabled |
+| nut | NUT UPS | UPS monitoring (4 entities) | ✅ Enabled |
+| telegram_bot | sensorsIOTHA | Notifications | ✅ Enabled |
+
+**Configured but unused** (kept; zero live entities): `go2rtc` (was used by Frigate), `simpleicons`, `radio_browser`. Safe to remove if desired.
 
 ### 7.6 Core configuration (configuration.yaml)
 - `default_config:` enabled.
@@ -759,7 +772,7 @@ cleansession true
 - `recorder:` 7-day retention.
 - Includes: templates, automations, scripts, scenes, sensors.
 - `mqtt:` sensors for Enphase (Tasmota), Grid Power (gPlug), and Weather Station (Fineoffset-WHx080 via OpenMQTTGateway RTL_433).
-- `mqtt_statestream:` base_topic (legacy evcc removed, wallbox now via ESP32 OCPP Server MQTT).
+- `mqtt_statestream:` base_topic (legacy evcc removed; wallbox now managed by the OCPP Server add-on).
 - `influxdb:` v2 at 192.168.0.203:8087, org `spiessa`, bucket `HomeAssistant`, include/exclude domains.
 - `command_line` sensors:
   - Solar Forecast Today/Tomorrow from `/config/scripts/query_solar_forecast.sh`.
@@ -788,12 +801,39 @@ Custom components installed in `/config/custom_components/` (updated 2026-03-27)
 - Zigbee stack is ZHA (presence of `zigbee.db` and ZHA automations)
 - Zigbee2MQTT is not configured inside HA OS (runs on IOTstack at 192.168.0.203)
 
+#### 7.7.1 Local patches to custom components
+
+The `smarthashtag` integration depends on the `pysmarthashtag` Python library, which is bundled inside HA's core container. We maintain a **local patch** to that library to add adaptive rate-limit backoff (the upstream library retried login every ~80 s after a single failure, which trips Smart's WAF and locks the API for hours).
+
+| File | Purpose |
+|------|---------|
+| `scripts/pysmarthashtag-patch/authentication.py` | Patched library file (AIMD backoff + circuit breaker) |
+| `scripts/pysmarthashtag-patch/apply.sh` | Idempotent deploy: SSH + base64 + `docker cp` to HA, with checksum guards |
+| `scripts/pysmarthashtag-patch/test_backoff.py` | Offline tests for the state machine |
+| `scripts/pysmarthashtag-patch/0001-adaptive-rate-limit-backoff.patch` | Unified diff, for replay |
+
+**When to re-apply:** after any HA core update that bumps `pysmarthashtag` (the deploy script fails loudly with a checksum mismatch — refresh the patch before re-running).
+
+**Upstream PR:** [DasBasti/pySmartHashtag #187](https://github.com/DasBasti/pySmartHashtag/pull/187) — once merged, the local patch can be retired.
+
 ### 7.8 Templates and sensors
 - `templates.yaml`: inverter power, load totals (direct from Shelly 3EM phases), power meter net energy, wallbox power, lab sub-metering (desk/bench/rest).
 - `templates/1_Sensors.yaml`: battery/grid/panel power, PV energy, calendar status sensors, mail sensor.
 - `templates/HomeAssistantSolarCalculations.yaml`: duplicate solar/load templates (legacy).
-- `sensors.yaml`: time_date + forecast sums + power_phase1 adjustments.
+- `sensors.yaml`: `time_date` only. The legacy `platform: template` sensors that lived here (`solar_forecast_today_sum`, `solar_forecast_tomorrow_sum`, `power_phase1`) were briefly migrated to modern `template:` syntax (2026-04-26) ahead of HA 2026.6's removal of the legacy syntax, then deleted entirely (2026-04-27) once it was confirmed they were summing entities from a long-since-removed `forecast_solar` integration. The one remaining consumer — the *Huawei postpone charging* automation — was re-pointed to `sensor.solar_forecast_today` from the SwissSolarForecast add-on, which provides the same kWh-day-total quantity natively.
 - `customize.yaml`: state_class fixes for energy dashboard.
+
+**Trigger-based "last-known" caches** (added 2026-04 to mask the smarthashtag integration's "unavailable when car is asleep" gaps and the Mi Smart Scale's wife-readings):
+
+| Sensor | Source | Trigger | Purpose |
+|---|---|---|---|
+| `sensor.smart_battery_last_known` | `sensor.smart_battery` | not_to ∈ {unavailable, unknown, none} | Latches last numeric SOC |
+| `sensor.smart_charging_target_last_known` | `sensor.smart_charging_target` | same | Latches last numeric target |
+| `sensor.andreas_weight` | `sensor.mi_smart_scale_32c7_mass` | same + condition `value ≥ 70 kg` | Filters wife's weighings, keeps user's last reading |
+
+Pattern: trigger fires only on state changes that match a (`not_to` + optional `condition`) gate. The sensor latches to the last triggering value; a HA restart restores the value via the recorder. See `templates.yaml` for the full definitions.
+
+**InfluxDB filter:** `sensor.mi_smart_scale_32c7_mass` is in the `influxdb.exclude.entities` list in `configuration.yaml` so wife-readings are not recorded; `sensor.andreas_weight` (already filtered ≥ 70 kg) is recorded normally.
 
 #### 7.8.1 EnergyV1 Template Sensors
 
@@ -1085,16 +1125,46 @@ mqtt:
 - AmazonFire overview chart uses `sensor.load_power` (consolidated 2026-02-19, previously `sensor.load_w`).
 - AmazonFire includes weight sensor `sensor.mi_smart_scale_32c7_mass` (Xiaomi BLE scale).
 
-### 7.11 ESPHome
-- YAML nodes: `earu-breaker`, `esphome-water-meter`, `liliane-mailbox`, `p1s-mains`, `esp32-bluetooth-proxy`, multiple `esphome-web-*`, `iphoneswitch`, `tabletswitch`.
-- ESPHome secrets stored in `/homeassistant/esphome/secrets.yaml` (see Secrets Store).
+### 7.11 ESPHome integration pointer
+- ESPHome is documented as a primary subsystem in §8 because it provides multiple edge devices, sensors, relays, BLE proxying, mailbox logic, and automation inputs.
+- HA integration entries are still tracked in §7.5; device firmware/configuration ownership is tracked in §8.
 
 ### 7.12 Backups and storage
 - Google Drive Backup add-on enabled.
 - `backup.db` present; `backup_config.yaml` appears to be a Frigate-style template (verify usage).
 - Recorder DB is `home-assistant_v2.db` (~1.2GB on disk at time of review).
 
-### 7.13 Maintenance tasks (from legacy docs)
+### 7.13 Maintenance tasks
+
+#### 7.13.1 Stale entity cleanup
+
+HA's MQTT auto-discovery accepts every device any gateway hears, so the entity registry accumulates ghost entries from neighbours' broadcasts. Two main sources observed:
+
+- **OpenMQTTGateway → rtl_433** picks up neighbours' 433 MHz weather/freezer sensors (Oregon, Acurite, Bresser, Fineoffset, inFactory, …) and auto-publishes HA discovery topics for each.
+- **iBeacon** registers every transient BLE iBeacon broadcast (Withings scales, generic Apple-format tags from passing pedestrians, e-bikes, …).
+
+The receiver side cannot reliably filter at source (OMG firmware has no per-device-ID allow-list for RTL_433), so the policy is **periodic registry purge**.
+
+**Tool:** `scripts/ha-purge-stale.py` (in this repo). Runs from the dev workspace via SSH + HA REST. Defaults:
+
+- threshold: state ∈ {unavailable, unknown, none, ""} AND `last_changed` > 30 days
+- match patterns: rtl_433 device-family prefixes + iBeacon noise UUIDs
+- keep-list: `wgx_ibeacon_93fa`, `wgx_ibeacon_bbf4`, `fineoffset_whx080` (your active devices)
+
+```bash
+# dry run (default — list candidates, no changes)
+python scripts/ha-purge-stale.py
+
+# apply: backup registry, delete matched entries, clear retained
+# MQTT discovery topics so OMG can't immediately re-create them, then
+# restart HA core
+python scripts/ha-purge-stale.py --apply --clear-mqtt
+```
+
+**Cadence:** ad-hoc, when registry feels cluttered. Two known clean-up triggers in 2026-04 (iBeacon: 690 ghosts → 10; rtl_433: pending). Expected ~quarterly.
+
+#### 7.13.2 Other maintenance recipes
+
 - Mass device deletion via browser console script (see legacy `Home Assistant.docx`).
 - MQTT discovery examples with `mosquitto_pub` for sensors.
 - Outlook integration credentials are stored in Secrets Store.
@@ -1104,16 +1174,109 @@ mqtt:
 **Current issues (2026-01-22):**
 - `appliance_signal.py` referenced in configuration.yaml but script is missing
 
-**Current versions (2026-03-31):**
-| Component | Version |
-|-----------|---------|
-| HA Core | 2026.3.4 |
-| HA OS | 17.1 |
-| ESPHome | 2026.3.1 |
-| SSH Terminal | 23.0.3 |
-| VS Code Server | 6.0.1 |
-| Matter Server | 8.3.0 |
-| Frigate | 0.17.1 |
+**Current versions (2026-04-26):** see § 7.1 (host) and § 7.4 (add-ons) for the canonical tables.
+
+---
+
+## 8. ESPHome Edge Devices
+
+ESPHome is a primary part of the Home Assistant installation, not only a device protocol. It owns edge firmware for relays, sensors, LoRa mailbox receivers, BLE proxying, water-meter pulse counting, wallbox phase switching, and several experimental boards. The ESPHome Device Builder add-on runs inside HA and stores active YAML configurations in `/homeassistant/esphome/`.
+
+### 8.1 Operating model
+
+| Item | Value |
+|------|-------|
+| HA add-on | ESPHome Device Builder |
+| Active config path | `/homeassistant/esphome/*.yaml` |
+| Secret file | `/homeassistant/esphome/secrets.yaml` |
+| HA integration | `esphome` config entries discovered by zeroconf/API |
+| Primary dependencies | Wi-Fi, HA ESPHome API, MQTT for selected nodes |
+| Documentation policy | Document node purpose, entities, and automations; never document secret values |
+| Config validation | All active YAML files pass `esphome config` as of 2026-04-27 |
+
+### 8.2 Active YAML inventory
+
+Inventory source: live HA configuration read from `/homeassistant/esphome/` on 2026-04-27 after ESPHome dashboard cleanup. `secrets.yaml` is intentionally excluded.
+
+### 8.2.1 Live HA ESPHome device inventory
+
+Inventory source: HA device/entity registry plus live state API on 2026-04-27 after ESPHome dashboard and HA registry cleanup. Stale HA config entries for `iphoneswitch`, `earu-breaker`, `ESPHome Web 4ed8d0`, `my-pc-power-remote-control`, `ESPHome Web 10fcf4`, `P1S_Mains`, and `tablet_switch` were removed from HA on 2026-04-27.
+
+| Status | Device | Summary | Key live / important entities | Notes |
+|--------|--------|---------|-------------------------------|-------|
+| Online | AlarmBell | ESP8266 relay used as office/calendar/mailbox bell | `switch.esphome_alarmbell_bell` | Used by calendar reminder and mailbox notification automations |
+| Online | ESPHome Water Meter | ESPHome pulse counter on the water meter | `sensor.esphome_water_meter_flow`, `sensor.esphome_water_meter_consumption` | Flow currently reports `0.0`; consumption counter reported `26476.0 L` during inventory |
+| Online | light-lab | Dual relay/light controller for lab PC and bench lights | `light.lab_pc`, `light.lab_bench`, `binary_sensor.dual_ls_status_2` | Used by motion-driven lab lighting automations |
+| Online | Mailbox-Notifier | LoRa mailbox receiver exposing mailbox full/empty state | `binary_sensor.esphome_web_10fcf4_mailbox_state` | Other helper buttons were unavailable during inventory; mailbox state was live |
+| Online | sonoff-s26 | Sonoff smart plug / relay device | `binary_sensor.sonoff_s20_status_2`, `switch.sonoff_s20_relay_2`, `light.sonoff_s20_green_led_2` | Only status entity was live during inventory; relay/light entities were unavailable |
+| Online / active scanner | Bluetooth Proxy Bathroom T7 | ESP32 BLE proxy for Xiaomi BLE, iBeacon, and nearby BLE sensors | Bluetooth scanner source `AC:67:B2:F9:C4:3A`; `button.esp32_bluetooth_proxy_f9c438_*` | ESPHome dashboard shows online; HA button/update entities are not a reliable online-status signal for this proxy |
+
+Current orphan check result:
+
+| Check | Result |
+|-------|--------|
+| ESPHome entities pointing to missing HA device IDs | 0 |
+| ESPHome entities pointing to missing config entries | 0 |
+| ESPHome entities without device IDs | 0 |
+| Stale/unavailable ESPHome devices removed from HA on 2026-04-27 | 7 config entries, 8 devices, 40 entities |
+| Remaining ESPHome config entries in HA | 6 |
+
+Remaining HA ESPHome config entries after cleanup: `Bluetooth Proxy f9c438`, `ESPHome AlarmBell`, `ESPHome Water Meter`, `Mailbox-Notifier`, `Sonoff Lab Light`, and `sonoff-s26-Enphase`.
+
+Post-cleanup reference check: `Stop charging Tablet` and `Start Charging Tablet` still reference the removed `Tabletswitch` device ID in `automations.yaml`. If tablet charging is no longer used, disable or delete those automations; if it is restored, re-add the ESPHome device first.
+
+Configured YAML files without a HA ESPHome config entry after cleanup: `earu-breaker.yaml`, `esphome-web-4ed8d0.yaml`, `esphome-web-57be65.yaml` (cat-pump experiment), `esphome-web-b27518.yaml` (QO-100/BME280), `esphome-web-cb281c.yaml` (HopfeNerd mailbox), `esphome-web-d6c833.yaml` (Birch WOL), `liliane-mailbox.yaml`, and `p1s-mains.yaml`. These files are valid YAML but should be treated as not currently integrated into HA unless rediscovered/re-added.
+
+| YAML file | Node / friendly name | Main function | Key HA entities / outputs | Automation or dashboard dependency | Notes |
+|-----------|----------------------|---------------|----------------------------|------------------------------------|-------|
+| `earu-breaker.yaml` | `earu-breaker` | Wallbox phase switch with BL0942 energy monitor | Re-add to HA to recreate entities | EV/wallbox phase switching if used | YAML remains; HA config entry removed 2026-04-27 |
+| `esp32-bluetooth-proxy-f9c438.yaml` | Bluetooth Proxy Bathroom T7 | BLE proxy for nearby Xiaomi/BLE devices | Bluetooth proxy device; HA xiaomi_ble entities depend on BLE coverage | BLE sensor availability | Uses ESPHome bluetooth-proxy package |
+| `esphome-water-meter.yaml` | ESPHome Water Meter | Pulse counter for water meter | `sensor.esphome_water_meter_consumption`, `sensor.esphome_water_meter_flow` | `Telegram: Water Counter Timeout`; water monitoring | Exposes `set_pulse_total` API action |
+| `esphome-web-4ed8d0.yaml` | TestBoard Web 4ed8d0 | Generic ESP32 test board / soil fallback board | Re-add to HA to recreate entities | None confirmed | YAML remains; HA config entry removed 2026-04-27 |
+| `esphome-web-57be65.yaml` | `cat_pump_controller` | ESP32-CAM cat pump experiment | Re-add to HA to create entities | None confirmed | YAML exists but no HA config entry; old AI picture callback removed during 2026.4 validation cleanup |
+| `esphome-web-b27518.yaml` | QO-100 | Ethernet ESP32 with BME280 | Re-add to HA to create entities | Environmental monitoring if enabled | YAML exists but no HA config entry |
+| `esphome-web-ca1ac8.yaml` | Mailbox-Notifier | LoRa mailbox receiver | `binary_sensor.esphome_web_10fcf4_mailbox_state` and related mailbox entities | Telegram mailbox notifications; mail sensor timeout | Uses custom UART include |
+| `esphome-web-cb281c.yaml` | HopfeNerd-Mailbox | LoRa mailbox receiver variant | Re-add to HA to create entities | Not confirmed active | YAML exists but no HA config entry |
+| `esphome-web-d6c833.yaml` | Birch-WOL | Wake-on-LAN bridge | Re-add to HA to create entities | Remote PC wake-up if used | YAML exists but no HA config entry |
+| `liliane-mailbox.yaml` | Liliane-Mailbox | LoRa mailbox receiver | Re-add to HA to create entities | Not confirmed active | YAML exists but no HA config entry |
+| `p1s-mains.yaml` | P1S-Mains | Bambu Lab P1S mains relay | Re-add to HA to recreate entities | P1S automations if restored | YAML remains; HA config entry removed 2026-04-27 |
+
+### 8.3 ESPHome automations and dependencies
+
+| Workflow | ESPHome node | HA entities | Automation dependency |
+|----------|--------------|-------------|-----------------------|
+| Tablet charge management | `tabletswitch` | tablet relay switch plus Fire Tablet battery sensor | `Start Charging Tablet`, `Stop charging Tablet` |
+| Water-meter watchdog | `esphome-water-meter` | `sensor.esphome_water_meter_flow` | `Telegram: Water Counter Timeout` |
+| P1S printer power | `p1s-mains` | `switch.p1s_mains_relay` | `P1S Switch ON`, `P1S Manual OFF`, `P1S automatic OFF` |
+| Mailbox notification | `Mailbox-Notifier` / LoRa mailbox nodes | `binary_sensor.esphome_web_10fcf4_mailbox_state`, `sensor.mail_sensor_last_update` | `Telegram: Mail arrived`, `Telegram: Mailbox emptied`, `Telegram: Mail Sensor Timeout` |
+| Calendar bell | ESPHome AlarmBell integration entry | `switch.esphome_alarmbell_bell` | `Ring bell 15 minutes before`, `Ring bell at event start`, mailbox arrival chime |
+| Lab lights | Sonoff Lab Light ESPHome integration entry | `light.lab_pc`, `light.lab_bench` | PC/bench light motion automations |
+| BLE sensor coverage | `esp32-bluetooth-proxy-f9c438` | Xiaomi BLE sensors and iBeacon/BLE discovery | Indirect dependency for temperature, plant, scale, and BLE presence sensors |
+| Wallbox phase switching | `earu-breaker` | wallbox phase switch and BL0942 sensors | EV/OCPP phase-switching logic |
+
+### 8.4 Secret handling and remediation
+
+ESPHome credentials must be treated as live infrastructure secrets. The documentation may name the secret store and secret keys, but must not include values.
+
+Observed issue from the live YAML audit: some ESPHome YAML files contained plaintext Wi-Fi fallback passwords, OTA passwords, MQTT credentials, web-server credentials, and API keys. These were migrated to `!secret` references on 2026-04-27, but the previously exposed values should still be considered compromised until rotated.
+
+Validation cleanup on 2026-04-27 updated active YAML files for ESPHome 2026.4 compatibility: removed legacy `esphome.platform` syntax, changed `bme280` to `bme280_i2c`, replaced removed `text_sensor.custom` mailbox UART handling with native UART debug callbacks plus a template text sensor, updated OTA syntax, removed obsolete API password auth, and removed the old ESP32-CAM AI picture callback blocks.
+
+Remediation plan:
+
+1. Rotate previously exposed external API keys and passwords.
+2. Recompile and deploy each affected node in small batches, starting with non-critical experimental nodes.
+3. After each deployment, verify HA entity availability and dependent automations.
+4. Keep only secret names and remediation status in this document.
+
+Suggested documentation status values:
+
+| Status | Meaning |
+|--------|---------|
+| `clean` | No plaintext credentials in node YAML |
+| `uses secrets` | Credentials referenced via `!secret` |
+| `needs rotation` | Plaintext API key/password was observed and should be rotated |
+| `legacy/test` | Node appears experimental or historical; verify before maintaining |
 
 ---
 
@@ -1299,64 +1462,21 @@ Primary energy data from Node-RED, written every ~10 seconds.
 
 #### 11.3.2 pv_forecast
 
-PV power forecasts from SwissSolarForecast add-on.
+PV power forecasts from the SwissSolarForecast add-on. Home Assistant consumes the resulting forecast entities and InfluxDB stores short-retention forecast output in the `pv_forecast` bucket.
 
-**Measurements:**
-- `pv_forecast` - Main forecast data
-- `pv_forecast_snapshot` - Point-in-time forecast snapshots
-- `pv_forecast_snapshot_meta` - Snapshot metadata
-
-| Field | Unit | Description |
-|-------|------|-------------|
-| `power_w_p10` | W | PV power (pessimistic, 90% confidence) |
-| `power_w_p50` | W | PV power (expected, median) |
-| `power_w_p90` | W | PV power (optimistic, 10% confidence) |
-| `energy_wh_p10/p50/p90` | Wh | Cumulative energy by percentile |
-| `ghi` | W/m² | Global horizontal irradiance |
-| `temp_air` | °C | Air temperature |
-| `battery_soc` | % | Simulated battery SOC |
-| `discharge_power_limit` | W | Discharge limit setting |
-| `run_time` | ISO | Forecast calculation time |
-
-**Tags:** `inverter` (total, EastWest, South), `model` (ch1, ch2, hybrid)
+Detailed add-on behavior, measurements, and data contracts: [SwissSolarForecast FSD](../swisssolarforecast/Documents/swisssolarforecast-fsd.md).
 
 #### 11.3.3 load_forecast
 
-Load consumption forecasts from LoadForecast add-on.
+Load consumption forecasts from the LoadForecast add-on. Home Assistant and Grafana use this bucket to compare expected household demand against PV forecast and battery state.
 
-**Measurement:** `load_forecast`
-
-| Field | Unit | Description |
-|-------|------|-------------|
-| `power_w_p10` | W | Load power (low estimate) |
-| `power_w_p50` | W | Load power (median) |
-| `power_w_p90` | W | Load power (high estimate) |
-| `run_time` | ISO | Forecast calculation time |
+Detailed add-on behavior, measurements, and data contracts: [LoadForecast FSD](../loadforecast/Documents/loadforecast-fsd.md).
 
 #### 11.3.4 energy_manager
 
-EnergyManager decisions and simulations.
+EnergyManager combines live Home Assistant state with PV/load forecasts to produce battery discharge decisions, appliance signals, SOC forecast data, and wallbox charging limits.
 
-**Measurements:**
-- `soc_forecast` - Simulated SOC trajectory
-- `discharge_decision` - Battery control decisions
-- `appliance_signal` - Appliance recommendations
-- `energy_balance` - Energy flow calculations
-
-| Measurement | Field | Description |
-|-------------|-------|-------------|
-| soc_forecast | `soc_percent` | Forecasted SOC at each timestep |
-| discharge_decision | `allowed` | Discharge permitted (bool) |
-| discharge_decision | `reason` | Decision explanation |
-| discharge_decision | `current_soc` | SOC at decision time |
-| discharge_decision | `deficit_wh` | Calculated energy deficit |
-| discharge_decision | `saved_wh` | Energy saved by blocking |
-| discharge_decision | `switch_on_time` | When discharge will be allowed |
-| appliance_signal | `signal` | green/orange/red |
-| appliance_signal | `reason` | Signal explanation |
-| appliance_signal | `excess_power_w` | Current PV excess |
-| appliance_signal | `final_soc_wh` | Projected final SOC |
-| energy_balance | `cumulative_wh` | Cumulative net energy |
+Detailed add-on behavior, measurements, and data contracts: [EnergyManager FSD](../energymanager/Documents/energymanager-fsd.md).
 
 #### 11.3.5 MBUS
 
@@ -1981,56 +2101,16 @@ python -m esptool --chip esp32c3 --port COM79 --baud 921600 \
 
 ### 13.5 Wallbox and EV Charging (OCPP via HA Add-on)
 
-**Hardware:**
-- Wallbox: AcTec (OCPP 1.6J)
-- Connector: Type 2 (IEC 62196-2)
-- Max Current: 16A (1-phase: 1.4-3.7kW, 3-phase: 4.1-11kW)
-- Chargepoint ID: `AcTec001`
-- Wallbox IP: 192.168.0.81
+The AcTec / Suntree SWJ7 wallbox is managed by the OCPP Server HA add-on. The Home Assistant dependency is the wallbox status, connection, power/energy, phase, and `number.wallbox_power_limit` entity set; EnergyManager writes the target charging limit and OCPP Server handles the OCPP 1.6J wallbox protocol.
 
-**OCPP Server:** HA add-on `OCPP Server` (v0.9.53) — replaces standalone ESP32 OCPP Server.
-- Communicates with wallbox via OCPP 1.6J WebSocket
-- Publishes HA entities via REST API
-- MQTT integration for status/commands (broker at 192.168.0.203:1883)
-- See `ocpp-server/docs/ocpp-server-fsd.md` for full spec
+| Item | Value |
+|------|-------|
+| Charge point ID | `AcTec001` |
+| Wallbox IP | `192.168.0.81` |
+| Control path | EnergyManager -> `number.wallbox_power_limit` -> OCPP Server -> wallbox |
+| Detailed add-on spec | [OCPP Server FSD](../ocpp-server/Documents/ocpp-server-fsd.md) |
 
-**MQTT Topics** (base: `ocpp/AcTec001/`):
-
-| Topic | Direction | Content |
-|-------|-----------|---------|
-| `status` | ESP32 → HA | `{connected, status, error_code}` |
-| `session` | ESP32 → HA | `{power_w, energy_wh, current_a, phase_mode, active}` |
-| `phase` | ESP32 → HA | `{phase_mode, power_correction_factor}` |
-| `command/start` | HA → ESP32 | `{id_tag}` |
-| `command/stop` | HA → ESP32 | `{}` |
-| `command/limit` | HA → ESP32 | `{power_w}` (auto phase switching) |
-
-**HA Entities (MQTT sensors):**
-
-| Entity | Source | Description |
-|--------|--------|-------------|
-| `sensor.wallbox_status` | MQTT | Available/Charging/Faulted |
-| `sensor.wallbox_power` | MQTT | Current charging power (W) |
-| `sensor.wallbox_energy` | MQTT | Session energy (Wh) |
-| `sensor.wallbox_phase_mode` | MQTT | 1-phase / 3-phase |
-| `binary_sensor.wallbox_connected` | MQTT | Wallbox online |
-| `binary_sensor.ev_plugged_in` | MQTT | Car plugged in |
-
-**Vehicle:**
-- Smart #5
-- Battery: 66 kWh
-- SOC: `input_number.ev_soc` (manual input or via `smarthashtag` integration)
-
-**Type 2 Charging Protocol (CP Signal):**
-
-| Voltage | State | Meaning |
-|---------|-------|---------|
-| +12V | A | No vehicle connected |
-| +9V | B | Vehicle connected, not ready |
-| +6V | C | Vehicle ready, charging |
-| -12V | E | Error state |
-
-> **Note:** evcc LXC (CT 117) has been decommissioned. All EV charging control is now via the ESP32 OCPP Server.
+evcc LXC (CT 117) has been decommissioned; EV charging control is via the OCPP Server add-on and Smart car integration.
 
 ### 13.6 Calculated Power Flow Sensors
 
@@ -2440,22 +2520,7 @@ Home Assistant uses the **ZHA** (Zigbee Home Automation) integration with a USB 
 - The old `Zigbee2MQTT` setup (referenced in legacy docs) has been replaced by ZHA directly in HA.
 - Legacy Zigbee doc (`D:\Dropbox\Documentation\Zigbee\Zigbee.docx`) describes the old Zigbee2MQTT device list — no longer applicable.
 
-### 15.2 ESPHome Devices
-
-Managed via the ESPHome Device Builder add-on in HA. YAML configs stored in `/homeassistant/esphome/`.
-
-| Device | Function | Key entities | Status |
-|--------|----------|-------------|--------|
-| **AlarmBell** | Office meeting bell (rings for calendar events) | `switch.esphome_alarmbell_bell` | Working |
-| **Water Meter** | Pulse counter on water meter | `sensor.esphome_water_meter_consumption` (18826 L), `sensor.esphome_water_meter_flow` | Working |
-| **Mailbox Notifier** (esphome-web-10fcf4) | BME280 (temp/humidity/pressure) + mailbox reed switch | `binary_sensor.esphome_web_10fcf4_mailbox_state`, `sensor.esphome_web_10fcf4_bme280_*` | Partially unavailable |
-| **RTL_433 Gateway** (esphome-web-4ed8d0) | 433 MHz receiver with SSD1306 display | `switch.esphome_web_4ed8d0_*` | Unavailable |
-| **Bluetooth Proxy** (esp32-bluetooth-proxy-f9c438) | BLE proxy for Xiaomi sensors | `button.esp32_bluetooth_proxy_f9c438_*` | Working |
-| **Earu Breaker** | Wallbox phase switch (BL0942 energy monitor) | `sensor.earu_breaker_*`, `switch.earu_breaker_wallbox_phase_switch` | Unavailable |
-| **p1s-mains** | Bambu Lab P1S printer mains power control | Related automations | Working |
-| **iphoneswitch** | CatBowl control | `switch.iphone_switch` | Unavailable |
-
-### 15.3 Tasmota / MQTT Devices
+### 15.2 Tasmota / MQTT Devices
 
 Devices flashed with Tasmota firmware, communicating via MQTT to the Mosquitto broker on IOTstack.
 
@@ -2470,7 +2535,7 @@ Devices flashed with Tasmota firmware, communicating via MQTT to the Mosquitto b
 
 **Legacy note:** The `D:\Dropbox\Documentation\Tasmota.docx` contains generic flashing instructions and the XY-WFUSB template. The `Lab Sonoffs Setup.docx` covers Espurna/Tasmota firmware for Sonoff POW (HLW8012 pin mapping). These are historical reference only.
 
-### 15.4 Shelly Devices
+### 15.3 Shelly Devices
 
 Native Shelly integration in HA (auto-discovered).
 
@@ -2479,7 +2544,7 @@ Native Shelly integration in HA (auto-discovered).
 | **Shelly 3EM** (shelly3em) | 3-phase energy monitoring | `switch.3em`, `binary_sensor.3em_overpowering` | Working |
 | **Shelly 2PM White** | Dual relay for lab lights | `light.lab_bench` (Bench), `light.lab_pc` (Desk) | Working |
 
-### 15.5 RTL_433 Weather Gateway
+### 15.4 RTL_433 Weather Gateway
 
 An ESP32 device (at **192.168.0.15**) running an RTL_433-to-MQTT gateway, receiving 433 MHz weather sensor signals and publishing via MQTT.
 
@@ -2492,7 +2557,7 @@ An ESP32 device (at **192.168.0.15**) running an RTL_433-to-MQTT gateway, receiv
 
 **Legacy note:** The `D:\Dropbox\Documentation\RTL_433&Node-Red&InfluxDB&Grafana.docx` describes the old Raspberry Pi-based RTL_433 stack. This has been replaced by the ESP32 gateway publishing directly to MQTT.
 
-### 15.6 Bluetooth / BLE Devices
+### 15.5 Bluetooth / BLE Devices
 
 | Device | Integration | Key entities | Status |
 |--------|------------|-------------|--------|
@@ -2628,16 +2693,16 @@ Key setup: systemd services on Pi (usbipd daemon, device bind) and VM (auto-atta
 ## 18. Troubleshooting and known issues
 
 ### General
-- ~~evcc add-on~~ Decommissioned, replaced by ESP32 OCPP Server. `evcc_intg` custom component removed (2026-02-19).
+- ~~evcc add-on~~ Decommissioned, replaced by the OCPP Server HA add-on. `evcc_intg` custom component removed (2026-02-19).
 - ~~Node-RED companion~~ (`nodered` custom component) removed 2026-02-19. Weather sensors migrated to native MQTT sensors. Node-RED container still runs on IOTstack but is no longer used by HA.
 - `appliance_signal.py` referenced but missing
 - Custom components removed (2026-03-27): `bambu_lab`, `browser_mod`, `localtuya`, `tuya_ble` — no longer installed.
 - HA resolution: no current backup — run `ha backups new --name "full"` to resolve.
 
 ### Energy System
-- Wallbox OCPP now managed by OCPP Server HA add-on (v0.9.53), no longer via standalone ESP32.
-- Wallbox OCPP issues: check MQTT `ocpp/AcTec001/status`
-- Phase switching: check MQTT `ocpp/AcTec001/phase/result` for errors
+- Wallbox OCPP now managed by OCPP Server HA add-on; see [OCPP Server FSD](../ocpp-server/Documents/ocpp-server-fsd.md).
+- Wallbox OCPP issues: check the OCPP Server add-on logs and Home Assistant wallbox entities.
+- Phase switching: check the OCPP Server add-on logs and related wallbox phase entities.
 - Smart meter not reporting: check Tasmota console, verify MBUS wiring
 
 ### InfluxDB
@@ -2659,14 +2724,14 @@ Key setup: systemd services on Pi (usbipd daemon, device bind) and VM (auto-atta
 
 ### External References
 - Huawei Solar Wiki: https://github.com/wlcrs/huawei_solar/wiki
-- ESP32 OCPP Server: https://github.com/SensorsIot/OCPP-ESP32-Server
+- OCPP Server add-on FSD: [ocpp-server-fsd.md](../ocpp-server/Documents/ocpp-server-fsd.md)
 - gPlug: https://gplug.ch/
 - Tasmota Smart Meter: https://tasmota.github.io/docs/Smart-Meter-Interface/
 - Tesla Style Card: HACS frontend
 
 ### MQTT Topics
 ```
-ocpp/AcTec001/#          # ESP32 OCPP Server wallbox topics
+ocpp/AcTec001/#          # Legacy/diagnostic wallbox topic namespace
 cmnd/LabLight/POWER2
 zigbee2mqtt/#
 ```
@@ -2810,28 +2875,12 @@ Primary energy data bucket with measurements organized by type.
 
 #### energy_manager Bucket
 
-EnergyManager addon output signals and decisions.
-
-| Measurement | Fields | Description |
-|-------------|--------|-------------|
-| appliance_signal | signal, reason, excess_power_w, final_soc_wh | Appliance control signal |
-| discharge_decision | allowed, reason, current_soc, deficit_wh, saved_wh, switch_on_time | Battery discharge decision |
-| energy_balance | cumulative_wh | Running energy balance |
-| soc_forecast | soc_percent | Predicted SOC |
+EnergyManager add-on output for optimization decisions, SOC projections, appliance signals, and EV charging control. Detailed schema: [EnergyManager FSD](../energymanager/Documents/energymanager-fsd.md).
 
 #### load_forecast Bucket
 
-LoadForecast addon predictions.
-
-| Measurement | Fields | Description |
-|-------------|--------|-------------|
-| load_forecast | power_w_p10, power_w_p50, power_w_p90, run_time | 15-min load predictions |
+LoadForecast add-on output for short-retention household demand predictions. Detailed schema: [LoadForecast FSD](../loadforecast/Documents/loadforecast-fsd.md).
 
 #### pv_forecast Bucket
 
-SwissSolarForecast addon predictions.
-
-| Measurement | Fields | Description |
-|-------------|--------|-------------|
-| pv_forecast | power_w_p10, power_w_p50, power_w_p90, energy_wh_p10, energy_wh_p50, energy_wh_p90, ghi, temp_air, battery_soc, discharge_power_limit, run_time | 15-min PV predictions |
-| pv_forecast_snapshot | forecast_wh_p10, forecast_wh_p50, forecast_wh_p90, soc_at_decision, decision_discharge_allowed, forecast_run_time | Daily snapshot |
+SwissSolarForecast add-on output for short-retention PV predictions and forecast snapshots. Detailed schema: [SwissSolarForecast FSD](../swisssolarforecast/Documents/swisssolarforecast-fsd.md).

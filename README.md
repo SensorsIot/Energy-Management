@@ -8,17 +8,12 @@ Home Assistant add-ons for energy forecasting and optimization.
 
 ## Add-ons
 
-| Add-on | Description |
-|--------|-------------|
-| [SwissSolarForecast](swisssolarforecast/) | PV power forecast using MeteoSwiss ICON data |
-| [LoadForecast](loadforecast/) | Statistical load prediction from historical data |
-| [EnergyManager](energymanager/) | Battery/EV/appliance optimization using forecasts |
-
-## Related Projects
-
-| Project | Description |
-|---------|-------------|
-| [OCPP-ESP32-Server](https://github.com/SensorsIot/OCPP-ESP32-Server) | ESP32-based OCPP server for EV wallbox control with phase switching |
+| Add-on | Description | FSD |
+|--------|-------------|-----|
+| [SwissSolarForecast](swisssolarforecast/) | PV power forecast using MeteoSwiss ICON data | [FSD](swisssolarforecast/Documents/swisssolarforecast-fsd.md) |
+| [LoadForecast](loadforecast/) | Statistical load prediction from historical data | [FSD](loadforecast/Documents/loadforecast-fsd.md) |
+| [EnergyManager](energymanager/) | Battery/EV/appliance optimization using forecasts | [FSD](energymanager/Documents/energymanager-fsd.md) |
+| [OCPP Server](ocpp-server/) | OCPP 1.6j wallbox server for Home Assistant control | [FSD](Documents/ocpp-server-fsd.md) |
 
 ## Architecture
 
@@ -46,6 +41,15 @@ Home Assistant add-ons for energy forecasting and optimization.
               │  EV Solar Charge│
               │  Appliance Signal
               │  SOC Forecast   │
+              └────────┬────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │   OCPP Server   │
+              │  ─────────────  │
+              │  Wallbox Bridge │
+              │  Power Limit    │
+              │  Phase Control  │
               └─────────────────┘
 ```
 
@@ -67,6 +71,7 @@ Home Assistant add-ons for energy forecasting and optimization.
    - `/config/swisssolarforecast.yaml`
    - `/config/loadforecast.yaml`
    - `/config/energymanager.yaml`
+   - OCPP Server is configured from the add-on Configuration tab
 
    At minimum, each needs the InfluxDB token:
    ```yaml
@@ -99,6 +104,11 @@ InfluxDB (HomeAssistant bucket) → Statistical Model → InfluxDB (load_forecas
 InfluxDB (pv_forecast + load_forecast) → Optimization → Battery/EV/Appliance Control
 ```
 
+### OCPP Server
+```
+Wallbox → OCPP Server add-on → Home Assistant wallbox entities
+```
+
 **EV solar charging** uses closed-loop grid meter feedback (`excess = -grid_power + wallbox_power`) to determine available power for the EV. Solar mode is always active — when there is genuine solar excess being exported to the grid, the EV captures it. The battery gets first priority via SUN2000's zero-export control. Battery protection status (forecast SOC at 21:00) is still computed and published to the dashboard for monitoring, but does not block solar charging.
 
 **Battery discharge blocking** uses two independent flags combined with OR logic. The battery optimizer blocks discharge when the SOC forecast is too low (protection flag), and the EV controller blocks discharge when the wallbox is actively charging in immediate or cheap mode (EV flag). This prevents SUN2000 from draining the battery to cover wallbox power that appears as household load via the DTSU correction path.
@@ -115,7 +125,13 @@ This format is designed for integration with Model Predictive Control (MPC) and 
 
 ## Documentation
 
-See [Energymanagement_fsd.md](Documents/Energymanagement_fsd.md) for the complete Functional Specification Document.
+| Document | Scope |
+|----------|-------|
+| [Home Installation FSD](Documents/Home-Installation-fsd.md) | Overall home installation and Home Assistant system overview |
+| [SwissSolarForecast FSD](swisssolarforecast/Documents/swisssolarforecast-fsd.md) | PV forecast add-on design and data contracts |
+| [LoadForecast FSD](loadforecast/Documents/loadforecast-fsd.md) | Load forecast add-on design and data contracts |
+| [EnergyManager FSD](energymanager/Documents/energymanager-fsd.md) | Energy optimization add-on design and control contracts |
+| [OCPP Server FSD](Documents/ocpp-server-fsd.md) | Wallbox/OCPP add-on design and entity contracts |
 
 ## Contributing
 

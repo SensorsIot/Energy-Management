@@ -1948,7 +1948,7 @@ EV charging runs **second** in the DAG: the home-battery SOC forecast (Section 4
 
 EV charging optimization maximizes solar self-consumption while ensuring charging goals are met.
 
-> **Wallbox infrastructure:** The OCPP server, phase switching, power-to-current conversion, and wallbox communication are documented in [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md).
+> **Wallbox infrastructure:** The OCPP server, phase switching, power-to-current conversion, and wallbox communication are documented in [ocpp-server-fsd.md](../ocpp-server/Documents/ocpp-server-fsd.md).
 
 **Key Features:**
 - 4 modes: Off, solar, cheap tariff, immediate — user selects via dashboard
@@ -1961,7 +1961,7 @@ EV charging optimization maximizes solar self-consumption while ensuring chargin
 
 ### 4.3.2 Architecture
 
-> **Wallbox communication, phase switching, MQTT power correction, and the EnergyManager ↔ OCPP Server interface contract are documented in [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md).**
+> **Wallbox communication, phase switching, MQTT power correction, and the EnergyManager ↔ OCPP Server interface contract are documented in [ocpp-server-fsd.md](../ocpp-server/Documents/ocpp-server-fsd.md).**
 
 From the EnergyManager's perspective, the wallbox is controlled through HA entities provided by the OCPP server:
 
@@ -1977,7 +1977,7 @@ From the EnergyManager's perspective, the wallbox is controlled through HA entit
 
 ### 4.3.3 Power Ranges
 
-> **Phase switching hardware and power-to-current conversion are documented in [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md).**
+> **Phase switching hardware and power-to-current conversion are documented in [ocpp-server-fsd.md](../ocpp-server/Documents/ocpp-server-fsd.md).**
 
 | Mode | Voltage | Current | Power Range |
 |------|---------|---------|-------------|
@@ -2002,7 +2002,7 @@ The user selects one of three charging modes via the kitchen dashboard (Amazon F
 
 The state machine routes the wallbox to the correct operating mode based on user selection. It does **not** compute charging power — that is done by the EV Charging Power Calculation (Section 4.3.6).
 
-> **Wallbox infrastructure:** Faults, disconnects, phase switching, and amp conversion are handled by the OCPP server (see [ocpp-server-fsd.md](../ocpp-server/docs/ocpp-server-fsd.md)). The state machine only makes charging decisions.
+> **Wallbox infrastructure:** Faults, disconnects, phase switching, and amp conversion are handled by the OCPP server (see [ocpp-server-fsd.md](../ocpp-server/Documents/ocpp-server-fsd.md)). The state machine only makes charging decisions.
 
 #### States
 

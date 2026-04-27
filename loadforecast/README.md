@@ -98,6 +98,10 @@ Adjust the cron expression for more or less frequent updates:
 - **SwissSolarForecast**: PV power forecast using MeteoSwiss weather data
 - **EnergyManager**: Combines PV and load forecasts for energy optimization
 
+## Specification
+
+See [LoadForecast FSD](Documents/loadforecast-fsd.md) for the full design, configuration model, InfluxDB contract, and operational notes.
+
 ## License
 
 MIT License - See LICENSE file for details.

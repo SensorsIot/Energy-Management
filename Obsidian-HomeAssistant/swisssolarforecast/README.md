@@ -1,0 +1,1 @@
+../../swisssolarforecast/README.md

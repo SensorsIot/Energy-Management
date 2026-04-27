@@ -79,7 +79,7 @@ pip install -r requirements-dev.txt
 
 - `Documents/EnergymanagementV2_fsd.md` -- main energy management logic
 - `Documents/Home-Installation-fsd.md` -- physical installation details
-- `ocpp-server/docs/ocpp-server-fsd.md` -- OCPP wallbox server spec
+- `ocpp-server/Documents/ocpp-server-fsd.md` -- OCPP wallbox server spec
 - `Documents/Smart-Car-Interface.md` -- Smart car API integration
 
 ## Key Conventions

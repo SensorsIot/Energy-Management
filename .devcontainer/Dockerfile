@@ -34,5 +34,5 @@ RUN mkdir -p /home/dev/.ssh \
 USER dev
 
 # Set default working directory for both docker exec and SSH logins
-WORKDIR /workspaces/Energy-Management
-RUN echo 'cd /workspaces/Energy-Management 2>/dev/null' >> /home/dev/.bashrc
+WORKDIR /workspaces/HomeAssistant
+RUN echo 'cd /workspaces/HomeAssistant 2>/dev/null' >> /home/dev/.bashrc

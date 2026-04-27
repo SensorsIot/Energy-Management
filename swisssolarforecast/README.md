@@ -110,6 +110,10 @@ Default fetch and calculation schedule:
 - **LoadForecast**: Statistical load prediction for consumption forecasting
 - **EnergyManager**: Combines PV and load forecasts for energy optimization
 
+## Specification
+
+See [SwissSolarForecast FSD](Documents/swisssolarforecast-fsd.md) for the full design, configuration model, InfluxDB contract, and operational notes.
+
 ## License
 
 MIT License - See LICENSE file for details.

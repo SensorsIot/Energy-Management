@@ -107,7 +107,7 @@ Published as `sensor.appliance_signal`. Reuses the home-battery SOC simulation a
 
 ## Specification
 
-See [Functional Specification Document](../Documents/EnergymanagementV2_fsd.md) for full design details.
+See [EnergyManager FSD](Documents/energymanager-fsd.md) for the full design, configuration model, control contracts, and operational notes.
 
 ## Related Add-ons
 

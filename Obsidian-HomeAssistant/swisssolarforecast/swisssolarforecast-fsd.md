@@ -1,0 +1,1 @@
+../../swisssolarforecast/Documents/swisssolarforecast-fsd.md

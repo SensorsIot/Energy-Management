@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 3.5 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 3.8 | **Status:** Draft | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -126,10 +126,11 @@ The wallbox reports its state via OCPP `StatusNotification`. These states drive 
 | `ws_port` | int | 8887 | WebSocket listen port |
 | `min_current_a` | int | 6 | Minimum charging current |
 | `max_current_a` | int | 16 | Maximum charging current |
-| `phase_switch_entity` | string? | `""` | HA switch entity for EARU relay (empty = disabled) |
-| `single_phase_supported` | bool | `false` | Wallbox supports 1-phase charging |
+| `wallbox_type` | enum | `three_phase` | One of `three_phase` (no phase switching), `external_breaker` (server drives EARU relay), `universal` (wallbox handles phase switching natively). Drives the derived `single_phase_supported` flag (`true` for `external_breaker` and `universal`). |
+| `phase_switch_entity` | string? | `""` | HA switch entity for EARU relay. Used only when `wallbox_type=external_breaker`. |
 | `power_update_interval_s` | int | 60 | Throttle interval for SetChargingProfile. 0W bypasses (safety-critical). |
 | `current_sensor_entity` | string? | `sensor.earu_breaker_current` | EARU BL0942 current sensor (safety gate for phase switching) |
+| `cloud_charging_entity` | string? | `""` | HA entity exposing the cloud charging-status raw value used for AcTec SuspendedEVSE correction (typically `sensor.smart_charging_status_raw_value`). Empty disables the correction. |
 
 ### 3.3 OCPP Messages
 
@@ -225,10 +226,12 @@ The OCPP server exposes HA entities as its external interface. All OCPP details,
 **AcTec SuspendedEVSE correction:** AcTec reports `SuspendedEVSE` for both charger- and car-initiated stops (firmware bug). The server corrects this:
 
 1. `SuspendedEVSE` + last sent 0W → genuine pause → stays `SuspendedEVSE`
-2. `SuspendedEVSE` + last sent > 0W → poll `sensor.smart_charging_status_raw_value`:
+2. `SuspendedEVSE` + last sent > 0W → poll the entity configured as `cloud_charging_entity` (typically `sensor.smart_charging_status_raw_value`):
    - Raw 25 (user-stopped) or 4 (complete) → correct to `SuspendedEV`, stop retries
    - Otherwise → continue retries
 3. In `SuspendedEV` → keep polling. If raw changes (no longer 25/4) → back to `SuspendedEVSE`
+
+If `cloud_charging_entity` is empty the correction is disabled and `SuspendedEVSE` is reported as-is.
 
 Cloud lags 3–10 min behind OCPP — throttled retries bridge the gap.
 
@@ -266,7 +269,15 @@ Cloud lags 3–10 min behind OCPP — throttled retries bridge the gap.
 
 #### 3.6.4 Phase Switching
 
-Fully managed by OCPP server. Consumer sends power; server decides phases.
+Behavior depends on `wallbox_type`:
+
+| `wallbox_type` | Phase switching |
+|----------------|-----------------|
+| `three_phase` | Disabled. Server clamps to the 3-phase range (4140–11040W); requests below 4140W are zeroed. |
+| `external_breaker` | Server drives the EARU latching relay via `phase_switch_entity`. Detailed flow below. |
+| `universal` | Wallbox manages phases natively; server passes the requested power through and reports observed phase count. |
+
+The remainder of this section describes the `external_breaker` flow (the only mode where the server actively switches phases). Consumer sends power; server decides phases.
 
 **Power ranges** (6A min, 16A max, 230V):
 
@@ -550,3 +561,4 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 | 3.5 | 2026-03-03 | Keep-alive pulse waits for Charging StatusNotification instead of fixed sleep; reverts immediately after confirmation |
 | 3.6 | 2026-03-24 | Removed keep-alive pulse — Actec confirmed to maintain sessions at 0W indefinitely without periodic nudging (tested 2026-03-24) |
 | 3.7 | 2026-03-29 | Stale MeterValues filter: drop readings with wallbox timestamps > 5 min old. Actec replays buffered meter-log queue after reconnects (e.g. DST reboot), causing energy counter jumps that corrupt daily statistics. TC-05c |
+| 3.8 | 2026-04-27 | Config refactor: `wallbox_type` enum (`three_phase`/`external_breaker`/`universal`) replaces `single_phase_supported` bool; new optional `cloud_charging_entity` makes the AcTec SuspendedEVSE cloud-correction source explicit. Consolidated two duplicate FSD copies into a single canonical document under `Documents/`. |

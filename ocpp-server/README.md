@@ -79,7 +79,7 @@ All options are in the add-on **Configuration tab**:
 
 ## Specification
 
-See [Functional Specification Document](docs/ocpp-server-fsd.md) for full design details.
+See [OCPP Server FSD](Documents/ocpp-server-fsd.md) for the full design, configuration model, Home Assistant entity contract, and operational notes.
 
 ## Related Add-ons
 
