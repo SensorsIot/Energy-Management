@@ -69,7 +69,9 @@ logging.basicConfig(
 )
 # Apply Swiss formatter to root logger
 for handler in logging.root.handlers:
-    handler.setFormatter(SwissFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
+    handler.setFormatter(
+        SwissFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S")
+    )
 
 # Silence apscheduler's per-cycle "Running job…" / "executed successfully"
 # chatter (and its UTC timestamps). Warnings still surface.
@@ -99,7 +101,9 @@ class EnergyManager:
         )
 
         # InfluxDB client for writing results
-        self.influx_url = f"http://{influx_opts.get('host', '192.168.0.203')}:{influx_opts.get('port', 8087)}"
+        self.influx_url = (
+            f"http://{influx_opts.get('host', '192.168.0.203')}:{influx_opts.get('port', 8087)}"
+        )
         self.influx_token = influx_token
         self.influx_org = influx_opts.get("org", "energymanagement")
         self.output_bucket = influx_opts.get("output_bucket", "energy_manager")
@@ -151,7 +155,9 @@ class EnergyManager:
         self.pv_power_entity = sensors_opts.get("pv_power", "sensor.solar_pv_total_ac_power")
         self.load_power_entity = sensors_opts.get("load_power", "sensor.house_load_power")
         self.surplus_power_entity = sensors_opts.get("surplus_power", "sensor.surplus_power")
-        self.appliance_signal_entity = sensors_opts.get("appliance_signal", "sensor.appliance_signal")
+        self.appliance_signal_entity = sensors_opts.get(
+            "appliance_signal", "sensor.appliance_signal"
+        )
 
         # Scheduler
         schedule_opts = options.get("schedule", {})
@@ -186,11 +192,19 @@ class EnergyManager:
         self.ev_min_power_w = ev_opts.get("min_power_w", 1400)
         self.ev_max_power_w = ev_opts.get("max_power_w", 11000)
         self.mbus_grid_power_entity = sensors_opts.get("mbus_grid_power", "sensor.grid_power")
-        self.dtsu_grid_power_entity = sensors_opts.get("dtsu_grid_power", "sensor.power_meter_active_power")
+        self.dtsu_grid_power_entity = sensors_opts.get(
+            "dtsu_grid_power", "sensor.power_meter_active_power"
+        )
         self.wallbox_power_entity = ev_opts.get("wallbox_power_entity", "sensor.wallbox_power")
-        self.wallbox_connected_entity = ev_opts.get("wallbox_connected_entity", "binary_sensor.wallbox_connected")
-        self.wallbox_power_limit_entity = ev_opts.get("wallbox_power_limit_entity", "number.wallbox_power_limit")
-        self.ev_target_power_entity = ev_opts.get("ev_target_power_entity", "sensor.ev_target_power")
+        self.wallbox_connected_entity = ev_opts.get(
+            "wallbox_connected_entity", "binary_sensor.wallbox_connected"
+        )
+        self.wallbox_power_limit_entity = ev_opts.get(
+            "wallbox_power_limit_entity", "number.wallbox_power_limit"
+        )
+        self.ev_target_power_entity = ev_opts.get(
+            "ev_target_power_entity", "sensor.ev_target_power"
+        )
         self._last_ev_power_limit = None
         self._last_ev_power_limit_at: float = 0.0  # monotonic timestamp
         self._ev_sm = EVStateMachine()
@@ -429,14 +443,18 @@ class EnergyManager:
         )
 
         if current_value is None:
-            logger.warning(f"Could not read current discharge power from {self.discharge_control_entity}")
+            logger.warning(
+                f"Could not read current discharge power from {self.discharge_control_entity}"
+            )
             # Continue anyway - we should try to set the value
         else:
             logger.info(f"Current discharge power: {current_value}W, target: {target_value}W")
 
             # Check if already at target value (with small tolerance for float comparison)
             if abs(current_value - target_value) < 1:
-                logger.debug(f"Discharge power already at target ({target_value}W), no change needed")
+                logger.debug(
+                    f"Discharge power already at target ({target_value}W), no change needed"
+                )
                 self.last_discharge_allowed = discharge_allowed
                 return
 
@@ -470,15 +488,19 @@ class EnergyManager:
 
         if verified_value is not None and abs(verified_value - target_value) < 1:
             self.last_discharge_allowed = discharge_allowed
-            logger.info(f"Battery control verified: {self.discharge_control_entity} = {verified_value}W")
+            logger.info(
+                f"Battery control verified: {self.discharge_control_entity} = {verified_value}W"
+            )
         elif verified_value is not None:
             logger.warning(
-                f"Battery control verification mismatch: set {target_value}W but read {verified_value}W"
+                f"Battery control verification mismatch: "
+                f"set {target_value}W but read {verified_value}W"
             )
             notify_error(
                 title="Battery Control Verification Failed",
                 message=(
-                    f"Set discharge power to {target_value}W but verification read {verified_value}W.\n\n"
+                    f"Set discharge power to {target_value}W but verification read "
+                    f"{verified_value}W.\n\n"
                     f"Entity: {self.discharge_control_entity}\n"
                     f"The battery may not be in the expected state!"
                 ),
@@ -486,7 +508,10 @@ class EnergyManager:
         else:
             # Could not verify but set succeeded
             self.last_discharge_allowed = discharge_allowed
-            logger.info(f"Battery control set: {self.discharge_control_entity} = {target_value}W (unverified)")
+            logger.info(
+                f"Battery control set: {self.discharge_control_entity} = "
+                f"{target_value}W (unverified)"
+            )
 
     def _update_discharge_control(self) -> None:
         """Combine both discharge-block flags and apply if changed."""
@@ -573,7 +598,8 @@ class EnergyManager:
             self.simulation_writer.write_soc_forecast(sim_with_strategy, scenario="with_strategy")
             self.simulation_writer.write_soc_forecast(sim_no_strategy, scenario="without_strategy")
             # Write forecast snapshot for accuracy tracking
-            # Only overwrites from NOW onwards - earlier points preserved for comparison with actual SOC
+            # Only overwrites from NOW onwards — earlier points preserved
+            # for comparison with actual SOC
             self.simulation_writer.write_forecast_snapshot(sim_with_strategy)
 
             # Prime the EV safety cache so the 10-s EV loop can show real
@@ -728,8 +754,14 @@ class EnergyManager:
                 now_mono = time.monotonic()
 
                 # Charging mode changed — get fresh SOC before deciding
-                if ev_mode_poll != self._last_ev_charging_mode and self._last_ev_charging_mode is not None:
-                    logger.info(f"Smart car: mode changed ({self._last_ev_charging_mode} → {ev_mode_poll}), polling SOC")
+                if (
+                    ev_mode_poll != self._last_ev_charging_mode
+                    and self._last_ev_charging_mode is not None
+                ):
+                    logger.info(
+                        f"Smart car: mode changed "
+                        f"({self._last_ev_charging_mode} → {ev_mode_poll}), polling SOC"
+                    )
                     self.update_car_soc()
                     self._last_car_soc_poll = now_mono
 
@@ -854,7 +886,9 @@ class EnergyManager:
                 min_soc_forecast = 100.0
                 battery_will_be_full = True
             elif ev_charging_source == "solar_surplus":
-                battery_will_be_full, _, battery_full_time, _ = self.ev_battery_optimizer.will_battery_hit_full()
+                battery_will_be_full, _, battery_full_time, _ = (
+                    self.ev_battery_optimizer.will_battery_hit_full()
+                )
                 ev_min_power = POWER_STEPS_3P[0]
                 ev_max_power = POWER_STEPS_3P[-1]
                 candidate_power = snap_to_power_step(
@@ -1048,7 +1082,11 @@ class EnergyManager:
                     last_power_limit_sent=self._last_ev_power_limit,
                     wb_connected=wb_connected,
                     idle_since=self._ev_idle_since,
-                    excess_w=(pv_power - load_power) if battery_soc < 100 else (-grid_power + wallbox_power),
+                    excess_w=(
+                        (pv_power - load_power)
+                        if battery_soc < 100
+                        else (-grid_power + wallbox_power)
+                    ),
                     ts=datetime.now(UTC),
                 ))
 

@@ -133,7 +133,8 @@ class ChargePointHandler(CP):
                 logger.info(f"Recovered transaction_id={txn_id} from MeterValues")
             else:
                 logger.info(
-                    f"Ignoring stale transaction_id={txn_id} from MeterValues (status={self.current_status})"
+                    f"Ignoring stale transaction_id={txn_id} from MeterValues "
+                    f"(status={self.current_status})"
                 )
 
         total_power = 0.0

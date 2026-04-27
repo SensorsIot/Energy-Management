@@ -217,7 +217,10 @@ class LocalFetcher:
             before = len(weather)
             weather = weather[weather.index <= cutoff]
             if len(weather) < before:
-                logger.info(f"Trimmed forecast from {before} to {len(weather)} hours (max {max_hours}h)")
+                logger.info(
+                    f"Trimmed forecast from {before} to {len(weather)} hours "
+                    f"(max {max_hours}h)"
+                )
 
         logger.info(
             f"Local forecast: {len(weather)} hours, "

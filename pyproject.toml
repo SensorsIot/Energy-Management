@@ -2,6 +2,9 @@
 line-length = 100
 target-version = "py311"
 
+# Vendored third-party patches: not our code to lint.
+extend-exclude = ["patches"]
+
 [tool.ruff.lint]
 # Bug-finders, modernization, and docstring layout (when docstrings exist).
 # ANN intentionally omitted: gradual typing not enforced project-wide.

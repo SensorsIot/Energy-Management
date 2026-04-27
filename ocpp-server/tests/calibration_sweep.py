@@ -89,20 +89,29 @@ def main() -> None:
     print("Reading baseline (no charging, waiting 20s)...")
     time.sleep(20)
     baseline = average_readings(SAMPLE_COUNT, SAMPLE_INTERVAL_S)
-    print(f"  Baseline: grid={baseline['grid_w']:.0f}W, dtsu={baseline['dtsu_w']:.0f}W, wb={baseline['wallbox_w']:.0f}W")
+    print(
+        f"  Baseline: grid={baseline['grid_w']:.0f}W, "
+        f"dtsu={baseline['dtsu_w']:.0f}W, wb={baseline['wallbox_w']:.0f}W"
+    )
     print()
 
     steps = list(range(5000, 12000, 1000))  # 5000, 6000, ..., 11000
     results = []
 
-    print(f"{'Req W':>7} | {'WB W':>7} | {'Grid W':>8} | {'DTSU W':>8} | {'Grid-Base':>10} | {'DTSU-Base':>10}")
+    print(
+        f"{'Req W':>7} | {'WB W':>7} | {'Grid W':>8} | {'DTSU W':>8} "
+        f"| {'Grid-Base':>10} | {'DTSU-Base':>10}"
+    )
     print("-" * 70)
 
     for target_w in steps:
         # Set power limit
         ha_set_state(POWER_LIMIT_ENTITY, str(int(target_w)))
         status = ha_get(WALLBOX_STATUS_ENTITY)
-        print(f"  Set {target_w}W, status={status}, settling {SETTLE_TIME_S}s...", end="", flush=True)
+        print(
+            f"  Set {target_w}W, status={status}, settling {SETTLE_TIME_S}s...",
+            end="", flush=True,
+        )
         time.sleep(SETTLE_TIME_S)
 
         # Wait for Charging status (up to 30s extra)
@@ -128,7 +137,10 @@ def main() -> None:
             "dtsu_delta_w": dtsu_delta,
         })
 
-        print(f"{target_w:>7} | {avg['wallbox_w']:>7.0f} | {avg['grid_w']:>8.0f} | {avg['dtsu_w']:>8.0f} | {grid_delta:>10.0f} | {dtsu_delta:>10.0f}")
+        print(
+            f"{target_w:>7} | {avg['wallbox_w']:>7.0f} | {avg['grid_w']:>8.0f} "
+            f"| {avg['dtsu_w']:>8.0f} | {grid_delta:>10.0f} | {dtsu_delta:>10.0f}"
+        )
 
     # Stop charging
     print("\nStopping: setting power limit to 0W...")
@@ -139,12 +151,18 @@ def main() -> None:
 
     # Summary
     print("\n=== CALIBRATION VERIFICATION SUMMARY ===")
-    print(f"{'Req W':>7} | {'WB W':>7} | {'Grid Delta':>10} | {'DTSU Delta':>10} | {'Req-Grid':>8} | {'Req-DTSU':>8}")
+    print(
+        f"{'Req W':>7} | {'WB W':>7} | {'Grid Delta':>10} | {'DTSU Delta':>10} "
+        f"| {'Req-Grid':>8} | {'Req-DTSU':>8}"
+    )
     print("-" * 70)
     for r in results:
         req_vs_grid = r["target_w"] - r["grid_delta_w"]
         req_vs_dtsu = r["target_w"] - r["dtsu_delta_w"]
-        print(f"{r['target_w']:>7} | {r['wallbox_w']:>7.0f} | {r['grid_delta_w']:>10.0f} | {r['dtsu_delta_w']:>10.0f} | {req_vs_grid:>+8.0f} | {req_vs_dtsu:>+8.0f}")
+        print(
+            f"{r['target_w']:>7} | {r['wallbox_w']:>7.0f} | {r['grid_delta_w']:>10.0f} "
+            f"| {r['dtsu_delta_w']:>10.0f} | {req_vs_grid:>+8.0f} | {req_vs_dtsu:>+8.0f}"
+        )
 
 
 if __name__ == "__main__":

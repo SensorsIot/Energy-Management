@@ -104,7 +104,9 @@ def calculate_charging_mode(
         return ChargingModeResult(
             target_power_w=max_power_w,
             charge_status="charging" if wallbox_power_w > 0 else "ready",
-            status_text="Charge Now" if wallbox_power_w == 0 else f"Charging at {wallbox_power_w:.0f}W",
+            status_text=(
+                "Charge Now" if wallbox_power_w == 0 else f"Charging at {wallbox_power_w:.0f}W"
+            ),
             reason="Immediate mode — full power regardless of tariff",
         )
 
@@ -113,7 +115,11 @@ def calculate_charging_mode(
         return ChargingModeResult(
             target_power_w=max_power_w,
             charge_status="charging" if wallbox_power_w > 0 else "ready",
-            status_text="Cheap tariff — charging" if wallbox_power_w > 0 else "Ready — cheap tariff active",
+            status_text=(
+                "Cheap tariff — charging"
+                if wallbox_power_w > 0
+                else "Ready — cheap tariff active"
+            ),
             reason="Cheap mode + cheap tariff → full power",
         )
 

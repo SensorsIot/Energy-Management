@@ -200,7 +200,11 @@ class AccuracyTracker:
             return False
 
         # Get the run_time from the forecast
-        forecast_run_time = forecast_data.get("run_time", [None])[0] if "run_time" in forecast_data.columns else None
+        forecast_run_time = (
+            forecast_data.get("run_time", [None])[0]
+            if "run_time" in forecast_data.columns
+            else None
+        )
         if not forecast_run_time:
             forecast_run_time = decision_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -352,7 +356,9 @@ class AccuracyTracker:
             if isinstance(result, list):
                 result = pd.concat(result) if result else pd.DataFrame()
             if result.empty:
-                logger.warning(f"No snapshot data for inverter={inverter}, snapshot_id={snapshot_id}")
+                logger.warning(
+                    f"No snapshot data for inverter={inverter}, snapshot_id={snapshot_id}"
+                )
                 return None
 
             if "_time" in result.columns:
@@ -393,7 +399,9 @@ class AccuracyTracker:
             if isinstance(result, list):
                 result = pd.concat(result) if result else pd.DataFrame()
             if result.empty:
-                logger.warning(f"No snapshot data for string={string_name}, snapshot_id={snapshot_id}")
+                logger.warning(
+                    f"No snapshot data for string={string_name}, snapshot_id={snapshot_id}"
+                )
                 return None
 
             if "_time" in result.columns:
@@ -683,9 +691,14 @@ class AccuracyTracker:
 
                 if calibration_points > 0:
                     total_points += calibration_points
-                    logger.info(f"Calibration: {calibration_points} total calibration points written")
+                    logger.info(
+                        f"Calibration: {calibration_points} total calibration points written"
+                    )
             else:
-                logger.warning("Insufficient data for weather factor computation (need at least 2 of East/West/South)")
+                logger.warning(
+                    "Insufficient data for weather factor computation "
+                    "(need at least 2 of East/West/South)"
+                )
 
         if total_points > 0:
             logger.info(
@@ -709,7 +722,8 @@ class AccuracyTracker:
           |> range(start: {start_str}, stop: {end_str})
           |> filter(fn: (r) => r._measurement == "pv_forecast")
           |> filter(fn: (r) => r.model == "{model}")
-          |> filter(fn: (r) => r._field =~ /^(energy_wh_p10|energy_wh_p50|energy_wh_p90|power_w_p10|power_w_p50|power_w_p90)$/)
+          |> filter(fn: (r) => r._field =~
+              /^(energy_wh_p10|energy_wh_p50|energy_wh_p90|power_w_p10|power_w_p50|power_w_p90)$/)
           |> pivot(rowKey:["_time"], columnKey: ["_field", "inverter"], valueColumn: "_value")
         '''
 

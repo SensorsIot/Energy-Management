@@ -136,7 +136,9 @@ class ShadingTracker:
           |> range(start: -7d)
           |> filter(fn: (r) => r._measurement == "pv_accuracy")
           |> filter(fn: (r) => r.snapshot_id == "{snapshot_id}")
-          |> filter(fn: (r) => r._field == "weather_factor" or r._field == "forecast_wh_p50" or r._field == "actual_wh")
+          |> filter(fn: (r) => r._field == "weather_factor"
+              or r._field == "forecast_wh_p50"
+              or r._field == "actual_wh")
           |> pivot(rowKey: ["_time", "string"], columnKey: ["_field"], valueColumn: "_value")
         '''
 
@@ -220,8 +222,11 @@ class ShadingTracker:
         from(bucket: "{self.bucket}")
           |> range(start: -90d)
           |> filter(fn: (r) => r._measurement == "shading_observations")
-          |> filter(fn: (r) => r._field == "ratio" or r._field == "hour" or r._field == "weather_factor")
-          |> pivot(rowKey: ["_time", "string", "snapshot_id"], columnKey: ["_field"], valueColumn: "_value")
+          |> filter(fn: (r) => r._field == "ratio"
+              or r._field == "hour"
+              or r._field == "weather_factor")
+          |> pivot(rowKey: ["_time", "string", "snapshot_id"],
+              columnKey: ["_field"], valueColumn: "_value")
           |> filter(fn: (r) => r.weather_factor >= {SUNNY_THRESHOLD})
         '''
 
@@ -261,7 +266,9 @@ class ShadingTracker:
                         hourly_factors[hour] = round(max(0.1, min(1.2, avg_ratio)), 2)
                     else:
                         # Fall back to default
-                        hourly_factors[hour] = DEFAULT_SHADING_FACTORS.get(string_name, {}).get(hour, 1.0)
+                        hourly_factors[hour] = (
+                            DEFAULT_SHADING_FACTORS.get(string_name, {}).get(hour, 1.0)
+                        )
 
                 factors[string_name] = hourly_factors
 
@@ -286,7 +293,10 @@ class ShadingTracker:
         # Prepare YAML content
         yaml_content = {
             "shading_correction": {
-                "description": "Shading factors by hour (local time). Updated automatically from sunny day observations.",
+                "description": (
+                    "Shading factors by hour (local time). "
+                    "Updated automatically from sunny day observations."
+                ),
                 "last_updated": datetime.now(self.local_tz).isoformat(),
                 "num_sunny_days": num_days,
                 "factors": factors,

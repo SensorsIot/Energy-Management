@@ -210,7 +210,9 @@ class IconFetcher:
             logger.debug(f"Download failed: {e}")
             return False
 
-    def download_item(self, run_iso: str, run_dir: Path, var: str, hour: int, member: int) -> str | None:
+    def download_item(
+        self, run_iso: str, run_dir: Path, var: str, hour: int, member: int
+    ) -> str | None:
         """Download a single forecast item (one variable, one hour, one member type).
 
         MeteoSwiss provides two file types:
@@ -222,7 +224,8 @@ class IconFetcher:
             run_dir: Directory to save the file
             var: Variable name (e.g., ASOB_S)
             hour: Forecast hour
-            member: Ensemble member (0=control, 1+=perturbed - but perturbed file contains ALL members)
+            member: Ensemble member (0=control, 1+=perturbed; perturbed file contains
+                ALL members)
 
         """
         perturbed = member > 0
@@ -272,7 +275,10 @@ class IconFetcher:
         run_dir = self.output_dir / run_str
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Fetching {self.model.upper()} run {run_iso}, hours {self.hour_start}-{self.hour_end}")
+        logger.info(
+            f"Fetching {self.model.upper()} run {run_iso}, "
+            f"hours {self.hour_start}-{self.hour_end}"
+        )
 
         # Build download task list: control (0) + perturbed trigger (1)
         download_tasks = []
@@ -291,7 +297,9 @@ class IconFetcher:
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
-                executor.submit(self.download_item, run_iso, run_dir, var, hour, member): (var, hour, member)
+                executor.submit(
+                    self.download_item, run_iso, run_dir, var, hour, member
+                ): (var, hour, member)
                 for var, hour, member in download_tasks
             }
 
@@ -310,8 +318,11 @@ class IconFetcher:
             logger.warning(f"Failed to download {len(failed)} items")
 
         # Save metadata
-        # Note: perturbed file contains all 10 perturbed members, so total is always 11 for CH1, 21 for CH2
-        actual_members = MODEL_CONFIG[self.model]["ensemble_members"] if self.include_ensemble else 1
+        # Note: perturbed file contains all 10 perturbed members,
+        # so total is always 11 for CH1, 21 for CH2
+        actual_members = (
+            MODEL_CONFIG[self.model]["ensemble_members"] if self.include_ensemble else 1
+        )
         metadata = {
             "model": self.model,
             "collection": self.collection,

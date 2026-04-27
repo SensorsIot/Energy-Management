@@ -390,13 +390,16 @@ class BatteryOptimizer:
         # ~0.5% around the threshold — enough to flip the decision every
         # cycle without a dead-band.
         hysteresis = 2.0  # percent
-        threshold = self.min_soc_percent + hysteresis if previously_blocked else self.min_soc_percent
+        threshold = (
+            self.min_soc_percent + hysteresis if previously_blocked else self.min_soc_percent
+        )
         soc_ok = min_soc_percent >= threshold
 
-        logger.info(f"Min SOC during expensive hours: {min_soc_percent:.0f}% at {swiss_time(min_soc_time)}, "
-                   f"threshold: {threshold:.0f}%"
-                   f"{' (incl. 2% hysteresis)' if previously_blocked else ''}"
-                   f", OK: {soc_ok}")
+        logger.info(
+            f"Min SOC during expensive hours: {min_soc_percent:.0f}% "
+            f"at {swiss_time(min_soc_time)}, threshold: {threshold:.0f}%"
+            f"{' (incl. 2% hysteresis)' if previously_blocked else ''}, OK: {soc_ok}"
+        )
 
         # Step 3: Decision logic - simple yes/no
         if not tariff.is_cheap_now:
@@ -408,7 +411,10 @@ class BatteryOptimizer:
         elif soc_ok:
             # CHEAP TARIFF + SOC OK: Allow discharge
             discharge_allowed = True
-            reason = f"SOC stays >= {self.min_soc_percent:.0f}% (min: {min_soc_percent:.0f}% at {swiss_time(min_soc_time)})"
+            reason = (
+                f"SOC stays >= {self.min_soc_percent:.0f}% "
+                f"(min: {min_soc_percent:.0f}% at {swiss_time(min_soc_time)})"
+            )
 
         else:
             # CHEAP TARIFF + SOC NOT OK: Calculate discharge floor

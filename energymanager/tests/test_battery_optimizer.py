@@ -178,7 +178,7 @@ class TestCheapTariffBlock:
     """During cheap tariff: BLOCK if SOC would drop below min during expensive hours."""
 
     def test_cheap_tariff_low_pv_blocks_discharge(self) -> None:
-        """At 22:00 (cheap), with poor PV forecast and hysteresis active, discharge should be blocked."""
+        """Cheap tariff at 22:00 with poor PV forecast + hysteresis: discharge blocked."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
             min_soc_percent=0,
@@ -209,7 +209,7 @@ class TestCheapTariffBlock:
         assert "Block" in decision.reason
 
     def test_cheap_tariff_low_soc_blocks_discharge(self) -> None:
-        """At 22:00 (cheap), with low starting SOC and hysteresis active, discharge should be blocked."""
+        """Cheap tariff at 22:00 with low starting SOC + hysteresis: discharge blocked."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
             min_soc_percent=0,

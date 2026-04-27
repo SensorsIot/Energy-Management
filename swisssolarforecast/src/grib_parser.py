@@ -26,7 +26,9 @@ _INDEX_CACHE = {}  # Nearest index per (lat, lon, model)
 _FILENAME_CACHE = {}  # Parsed filename metadata
 
 
-def get_grid_coords(model: str = "ch2", cache_dir: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
+def get_grid_coords(
+    model: str = "ch2", cache_dir: Path | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     """Load ICON grid coordinates, downloading if necessary.
 
     Args:

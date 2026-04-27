@@ -129,8 +129,16 @@ class WallboxSimulator(CP):
             meter_value=[{
                 "timestamp": datetime.now(UTC).isoformat(),
                 "sampled_value": [
-                    {"measurand": "Power.Active.Import", "value": str(self.power_w), "unit": "W"},
-                    {"measurand": "Energy.Active.Import.Register", "value": str(int(self.energy_wh)), "unit": "Wh"},
+                    {
+                        "measurand": "Power.Active.Import",
+                        "value": str(self.power_w),
+                        "unit": "W",
+                    },
+                    {
+                        "measurand": "Energy.Active.Import.Register",
+                        "value": str(int(self.energy_wh)),
+                        "unit": "Wh",
+                    },
                 ],
             }],
         )

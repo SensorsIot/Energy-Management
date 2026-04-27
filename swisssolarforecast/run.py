@@ -68,7 +68,9 @@ class SwissSolarForecast:
         accuracy_config = options.get("accuracy_tracker", {})
         self.ha_url = accuracy_config.get("ha_url", "http://supervisor/core").rstrip("/")
         self.soc_entity = accuracy_config.get("soc_entity", "sensor.battery_state_of_capacity")
-        self.discharge_entity = accuracy_config.get("discharge_control_entity", "number.battery_maximum_discharging_power")
+        self.discharge_entity = accuracy_config.get(
+            "discharge_control_entity", "number.battery_maximum_discharging_power"
+        )
 
         # Get HA token from environment
         self._ha_token = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")

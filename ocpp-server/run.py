@@ -707,13 +707,15 @@ class OCPPServer:
                             ):
                                 # 0W (pause) bypasses throttle — safety-critical
                                 logger.info(
-                                    f"Power limit changed to {power_w}W (sending immediately, {since_last_change:.0f}s since last change)"
+                                    f"Power limit changed to {power_w}W (sending immediately, "
+                        f"{since_last_change:.0f}s since last change)"
                                 )
                                 await self._send_power_to_wallbox(power_w)
                             else:
                                 # Rapid change — queue, send when interval expires
                                 logger.info(
-                                    f"Power limit changed to {power_w}W (throttled, {since_last_change:.0f}s since last change)"
+                                    f"Power limit changed to {power_w}W (throttled, "
+                        f"{since_last_change:.0f}s since last change)"
                                 )
                                 self._pending_power_w = power_w
                         except ValueError:
@@ -901,7 +903,10 @@ class OCPPServer:
             "binary_sensor.wallbox_single_phase_supported",
             "on" if self.single_phase_supported else "off",
         )
-        logger.info(f"Wallbox type: {self.wallbox_type} (single_phase_supported={self.single_phase_supported})")
+        logger.info(
+            f"Wallbox type: {self.wallbox_type} "
+            f"(single_phase_supported={self.single_phase_supported})"
+        )
 
         # Read initial relay state to sync phase count (external_breaker only)
         if self.wallbox_type == "external_breaker" and self.phase_switch_entity:

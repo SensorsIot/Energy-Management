@@ -107,7 +107,10 @@ class ForecastWriter:
         if forecast_resampled.index.tzinfo is None:
             forecast_resampled.index = forecast_resampled.index.tz_localize('UTC')
 
-        logger.debug(f"Resampled forecast from {len(forecast)} to {len(forecast_resampled)} points ({minutes} min)")
+        logger.debug(
+            f"Resampled forecast from {len(forecast)} to "
+            f"{len(forecast_resampled)} points ({minutes} min)"
+        )
         return forecast_resampled
 
     def write_metadata(self, key: str, value: str) -> None:
@@ -173,7 +176,8 @@ class ForecastWriter:
 
             # Single point per timestamp with ALL percentile values
             # This guarantees exact same timestamp for P10/P50/P90
-            # Note: run_time is a field (not tag) so points overwrite on same timestamp+inverter+model
+            # Note: run_time is a field (not tag) so points overwrite on
+            # same timestamp+inverter+model
             point = (
                 Point("pv_forecast")
                 .tag("inverter", "total")

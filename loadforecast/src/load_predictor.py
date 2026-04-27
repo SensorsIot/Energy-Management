@@ -110,9 +110,11 @@ class LoadPredictor:
         total_days = len(df) / 96  # Approximate days of data
         avg_load = df["load_power"].mean()
         logger.info(f"Built profile from ~{total_days:.0f} days of data, avg load {avg_load:.0f}W")
-        logger.info(f"  P10 range: {self.profile['p10'].min():.0f} - {self.profile['p10'].max():.0f} W")
-        logger.info(f"  P50 range: {self.profile['p50'].min():.0f} - {self.profile['p50'].max():.0f} W")
-        logger.info(f"  P90 range: {self.profile['p90'].min():.0f} - {self.profile['p90'].max():.0f} W")
+        for pct in ("p10", "p50", "p90"):
+            col = self.profile[pct]
+            logger.info(
+                f"  {pct.upper()} range: {col.min():.0f} - {col.max():.0f} W"
+            )
 
         return self.profile
 
