@@ -118,3 +118,9 @@ ALL_ENTITIES = {
     "binary_sensors": BINARY_SENSORS,
     "controls": CONTROLS,
 }
+
+# Flat lookup used by HAEntityManager.set_state() to recover attributes when a
+# caller passes only state — without this fallback, every state update wipes
+# unit_of_measurement / state_class / device_class via the REST replace-semantics
+# of POST /api/states/, which trips HA's recorder repair detectors.
+ALL_DEFS = {**SENSORS, **BINARY_SENSORS, **CONTROLS}

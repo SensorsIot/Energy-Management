@@ -6,7 +6,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.56"
+__version__ = "0.9.57"
 
 import asyncio
 import json
@@ -21,7 +21,7 @@ import aiohttp
 import aiomqtt
 import websockets
 
-from src.ha_entities import BINARY_SENSORS, CONTROLS, SENSORS
+from src.ha_entities import ALL_DEFS, BINARY_SENSORS, CONTROLS, SENSORS
 from src.ocpp_handler import ChargePointHandler
 
 # Configure logging
@@ -87,10 +87,13 @@ class HAEntityManager:
         if not self._session:
             logger.warning("HAEntityManager not started, cannot set state")
             return
+        if attributes is None:
+            defn = ALL_DEFS.get(entity_id, {})
+            attributes = {k: v for k, v in defn.items() if k != "initial_state"}
         url = f"{self.url}/states/{entity_id}"
         data = {
             "state": str(state),
-            "attributes": attributes or {},
+            "attributes": attributes,
         }
         try:
             async with self._session.post(
