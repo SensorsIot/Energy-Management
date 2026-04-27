@@ -13,7 +13,7 @@ Phase 2: Evaluation (21:15 daily local time)
 
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -181,7 +181,7 @@ class AccuracyTracker:
 
         """
         if decision_time is None:
-            decision_time = datetime.now(timezone.utc)
+            decision_time = datetime.now(UTC)
 
         # Generate snapshot_id as date string (YYYY-MM-DD)
         snapshot_id = decision_time.strftime("%Y-%m-%d")
@@ -216,7 +216,7 @@ class AccuracyTracker:
             for idx, row in string_data.iterrows():
                 timestamp = idx if isinstance(idx, datetime) else pd.Timestamp(idx)
                 if timestamp.tzinfo is None:
-                    timestamp = timestamp.tz_localize(timezone.utc)
+                    timestamp = timestamp.tz_localize(UTC)
 
                 point = (
                     Point("pv_forecast_snapshot")
@@ -429,7 +429,7 @@ class AccuracyTracker:
 
         """
         if evaluation_time is None:
-            evaluation_time = datetime.now(timezone.utc)
+            evaluation_time = datetime.now(UTC)
 
         # Convert to local timezone to determine snapshot timing
         # Snapshot is created at 21:00 LOCAL time, so we need to match that
@@ -444,8 +444,8 @@ class AccuracyTracker:
         snapshot_end_local = eval_local.replace(hour=21, minute=0, second=0, microsecond=0)
 
         # Convert to UTC for InfluxDB queries
-        snapshot_start = snapshot_start_local.astimezone(timezone.utc)
-        snapshot_end = snapshot_end_local.astimezone(timezone.utc)
+        snapshot_start = snapshot_start_local.astimezone(UTC)
+        snapshot_end = snapshot_end_local.astimezone(UTC)
 
         logger.info(
             f"Evaluating forecast accuracy for snapshot {snapshot_id} model={model} "
@@ -497,7 +497,7 @@ class AccuracyTracker:
             for idx, row in joined.iterrows():
                 timestamp = idx if isinstance(idx, datetime) else pd.Timestamp(idx)
                 if timestamp.tzinfo is None:
-                    timestamp = timestamp.tz_localize(timezone.utc)
+                    timestamp = timestamp.tz_localize(UTC)
 
                 point = (
                     Point("pv_accuracy")
@@ -555,7 +555,7 @@ class AccuracyTracker:
             for idx, row in joined.iterrows():
                 timestamp = idx if isinstance(idx, datetime) else pd.Timestamp(idx)
                 if timestamp.tzinfo is None:
-                    timestamp = timestamp.tz_localize(timezone.utc)
+                    timestamp = timestamp.tz_localize(UTC)
 
                 point = (
                     Point("pv_accuracy")
@@ -655,7 +655,7 @@ class AccuracyTracker:
 
                         timestamp = ts if isinstance(ts, datetime) else pd.Timestamp(ts)
                         if timestamp.tzinfo is None:
-                            timestamp = timestamp.tz_localize(timezone.utc)
+                            timestamp = timestamp.tz_localize(UTC)
 
                         point = (
                             Point("pv_accuracy")

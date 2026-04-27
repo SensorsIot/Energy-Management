@@ -623,7 +623,7 @@ class OCPPServer:
                         self.charge_point.transaction_started_event.wait(),
                         timeout=15,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning("StartTransaction not received after 15s")
                     return
             else:
@@ -822,7 +822,7 @@ class OCPPServer:
                         self.charge_point.meter_values_event.wait(), timeout=10
                     )
                     logger.info("Post-connect: MeterValues received for inner sync")
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning(
                         "Post-connect: MeterValues timeout (10s), continuing anyway"
                     )

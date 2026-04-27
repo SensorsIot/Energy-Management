@@ -9,7 +9,7 @@ Test cases:
 
 import pytest
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from zoneinfo import ZoneInfo
 
 from src.battery_optimizer import BatteryOptimizer, DischargeDecision
@@ -36,7 +36,7 @@ def make_forecast(
 
     """
     periods = hours * 4  # 15-min intervals
-    times = pd.date_range(start=start, periods=periods, freq="15min", tz=timezone.utc)
+    times = pd.date_range(start=start, periods=periods, freq="15min", tz=UTC)
 
     # Extend patterns to fill all periods
     pv_extended = (pv_pattern * (periods // len(pv_pattern) + 1))[:periods]
@@ -65,7 +65,7 @@ class TestExpensiveTariff:
         )
 
         # Midday on a weekday - expensive tariff
-        now = datetime(2026, 1, 26, 11, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 11, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # Forecast with high load, no PV (worst case)
         forecast = make_forecast(
@@ -91,7 +91,7 @@ class TestExpensiveTariff:
             min_soc_percent=0,
         )
 
-        now = datetime(2026, 1, 26, 14, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 14, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         forecast = make_forecast(
             start=now,
@@ -120,7 +120,7 @@ class TestCheapTariffAllow:
         )
 
         # Evening on a weekday - cheap tariff
-        now = datetime(2026, 1, 26, 21, 30, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 21, 30, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # Good PV during day, moderate load
         # Simulate: night (no PV), then day (good PV)
@@ -150,7 +150,7 @@ class TestCheapTariffAllow:
             min_soc_percent=0,
         )
 
-        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # Good PV during day (enough to cover load and charge battery)
         # 22:00 → 06:00 = 8h = 32 periods of no PV
@@ -184,7 +184,7 @@ class TestCheapTariffBlock:
             min_soc_percent=0,
         )
 
-        now = datetime(2026, 1, 26, 21, 30, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 21, 30, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # Poor PV (cloudy day), high load
         pv_pattern = [0] * 36 + [500] * 48 + [0] * 12  # Very little PV
@@ -215,7 +215,7 @@ class TestCheapTariffBlock:
             min_soc_percent=0,
         )
 
-        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # Moderate PV but starting SOC is low
         pv_pattern = [0] * 36 + [2000] * 48 + [0] * 12
@@ -245,7 +245,7 @@ class TestCheapTariffBlock:
             min_soc_percent=20,  # Higher threshold
         )
 
-        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # Create forecast that would result in ~15% min SOC
         pv_pattern = [0] * 36 + [1000] * 48 + [0] * 12
@@ -282,7 +282,7 @@ class TestDischargeFloor:
             capacity_wh=10000,
             min_soc_percent=0,
         )
-        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # Moderate PV (enough to recover by midday), moderate load
         pv_pattern = [0] * 32 + [3000] * 48 + [0] * 16
@@ -304,7 +304,7 @@ class TestDischargeFloor:
             capacity_wh=10000,
             min_soc_percent=0,
         )
-        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # Low PV — morning drop is significant
         pv_pattern = [0] * 36 + [1500] * 48 + [0] * 12
@@ -332,7 +332,7 @@ class TestSelfCorrecting:
             min_soc_percent=0,
         )
 
-        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # Balanced forecast: PV roughly matches load during day
         # Night: no PV, 500W load
@@ -374,7 +374,7 @@ class TestEdgeCases:
         """With no forecast data, default to allowing discharge."""
         optimizer = BatteryOptimizer()
 
-        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         decision, sim_full, sim_strategy = optimizer.calculate_decision(
             soc_percent=50,
@@ -390,7 +390,7 @@ class TestEdgeCases:
         optimizer = BatteryOptimizer(weekend_all_day_cheap=True)
 
         # Saturday midday
-        now = datetime(2026, 1, 31, 12, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 31, 12, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         tariff = optimizer.get_tariff_periods(now)
 
@@ -405,7 +405,7 @@ class TestEdgeCases:
         )
 
         # Friday night 23:00 → weekend ahead
-        now = datetime(2026, 1, 30, 23, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 30, 23, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # No PV, moderate load → SOC will drop to 0% on Saturday
         # But Saturday is cheap, so it shouldn't matter
@@ -430,7 +430,7 @@ class TestEdgeCases:
         optimizer = BatteryOptimizer()
 
         # Monday morning
-        now = datetime(2026, 1, 26, 8, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 8, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         tariff = optimizer.get_tariff_periods(now)
 
@@ -441,7 +441,7 @@ class TestEdgeCases:
         optimizer = BatteryOptimizer()
 
         # Monday night
-        now = datetime(2026, 1, 26, 23, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 23, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         tariff = optimizer.get_tariff_periods(now)
 
@@ -452,7 +452,7 @@ class TestEdgeCases:
         optimizer = BatteryOptimizer(holidays=["2026-01-01"])
 
         # New Year's Day midday
-        now = datetime(2026, 1, 1, 12, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         assert optimizer.is_holiday(now) is True
         assert optimizer.is_cheap_day(now) is True
@@ -488,28 +488,28 @@ class TestTariffBoundaryTransitions:
     def test_2059_is_expensive(self) -> None:
         """20:59 Swiss → still expensive (cheap starts at 21:00)."""
         optimizer = BatteryOptimizer()
-        now = datetime(2026, 1, 26, 20, 59, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 20, 59, tzinfo=SWISS_TZ).astimezone(UTC)
         tariff = optimizer.get_tariff_periods(now)
         assert tariff.is_cheap_now is False
 
     def test_2101_is_cheap(self) -> None:
         """21:01 Swiss → cheap (within cheap window)."""
         optimizer = BatteryOptimizer()
-        now = datetime(2026, 1, 26, 21, 1, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 21, 1, tzinfo=SWISS_TZ).astimezone(UTC)
         tariff = optimizer.get_tariff_periods(now)
         assert tariff.is_cheap_now is True
 
     def test_0559_is_cheap(self) -> None:
         """05:59 Swiss → cheap (before 06:00 boundary)."""
         optimizer = BatteryOptimizer()
-        now = datetime(2026, 1, 27, 5, 59, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 27, 5, 59, tzinfo=SWISS_TZ).astimezone(UTC)
         tariff = optimizer.get_tariff_periods(now)
         assert tariff.is_cheap_now is True
 
     def test_0601_is_expensive(self) -> None:
         """06:01 Swiss → expensive (after 06:00 boundary)."""
         optimizer = BatteryOptimizer()
-        now = datetime(2026, 1, 27, 6, 1, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 27, 6, 1, tzinfo=SWISS_TZ).astimezone(UTC)
         tariff = optimizer.get_tariff_periods(now)
         assert tariff.is_cheap_now is False
 
@@ -529,7 +529,7 @@ class TestHysteresis:
             min_soc_percent=0,
         )
         # Monday 22:00 (cheap tariff)
-        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(timezone.utc)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
 
         # Craft forecast so that at low SOC, projected min is just above 0%
         # Night: 0 PV, 300W load.  Day: enough PV to recover

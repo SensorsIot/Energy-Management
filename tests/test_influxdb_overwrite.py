@@ -19,7 +19,7 @@ Usage:
 import argparse
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, UTC
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -60,7 +60,7 @@ def write_test_data(client: InfluxDBClient, bucket: str, org: str,
     write_api = client.write_api(write_options=SYNCHRONOUS)
 
     # Use fixed timestamps in the future (aligned to 15-min)
-    base_time = datetime.now(timezone.utc).replace(
+    base_time = datetime.now(UTC).replace(
         minute=(datetime.now().minute // 15) * 15,
         second=0,
         microsecond=0
@@ -122,8 +122,8 @@ def delete_test_data(client: InfluxDBClient, bucket: str, org: str) -> None:
     """Clean up test data."""
     delete_api = client.delete_api()
 
-    start = datetime.now(timezone.utc) - timedelta(hours=1)
-    stop = datetime.now(timezone.utc) + timedelta(days=1)
+    start = datetime.now(UTC) - timedelta(hours=1)
+    stop = datetime.now(UTC) + timedelta(days=1)
 
     print("Deleting test_forecast data...")
     delete_api.delete(

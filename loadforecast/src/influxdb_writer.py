@@ -4,7 +4,7 @@ Writes P10/P50/P90 power forecasts (W) at 15-minute intervals.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import pandas as pd
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -87,7 +87,7 @@ class LoadForecastWriter:
 
         """
         if run_time is None:
-            run_time = datetime.now(timezone.utc)
+            run_time = datetime.now(UTC)
 
         run_time_str = run_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -99,7 +99,7 @@ class LoadForecastWriter:
         for timestamp, row in forecast.iterrows():
             # Ensure timezone-aware
             if hasattr(timestamp, "tzinfo") and timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                timestamp = timestamp.replace(tzinfo=UTC)
 
             # Single point per timestamp with all percentile fields
             # Note: run_time is a field (not tag) so points overwrite on same timestamp+model

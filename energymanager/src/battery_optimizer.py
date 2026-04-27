@@ -10,7 +10,7 @@ Simplified Algorithm (FSD v2.6):
 """
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, UTC
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
@@ -25,7 +25,7 @@ SWISS_TZ = ZoneInfo("Europe/Zurich")
 def swiss_time(dt: datetime) -> str:
     """Format datetime as HH:MM in Swiss timezone."""
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(SWISS_TZ).strftime("%H:%M")
 
 

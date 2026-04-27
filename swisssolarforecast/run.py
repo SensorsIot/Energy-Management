@@ -12,7 +12,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 import pandas as pd
@@ -254,7 +254,7 @@ class SwissSolarForecast:
 
             # Write PV forecast to InfluxDB (15-min intervals)
             if self.influx_writer:
-                run_time = datetime.now(timezone.utc)
+                run_time = datetime.now(UTC)
 
                 # Fetch current battery state from HA for decision context
                 battery_soc = self._get_ha_value(self.soc_entity)
@@ -320,7 +320,7 @@ class SwissSolarForecast:
                 self.influx_writer.write_pv_forecast(
                     pv_forecast=output,
                     model="local",
-                    run_time=datetime.now(timezone.utc),
+                    run_time=datetime.now(UTC),
                     resample_minutes=15,
                 )
                 logger.info("Local forecast written to InfluxDB")

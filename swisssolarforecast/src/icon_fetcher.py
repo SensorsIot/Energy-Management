@@ -11,7 +11,7 @@ import requests
 import shutil
 import logging
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -107,7 +107,7 @@ class IconFetcher:
 
     def get_expected_run_times(self, lookback_hours: int = 48) -> list[datetime]:
         """Calculate expected model run times within the lookback period."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         runs = []
 
         for hours_ago in range(0, lookback_hours):
@@ -323,7 +323,7 @@ class IconFetcher:
             "include_ensemble": self.include_ensemble,
             "files_downloaded": len(downloaded),
             "files_failed": len(failed),
-            "downloaded_at": datetime.now(timezone.utc).isoformat(),
+            "downloaded_at": datetime.now(UTC).isoformat(),
         }
 
         with open(metadata_file, "w") as f:

@@ -5,7 +5,7 @@ Supports P10/P50/P90 percentiles from ensemble forecasts.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import pandas as pd
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -116,7 +116,7 @@ class ForecastWriter:
             Point("pv_forecast_metadata")
             .tag("key", key)
             .field("value", value)
-            .time(datetime.now(timezone.utc), WritePrecision.S)
+            .time(datetime.now(UTC), WritePrecision.S)
         )
         self.write_api.write(bucket=self.bucket, org=self.org, record=point)
 
@@ -144,7 +144,7 @@ class ForecastWriter:
 
         """
         if run_time is None:
-            run_time = datetime.now(timezone.utc)
+            run_time = datetime.now(UTC)
 
         run_time_str = run_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -167,7 +167,7 @@ class ForecastWriter:
         for _idx, timestamp in enumerate(pv_forecast.index):
             # Ensure timestamp is timezone-aware
             if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                timestamp = timestamp.replace(tzinfo=UTC)
 
             row = pv_forecast.loc[timestamp]
 

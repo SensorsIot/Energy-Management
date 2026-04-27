@@ -11,7 +11,7 @@ import logging
 import signal
 import sys
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -42,14 +42,14 @@ CAR_SOC_CHARGING_INTERVAL_S = 60
 def swiss_time(dt: datetime) -> str:
     """Format datetime in Swiss timezone."""
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(SWISS_TZ).strftime("%H:%M")
 
 
 def swiss_datetime(dt: datetime) -> str:
     """Format datetime in Swiss timezone with date."""
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(SWISS_TZ).strftime("%Y-%m-%d %H:%M")
 
 
@@ -356,7 +356,7 @@ class EnergyManager:
         points = []
         cumulative_wh = 0.0
         for t in forecast.index:
-            ts = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+            ts = t if t.tzinfo else t.replace(tzinfo=UTC)
             row = forecast.loc[t]
 
             pv_wh = float(row.get("pv_energy_wh", 0))
@@ -398,7 +398,7 @@ class EnergyManager:
 
     def write_decision(self, decision, current_soc: float) -> None:
         """Write discharge decision to InfluxDB."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         point = (
             Point("discharge_decision")
@@ -516,7 +516,7 @@ class EnergyManager:
             logger.debug(f"Current battery SOC: {current_soc:.1f}%")
 
             # Get forecast
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             start = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
 
             # Get tariff periods to determine forecast end
@@ -674,7 +674,7 @@ class EnergyManager:
                 .field("reason", signal.reason)
                 .field("excess_power_w", float(signal.excess_power_w))
                 .field("min_soc_percent", float(signal.min_soc_percent))
-                .time(datetime.now(timezone.utc), WritePrecision.S)
+                .time(datetime.now(UTC), WritePrecision.S)
             )
             self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=point)
 
@@ -688,7 +688,7 @@ class EnergyManager:
         if state:
             try:
                 updated = datetime.fromisoformat(state["last_updated"])
-                age = (datetime.now(timezone.utc) - updated).total_seconds()
+                age = (datetime.now(UTC) - updated).total_seconds()
                 if age < 20:
                     return float(state["state"])
                 logger.debug(f"M-Bus stale ({age:.0f}s), falling back to DTSU")
@@ -784,7 +784,7 @@ class EnergyManager:
                 )
                 ev_mode = "solar"
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             tariff = self.optimizer.get_tariff_periods(now)
             grid_power = self._read_grid_power()
             battery_soc = self.ha_client.get_sensor_value(self.soc_entity) or 0
@@ -1049,7 +1049,7 @@ class EnergyManager:
                     wb_connected=wb_connected,
                     idle_since=self._ev_idle_since,
                     excess_w=(pv_power - load_power) if battery_soc < 100 else (-grid_power + wallbox_power),
-                    ts=datetime.now(timezone.utc),
+                    ts=datetime.now(UTC),
                 ))
 
             # Publish dashboard sensors

@@ -8,7 +8,7 @@ Implements FSD Section 4.2: SOC Simulation
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import pandas as pd
 
@@ -237,7 +237,7 @@ class SocSimulator:
 
         """
         if simulation.empty:
-            return 0.0, datetime.now(timezone.utc)
+            return 0.0, datetime.now(UTC)
 
         min_idx = simulation['soc_percent'].idxmin()
         min_soc = simulation['soc_percent'].min()

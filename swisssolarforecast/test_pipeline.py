@@ -8,7 +8,7 @@
 
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 # Configure logging
@@ -121,7 +121,7 @@ def main() -> int:
         )
         writer.connect()
 
-        run_time = datetime.now(timezone.utc)
+        run_time = datetime.now(UTC)
         writer.write_pv_forecast(
             pv_forecast=pv_forecast,
             model="ch1",

@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from collections.abc import Callable
 
 from ocpp.routing import on
@@ -69,7 +69,7 @@ class ChargePointHandler(CP):
         logger.info(f"Wallbox connected: {charge_point_vendor} {charge_point_model}")
         self.boot_event.set()
         return call_result.BootNotification(
-            current_time=datetime.now(timezone.utc).isoformat(),
+            current_time=datetime.now(UTC).isoformat(),
             interval=60,  # Heartbeat interval in seconds
             status=RegistrationStatus.accepted,
         )
@@ -79,7 +79,7 @@ class ChargePointHandler(CP):
         """Wallbox heartbeat - keep connection alive."""
         self.heartbeat_event.set()
         return call_result.Heartbeat(
-            current_time=datetime.now(timezone.utc).isoformat()
+            current_time=datetime.now(UTC).isoformat()
         )
 
     @on(Action.status_notification)
@@ -147,7 +147,7 @@ class ChargePointHandler(CP):
                         mv_timestamp.replace("Z", "+00:00")
                     )
                     age_s = (
-                        datetime.now(timezone.utc) - mv_time
+                        datetime.now(UTC) - mv_time
                     ).total_seconds()
                     if age_s > self.METER_VALUES_MAX_AGE_S:
                         logger.warning(

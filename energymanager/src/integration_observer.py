@@ -12,7 +12,7 @@ import json
 import logging
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 from src.ev_state_machine import EVInputs, EVOutput, EVState
@@ -208,7 +208,7 @@ class IntegrationObserver:
             failed = sum(1 for tr in self._results.values() if tr.status == "failed")
             pending = sum(1 for tr in self._results.values() if tr.status == "pending")
             report = {
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": datetime.now(UTC).isoformat(),
                 "version": _REPORT_VERSION,
                 "summary": {
                     "total": len(self._results),

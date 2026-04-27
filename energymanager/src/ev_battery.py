@@ -13,7 +13,7 @@ battery (now EV-free) rides the remaining forecast back up.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -59,7 +59,7 @@ class EVBatteryOptimizer:
         safe default.
         """
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             stop = (now + self.horizon).isoformat()
             query = f'''
             from(bucket: "{self.bucket}")
@@ -109,11 +109,11 @@ class EVBatteryOptimizer:
             (hits_full, peak_soc or None, full_time_local "HH:MM" or None, end_of_today)
 
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         now_local = now.astimezone(SWISS_TZ)
         end_of_today = now_local.replace(
             hour=23, minute=59, second=59, microsecond=0
-        ).astimezone(timezone.utc)
+        ).astimezone(UTC)
         end_stop = end_of_today.isoformat()
 
         query = f"""

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from unittest.mock import patch
 
@@ -58,7 +58,7 @@ def _make_snapshot(
     if output is None:
         output = EVOutput(EVState.IDLE, 0, "test")
     if ts is None:
-        ts = datetime.now(timezone.utc)
+        ts = datetime.now(UTC)
     return CycleSnapshot(
         inputs=inputs,
         output=output,
@@ -341,7 +341,7 @@ class TestDetectors:
 
     def test_no13_skip_idle(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         prev = _make_snapshot(
             output=EVOutput(EVState.SOLAR, 3000, "Solar"),
         )
@@ -454,7 +454,7 @@ class TestDetectors:
 
     def test_ec13_auto_revert(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         prev = _make_snapshot(
             inputs=_make_inputs(charging_mode="immediate"),
             ts=now - timedelta(minutes=6),

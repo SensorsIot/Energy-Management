@@ -2,7 +2,7 @@
 
 import logging
 import warnings
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -18,7 +18,7 @@ SWISS_TZ = ZoneInfo("Europe/Zurich")
 def _swiss(ts) -> str:
     """Format a timezone-aware timestamp (or naive UTC) in Swiss local time."""
     if getattr(ts, "tzinfo", None) is None:
-        ts = ts.replace(tzinfo=timezone.utc)
+        ts = ts.replace(tzinfo=UTC)
     return ts.astimezone(SWISS_TZ).strftime("%Y-%m-%d %H:%M")
 
 
@@ -171,13 +171,13 @@ class ForecastReader:
 
         # Ensure start/end are timezone-aware UTC for comparison with df.index
         if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
+            start = start.replace(tzinfo=UTC)
         else:
-            start = start.astimezone(timezone.utc)
+            start = start.astimezone(UTC)
         if end.tzinfo is None:
-            end = end.replace(tzinfo=timezone.utc)
+            end = end.replace(tzinfo=UTC)
         else:
-            end = end.astimezone(timezone.utc)
+            end = end.astimezone(UTC)
 
         # Ensure df.index is UTC (internal convention; logs render Swiss local)
         if df.index.tz is None:

@@ -8,7 +8,7 @@ Measurements stored in pv_forecast bucket:
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 import yaml
@@ -113,7 +113,7 @@ class ShadingTracker:
             .field("hour", hour)
             .field("ratio", float(ratio))
             .field("weather_factor", float(weather_factor))
-            .time(datetime.now(timezone.utc), WritePrecision.S)
+            .time(datetime.now(UTC), WritePrecision.S)
         )
         self.write_api.write(bucket=self.bucket, org=self.influx_org, record=point)
 

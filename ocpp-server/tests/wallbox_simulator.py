@@ -12,7 +12,7 @@ Default: ws://192.168.0.202:8887/AcTec001
 import asyncio
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import websockets
 from ocpp.routing import on
@@ -99,7 +99,7 @@ class WallboxSimulator(CP):
             connector_id=1,
             id_tag=id_tag,
             meter_start=int(self.energy_wh),
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
         )
         resp = await self.call(req)
         self.transaction_id = resp.transaction_id
@@ -113,7 +113,7 @@ class WallboxSimulator(CP):
             return
         req = call.StopTransaction(
             meter_stop=int(self.energy_wh),
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             transaction_id=self.transaction_id,
         )
         await self.call(req)
@@ -127,7 +127,7 @@ class WallboxSimulator(CP):
         req = call.MeterValues(
             connector_id=1,
             meter_value=[{
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "sampled_value": [
                     {"measurand": "Power.Active.Import", "value": str(self.power_w), "unit": "W"},
                     {"measurand": "Energy.Active.Import.Register", "value": str(int(self.energy_wh)), "unit": "Wh"},

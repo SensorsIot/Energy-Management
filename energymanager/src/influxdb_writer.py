@@ -1,7 +1,7 @@
 """InfluxDB writer for EnergyManager simulation results."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import pandas as pd
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -68,7 +68,7 @@ class SimulationWriter:
         for timestamp, row in simulation.iterrows():
             # Ensure timestamp is timezone-aware
             if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                timestamp = timestamp.replace(tzinfo=UTC)
 
             point = (
                 Point("soc_forecast")
@@ -101,7 +101,7 @@ class SimulationWriter:
             current_soc: Current battery SOC
 
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         point = (
             Point("discharge_decision")
@@ -141,7 +141,7 @@ class SimulationWriter:
         for timestamp, row in simulation.iterrows():
             # Ensure timestamp is timezone-aware
             if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                timestamp = timestamp.replace(tzinfo=UTC)
 
             point = (
                 Point("soc_forecast_snapshot")

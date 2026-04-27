@@ -10,7 +10,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 import yaml
@@ -209,11 +209,11 @@ def main() -> None:
     signal.signal(signal.SIGINT, signal_handler)
 
     # Main loop - run on cron schedule
-    cron = croniter(cron_expr, datetime.now(timezone.utc))
+    cron = croniter(cron_expr, datetime.now(UTC))
 
     while running:
         next_run = cron.get_next(datetime)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         wait_seconds = (next_run - now).total_seconds()
 
         if wait_seconds > 0:
@@ -222,7 +222,7 @@ def main() -> None:
             # Sleep in small intervals to allow signal handling
             while wait_seconds > 0 and running:
                 time.sleep(min(wait_seconds, 30))
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 wait_seconds = (next_run - now).total_seconds()
 
         if running:

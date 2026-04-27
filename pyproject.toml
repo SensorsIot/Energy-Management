@@ -1,0 +1,25 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Bug-finders, modernization, and docstring layout (when docstrings exist).
+# ANN intentionally omitted: gradual typing not enforced project-wide.
+select = ["E", "W", "F", "B", "UP", "D"]
+
+ignore = [
+    # "Must have a docstring" rules — produce filler when forced.
+    "D100",  # Missing docstring in public module
+    "D101",  # Missing docstring in public class
+    "D102",  # Missing docstring in public method
+    "D103",  # Missing docstring in public function
+    "D104",  # Missing docstring in public package
+    "D107",  # Missing docstring in __init__
+    # Intentional patterns in this codebase.
+    "E402",  # Module-level import not at top (e.g., sys.path manipulation in scripts)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use fixtures and ad-hoc helpers; docstring rules add noise without value.
+"**/tests/**" = ["D"]
+"**/test_*.py" = ["D"]

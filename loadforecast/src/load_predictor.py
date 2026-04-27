@@ -8,7 +8,7 @@ not UTC, so that "morning peak" patterns align with actual user behavior.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import pandas as pd
 from influxdb_client import InfluxDBClient
@@ -138,7 +138,7 @@ class LoadPredictor:
 
         # Align start time to 15-min boundary in UTC
         if start_time is None:
-            start_time = datetime.now(timezone.utc)
+            start_time = datetime.now(UTC)
         start_time = start_time.replace(
             minute=(start_time.minute // 15) * 15,
             second=0,
