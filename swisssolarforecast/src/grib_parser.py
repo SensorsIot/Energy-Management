@@ -1,4 +1,5 @@
 """GRIB file parser for MeteoSwiss ICON forecast data.
+
 Handles ICON's unstructured triangular grid for both CH1 and CH2 models.
 
 All functions that need location now require lat/lon as explicit parameters,

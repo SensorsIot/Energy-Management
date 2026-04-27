@@ -56,6 +56,7 @@ def calculate_ev_power(
         excess_w: Available solar excess in watts
         min_power_w: Minimum wallbox power (below this → pause)
         max_power_w: Maximum wallbox power (clamp ceiling)
+        battery_full: Whether the home battery is full — affects phase-gap resolution
 
     Returns:
         EVChargingResult with target power, excess, and reason

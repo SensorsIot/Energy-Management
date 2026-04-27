@@ -171,7 +171,7 @@ def run_forecast(options: dict) -> bool:
 
 
 def main() -> None:
-    """Main entry point for HA add-on."""
+    """Run the LoadForecast add-on (CLI entry point)."""
     import argparse
 
     parser = argparse.ArgumentParser(description="LoadForecast Add-on")

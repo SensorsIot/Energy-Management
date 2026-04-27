@@ -1,4 +1,5 @@
 """ICON forecast data fetcher for MeteoSwiss STAC API.
+
 Supports hybrid CH1+CH2 approach with ensemble members for uncertainty bands.
 
 - CH1: 1km resolution, 33h horizon, 11 ensemble members, runs every 3h
@@ -428,7 +429,7 @@ def fetch_icon_data(
     hour_end: int = None,
     include_ensemble: bool = True,
 ) -> dict:
-    """Convenience function to fetch ICON forecast data.
+    """Fetch ICON forecast data (convenience wrapper).
 
     Args:
         model: "ch1" or "ch2"

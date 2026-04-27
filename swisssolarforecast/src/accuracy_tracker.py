@@ -767,7 +767,7 @@ class AccuracyTracker:
 
 
 def create_accuracy_tracker(options: dict) -> AccuracyTracker:
-    """Factory function to create AccuracyTracker from options dict."""
+    """Build an AccuracyTracker from the provided options dict."""
     influx_config = options.get("influxdb", {})
     accuracy_config = options.get("accuracy_tracker", {})
 

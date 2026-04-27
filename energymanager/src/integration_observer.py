@@ -126,7 +126,7 @@ class IntegrationObserver:
     # -- public API --
 
     def observe(self, snapshot: CycleSnapshot) -> None:
-        """Called each cycle.  Never raises."""
+        """Process one observation cycle (never raises)."""
         try:
             self._observe_inner(snapshot)
         except Exception:

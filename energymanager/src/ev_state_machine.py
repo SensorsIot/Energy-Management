@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # States
 # ---------------------------------------------------------------------------
 
-class EVState(str, Enum):
+class EVState(StrEnum):
     """EV charging states (str so it works as an HA sensor value)."""
 
     IDLE = "idle"

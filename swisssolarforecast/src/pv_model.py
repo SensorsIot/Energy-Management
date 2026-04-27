@@ -1,4 +1,5 @@
 """PV power forecast model using pvlib.
+
 Supports hierarchical config: plants -> inverters -> strings -> panels.
 
 All forecast functions accept plants as a parameter, allowing runtime
@@ -10,9 +11,6 @@ import pandas as pd
 import numpy as np
 import logging
 
-
-# Legacy import for backwards compatibility (DEPRECATED)
-from .config import PLANTS as _LEGACY_PLANTS
 
 logger = logging.getLogger(__name__)
 
@@ -213,26 +211,20 @@ def forecast_plant_power(
 
 def forecast_all_plants(
     weather: pd.DataFrame,
-    plants: list[dict] | None = None,
+    plants: list[dict],
     shading_factors: dict | None = None,
 ) -> pd.DataFrame:
     """Calculate power forecast for all plants.
 
     Args:
         weather: Weather DataFrame with ghi, temp_air, wind_speed
-        plants: List of plant dicts from PVSystemConfig.plants.
-                If None, uses legacy config_pv.yaml (DEPRECATED).
+        plants: List of plant dicts from PVSystemConfig.plants
         shading_factors: Optional dict mapping string name -> hour -> factor.
 
     Returns:
         DataFrame with power forecast for all plants
 
     """
-    # Use provided plants or fall back to legacy for backwards compatibility
-    if plants is None:
-        logger.debug("No plants provided, using legacy config (DEPRECATED)")
-        plants = _LEGACY_PLANTS
-
     results = {}
     first_result = None
 
@@ -271,15 +263,14 @@ def forecast_all_plants(
 
 def forecast_ensemble_plants(
     ensemble_weather: dict[int, pd.DataFrame],
-    plants: list[dict] | None = None,
+    plants: list[dict],
     shading_factors: dict | None = None,
 ) -> pd.DataFrame:
     """Calculate power forecast with uncertainty bands using ensemble weather data.
 
     Args:
         ensemble_weather: Dict mapping member number to weather DataFrame
-        plants: List of plant dicts from PVSystemConfig.plants.
-                If None, uses legacy config_pv.yaml (DEPRECATED).
+        plants: List of plant dicts from PVSystemConfig.plants
         shading_factors: Optional dict mapping string name -> hour -> factor.
 
     Returns:
@@ -287,11 +278,6 @@ def forecast_ensemble_plants(
         plus per-inverter percentiles.
 
     """
-    # Use provided plants or fall back to legacy for backwards compatibility
-    if plants is None:
-        logger.debug("No plants provided, using legacy config (DEPRECATED)")
-        plants = _LEGACY_PLANTS
-
     if not ensemble_weather:
         raise ValueError("No ensemble weather data provided")
 

@@ -39,9 +39,11 @@ class LocalFetcher:
         point_id: int = 441500,
         parameters: dict[str, str] | None = None,
     ) -> None:
-        """Args:
-        point_id: MeteoSwiss point ID (441500 = Lausen/4415)
-        parameters: Mapping of standard names to MeteoSwiss parameter codes.
+        """Initialize the fetcher.
+
+        Args:
+            point_id: MeteoSwiss point ID (441500 = Lausen/4415)
+            parameters: Mapping of standard names to MeteoSwiss parameter codes.
 
         """
         self.point_id = point_id

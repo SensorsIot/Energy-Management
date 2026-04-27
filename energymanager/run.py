@@ -1333,7 +1333,7 @@ def load_config(config_path: str = None) -> dict:
 
 
 def main() -> None:
-    """Main entry point."""
+    """Run the EnergyManager add-on (CLI entry point)."""
     import argparse
 
     parser = argparse.ArgumentParser(description="EnergyManager Add-on")

@@ -23,6 +23,9 @@ logger = logging.getLogger("test_pipeline")
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+import yaml
+
+from src.config import PVSystemConfig
 from src.icon_fetcher import IconFetcher
 from src.grib_parser import load_hybrid_ensemble_forecast
 from src.pv_model import forecast_ensemble_plants
@@ -90,8 +93,13 @@ def main() -> int:
     logger.info("STEP 3: Calculating PV forecast with pvlib...")
     logger.info("=" * 60)
 
+    # Load PV configuration from config_pv.yaml
+    config_path = Path(__file__).parent / "config_pv.yaml"
+    with open(config_path) as f:
+        pv_config = PVSystemConfig.from_options(yaml.safe_load(f))
+
     try:
-        pv_forecast = forecast_ensemble_plants(ensemble_weather)
+        pv_forecast = forecast_ensemble_plants(ensemble_weather, plants=pv_config.plants)
         logger.info(f"Generated forecast with {len(pv_forecast)} time steps")
         logger.info(f"Columns: {list(pv_forecast.columns)}")
 

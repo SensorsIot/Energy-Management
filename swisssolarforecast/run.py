@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""SwissSolarForecast Home Assistant Add-on
-Main entry point.
+"""SwissSolarForecast Home Assistant Add-on — main entry point.
 
 Runs two decoupled tasks:
 1. Fetcher: Downloads ICON GRIB data from MeteoSwiss (scheduled)
@@ -539,7 +538,7 @@ def load_options(config_path: str = None) -> dict:
 
 
 def main() -> None:
-    """Main entry point."""
+    """Run the SwissSolarForecast add-on (CLI entry point)."""
     import argparse
 
     parser = argparse.ArgumentParser(description="SwissSolarForecast Add-on")

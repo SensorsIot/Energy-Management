@@ -345,7 +345,7 @@ class OCPPServer:
             logger.warning(f"MQTT publish failed: {e}")
 
     def _on_status_change(self, key: str, value) -> None:
-        """Callback when wallbox status changes — update HA entity and MQTT."""
+        """Handle a wallbox status change: update HA entity and MQTT."""
         entity_id = STATUS_ENTITY_MAP.get(key)
         if not entity_id:
             logger.debug(f"No entity mapping for status key: {key}")
@@ -1001,7 +1001,7 @@ async def async_main() -> None:
 
 
 def main() -> None:
-    """Main entry point."""
+    """Run the OCPP Server add-on (CLI entry point)."""
     asyncio.run(async_main())
 
 

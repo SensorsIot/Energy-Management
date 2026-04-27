@@ -306,6 +306,7 @@ class ShadingTracker:
 
     def load_shading_factors(self) -> dict[str, dict[int, float]]:
         """Load shading factors from YAML file.
+
         Falls back to defaults if file doesn't exist.
         """
         try:
@@ -362,7 +363,7 @@ class ShadingTracker:
 
 
 def create_shading_tracker(options: dict) -> ShadingTracker:
-    """Factory function to create ShadingTracker from options dict."""
+    """Build a ShadingTracker from the provided options dict."""
     influx_config = options.get("influxdb", {})
 
     return ShadingTracker(
