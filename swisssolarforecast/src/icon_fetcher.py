@@ -137,7 +137,7 @@ class IconFetcher:
             r.raise_for_status()
             data = r.json()
             return len(data.get("features", [])) > 0
-        except:
+        except Exception:
             return False
 
     def find_latest_available_run(self) -> datetime | None:

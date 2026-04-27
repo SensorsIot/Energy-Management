@@ -315,7 +315,7 @@ def forecast_ensemble_plants(
 
     # Stack all members' total AC power for percentile calculation
     all_totals = []
-    for member, forecast in member_forecasts.items():
+    for _member, forecast in member_forecasts.items():
         # Align indices
         if "total_ac_power" in forecast.columns:
             aligned = forecast["total_ac_power"].reindex(index)
@@ -353,7 +353,7 @@ def forecast_ensemble_plants(
     for inv_name in inverter_names:
         col = f"{inv_name}_ac_power"
         inv_arrays = []
-        for member, forecast in member_forecasts.items():
+        for _member, forecast in member_forecasts.items():
             if col in forecast.columns:
                 aligned = forecast[col].reindex(index)
                 inv_arrays.append(aligned.values)

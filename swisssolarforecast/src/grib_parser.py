@@ -83,7 +83,7 @@ def get_grid_coords(model: str = "ch2", cache_dir: Path | None = None) -> tuple[
                 break
             try:
                 name = eccodes.codes_get(msg, 'shortName')
-            except:
+            except Exception:
                 name = 'unknown'
             if name == 'tlat':
                 lats = eccodes.codes_get_array(msg, 'values')
