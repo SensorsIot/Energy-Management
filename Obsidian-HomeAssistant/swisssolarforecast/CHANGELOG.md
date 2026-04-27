@@ -1,1 +1,0 @@
-../../swisssolarforecast/CHANGELOG.md
