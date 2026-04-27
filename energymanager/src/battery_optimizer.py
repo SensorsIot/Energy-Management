@@ -1,5 +1,4 @@
-"""
-Battery discharge optimization based on energy balance.
+"""Battery discharge optimization based on energy balance.
 
 Simplified Algorithm (FSD v2.6):
 1. If expensive tariff (06:00-21:00): always allow discharge
@@ -12,7 +11,6 @@ Simplified Algorithm (FSD v2.6):
 
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple, List
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
@@ -34,6 +32,7 @@ def swiss_time(dt: datetime) -> str:
 @dataclass
 class TariffPeriod:
     """Tariff period information."""
+
     cheap_start: datetime
     cheap_end: datetime
     target: datetime
@@ -43,6 +42,7 @@ class TariffPeriod:
 @dataclass
 class DischargeDecision:
     """Battery discharge decision."""
+
     discharge_allowed: bool
     reason: str
     min_soc_percent: float  # Minimum SOC during expensive hours (for logging)
@@ -62,8 +62,8 @@ class BatteryOptimizer:
         weekday_cheap_start: str = "21:00",
         weekday_cheap_end: str = "06:00",
         weekend_all_day_cheap: bool = True,
-        holidays: List[str] = None,
-    ):
+        holidays: list[str] = None,
+    ) -> None:
         self.capacity_wh = capacity_wh
         self.min_soc_percent = min_soc_percent
         self.min_soc_wh = capacity_wh * min_soc_percent / 100
@@ -134,11 +134,11 @@ class BatteryOptimizer:
         return simulation[after_cheap_end & at_or_before_cheap_start & is_expensive_day]
 
     def get_tariff_periods(self, now: datetime) -> TariffPeriod:
-        """
-        Calculate tariff periods based on current time.
+        """Calculate tariff periods based on current time.
 
         Returns:
             TariffPeriod with cheap_start, cheap_end, target, is_cheap_now
+
         """
         # Convert to Swiss time for tariff comparison
         # Tariff hours (21:00-06:00) are defined in Swiss time
@@ -238,11 +238,10 @@ class BatteryOptimizer:
         self,
         soc_percent: float,
         forecast: pd.DataFrame,
-        block_from: Optional[datetime] = None,
-        block_until: Optional[datetime] = None,
+        block_from: datetime | None = None,
+        block_until: datetime | None = None,
     ) -> pd.DataFrame:
-        """
-        Simulate SOC trajectory with optional discharge blocking.
+        """Simulate SOC trajectory with optional discharge blocking.
 
         Args:
             soc_percent: Starting SOC (0-100)
@@ -252,6 +251,7 @@ class BatteryOptimizer:
 
         Returns:
             DataFrame with soc_percent, soc_wh, soc_wh_unclamped, net_wh, discharge_wh columns
+
         """
         e_bat = soc_percent / 100 * self.capacity_wh
         e_bat_unclamped = e_bat
@@ -319,9 +319,8 @@ class BatteryOptimizer:
         forecast: pd.DataFrame,
         now: datetime,
         previously_blocked: bool = False,
-    ) -> Tuple[DischargeDecision, pd.DataFrame, pd.DataFrame]:
-        """
-        Calculate battery discharge decision.
+    ) -> tuple[DischargeDecision, pd.DataFrame, pd.DataFrame]:
+        """Calculate battery discharge decision.
 
         Simplified Algorithm (FSD v2.6):
         1. Always simulate SOC trajectory for visualization
@@ -341,6 +340,7 @@ class BatteryOptimizer:
 
         Returns:
             (decision, sim_no_strategy, sim_with_strategy)
+
         """
         tariff = self.get_tariff_periods(now)
 

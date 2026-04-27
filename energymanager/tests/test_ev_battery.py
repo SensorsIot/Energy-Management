@@ -34,19 +34,19 @@ def _make_optimizer(
 
 
 class TestSafetyGate:
-    def test_safe_when_min_well_above_floor(self):
+    def test_safe_when_min_well_above_floor(self) -> None:
         opt = _make_optimizer(min_soc_in_window=50.0, min_soc_percent=10.0)
         safe, min_soc = opt.check_ev_safe(ev_load_wh=0.0)
         assert safe is True
         assert min_soc == 50.0
 
-    def test_unsafe_when_min_below_floor(self):
+    def test_unsafe_when_min_below_floor(self) -> None:
         opt = _make_optimizer(min_soc_in_window=8.0, min_soc_percent=10.0)
         safe, min_soc = opt.check_ev_safe(ev_load_wh=0.0)
         assert safe is False
         assert min_soc == 8.0
 
-    def test_ev_load_subtracts_from_min(self):
+    def test_ev_load_subtracts_from_min(self) -> None:
         """EV load is subtracted as worst case (one 15-min slot)."""
         # 1000 Wh on a 20 kWh battery = 5%. Min 14% - 5% = 9% < 10% floor.
         opt = _make_optimizer(min_soc_in_window=14.0, min_soc_percent=10.0)
@@ -54,28 +54,28 @@ class TestSafetyGate:
         assert safe is False
         assert min_soc == 9.0
 
-    def test_ev_load_keeps_it_safe_if_margin_is_enough(self):
+    def test_ev_load_keeps_it_safe_if_margin_is_enough(self) -> None:
         # 1000 Wh on 20 kWh = 5%. Min 20% - 5% = 15% ≥ 10% floor.
         opt = _make_optimizer(min_soc_in_window=20.0, min_soc_percent=10.0)
         safe, min_soc = opt.check_ev_safe(ev_load_wh=1000.0)
         assert safe is True
         assert min_soc == 15.0
 
-    def test_min_clamped_at_zero(self):
+    def test_min_clamped_at_zero(self) -> None:
         """Negative projected min after subtraction is clamped to 0."""
         opt = _make_optimizer(min_soc_in_window=3.0, min_soc_percent=10.0)
         safe, min_soc = opt.check_ev_safe(ev_load_wh=2000.0)  # subtracts 10%
         assert safe is False
         assert min_soc == 0.0
 
-    def test_blocks_when_no_forecast_data(self):
+    def test_blocks_when_no_forecast_data(self) -> None:
         """Missing forecast → block EV as precaution."""
         opt = _make_optimizer(min_soc_in_window=None)
         safe, min_soc = opt.check_ev_safe()
         assert safe is False
         assert min_soc == 0.0
 
-    def test_blocks_on_query_error(self):
+    def test_blocks_on_query_error(self) -> None:
         client = MagicMock()
         client.query_api.return_value.query.side_effect = RuntimeError("boom")
         opt = EVBatteryOptimizer(
@@ -88,7 +88,7 @@ class TestSafetyGate:
         assert safe is False
         assert min_soc == 0.0
 
-    def test_exactly_at_floor_is_safe(self):
+    def test_exactly_at_floor_is_safe(self) -> None:
         """`>=` comparison — equal to floor is allowed."""
         opt = _make_optimizer(min_soc_in_window=10.0, min_soc_percent=10.0)
         safe, _ = opt.check_ev_safe()
@@ -98,7 +98,7 @@ class TestSafetyGate:
 class TestWillBatteryHitFull:
     """Dashboard diagnostic — not a gate."""
 
-    def test_below_threshold(self):
+    def test_below_threshold(self) -> None:
         """Peak SOC 85% → not full."""
         client = MagicMock()
         record = MagicMock()
@@ -117,7 +117,7 @@ class TestWillBatteryHitFull:
         assert peak == 85.0
         assert full_time is None
 
-    def test_no_records(self):
+    def test_no_records(self) -> None:
         client = MagicMock()
         client.query_api.return_value.query.return_value = []
         opt = EVBatteryOptimizer(

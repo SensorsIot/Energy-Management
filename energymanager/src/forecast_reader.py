@@ -1,11 +1,8 @@
-"""
-Read PV and Load forecasts from InfluxDB.
-"""
+"""Read PV and Load forecasts from InfluxDB."""
 
 import logging
 import warnings
 from datetime import datetime, timezone
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -39,22 +36,22 @@ class ForecastReader:
         org: str,
         pv_bucket: str = "pv_forecast",
         load_bucket: str = "load_forecast",
-    ):
+    ) -> None:
         self.host = host
         self.port = port
         self.token = token
         self.org = org
         self.pv_bucket = pv_bucket
         self.load_bucket = load_bucket
-        self.client: Optional[InfluxDBClient] = None
+        self.client: InfluxDBClient | None = None
 
-    def connect(self):
+    def connect(self) -> None:
         """Connect to InfluxDB."""
         url = f"http://{self.host}:{self.port}"
         logger.info(f"Connecting to InfluxDB at {url}")
         self.client = InfluxDBClient(url=url, token=self.token, org=self.org)
 
-    def close(self):
+    def close(self) -> None:
         """Close connection."""
         if self.client:
             self.client.close()
@@ -65,8 +62,7 @@ class ForecastReader:
         end: datetime,
         percentile: str = "p50",
     ) -> pd.Series:
-        """
-        Get PV energy forecast.
+        """Get PV energy forecast.
 
         Args:
             start: Start time
@@ -75,6 +71,7 @@ class ForecastReader:
 
         Returns:
             Series with energy_wh indexed by time
+
         """
         query_api = self.client.query_api()
 
@@ -109,8 +106,7 @@ class ForecastReader:
         end: datetime,
         percentile: str = "p50",
     ) -> pd.Series:
-        """
-        Get Load energy forecast.
+        """Get Load energy forecast.
 
         Args:
             start: Start time
@@ -119,6 +115,7 @@ class ForecastReader:
 
         Returns:
             Series with energy_wh indexed by time
+
         """
         query_api = self.client.query_api()
 
@@ -152,14 +149,14 @@ class ForecastReader:
         end: datetime,
         percentile: str = "p50",
     ) -> pd.DataFrame:
-        """
-        Get combined PV and Load forecast.
+        """Get combined PV and Load forecast.
 
         When PV forecast extends beyond load forecast, the load is filled
         by repeating the last available day's pattern cyclically.
 
         Returns:
             DataFrame with columns: pv_energy_wh, load_energy_wh, net_energy_wh
+
         """
         pv = self.get_pv_forecast(start, end, percentile)
         load = self.get_load_forecast(start, end, percentile)
@@ -208,9 +205,8 @@ class ForecastReader:
         bucket: str = "HuaweiNew",
         measurement: str = "Energy",
         field: str = "BATT_Level",
-    ) -> Optional[float]:
-        """
-        Get current battery SOC from InfluxDB.
+    ) -> float | None:
+        """Get current battery SOC from InfluxDB.
 
         Args:
             bucket: Bucket containing battery data
@@ -219,6 +215,7 @@ class ForecastReader:
 
         Returns:
             Current SOC percentage or None if not available
+
         """
         query_api = self.client.query_api()
 

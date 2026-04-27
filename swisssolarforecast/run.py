@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-SwissSolarForecast Home Assistant Add-on
+"""SwissSolarForecast Home Assistant Add-on
 Main entry point.
 
 Runs two decoupled tasks:
@@ -8,7 +7,6 @@ Runs two decoupled tasks:
 2. Calculator: Reads GRIB files, calculates forecast, writes to InfluxDB (scheduled)
 """
 
-import json
 import logging
 import os
 import signal
@@ -16,7 +14,6 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
 
 import pandas as pd
 import requests
@@ -49,7 +46,7 @@ from src.shading_tracker import ShadingTracker, create_shading_tracker
 class SwissSolarForecast:
     """Main add-on application."""
 
-    def __init__(self, options: Dict):
+    def __init__(self, options: dict) -> None:
         self.options = options
         self.running = False
 
@@ -78,18 +75,18 @@ class SwissSolarForecast:
         self._ha_token = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
         if not self._ha_token:
             try:
-                with open("/run/secrets/supervisor_token", "r") as f:
+                with open("/run/secrets/supervisor_token") as f:
                     self._ha_token = f.read().strip()
             except FileNotFoundError:
                 pass
 
         # Initialize components
-        self.influx_writer: Optional[ForecastWriter] = None
-        self.scheduler: Optional[ForecastScheduler] = None
-        self.accuracy_tracker: Optional[AccuracyTracker] = None
-        self.shading_tracker: Optional[ShadingTracker] = None
+        self.influx_writer: ForecastWriter | None = None
+        self.scheduler: ForecastScheduler | None = None
+        self.accuracy_tracker: AccuracyTracker | None = None
+        self.shading_tracker: ShadingTracker | None = None
 
-    def _get_ha_value(self, entity_id: str) -> Optional[float]:
+    def _get_ha_value(self, entity_id: str) -> float | None:
         """Fetch numeric value from Home Assistant entity."""
         if not self._ha_token:
             return None
@@ -105,7 +102,7 @@ class SwissSolarForecast:
             logger.debug(f"Could not fetch {entity_id}: {e}")
             return None
 
-    def init_influxdb(self):
+    def init_influxdb(self) -> None:
         """Initialize InfluxDB connection."""
         influx_config = self.options.get("influxdb", {})
 
@@ -119,7 +116,7 @@ class SwissSolarForecast:
         self.influx_writer.connect()
         self.influx_writer.ensure_bucket(retention_days=30)
 
-    def init_accuracy_tracker(self):
+    def init_accuracy_tracker(self) -> None:
         """Initialize forecast accuracy tracker."""
         accuracy_config = self.options.get("accuracy_tracker", {})
 
@@ -131,13 +128,13 @@ class SwissSolarForecast:
         self.accuracy_tracker.connect()
         logger.info("Accuracy tracker initialized")
 
-    def init_shading_tracker(self):
+    def init_shading_tracker(self) -> None:
         """Initialize shading correction tracker."""
         self.shading_tracker = create_shading_tracker(self.options)
         self.shading_tracker.connect()
         logger.info("Shading tracker initialized")
 
-    def init_scheduler(self):
+    def init_scheduler(self) -> None:
         """Initialize scheduler with callbacks."""
         schedule_config = self.options.get("schedule", {})
 
@@ -173,7 +170,7 @@ class SwissSolarForecast:
             coalesce=True,
         )
 
-    def _local_forecast_job(self):
+    def _local_forecast_job(self) -> None:
         """Job wrapper for local forecast calculation."""
         logger.info("Scheduled local forecast starting...")
         try:
@@ -223,7 +220,7 @@ class SwissSolarForecast:
             logger.error(f"CH2 fetch failed: {e}", exc_info=True)
             raise
 
-    def calculate_forecast(self):
+    def calculate_forecast(self) -> None:
         """Calculate PV forecast from local GRIB data and write to InfluxDB."""
         logger.info("Calculating PV forecast...")
 
@@ -279,7 +276,7 @@ class SwissSolarForecast:
             logger.error(f"Forecast calculation failed: {e}", exc_info=True)
             raise
 
-    def calculate_local_forecast(self):
+    def calculate_local_forecast(self) -> None:
         """Fetch MeteoSwiss local point forecast and calculate PV power."""
         logger.info("Calculating local point forecast...")
 
@@ -331,7 +328,7 @@ class SwissSolarForecast:
         except Exception as e:
             logger.error(f"Local forecast failed: {e}", exc_info=True)
 
-    def snapshot_forecast(self):
+    def snapshot_forecast(self) -> None:
         """Snapshot current forecast for accuracy tracking (21:00 daily).
 
         Snapshots both GRIB (hybrid) and local forecasts with the same rules
@@ -351,7 +348,7 @@ class SwissSolarForecast:
             except Exception as e:
                 logger.error(f"Forecast snapshot failed (model={model}): {e}", exc_info=True)
 
-    def evaluate_forecast(self):
+    def evaluate_forecast(self) -> None:
         """Evaluate forecast accuracy against actuals (21:15 daily).
 
         Evaluates both GRIB and local forecasts against the same actuals.
@@ -371,7 +368,7 @@ class SwissSolarForecast:
             except Exception as e:
                 logger.error(f"Forecast evaluation failed (model={model}): {e}", exc_info=True)
 
-    def update_shading_factors(self):
+    def update_shading_factors(self) -> None:
         """Update shading factors from recent accuracy data."""
         if not self.shading_tracker:
             return
@@ -396,7 +393,7 @@ class SwissSolarForecast:
         except Exception as e:
             logger.error(f"Shading factors update failed: {e}", exc_info=True)
 
-    def start(self):
+    def start(self) -> None:
         """Start the add-on."""
         logger.info("Starting SwissSolarForecast add-on...")
 
@@ -440,7 +437,7 @@ class SwissSolarForecast:
         while self.running:
             time.sleep(1)
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the add-on gracefully."""
         logger.info("Stopping SwissSolarForecast add-on...")
         self.running = False
@@ -471,7 +468,7 @@ def deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def load_options(config_path: str = None) -> Dict:
+def load_options(config_path: str = None) -> dict:
     """Load configuration with secrets from environment.
 
     Strategy:
@@ -541,7 +538,7 @@ def load_options(config_path: str = None) -> Dict:
     return options
 
 
-def main():
+def main() -> None:
     """Main entry point."""
     import argparse
 
@@ -560,7 +557,7 @@ def main():
     app = SwissSolarForecast(options)
 
     # Handle signals
-    def signal_handler(signum, frame):
+    def signal_handler(signum, frame) -> None:
         logger.info(f"Received signal {signum}")
         app.stop()
         sys.exit(0)

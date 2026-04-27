@@ -1,5 +1,4 @@
-"""
-GRIB file parser for MeteoSwiss ICON forecast data.
+"""GRIB file parser for MeteoSwiss ICON forecast data.
 Handles ICON's unstructured triangular grid for both CH1 and CH2 models.
 
 All functions that need location now require lat/lon as explicit parameters,
@@ -10,7 +9,6 @@ import eccodes
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Optional
 import logging
 import requests
 import tempfile
@@ -27,38 +25,38 @@ _INDEX_CACHE = {}  # Nearest index per (lat, lon, model)
 _FILENAME_CACHE = {}  # Parsed filename metadata
 
 
-def get_grid_coords(model: str = "ch2", cache_dir: Optional[Path] = None) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Load ICON grid coordinates, downloading if necessary.
-    
+def get_grid_coords(model: str = "ch2", cache_dir: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Load ICON grid coordinates, downloading if necessary.
+
     Args:
         model: "ch1" or "ch2"
         cache_dir: Directory for cached grid files
+
     """
     global _GRID_CACHE
-    
+
     cache_key = f"{model}_lats"
     if cache_key in _GRID_CACHE:
         return _GRID_CACHE[f"{model}_lats"], _GRID_CACHE[f"{model}_lons"]
-    
+
     if cache_dir is None:
         cache_dir = Path(tempfile.gettempdir()) / "meteoswiss_grib"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    
+
     cache_file = cache_dir / f"grid_coords_{model}.npz"
     if cache_file.exists():
         data = np.load(cache_file)
         _GRID_CACHE[f"{model}_lats"] = data['lats']
         _GRID_CACHE[f"{model}_lons"] = data['lons']
         return _GRID_CACHE[f"{model}_lats"], _GRID_CACHE[f"{model}_lons"]
-    
+
     logger.info(f"Downloading ICON-{model.upper()} grid coordinates...")
     collection = f"ch.meteoschweiz.ogd-forecasting-icon-{model}"
     url = f"{STAC_API_URL}/collections/{collection}"
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     data = r.json()
-    
+
     # Find the horizontal constants file
     grid_asset_key = f"horizontal_constants_icon-{model}-eps.grib2"
     if grid_asset_key not in data.get('assets', {}):
@@ -67,17 +65,17 @@ def get_grid_coords(model: str = "ch2", cache_dir: Optional[Path] = None) -> tup
             if 'horizontal_constants' in key:
                 grid_asset_key = key
                 break
-    
+
     grid_url = data['assets'][grid_asset_key]['href']
     grid_path = cache_dir / f"grid_constants_{model}.grib2"
-    
+
     r = requests.get(grid_url, timeout=120)
     r.raise_for_status()
     grid_path.write_bytes(r.content)
-    
+
     lats = None
     lons = None
-    
+
     with open(grid_path, 'rb') as f:
         while True:
             msg = eccodes.codes_grib_new_from_file(f)
@@ -92,19 +90,19 @@ def get_grid_coords(model: str = "ch2", cache_dir: Optional[Path] = None) -> tup
             elif name == 'tlon':
                 lons = eccodes.codes_get_array(msg, 'values')
             eccodes.codes_release(msg)
-    
+
     if lats is None or lons is None:
         raise RuntimeError(f"Could not extract grid coordinates for {model}")
-    
+
     # Convert from radians if necessary
     if lats.max() < 2:
         lats = np.degrees(lats)
         lons = np.degrees(lons)
-    
+
     np.savez(cache_file, lats=lats, lons=lons)
     _GRID_CACHE[f"{model}_lats"] = lats
     _GRID_CACHE[f"{model}_lons"] = lons
-    
+
     return lats, lons
 
 
@@ -122,8 +120,7 @@ def find_nearest_index(lat: float, lon: float, model: str = "ch2") -> int:
 
 
 def parse_filename(path: Path) -> dict:
-    """
-    Extract metadata from GRIB filename. Results are cached.
+    """Extract metadata from GRIB filename. Results are cached.
 
     Returns dict with: model, run_time, forecast_hour, variable, member
     """
@@ -187,8 +184,7 @@ def read_grib_at_location(
     lon: float,
     model: str = None,
 ) -> dict:
-    """
-    Read GRIB file and extract value at nearest grid point.
+    """Read GRIB file and extract value at nearest grid point.
 
     Uses GRIB metadata as authoritative source for date/time,
     with filename parsing as fallback for variable/member info.
@@ -279,8 +275,7 @@ def read_grib_all_members(
     lon: float,
     model: str = None,
 ) -> list[dict]:
-    """
-    Read all GRIB messages from a file (for multi-member perturbed files).
+    """Read all GRIB messages from a file (for multi-member perturbed files).
 
     Returns a list of dicts, one per member, with member number from perturbationNumber.
     """
@@ -378,56 +373,54 @@ def extract_pv_weather(
     lat: float,
     lon: float,
 ) -> pd.DataFrame:
-    """
-    Extract weather variables needed for PV modeling from multiple GRIB files.
-    """
+    """Extract weather variables needed for PV modeling from multiple GRIB files."""
     # Group files by time and variable
     data_by_time = {}
-    
+
     for path in grib_paths:
         try:
             result = read_grib_at_location(path, lat, lon)
-            
+
             if result['valid_time'] is None or result['value'] is None:
                 continue
-            
+
             time = result['valid_time']
             var = result['variable']
-            
+
             if time not in data_by_time:
                 data_by_time[time] = {}
-            
+
             data_by_time[time][var] = result['value']
-            
+
         except Exception as e:
             logger.error(f"Failed to parse {path.name}: {e}")
-    
+
     if not data_by_time:
         logger.warning("No data extracted from GRIB files")
         return pd.DataFrame()
-    
+
     # Build DataFrame
     df = pd.DataFrame.from_dict(data_by_time, orient='index')
     df.index.name = 'time'
     df = df.sort_index()
-    
+
     logger.info(f"Extracted data for {len(df)} time steps: {list(df.columns)}")
-    
+
     # Map to standard PV variable names
     result = pd.DataFrame(index=df.index)
-    
+
     # GHI from net shortwave radiation
     if 'asob_s' in df.columns:
         result['ghi'] = df['asob_s'].clip(lower=0)
-    
+
     # Direct if available
     if 'aswdir_s' in df.columns:
         result['dni'] = df['aswdir_s'].clip(lower=0)
-    
-    # Diffuse if available  
+
+    # Diffuse if available
     if 'aswdifd_s' in df.columns:
         result['dhi'] = df['aswdifd_s'].clip(lower=0)
-    
+
     # Temperature (K to C)
     if 't_2m' in df.columns:
         temp = df['t_2m']
@@ -436,13 +429,13 @@ def extract_pv_weather(
         result['temp_air'] = temp
     else:
         result['temp_air'] = 5.0  # Winter default
-    
+
     # Wind
     if 'u_10m' in df.columns:
         result['wind_speed'] = np.abs(df['u_10m'])
     else:
         result['wind_speed'] = 2.0
-    
+
     return result
 
 
@@ -452,8 +445,7 @@ def load_local_forecast(
     lon: float,
     model: str = "ch2",
 ) -> pd.DataFrame:
-    """
-    Load forecast data from local forecastData directory.
+    """Load forecast data from local forecastData directory.
 
     Args:
         forecast_dir: Base forecastData directory
@@ -463,6 +455,7 @@ def load_local_forecast(
 
     Returns:
         DataFrame with weather variables for PV modeling
+
     """
     model_dir = forecast_dir / f"icon-{model}"
 
@@ -488,8 +481,7 @@ def load_local_forecast(
 
 
 def deaccumulate_avg(values: np.ndarray, hours: np.ndarray) -> np.ndarray:
-    """
-    Convert running average to hourly values (vectorized).
+    """Convert running average to hourly values (vectorized).
 
     MeteoSwiss radiation variables (ASOB_S, etc.) are time-mean values from hour 0.
     Formula: hourly(h) = avg(h) * h - avg(h-1) * (h-1)
@@ -508,11 +500,11 @@ def extract_ensemble_weather(
     lat: float,
     lon: float,
 ) -> dict[int, pd.DataFrame]:
-    """
-    Extract weather for all ensemble members from GRIB files.
+    """Extract weather for all ensemble members from GRIB files.
 
     Returns:
         Dict mapping member number to DataFrame with weather variables
+
     """
     # Filter out incomplete downloads (.tmp files)
     valid_paths = [p for p in grib_paths if p.suffix.lower() == '.grib2']
@@ -697,8 +689,7 @@ def load_ensemble_forecast(
     lon: float,
     model: str = "ch2",
 ) -> dict[int, pd.DataFrame]:
-    """
-    Load ensemble forecast data from local forecastData directory.
+    """Load ensemble forecast data from local forecastData directory.
 
     Fault-tolerant: handles incomplete downloads and various filename formats.
 
@@ -710,6 +701,7 @@ def load_ensemble_forecast(
 
     Returns:
         Dict mapping member number (0=control, 1-N=perturbed) to DataFrame
+
     """
     model_dir = forecast_dir / f"icon-{model}"
 
@@ -752,8 +744,7 @@ def load_hybrid_ensemble_forecast(
     ch1_hours: tuple[int, int] = (0, 33),
     ch2_hours: tuple[int, int] = (33, 48),
 ) -> dict[int, pd.DataFrame]:
-    """
-    Load hybrid CH1+CH2 ensemble forecast data.
+    """Load hybrid CH1+CH2 ensemble forecast data.
 
     - CH1: hours 0-33 (higher resolution, 11 members)
     - CH2: hours 33-48 (longer horizon, 21 members)
@@ -770,6 +761,7 @@ def load_hybrid_ensemble_forecast(
 
     Returns:
         Dict mapping member number to DataFrame with combined weather
+
     """
     result = {}
 

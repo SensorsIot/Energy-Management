@@ -1,5 +1,4 @@
-"""
-Scheduler for SwissSolarForecast add-on.
+"""Scheduler for SwissSolarForecast add-on.
 
 Runs two independent tasks:
 1. Fetcher: Downloads ICON GRIB data on schedule (CH1 every 3h, CH2 every 6h)
@@ -7,10 +6,9 @@ Runs two independent tasks:
 """
 
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from collections.abc import Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -20,8 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class ForecastScheduler:
-    """
-    Manages scheduled tasks for ICON data fetching and forecast calculation.
+    """Manages scheduled tasks for ICON data fetching and forecast calculation.
 
     The fetcher and calculator are decoupled:
     - Fetcher writes GRIB files to disk
@@ -36,9 +33,8 @@ class ForecastScheduler:
         calculator_interval_minutes: int = 15,
         timezone: str = "UTC",
         local_timezone: str = "Europe/Zurich",
-    ):
-        """
-        Initialize scheduler.
+    ) -> None:
+        """Initialize scheduler.
 
         Args:
             data_dir: Directory for GRIB file storage
@@ -47,6 +43,7 @@ class ForecastScheduler:
             calculator_interval_minutes: How often to run calculator
             timezone: Timezone for cron schedules (weather fetching, UTC)
             local_timezone: Local timezone for accuracy tracking (decision time)
+
         """
         self.data_dir = Path(data_dir)
         self.ch1_cron = ch1_cron
@@ -58,29 +55,29 @@ class ForecastScheduler:
         self.scheduler = BackgroundScheduler(timezone=timezone)
 
         # Callbacks set by run.py
-        self.fetch_ch1_callback: Optional[Callable] = None
-        self.fetch_ch2_callback: Optional[Callable] = None
-        self.calculate_callback: Optional[Callable] = None
-        self.snapshot_callback: Optional[Callable] = None
-        self.evaluate_callback: Optional[Callable] = None
-        self.shading_update_callback: Optional[Callable] = None
+        self.fetch_ch1_callback: Callable | None = None
+        self.fetch_ch2_callback: Callable | None = None
+        self.calculate_callback: Callable | None = None
+        self.snapshot_callback: Callable | None = None
+        self.evaluate_callback: Callable | None = None
+        self.shading_update_callback: Callable | None = None
 
         # Status tracking
-        self.last_fetch_ch1: Optional[datetime] = None
-        self.last_fetch_ch2: Optional[datetime] = None
-        self.last_calculation: Optional[datetime] = None
-        self.last_snapshot: Optional[datetime] = None
-        self.last_evaluation: Optional[datetime] = None
+        self.last_fetch_ch1: datetime | None = None
+        self.last_fetch_ch2: datetime | None = None
+        self.last_calculation: datetime | None = None
+        self.last_snapshot: datetime | None = None
+        self.last_evaluation: datetime | None = None
 
     def set_callbacks(
         self,
         fetch_ch1: Callable,
         fetch_ch2: Callable,
         calculate: Callable,
-        snapshot: Optional[Callable] = None,
-        evaluate: Optional[Callable] = None,
-        shading_update: Optional[Callable] = None,
-    ):
+        snapshot: Callable | None = None,
+        evaluate: Callable | None = None,
+        shading_update: Callable | None = None,
+    ) -> None:
         """Set callback functions for scheduled tasks."""
         self.fetch_ch1_callback = fetch_ch1
         self.fetch_ch2_callback = fetch_ch2
@@ -89,7 +86,7 @@ class ForecastScheduler:
         self.evaluate_callback = evaluate
         self.shading_update_callback = shading_update
 
-    def _fetch_ch1_job(self):
+    def _fetch_ch1_job(self) -> None:
         """Job wrapper for CH1 fetch."""
         logger.info("Scheduled CH1 fetch starting...")
         try:
@@ -102,7 +99,7 @@ class ForecastScheduler:
         except Exception as e:
             logger.error(f"CH1 fetch failed: {e}", exc_info=True)
 
-    def _fetch_ch2_job(self):
+    def _fetch_ch2_job(self) -> None:
         """Job wrapper for CH2 fetch."""
         logger.info("Scheduled CH2 fetch starting...")
         try:
@@ -115,7 +112,7 @@ class ForecastScheduler:
         except Exception as e:
             logger.error(f"CH2 fetch failed: {e}", exc_info=True)
 
-    def _calculate_job(self):
+    def _calculate_job(self) -> None:
         """Job wrapper for forecast calculation."""
         logger.info("Scheduled calculation starting...")
         try:
@@ -128,7 +125,7 @@ class ForecastScheduler:
         except Exception as e:
             logger.error(f"Calculation failed: {e}", exc_info=True)
 
-    def _snapshot_job(self):
+    def _snapshot_job(self) -> None:
         """Job wrapper for forecast snapshot (21:00 daily)."""
         logger.info("Scheduled forecast snapshot starting...")
         try:
@@ -141,7 +138,7 @@ class ForecastScheduler:
         except Exception as e:
             logger.error(f"Forecast snapshot failed: {e}", exc_info=True)
 
-    def _evaluate_job(self):
+    def _evaluate_job(self) -> None:
         """Job wrapper for forecast evaluation (21:15 daily)."""
         logger.info("Scheduled forecast evaluation starting...")
         try:
@@ -160,7 +157,7 @@ class ForecastScheduler:
         except Exception as e:
             logger.error(f"Forecast evaluation failed: {e}", exc_info=True)
 
-    def setup_jobs(self):
+    def setup_jobs(self) -> None:
         """Configure scheduled jobs."""
         # CH1 fetch job
         logger.info(f"Setting up CH1 fetch: cron={self.ch1_cron}")
@@ -224,7 +221,7 @@ class ForecastScheduler:
                 coalesce=True,
             )
 
-    def start(self):
+    def start(self) -> None:
         """Start the scheduler."""
         self.setup_jobs()
         self.scheduler.start()
@@ -234,28 +231,28 @@ class ForecastScheduler:
         for job in self.scheduler.get_jobs():
             logger.info(f"  {job.name}: next run at {job.next_run_time}")
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the scheduler gracefully."""
         logger.info("Stopping scheduler...")
         self.scheduler.shutdown(wait=True)
         logger.info("Scheduler stopped")
 
-    def trigger_fetch_ch1(self):
+    def trigger_fetch_ch1(self) -> None:
         """Manually trigger CH1 fetch."""
         logger.info("Manual CH1 fetch triggered")
         self._fetch_ch1_job()
 
-    def trigger_fetch_ch2(self):
+    def trigger_fetch_ch2(self) -> None:
         """Manually trigger CH2 fetch."""
         logger.info("Manual CH2 fetch triggered")
         self._fetch_ch2_job()
 
-    def trigger_calculate(self):
+    def trigger_calculate(self) -> None:
         """Manually trigger calculation."""
         logger.info("Manual calculation triggered")
         self._calculate_job()
 
-    def get_status(self) -> Dict:
+    def get_status(self) -> dict:
         """Get scheduler status."""
         jobs = []
         for job in self.scheduler.get_jobs():

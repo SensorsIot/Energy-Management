@@ -1,6 +1,5 @@
-"""
-PV power forecast model using pvlib.
-Supports hierarchical config: plants -> inverters -> strings -> panels
+"""PV power forecast model using pvlib.
+Supports hierarchical config: plants -> inverters -> strings -> panels.
 
 All forecast functions accept plants as a parameter, allowing runtime
 configuration from user config files rather than import-time globals.
@@ -10,9 +9,7 @@ import pvlib
 import pandas as pd
 import numpy as np
 import logging
-from typing import List, Optional
 
-from .config import PVSystemConfig
 
 # Legacy import for backwards compatibility (DEPRECATED)
 from .config import PLANTS as _LEGACY_PLANTS
@@ -36,34 +33,33 @@ def forecast_string_dc_power(
     longitude: float,
     altitude: float,
     timezone: str,
-    shading_factors: Optional[dict] = None,
+    shading_factors: dict | None = None,
 ) -> pd.Series:
     """Calculate DC power forecast for a single string."""
-    
     tilt = string["tilt"]
     azimuth = string["azimuth"]
     panel = string["panel"]
     dc_power_stc = string["dc_power"]  # count * pdc0
     gamma_pdc = panel["gamma_pdc"]
-    
+
     # Ensure timezone-aware index
     times = weather.index.copy()
     if times.tz is None:
         times = times.tz_localize("UTC")
     times = times.tz_convert(timezone)
-    
+
     # Create weather DataFrame with proper timezone
     weather_tz = weather.copy()
     weather_tz.index = times
-    
+
     # Solar position
     solar_pos = pvlib.solarposition.get_solarposition(
         times, latitude, longitude, altitude=altitude
     )
-    
+
     # Get irradiance as numpy arrays
     ghi = np.asarray(weather_tz["ghi"])
-    
+
     if "dni" in weather_tz.columns and "dhi" in weather_tz.columns:
         dni = np.asarray(weather_tz["dni"])
         dhi = np.asarray(weather_tz["dhi"])
@@ -76,10 +72,10 @@ def forecast_string_dc_power(
         )
         dni = np.asarray(erbs["dni"])
         dhi = np.asarray(erbs["dhi"])
-    
+
     # Extraterrestrial radiation
     dni_extra = np.asarray(pvlib.irradiance.get_extra_radiation(times))
-    
+
     # POA irradiance
     poa = pvlib.irradiance.get_total_irradiance(
         surface_tilt=tilt,
@@ -92,23 +88,23 @@ def forecast_string_dc_power(
         dni_extra=dni_extra,
         model="isotropic",
     )
-    
+
     # Handle both DataFrame and dict returns
     if isinstance(poa, pd.DataFrame):
         poa_global = np.asarray(poa["poa_global"])
     else:
         poa_global = np.asarray(poa["poa_global"])
-    
+
     poa_global = np.clip(np.nan_to_num(poa_global), 0, None)
-    
+
     # Cell temperature
     temp_air = np.asarray(weather_tz.get("temp_air", pd.Series(10, index=times)))
     wind_speed = np.asarray(weather_tz.get("wind_speed", pd.Series(2, index=times)))
-    
+
     cell_temp = pvlib.temperature.faiman(
         poa_global, temp_air, wind_speed, u0=25.0, u1=6.84
     )
-    
+
     # DC power using PVWatts model
     dc_power = pvlib.pvsystem.pvwatts_dc(
         effective_irradiance=poa_global,
@@ -137,11 +133,10 @@ def forecast_string_dc_power(
 def forecast_inverter_power(
     weather: pd.DataFrame,
     inverter: dict,
-    shading_factors: Optional[dict] = None,
+    shading_factors: dict | None = None,
 ) -> pd.DataFrame:
-    """
-    Calculate power forecast for an inverter and all its strings.
-    
+    """Calculate power forecast for an inverter and all its strings.
+
     Returns DataFrame with:
     - DC power per string
     - Total DC power
@@ -153,38 +148,36 @@ def forecast_inverter_power(
     tz = inverter["timezone"]
     max_power = inverter["max_power"]
     efficiency = inverter["efficiency"]
-    
+
     results = {}
-    
+
     # Calculate DC power for each string
     for string in inverter["strings"]:
         dc_power = forecast_string_dc_power(weather, string, lat, lon, alt, tz, shading_factors)
         results[f"{string['name']}_dc"] = dc_power
-    
+
     # Get index from first result
     index = list(results.values())[0].index
-    
+
     # Build DataFrame
     df = pd.DataFrame(results, index=index)
-    
+
     # Total DC power for this inverter
     dc_cols = [c for c in df.columns if c.endswith("_dc")]
     df["total_dc"] = df[dc_cols].sum(axis=1)
-    
+
     # AC power: apply efficiency and clip to max_power
     df["ac_power"] = np.clip(df["total_dc"] * efficiency, 0, max_power)
-    
+
     return df
 
 
 def forecast_plant_power(
     weather: pd.DataFrame,
     plant: dict,
-    shading_factors: Optional[dict] = None,
+    shading_factors: dict | None = None,
 ) -> pd.DataFrame:
-    """
-    Calculate power forecast for a plant and all its inverters.
-    """
+    """Calculate power forecast for a plant and all its inverters."""
     loc = plant["location"]
     results = {}
     first_index = None
@@ -201,30 +194,29 @@ def forecast_plant_power(
 
         logger.info(f"Calculating forecast for inverter: {inverter['name']}")
         inv_result = forecast_inverter_power(weather, inv_with_loc, shading_factors)
-        
+
         # Store inverter AC power
         results[f"{inverter['name']}_ac_power"] = inv_result["ac_power"]
-        
+
         if first_index is None:
             first_index = inv_result.index
-    
+
     # Build output DataFrame
     output = pd.DataFrame(results, index=first_index)
-    
+
     # Total AC power for this plant
     ac_cols = [c for c in output.columns if c.endswith("_ac_power")]
     output["total_ac_power"] = output[ac_cols].sum(axis=1)
-    
+
     return output
 
 
 def forecast_all_plants(
     weather: pd.DataFrame,
-    plants: Optional[List[dict]] = None,
-    shading_factors: Optional[dict] = None,
+    plants: list[dict] | None = None,
+    shading_factors: dict | None = None,
 ) -> pd.DataFrame:
-    """
-    Calculate power forecast for all plants.
+    """Calculate power forecast for all plants.
 
     Args:
         weather: Weather DataFrame with ghi, temp_air, wind_speed
@@ -234,6 +226,7 @@ def forecast_all_plants(
 
     Returns:
         DataFrame with power forecast for all plants
+
     """
     # Use provided plants or fall back to legacy for backwards compatibility
     if plants is None:
@@ -278,11 +271,10 @@ def forecast_all_plants(
 
 def forecast_ensemble_plants(
     ensemble_weather: dict[int, pd.DataFrame],
-    plants: Optional[List[dict]] = None,
-    shading_factors: Optional[dict] = None,
+    plants: list[dict] | None = None,
+    shading_factors: dict | None = None,
 ) -> pd.DataFrame:
-    """
-    Calculate power forecast with uncertainty bands using ensemble weather data.
+    """Calculate power forecast with uncertainty bands using ensemble weather data.
 
     Args:
         ensemble_weather: Dict mapping member number to weather DataFrame
@@ -293,6 +285,7 @@ def forecast_ensemble_plants(
     Returns:
         DataFrame with P10, P50, P90 columns for total AC power,
         plus per-inverter percentiles.
+
     """
     # Use provided plants or fall back to legacy for backwards compatibility
     if plants is None:

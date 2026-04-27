@@ -1,6 +1,4 @@
-"""
-Tests for the passive integration-test observer.
-"""
+"""Tests for the passive integration-test observer."""
 
 from __future__ import annotations
 
@@ -79,19 +77,19 @@ def _make_snapshot(
 # ---------------------------------------------------------------------------
 
 class TestRegistration:
-    def test_all_23_tests_registered(self):
+    def test_all_23_tests_registered(self) -> None:
         assert len(_TEST_DEFS) == 23
 
-    def test_initial_status_pending(self, tmp_path):
+    def test_initial_status_pending(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "report.json"))
         for tr in obs._results.values():
             assert tr.status == "pending"
 
-    def test_test_ids_unique(self):
+    def test_test_ids_unique(self) -> None:
         ids = [td.test_id for td in _TEST_DEFS]
         assert len(ids) == len(set(ids))
 
-    def test_categories(self):
+    def test_categories(self) -> None:
         normal = [td for td in _TEST_DEFS if td.category == "normal"]
         edge = [td for td in _TEST_DEFS if td.category == "edge"]
         assert len(normal) == 11
@@ -103,7 +101,7 @@ class TestRegistration:
 # ---------------------------------------------------------------------------
 
 class TestPersistence:
-    def test_save_and_reload(self, tmp_path):
+    def test_save_and_reload(self, tmp_path) -> None:
         path = str(tmp_path / "report.json")
         obs = IntegrationObserver(report_path=path)
 
@@ -124,12 +122,12 @@ class TestPersistence:
         assert obs2._results["NO-01"].status == "passed"
         assert obs2._results["NO-01"].pass_count == 1
 
-    def test_missing_report_file(self, tmp_path):
+    def test_missing_report_file(self, tmp_path) -> None:
         path = str(tmp_path / "nonexistent" / "report.json")
         obs = IntegrationObserver(report_path=path)
         assert obs._results["NO-01"].status == "pending"
 
-    def test_version_mismatch_resets_results(self, tmp_path):
+    def test_version_mismatch_resets_results(self, tmp_path) -> None:
         """Old report with different version is ignored — all tests start pending."""
         path = tmp_path / "report.json"
         old_report = {
@@ -145,7 +143,7 @@ class TestPersistence:
         assert obs._results["NO-01"].status == "pending"
         assert obs._results["NO-01"].pass_count == 0
 
-    def test_current_version_loads_normally(self, tmp_path):
+    def test_current_version_loads_normally(self, tmp_path) -> None:
         """Report with matching version is loaded."""
         path = tmp_path / "report.json"
         report = {
@@ -167,7 +165,7 @@ class TestPersistence:
 # ---------------------------------------------------------------------------
 
 class TestNotifications:
-    def test_first_pass_logs_info(self, tmp_path):
+    def test_first_pass_logs_info(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(wallbox_available=False, charging_mode="solar"),
@@ -177,7 +175,7 @@ class TestNotifications:
         assert obs._results["NO-01"].status == "passed"
 
     @patch("src.integration_observer.notify_error")
-    def test_regression_sends_error(self, mock_error, tmp_path):
+    def test_regression_sends_error(self, mock_error, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         # First: pass NO-12
         snap_pass = _make_snapshot(
@@ -205,7 +203,7 @@ class TestNotifications:
         ]
         assert len(regression_calls) >= 1
 
-    def test_recovery_logs_info(self, tmp_path):
+    def test_recovery_logs_info(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         # Force failed state
         obs._results["NO-12"].status = "failed"
@@ -225,7 +223,7 @@ class TestNotifications:
 # ---------------------------------------------------------------------------
 
 class TestPreconditions:
-    def test_no02_skips_when_not_idle(self, tmp_path):
+    def test_no02_skips_when_not_idle(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             prev_state=EVState.SOLAR,
@@ -234,13 +232,13 @@ class TestPreconditions:
         result = obs._detect_no02(None, snap)
         assert result is None
 
-    def test_ec12_skips_without_prev(self, tmp_path):
+    def test_ec12_skips_without_prev(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot()
         result = obs._detect_ec12(None, snap)
         assert result is None
 
-    def test_ec13_skips_when_not_reverting(self, tmp_path):
+    def test_ec13_skips_when_not_reverting(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         prev = _make_snapshot(inputs=_make_inputs(charging_mode="solar"))
         curr = _make_snapshot(inputs=_make_inputs(charging_mode="solar"))
@@ -254,7 +252,7 @@ class TestPreconditions:
 
 class TestExceptionSafety:
     @patch("src.integration_observer.notify_error", side_effect=Exception("boom"))
-    def test_observe_never_raises(self, mock_error, tmp_path):
+    def test_observe_never_raises(self, mock_error, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         # Force a failure scenario so notify_error is called
         obs._results["NO-01"].status = "passed"
@@ -271,7 +269,7 @@ class TestExceptionSafety:
 # ---------------------------------------------------------------------------
 
 class TestDetectors:
-    def test_no01_pass(self, tmp_path):
+    def test_no01_pass(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(wallbox_available=False, charging_mode="solar"),
@@ -279,7 +277,7 @@ class TestDetectors:
         )
         assert obs._detect_no01(None, snap) is True
 
-    def test_no01_skip_when_available(self, tmp_path):
+    def test_no01_skip_when_available(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(wallbox_available=True, charging_mode="solar"),
@@ -287,7 +285,7 @@ class TestDetectors:
         )
         assert obs._detect_no01(None, snap) is None
 
-    def test_no02_pass_charging_power(self, tmp_path):
+    def test_no02_pass_charging_power(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(ev_charging_power_w=3000),
@@ -296,7 +294,7 @@ class TestDetectors:
         )
         assert obs._detect_no02(None, snap) is True
 
-    def test_no02_skip_power_zero(self, tmp_path):
+    def test_no02_skip_power_zero(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(ev_charging_power_w=0),
@@ -305,7 +303,7 @@ class TestDetectors:
         )
         assert obs._detect_no02(None, snap) is None
 
-    def test_no05_pass(self, tmp_path):
+    def test_no05_pass(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(ev_charging_power_w=5000),
@@ -313,7 +311,7 @@ class TestDetectors:
         )
         assert obs._detect_no05(None, snap) is True
 
-    def test_no05_fail_mismatch(self, tmp_path):
+    def test_no05_fail_mismatch(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(ev_charging_power_w=5000),
@@ -321,7 +319,7 @@ class TestDetectors:
         )
         assert obs._detect_no05(None, snap) is False
 
-    def test_no05_skip_not_solar(self, tmp_path):
+    def test_no05_skip_not_solar(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(ev_charging_power_w=5000),
@@ -329,7 +327,7 @@ class TestDetectors:
         )
         assert obs._detect_no05(None, snap) is None
 
-    def test_no13_pass(self, tmp_path):
+    def test_no13_pass(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         prev = _make_snapshot(
             output=EVOutput(EVState.SOLAR, 3000, "Solar"),
@@ -341,7 +339,7 @@ class TestDetectors:
         )
         assert obs._detect_no13(prev, curr) is True
 
-    def test_no13_skip_idle(self, tmp_path):
+    def test_no13_skip_idle(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         now = datetime.now(timezone.utc)
         prev = _make_snapshot(
@@ -355,7 +353,7 @@ class TestDetectors:
         )
         assert obs._detect_no13(prev, curr) is None
 
-    def test_ec05_pass(self, tmp_path):
+    def test_ec05_pass(self, tmp_path) -> None:
         """Battery protection blocks: surplus above threshold but ev_charging_power_w=0."""
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
@@ -368,7 +366,7 @@ class TestDetectors:
         )
         assert obs._detect_ec05(None, snap) is True
 
-    def test_ec05_skip_charging_active(self, tmp_path):
+    def test_ec05_skip_charging_active(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(
@@ -380,7 +378,7 @@ class TestDetectors:
         )
         assert obs._detect_ec05(None, snap) is None
 
-    def test_ec06_pass(self, tmp_path):
+    def test_ec06_pass(self, tmp_path) -> None:
         """Protection failure while in SOLAR → exits to IDLE (wallbox settled)."""
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         prev = _make_snapshot(
@@ -395,7 +393,7 @@ class TestDetectors:
         )
         assert obs._detect_ec06(prev, curr) is True
 
-    def test_ec02_pass(self, tmp_path):
+    def test_ec02_pass(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             output=EVOutput(EVState.SOLAR, 5000, "Solar"),
@@ -403,7 +401,7 @@ class TestDetectors:
         )
         assert obs._detect_ec02(None, snap) is True
 
-    def test_ec02_fail(self, tmp_path):
+    def test_ec02_fail(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             output=EVOutput(EVState.SOLAR, 5000, "Solar"),
@@ -411,7 +409,7 @@ class TestDetectors:
         )
         assert obs._detect_ec02(None, snap) is False
 
-    def test_ec12_pass_no_change(self, tmp_path):
+    def test_ec12_pass_no_change(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         prev = _make_snapshot(
             output=EVOutput(EVState.SOLAR, 5000, "Solar"),
@@ -423,7 +421,7 @@ class TestDetectors:
         )
         assert obs._detect_ec12(prev, curr) is True
 
-    def test_ec12_skip_rate_limited_catchup(self, tmp_path):
+    def test_ec12_skip_rate_limited_catchup(self, tmp_path) -> None:
         """EC-12 should skip when previous cycle had a pending rate-limited send."""
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         prev = _make_snapshot(
@@ -436,7 +434,7 @@ class TestDetectors:
         )
         assert obs._detect_ec12(prev, curr) is None
 
-    def test_ec14_faulted(self, tmp_path):
+    def test_ec14_faulted(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(wallbox_status="Faulted"),
@@ -444,7 +442,7 @@ class TestDetectors:
         )
         assert obs._detect_ec14(None, snap) is True
 
-    def test_ec15_pass(self, tmp_path):
+    def test_ec15_pass(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(charging_mode="solar"),
@@ -454,7 +452,7 @@ class TestDetectors:
         )
         assert obs._detect_ec15(None, snap) is True
 
-    def test_ec13_auto_revert(self, tmp_path):
+    def test_ec13_auto_revert(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         now = datetime.now(timezone.utc)
         prev = _make_snapshot(
@@ -469,7 +467,7 @@ class TestDetectors:
         )
         assert obs._detect_ec13(prev, curr) is True
 
-    def test_ec16_idle_exits_solar(self, tmp_path):
+    def test_ec16_idle_exits_solar(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(wallbox_idle=True),
@@ -478,7 +476,7 @@ class TestDetectors:
         )
         assert obs._detect_ec16(None, snap) is True
 
-    def test_ec16_skips_when_not_idle(self, tmp_path):
+    def test_ec16_skips_when_not_idle(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         snap = _make_snapshot(
             inputs=_make_inputs(wallbox_idle=False),

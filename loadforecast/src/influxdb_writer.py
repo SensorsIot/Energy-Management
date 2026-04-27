@@ -1,12 +1,10 @@
-"""
-InfluxDB writer for load forecast data.
+"""InfluxDB writer for load forecast data.
 
 Writes P10/P50/P90 power forecasts (W) at 15-minute intervals.
 """
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 import pandas as pd
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -25,16 +23,16 @@ class LoadForecastWriter:
         token: str,
         org: str,
         bucket: str = "load_forecast",
-    ):
+    ) -> None:
         self.host = host
         self.port = port
         self.token = token
         self.org = org
         self.bucket = bucket
-        self.client: Optional[InfluxDBClient] = None
+        self.client: InfluxDBClient | None = None
         self.write_api = None
 
-    def connect(self):
+    def connect(self) -> None:
         """Connect to InfluxDB."""
         url = f"http://{self.host}:{self.port}"
         logger.info(f"Connecting to InfluxDB at {url}")
@@ -45,13 +43,13 @@ class LoadForecastWriter:
         health = self.client.health()
         logger.info(f"InfluxDB connection: {health.status}")
 
-    def close(self):
+    def close(self) -> None:
         """Close connection."""
         if self.client:
             self.client.close()
             logger.info("InfluxDB connection closed")
 
-    def ensure_bucket(self, retention_days: int = 30):
+    def ensure_bucket(self, retention_days: int = 30) -> None:
         """Create bucket if it doesn't exist."""
         buckets_api = self.client.buckets_api()
 
@@ -76,10 +74,9 @@ class LoadForecastWriter:
         self,
         forecast: pd.DataFrame,
         model: str = "statistical",
-        run_time: Optional[datetime] = None,
-    ):
-        """
-        Write load forecast to InfluxDB.
+        run_time: datetime | None = None,
+    ) -> None:
+        """Write load forecast to InfluxDB.
 
         Args:
             forecast: DataFrame with power_w_p10, power_w_p50, power_w_p90 columns
@@ -87,6 +84,7 @@ class LoadForecastWriter:
                      Index must be datetime (future timestamps)
             model: Model identifier
             run_time: When this forecast was calculated
+
         """
         if run_time is None:
             run_time = datetime.now(timezone.utc)

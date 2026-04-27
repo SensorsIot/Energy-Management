@@ -1,5 +1,4 @@
-"""
-Appliance signal dataclass for washing machine / dishwasher.
+"""Appliance signal dataclass for washing machine / dishwasher.
 
 Signal logic (implemented in run.py):
 - GREEN: Current PV excess > appliance power (can run directly from solar)
@@ -15,6 +14,7 @@ from dataclasses import dataclass
 @dataclass
 class ApplianceSignal:
     """Appliance signal result."""
+
     signal: str  # "green", "orange", or "red"
     reason: str
     excess_power_w: float

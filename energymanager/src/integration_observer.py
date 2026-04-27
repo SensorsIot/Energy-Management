@@ -1,5 +1,4 @@
-"""
-Passive integration-test observer for EV charging.
+"""Passive integration-test observer for EV charging.
 
 Watches every 10 s control_ev_charging() cycle and checks off 23 test
 cases (11 normal operation, 12 edge cases) as they naturally occur during

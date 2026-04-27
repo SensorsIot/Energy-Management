@@ -9,35 +9,35 @@ from src.ev_charging import calculate_ev_power, resolve_phase_gap, snap_to_power
 
 
 class TestSnapToPowerStep:
-    def test_surplus_5000_picks_4354(self):
+    def test_surplus_5000_picks_4354(self) -> None:
         """5000 W surplus → highest step ≤ 5000 = 4354W (7A)."""
         assert snap_to_power_step(5000) == 4354
 
-    def test_surplus_below_steps_returns_min(self):
+    def test_surplus_below_steps_returns_min(self) -> None:
         """2000 W surplus (< 3962W) → returns min step, battery covers gap."""
         assert snap_to_power_step(2000) == 3962
 
-    def test_surplus_above_max_picks_max(self):
+    def test_surplus_above_max_picks_max(self) -> None:
         """12000 W surplus → picks 7624W (12A, max step)."""
         assert snap_to_power_step(12000) == 7624
 
-    def test_exact_step_boundary(self):
+    def test_exact_step_boundary(self) -> None:
         """6288 W = exactly 10A step → picks 6288."""
         assert snap_to_power_step(6288) == 6288
 
-    def test_custom_power_range(self):
+    def test_custom_power_range(self) -> None:
         """5000 W with min=5117 → returns 5117 (min valid step)."""
         assert snap_to_power_step(5000, min_power_w=5117) == 5117
 
-    def test_custom_max(self):
+    def test_custom_max(self) -> None:
         """12000 W with max=6288 → 6288."""
         assert snap_to_power_step(12000, max_power_w=6288) == 6288
 
-    def test_between_steps(self):
+    def test_between_steps(self) -> None:
         """5200 W → highest step ≤ 5200 = 5117 (8A)."""
         assert snap_to_power_step(5200) == 5117
 
-    def test_just_at_min_step(self):
+    def test_just_at_min_step(self) -> None:
         """3962 W exactly → picks 3962."""
         assert snap_to_power_step(3962) == 3962
 
@@ -46,24 +46,24 @@ class TestSnapToPowerStep:
 
 
 class TestResolvePhaseGap:
-    def test_in_gap_battery_not_full_snaps_down(self):
+    def test_in_gap_battery_not_full_snaps_down(self) -> None:
         assert resolve_phase_gap(3900, battery_full=False) == 3680
 
-    def test_in_gap_battery_full_snaps_up(self):
+    def test_in_gap_battery_full_snaps_up(self) -> None:
         assert resolve_phase_gap(3900, battery_full=True) == 4140
 
-    def test_at_gap_lo_no_snap(self):
+    def test_at_gap_lo_no_snap(self) -> None:
         """Boundary is exclusive — exactly 3680 stays."""
         assert resolve_phase_gap(3680, battery_full=False) == 3680
 
-    def test_at_gap_hi_no_snap(self):
+    def test_at_gap_hi_no_snap(self) -> None:
         """Boundary is exclusive — exactly 4140 stays."""
         assert resolve_phase_gap(4140, battery_full=True) == 4140
 
-    def test_below_gap_unaffected(self):
+    def test_below_gap_unaffected(self) -> None:
         assert resolve_phase_gap(2000, battery_full=False) == 2000
 
-    def test_above_gap_unaffected(self):
+    def test_above_gap_unaffected(self) -> None:
         assert resolve_phase_gap(7000, battery_full=True) == 7000
 
 
@@ -71,30 +71,30 @@ class TestResolvePhaseGap:
 
 
 class TestCalculateEvPower:
-    def test_below_min_pauses(self):
+    def test_below_min_pauses(self) -> None:
         result = calculate_ev_power(excess_w=1000, min_power_w=1400)
         assert result.target_power_w == 0
 
-    def test_excess_in_gap_snaps_down(self):
+    def test_excess_in_gap_snaps_down(self) -> None:
         """3900 W in gap → snaps to 3680."""
         result = calculate_ev_power(excess_w=3900, battery_full=False)
         assert result.target_power_w == 3680
 
-    def test_excess_in_gap_battery_full_snaps_up(self):
+    def test_excess_in_gap_battery_full_snaps_up(self) -> None:
         """3900 W in gap, battery full → snaps to 4140."""
         result = calculate_ev_power(excess_w=3900, battery_full=True)
         assert result.target_power_w == 4140
 
-    def test_at_gap_hi_stays(self):
+    def test_at_gap_hi_stays(self) -> None:
         """4140 W is exactly at gap boundary (exclusive) → stays 4140."""
         result = calculate_ev_power(excess_w=4140, battery_full=False)
         assert result.target_power_w == 4140
 
-    def test_normal_excess_unaffected(self):
+    def test_normal_excess_unaffected(self) -> None:
         result = calculate_ev_power(excess_w=7000)
         assert result.target_power_w == 7000
 
-    def test_clamps_to_max(self):
+    def test_clamps_to_max(self) -> None:
         result = calculate_ev_power(excess_w=15000, max_power_w=11000)
         assert result.target_power_w == 11000
 
@@ -120,7 +120,7 @@ class TestPhaseGapStability:
         3810, 4050, 3850, 3900, 4000,
     ]
 
-    def test_cloud_fluctuation_battery_not_full(self):
+    def test_cloud_fluctuation_battery_not_full(self) -> None:
         """All gap values snap to 3680 W (1φ max) — no phase switches."""
         results = [
             calculate_ev_power(excess_w=e, battery_full=False)
@@ -133,7 +133,7 @@ class TestPhaseGapStability:
             f"Expected all 3680, got {powers}"
         )
 
-    def test_cloud_fluctuation_battery_full(self):
+    def test_cloud_fluctuation_battery_full(self) -> None:
         """All gap values snap to 4140 W (3φ min) — no phase switches."""
         results = [
             calculate_ev_power(excess_w=e, battery_full=True)

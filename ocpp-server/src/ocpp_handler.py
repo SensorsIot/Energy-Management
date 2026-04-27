@@ -1,12 +1,10 @@
-"""
-OCPP 1.6j message handler for wallbox communication.
-"""
+"""OCPP 1.6j message handler for wallbox communication."""
 
 import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional, Callable
+from collections.abc import Callable
 
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as CP
@@ -26,8 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class ChargePointHandler(CP):
-    """
-    OCPP 1.6j ChargePoint handler.
+    """OCPP 1.6j ChargePoint handler.
 
     Handles incoming messages from wallbox and sends commands.
     """
@@ -43,15 +40,15 @@ class ChargePointHandler(CP):
     DEMAND_DIVISOR = 637
 
     def __init__(
-        self, id: str, connection, on_status_change: Optional[Callable] = None
-    ):
+        self, id: str, connection, on_status_change: Callable | None = None
+    ) -> None:
         super().__init__(id, connection)
         self.on_status_change = on_status_change
         self.current_status = ChargePointStatus.available
         self.current_power_w = 0
         self.session_energy_wh = 0
         self.connector_id = 1
-        self.transaction_id: Optional[int] = None
+        self.transaction_id: int | None = None
         self._transaction_counter = 0
         self.boot_event = asyncio.Event()
         self.status_event = asyncio.Event()
@@ -270,8 +267,7 @@ class ChargePointHandler(CP):
         return self.METER_SCALE * raw_w + self.METER_OFFSET
 
     async def set_charging_power(self, power_w: float, num_phases: int = 3):
-        """
-        Set charging power limit via SetChargingProfile.
+        """Set charging power limit via SetChargingProfile.
 
         Converts M-Bus watts to integer amps using calibrated divisor,
         then sends via OCPP 1.6 chargingRateUnit=A.
@@ -279,6 +275,7 @@ class ChargePointHandler(CP):
         Args:
             power_w: Target power in watts (M-Bus scale)
             num_phases: Number of phases (1 or 3)
+
         """
         limit_w = max(0, power_w)
         limit_a = round(limit_w / self.DEMAND_DIVISOR) if limit_w > 0 else 0

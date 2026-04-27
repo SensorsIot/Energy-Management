@@ -1,5 +1,4 @@
-"""
-Tests for simplified battery discharge optimization algorithm (FSD v2.6).
+"""Tests for simplified battery discharge optimization algorithm (FSD v2.6).
 
 Test cases:
 1. Expensive tariff → ALLOW (always)
@@ -24,8 +23,7 @@ def make_forecast(
     pv_pattern: list[float],
     load_pattern: list[float],
 ) -> pd.DataFrame:
-    """
-    Create a forecast DataFrame for testing.
+    """Create a forecast DataFrame for testing.
 
     Args:
         start: Start time (UTC)
@@ -35,6 +33,7 @@ def make_forecast(
 
     Returns:
         DataFrame with pv_energy_wh, load_energy_wh, net_energy_wh at 15-min intervals
+
     """
     periods = hours * 4  # 15-min intervals
     times = pd.date_range(start=start, periods=periods, freq="15min", tz=timezone.utc)
@@ -46,7 +45,7 @@ def make_forecast(
     # Convert power (W) to energy per 15-min period (Wh)
     pv_wh = [p * 0.25 for p in pv_extended]
     load_wh = [val * 0.25 for val in load_extended]
-    net_wh = [p - ld for p, ld in zip(pv_wh, load_wh)]
+    net_wh = [p - ld for p, ld in zip(pv_wh, load_wh, strict=False)]
 
     return pd.DataFrame({
         "pv_energy_wh": pv_wh,
@@ -58,7 +57,7 @@ def make_forecast(
 class TestExpensiveTariff:
     """During expensive tariff (06:00-21:00): always ALLOW discharge."""
 
-    def test_expensive_tariff_allows_discharge(self):
+    def test_expensive_tariff_allows_discharge(self) -> None:
         """At 12:00 (expensive), discharge should be allowed regardless of SOC forecast."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
@@ -85,7 +84,7 @@ class TestExpensiveTariff:
         assert decision.discharge_allowed is True
         assert "Expensive tariff" in decision.reason
 
-    def test_expensive_tariff_low_soc_still_allows(self):
+    def test_expensive_tariff_low_soc_still_allows(self) -> None:
         """Even with low SOC during expensive tariff, discharge is allowed."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
@@ -113,7 +112,7 @@ class TestExpensiveTariff:
 class TestCheapTariffAllow:
     """During cheap tariff: ALLOW if SOC stays >= min during expensive hours."""
 
-    def test_cheap_tariff_high_pv_allows_discharge(self):
+    def test_cheap_tariff_high_pv_allows_discharge(self) -> None:
         """At 22:00 (cheap), with good PV forecast, discharge should be allowed."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
@@ -144,7 +143,7 @@ class TestCheapTariffAllow:
         assert decision.discharge_allowed is True
         assert "SOC stays >=" in decision.reason
 
-    def test_cheap_tariff_full_battery_allows_discharge(self):
+    def test_cheap_tariff_full_battery_allows_discharge(self) -> None:
         """With 100% SOC and good PV, should allow discharge."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
@@ -178,7 +177,7 @@ class TestCheapTariffAllow:
 class TestCheapTariffBlock:
     """During cheap tariff: BLOCK if SOC would drop below min during expensive hours."""
 
-    def test_cheap_tariff_low_pv_blocks_discharge(self):
+    def test_cheap_tariff_low_pv_blocks_discharge(self) -> None:
         """At 22:00 (cheap), with poor PV forecast and hysteresis active, discharge should be blocked."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
@@ -209,7 +208,7 @@ class TestCheapTariffBlock:
         assert decision.discharge_allowed is False
         assert "Block" in decision.reason
 
-    def test_cheap_tariff_low_soc_blocks_discharge(self):
+    def test_cheap_tariff_low_soc_blocks_discharge(self) -> None:
         """At 22:00 (cheap), with low starting SOC and hysteresis active, discharge should be blocked."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
@@ -239,7 +238,7 @@ class TestCheapTariffBlock:
 
         assert decision.discharge_allowed is False
 
-    def test_min_soc_threshold_respected(self):
+    def test_min_soc_threshold_respected(self) -> None:
         """SOC dropping to exactly min_soc should be allowed, below should block."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
@@ -272,7 +271,7 @@ class TestCheapTariffBlock:
 class TestDischargeFloor:
     """SOC floor logic: allow discharge above floor, block at/below floor."""
 
-    def test_high_soc_above_floor_allows(self):
+    def test_high_soc_above_floor_allows(self) -> None:
         """At 22:00 cheap, with high SOC well above the floor → allow discharge.
 
         This is the core fix: the old algorithm blocked at 71% because the
@@ -299,7 +298,7 @@ class TestDischargeFloor:
         assert decision.discharge_allowed is True
         assert "floor" in decision.reason.lower() or "stays >=" in decision.reason.lower()
 
-    def test_low_soc_at_floor_blocks(self):
+    def test_low_soc_at_floor_blocks(self) -> None:
         """SOC at or below floor → block discharge (with hysteresis active)."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
@@ -326,7 +325,7 @@ class TestDischargeFloor:
 class TestSelfCorrecting:
     """Test that re-checking every 15 min allows self-correction."""
 
-    def test_block_then_allow_as_conditions_improve(self):
+    def test_block_then_allow_as_conditions_improve(self) -> None:
         """If initially blocked, later check with better SOC should allow."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
@@ -371,7 +370,7 @@ class TestSelfCorrecting:
 class TestEdgeCases:
     """Edge cases and special scenarios."""
 
-    def test_no_forecast_data_allows_discharge(self):
+    def test_no_forecast_data_allows_discharge(self) -> None:
         """With no forecast data, default to allowing discharge."""
         optimizer = BatteryOptimizer()
 
@@ -386,7 +385,7 @@ class TestEdgeCases:
         assert decision.discharge_allowed is True
         assert "No forecast data" in decision.reason
 
-    def test_weekend_all_day_cheap(self):
+    def test_weekend_all_day_cheap(self) -> None:
         """Weekend is all-day cheap tariff."""
         optimizer = BatteryOptimizer(weekend_all_day_cheap=True)
 
@@ -397,7 +396,7 @@ class TestEdgeCases:
 
         assert tariff.is_cheap_now is True
 
-    def test_weekend_allows_discharge_despite_low_soc(self):
+    def test_weekend_allows_discharge_despite_low_soc(self) -> None:
         """On weekends, daytime SOC dips should not block discharge (all-day cheap)."""
         optimizer = BatteryOptimizer(
             capacity_wh=10000,
@@ -426,7 +425,7 @@ class TestEdgeCases:
         # Weekend days have no expensive hours → discharge should be allowed
         assert decision.discharge_allowed is True
 
-    def test_weekday_morning_is_expensive(self):
+    def test_weekday_morning_is_expensive(self) -> None:
         """Weekday 08:00 should be expensive tariff."""
         optimizer = BatteryOptimizer()
 
@@ -437,7 +436,7 @@ class TestEdgeCases:
 
         assert tariff.is_cheap_now is False
 
-    def test_weekday_night_is_cheap(self):
+    def test_weekday_night_is_cheap(self) -> None:
         """Weekday 23:00 should be cheap tariff."""
         optimizer = BatteryOptimizer()
 
@@ -448,7 +447,7 @@ class TestEdgeCases:
 
         assert tariff.is_cheap_now is True
 
-    def test_holiday_is_cheap(self):
+    def test_holiday_is_cheap(self) -> None:
         """Configured holidays should be all-day cheap."""
         optimizer = BatteryOptimizer(holidays=["2026-01-01"])
 
@@ -462,7 +461,7 @@ class TestEdgeCases:
 class TestDecisionDataclass:
     """Test DischargeDecision dataclass fields."""
 
-    def test_decision_has_required_fields(self):
+    def test_decision_has_required_fields(self) -> None:
         """DischargeDecision should have discharge_allowed, reason, min_soc_percent."""
         decision = DischargeDecision(
             discharge_allowed=True,
@@ -486,28 +485,28 @@ class TestTariffBoundaryTransitions:
     Default tariff: cheap 21:00–06:00, expensive 06:00–21:00 (weekdays).
     """
 
-    def test_2059_is_expensive(self):
+    def test_2059_is_expensive(self) -> None:
         """20:59 Swiss → still expensive (cheap starts at 21:00)."""
         optimizer = BatteryOptimizer()
         now = datetime(2026, 1, 26, 20, 59, tzinfo=SWISS_TZ).astimezone(timezone.utc)
         tariff = optimizer.get_tariff_periods(now)
         assert tariff.is_cheap_now is False
 
-    def test_2101_is_cheap(self):
+    def test_2101_is_cheap(self) -> None:
         """21:01 Swiss → cheap (within cheap window)."""
         optimizer = BatteryOptimizer()
         now = datetime(2026, 1, 26, 21, 1, tzinfo=SWISS_TZ).astimezone(timezone.utc)
         tariff = optimizer.get_tariff_periods(now)
         assert tariff.is_cheap_now is True
 
-    def test_0559_is_cheap(self):
+    def test_0559_is_cheap(self) -> None:
         """05:59 Swiss → cheap (before 06:00 boundary)."""
         optimizer = BatteryOptimizer()
         now = datetime(2026, 1, 27, 5, 59, tzinfo=SWISS_TZ).astimezone(timezone.utc)
         tariff = optimizer.get_tariff_periods(now)
         assert tariff.is_cheap_now is True
 
-    def test_0601_is_expensive(self):
+    def test_0601_is_expensive(self) -> None:
         """06:01 Swiss → expensive (after 06:00 boundary)."""
         optimizer = BatteryOptimizer()
         now = datetime(2026, 1, 27, 6, 1, tzinfo=SWISS_TZ).astimezone(timezone.utc)
@@ -540,7 +539,7 @@ class TestHysteresis:
                                  pv_pattern=pv_pattern, load_pattern=load_pattern)
         return optimizer, forecast, now
 
-    def test_previously_blocked_requires_margin_to_reallow(self):
+    def test_previously_blocked_requires_margin_to_reallow(self) -> None:
         """When previously blocked, min_soc barely above threshold stays blocked."""
         optimizer, forecast, now = self._make_optimizer_and_forecast()
 
@@ -566,7 +565,7 @@ class TestHysteresis:
 
         pytest.skip("Could not find borderline SOC for this forecast")
 
-    def test_previously_blocked_allows_with_clear_margin(self):
+    def test_previously_blocked_allows_with_clear_margin(self) -> None:
         """When previously blocked but min_soc clearly above threshold+2%, allow."""
         optimizer, forecast, now = self._make_optimizer_and_forecast()
 
@@ -577,7 +576,7 @@ class TestHysteresis:
         )
         assert decision.discharge_allowed is True
 
-    def test_not_previously_blocked_allows_at_threshold(self):
+    def test_not_previously_blocked_allows_at_threshold(self) -> None:
         """When not previously blocked, min_soc at threshold allows normally."""
         optimizer, forecast, now = self._make_optimizer_and_forecast()
 

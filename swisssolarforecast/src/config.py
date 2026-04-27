@@ -1,13 +1,11 @@
-"""
-PV System Configuration.
-Loads hierarchical configuration: panels -> plants -> inverters -> strings
+"""PV System Configuration.
+Loads hierarchical configuration: panels -> plants -> inverters -> strings.
 
 This module provides a PVSystemConfig class that is instantiated at runtime
 with user configuration, rather than loading from a fixed file at import time.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -15,14 +13,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PVSystemConfig:
-    """
-    PV system configuration loaded from user config.
+    """PV system configuration loaded from user config.
 
     Replaces the old module-level globals with a proper config object
     that can be instantiated with runtime configuration.
     """
-    panels: Dict[str, dict] = field(default_factory=dict)
-    plants: List[dict] = field(default_factory=list)
+
+    panels: dict[str, dict] = field(default_factory=dict)
+    plants: list[dict] = field(default_factory=list)
     location: dict = field(default_factory=dict)
 
     # Derived properties
@@ -33,14 +31,14 @@ class PVSystemConfig:
 
     @classmethod
     def from_options(cls, options: dict) -> "PVSystemConfig":
-        """
-        Create config from user options dict.
+        """Create config from user options dict.
 
         Args:
             options: Full options dict from load_options()
 
         Returns:
             PVSystemConfig instance
+
         """
         config = cls()
 
@@ -127,7 +125,7 @@ class PVSystemConfig:
 
         return config
 
-    def get_all_inverters(self) -> List[dict]:
+    def get_all_inverters(self) -> list[dict]:
         """Get flat list of all inverters with location info."""
         inverters = []
         for plant in self.plants:
@@ -164,7 +162,7 @@ def _load_legacy_config():
         return None
 
     logger.debug(f"Loading legacy config from {config_path}")
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         return yaml.safe_load(f)
 
 

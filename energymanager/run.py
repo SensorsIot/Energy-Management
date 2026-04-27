@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-EnergyManager Add-on for Home Assistant.
+"""EnergyManager Add-on for Home Assistant.
 
 Optimizes battery usage based on PV and load forecasts.
 """
@@ -57,6 +56,7 @@ def swiss_datetime(dt: datetime) -> str:
 # Configure logging with Swiss timezone
 class SwissFormatter(logging.Formatter):
     """Formatter that uses Swiss timezone."""
+
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, tz=SWISS_TZ)
         return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S")
@@ -82,7 +82,7 @@ logger = logging.getLogger("energymanager")
 class EnergyManager:
     """Main EnergyManager application."""
 
-    def __init__(self, options: dict):
+    def __init__(self, options: dict) -> None:
         self.options = options
 
         # Initialize InfluxDB components
@@ -252,7 +252,7 @@ class EnergyManager:
         self._last_ev_charging_mode: str | None = None
         self._last_car_soc_poll: float = 0.0
 
-    def connect(self):
+    def connect(self) -> None:
         """Connect to services."""
         logger.info("Connecting to services...")
         self.forecast_reader.connect()
@@ -271,7 +271,7 @@ class EnergyManager:
         )
         logger.info("Connected successfully")
 
-    def close(self):
+    def close(self) -> None:
         """Close connections."""
         self.forecast_reader.close()
         if self.influx_client:
@@ -326,7 +326,7 @@ class EnergyManager:
         )
         return None
 
-    def write_energy_balance(self, forecast, house_soc: float | None = None):
+    def write_energy_balance(self, forecast, house_soc: float | None = None) -> None:
         """Write energy balance + car SOC forecast to InfluxDB.
 
         Car SOC model: the house battery is a buffer. Surplus first refills
@@ -337,6 +337,7 @@ class EnergyManager:
         Args:
             forecast: DataFrame with pv_energy_wh, load_energy_wh, net_energy_wh
             house_soc: current house battery SOC (%); if None, car curve is skipped
+
         """
         if forecast.empty:
             return
@@ -395,7 +396,7 @@ class EnergyManager:
             + (f" (car SOC forecast from {car_soc:.0f}%)" if sim_car else "")
         )
 
-    def write_decision(self, decision, current_soc: float):
+    def write_decision(self, decision, current_soc: float) -> None:
         """Write discharge decision to InfluxDB."""
         now = datetime.now(timezone.utc)
 
@@ -410,7 +411,7 @@ class EnergyManager:
 
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=point)
 
-    def control_battery(self, discharge_allowed: bool):
+    def control_battery(self, discharge_allowed: bool) -> None:
         """Control battery discharge via Home Assistant - reads actual state and adjusts."""
         if not self.ha_client.token:
             logger.warning("No HA token, cannot control battery")
@@ -487,7 +488,7 @@ class EnergyManager:
             self.last_discharge_allowed = discharge_allowed
             logger.info(f"Battery control set: {self.discharge_control_entity} = {target_value}W (unverified)")
 
-    def _update_discharge_control(self):
+    def _update_discharge_control(self) -> None:
         """Combine both discharge-block flags and apply if changed."""
         discharge_allowed = not (
             self._discharge_blocked_by_protection or self._discharge_blocked_by_ev
@@ -504,7 +505,7 @@ class EnergyManager:
             )
             self.control_battery(discharge_allowed)
 
-    def run_optimization(self):
+    def run_optimization(self) -> None:
         """Run battery optimization cycle."""
         logger.info("=" * 50)
         logger.info("Running battery optimization...")
@@ -598,7 +599,7 @@ class EnergyManager:
         except Exception as e:
             logger.error(f"Optimization failed: {e}", exc_info=True)
 
-    def calculate_appliance_signal(self, current_soc: float, simulation: pd.DataFrame):
+    def calculate_appliance_signal(self, current_soc: float, simulation: pd.DataFrame) -> None:
         """Calculate and output appliance signal to Home Assistant.
 
         Signal logic:
@@ -701,7 +702,7 @@ class EnergyManager:
             return 0.0
         return extra_load_wh / self.capacity_wh * 100
 
-    def control_ev_charging(self):
+    def control_ev_charging(self) -> None:
         """Control EV charging via state machine (FSD 4.5)."""
         if not self.ev_charging_enabled:
             return
@@ -1089,7 +1090,7 @@ class EnergyManager:
         except Exception as e:
             logger.error(f"EV charging control failed: {e}", exc_info=True)
 
-    def update_car_soc(self):
+    def update_car_soc(self) -> None:
         """Read SOC and charging state from smarthashtag HA entities."""
         if not self.smart_car_enabled:
             return
@@ -1142,7 +1143,7 @@ class EnergyManager:
             logger.debug(f"Could not query InfluxDB for {entity_id}: {e}")
         return None
 
-    def _ensure_sensor_exists(self, entity_id: str, default_state, attributes: dict):
+    def _ensure_sensor_exists(self, entity_id: str, default_state, attributes: dict) -> None:
         """Ensure a sensor exists in HA. Restores last value from InfluxDB if missing."""
         existing = self.ha_client.get_state(entity_id)
         if existing is not None:
@@ -1155,7 +1156,7 @@ class EnergyManager:
                      f"{' (from InfluxDB)' if restored is not None else ' (default)'}")
         self.ha_client.set_sensor_state(entity_id, state, attributes=attributes)
 
-    def _publish_initial_sensors(self):
+    def _publish_initial_sensors(self) -> None:
         """Ensure all managed sensors exist in HA at startup."""
         try:
             self._ensure_sensor_exists(
@@ -1174,7 +1175,7 @@ class EnergyManager:
         except Exception as e:
             logger.warning(f"Failed to check initial sensors: {e}")
 
-    def start(self):
+    def start(self) -> None:
         """Start the scheduler."""
         logger.info(f"Starting scheduler (every {self.update_interval} minutes)")
 
@@ -1238,7 +1239,7 @@ class EnergyManager:
         if job:
             logger.info(f"Next optimization at {swiss_datetime(job.next_run_time)}")
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the scheduler."""
         logger.info("Stopping scheduler...")
         self.scheduler.shutdown(wait=True)
@@ -1272,6 +1273,7 @@ def load_config(config_path: str = None) -> dict:
 
     Returns:
         Merged configuration dictionary with secrets
+
     """
     import yaml
     import os
@@ -1330,7 +1332,7 @@ def load_config(config_path: str = None) -> dict:
     return merged
 
 
-def main():
+def main() -> None:
     """Main entry point."""
     import argparse
 
@@ -1354,7 +1356,7 @@ def main():
     manager = EnergyManager(options)
 
     # Handle shutdown signals
-    def shutdown(signum, frame):
+    def shutdown(signum, frame) -> None:
         logger.info(f"Received signal {signum}, shutting down...")
         manager.stop()
         sys.exit(0)

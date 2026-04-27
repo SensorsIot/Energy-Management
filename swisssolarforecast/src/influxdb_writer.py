@@ -1,5 +1,4 @@
-"""
-InfluxDB writer for PV forecast data.
+"""InfluxDB writer for PV forecast data.
 
 Writes forecast results with future timestamps to InfluxDB.
 Supports P10/P50/P90 percentiles from ensemble forecasts.
@@ -7,7 +6,6 @@ Supports P10/P50/P90 percentiles from ensemble forecasts.
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 import pandas as pd
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -26,16 +24,16 @@ class ForecastWriter:
         token: str,
         org: str,
         bucket: str,
-    ):
+    ) -> None:
         self.host = host
         self.port = port
         self.token = token
         self.org = org
         self.bucket = bucket
-        self.client: Optional[InfluxDBClient] = None
+        self.client: InfluxDBClient | None = None
         self.write_api = None
 
-    def connect(self):
+    def connect(self) -> None:
         """Connect to InfluxDB."""
         url = f"http://{self.host}:{self.port}"
         logger.info(f"Connecting to InfluxDB at {url}")
@@ -55,13 +53,13 @@ class ForecastWriter:
             logger.error(f"Failed to connect to InfluxDB: {e}")
             raise
 
-    def close(self):
+    def close(self) -> None:
         """Close InfluxDB connection."""
         if self.client:
             self.client.close()
             logger.info("InfluxDB connection closed")
 
-    def ensure_bucket(self, retention_days: int = 30):
+    def ensure_bucket(self, retention_days: int = 30) -> None:
         """Create bucket if it doesn't exist."""
         buckets_api = self.client.buckets_api()
 
@@ -85,8 +83,7 @@ class ForecastWriter:
         )
 
     def _resample_forecast(self, forecast: pd.DataFrame, minutes: int = 15) -> pd.DataFrame:
-        """
-        Resample forecast to specified minute intervals using interpolation.
+        """Resample forecast to specified minute intervals using interpolation.
 
         Aligns timestamps to exact 15-min boundaries (00, 15, 30, 45)
         for synchronization with actual consumption data.
@@ -113,7 +110,7 @@ class ForecastWriter:
         logger.debug(f"Resampled forecast from {len(forecast)} to {len(forecast_resampled)} points ({minutes} min)")
         return forecast_resampled
 
-    def write_metadata(self, key: str, value: str):
+    def write_metadata(self, key: str, value: str) -> None:
         """Write metadata point (e.g., last update time, status)."""
         point = (
             Point("pv_forecast_metadata")
@@ -127,13 +124,12 @@ class ForecastWriter:
         self,
         pv_forecast: pd.DataFrame,
         model: str = "hybrid",
-        run_time: Optional[datetime] = None,
+        run_time: datetime | None = None,
         resample_minutes: int = 15,
-        battery_soc: Optional[float] = None,
-        discharge_power_limit: Optional[float] = None,
-    ):
-        """
-        Write PV forecast to InfluxDB with aligned timestamps.
+        battery_soc: float | None = None,
+        discharge_power_limit: float | None = None,
+    ) -> None:
+        """Write PV forecast to InfluxDB with aligned timestamps.
 
         Stores PV power and per-period energy (Wh per 15-min).
         All values are at exact 15-min boundaries for MPC synchronization.
@@ -145,6 +141,7 @@ class ForecastWriter:
             resample_minutes: Time resolution (default 15 min)
             battery_soc: Current battery state of charge (%) - for decision context
             discharge_power_limit: Max discharge power setting (W) - 0 means blocked
+
         """
         if run_time is None:
             run_time = datetime.now(timezone.utc)
@@ -167,7 +164,7 @@ class ForecastWriter:
 
         points = []
 
-        for idx, timestamp in enumerate(pv_forecast.index):
+        for _idx, timestamp in enumerate(pv_forecast.index):
             # Ensure timestamp is timezone-aware
             if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is None:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)

@@ -1,5 +1,4 @@
-"""
-EV charging state machine — 4-state design.
+"""EV charging state machine — 4-state design.
 
 States:
   1. IDLE            — no EV charging, SUN2000 has full control
@@ -26,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 class EVState(str, Enum):
     """EV charging states (str so it works as an HA sensor value)."""
+
     IDLE = "idle"
     SOLAR = "solar"
     CHEAP = "cheap"
@@ -39,6 +39,7 @@ class EVState(str, Enum):
 @dataclass(frozen=True)
 class EVInputs:
     """All inputs needed for one step() call."""
+
     wallbox_available: bool
     wallbox_power_w: float
     wallbox_status: str               # for OCPP status logging only
@@ -58,6 +59,7 @@ class EVInputs:
 @dataclass
 class EVOutput:
     """Decision produced by step()."""
+
     state: EVState
     target_power_w: float
     reason: str

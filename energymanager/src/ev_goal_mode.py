@@ -1,5 +1,4 @@
-"""
-EV charging mode calculation (FSD 4.5.4).
+"""EV charging mode calculation (FSD 4.5.4).
 
 Modes (via input_select.ev_charging_mode):
   - solar: default, handled by ev_charging.py (this module returns idle)
@@ -19,6 +18,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ChargingModeResult:
     """Result of charging mode calculation."""
+
     target_power_w: float       # Power to set on wallbox (0 = wait/inactive)
     charge_status: str          # idle / ready / waiting / charging / error
     status_text: str            # Human-readable status for dashboard
@@ -36,8 +36,7 @@ def calculate_charging_mode(
     auto_reset_timeout_min: float = 5.0,
     max_power_w: float = 11000,
 ) -> ChargingModeResult:
-    """
-    Calculate charging power and status based on the active mode.
+    """Calculate charging power and status based on the active mode.
 
     Args:
         ev_charging_mode: Active mode ("solar", "immediate", "cheap")
@@ -52,6 +51,7 @@ def calculate_charging_mode(
 
     Returns:
         ChargingModeResult with target power, status, reason, and revert flag
+
     """
     # Solar mode → handled by ev_charging.py, not here
     if ev_charging_mode not in ("immediate", "cheap"):

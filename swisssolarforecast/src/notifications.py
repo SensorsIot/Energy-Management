@@ -1,5 +1,4 @@
-"""
-Notification module for sending alerts via Telegram.
+"""Notification module for sending alerts via Telegram.
 
 Configure via environment variables or config file:
 - TELEGRAM_BOT_TOKEN: Bot token from @BotFather
@@ -10,7 +9,6 @@ import os
 import logging
 import requests
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +20,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 SECRETS_FILE = Path("/home/energymanagement/Documents/secrets.txt")
 
 
-def _load_secrets():
+def _load_secrets() -> None:
     """Load Telegram credentials from secrets file."""
     global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
@@ -33,7 +31,7 @@ def _load_secrets():
         return
 
     try:
-        with open(SECRETS_FILE, "r") as f:
+        with open(SECRETS_FILE) as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("#") or "=" not in line:
@@ -61,8 +59,7 @@ def send_telegram(
     parse_mode: str = "HTML",
     disable_notification: bool = False,
 ) -> bool:
-    """
-    Send a message via Telegram.
+    """Send a message via Telegram.
 
     Args:
         message: Text message to send (supports HTML formatting)
@@ -71,6 +68,7 @@ def send_telegram(
 
     Returns:
         True if message was sent successfully
+
     """
     _load_secrets()
 
@@ -90,7 +88,7 @@ def send_telegram(
     try:
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
-        logger.debug(f"Telegram message sent successfully")
+        logger.debug("Telegram message sent successfully")
         return True
     except requests.RequestException as e:
         logger.warning(f"Failed to send Telegram message: {e}")
@@ -98,38 +96,38 @@ def send_telegram(
 
 
 def notify_warning(title: str, message: str, silent: bool = True) -> bool:
-    """
-    Send a warning notification.
+    """Send a warning notification.
 
     Args:
         title: Short title for the warning
         message: Detailed message
         silent: If True, don't trigger notification sound
+
     """
     text = f"<b>Warning: {title}</b>\n\n{message}"
     return send_telegram(text, disable_notification=silent)
 
 
 def notify_error(title: str, message: str) -> bool:
-    """
-    Send an error notification (with sound).
+    """Send an error notification (with sound).
 
     Args:
         title: Short title for the error
         message: Detailed message
+
     """
     text = f"<b>Error: {title}</b>\n\n{message}"
     return send_telegram(text, disable_notification=False)
 
 
 def notify_info(title: str, message: str, silent: bool = True) -> bool:
-    """
-    Send an info notification.
+    """Send an info notification.
 
     Args:
         title: Short title
         message: Detailed message
         silent: If True, don't trigger notification sound
+
     """
     text = f"<b>{title}</b>\n\n{message}"
     return send_telegram(text, disable_notification=silent)

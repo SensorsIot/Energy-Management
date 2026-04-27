@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Wallbox OCPP 1.6J simulator for testing the OCPP Server add-on.
+"""Wallbox OCPP 1.6J simulator for testing the OCPP Server add-on.
 
 Uses the ocpp library as a client to match exact message format.
 
@@ -31,7 +30,7 @@ logger = logging.getLogger("wallbox-sim")
 class WallboxSimulator(CP):
     """Simulated wallbox using the ocpp library (acts as ChargePoint client)."""
 
-    def __init__(self, id, connection):
+    def __init__(self, id, connection) -> None:
         super().__init__(id, connection)
         self.charging = False
         self.transaction_id = None
@@ -85,7 +84,7 @@ class WallboxSimulator(CP):
         logger.info(f"  Boot: {resp.status}")
         return resp.status == RegistrationStatus.accepted.value
 
-    async def send_status(self, status: str):
+    async def send_status(self, status: str) -> None:
         req = call.StatusNotification(
             connector_id=1,
             error_code="NoError",
@@ -94,7 +93,7 @@ class WallboxSimulator(CP):
         await self.call(req)
         logger.info(f"  Status: {status}")
 
-    async def _do_start_transaction(self, id_tag: str):
+    async def _do_start_transaction(self, id_tag: str) -> None:
         await asyncio.sleep(0.5)
         req = call.StartTransaction(
             connector_id=1,
@@ -108,7 +107,7 @@ class WallboxSimulator(CP):
         logger.info(f"  Transaction started: id={self.transaction_id}")
         await self.send_status("Charging")
 
-    async def _do_stop_transaction(self):
+    async def _do_stop_transaction(self) -> None:
         await asyncio.sleep(0.5)
         if self.transaction_id is None:
             return
@@ -124,7 +123,7 @@ class WallboxSimulator(CP):
         logger.info("  Transaction stopped")
         await self.send_status("Available")
 
-    async def _send_meter_values(self):
+    async def _send_meter_values(self) -> None:
         req = call.MeterValues(
             connector_id=1,
             meter_value=[{
@@ -138,7 +137,7 @@ class WallboxSimulator(CP):
         await self.call(req)
         logger.info(f"  MeterValues: {self.power_w:.0f}W, {self.energy_wh:.0f}Wh")
 
-    async def _meter_loop(self):
+    async def _meter_loop(self) -> None:
         """Send MeterValues every 10s while charging."""
         while True:
             await asyncio.sleep(10)
@@ -147,7 +146,7 @@ class WallboxSimulator(CP):
                 await self._send_meter_values()
 
 
-async def main():
+async def main() -> None:
     uri = sys.argv[1] if len(sys.argv) > 1 else "ws://192.168.0.202:8887/AcTec001"
     logger.info(f"Connecting to {uri}")
 

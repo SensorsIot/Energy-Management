@@ -1,5 +1,4 @@
-"""
-EV charging power calculation for opportunistic solar mode.
+"""EV charging power calculation for opportunistic solar mode.
 
 Clamps excess power to wallbox min/max limits:
   excess >= min_power_w → charge at min(excess, max_power_w)
@@ -28,6 +27,7 @@ POWER_STEPS_3P = [3962, 4354, 5117, 5727, 6288, 7034, 7624]
 @dataclass
 class EVChargingResult:
     """Result of EV charging power calculation."""
+
     target_power_w: float       # Power to set on wallbox (0 = pause)
     available_excess_w: float   # Computed solar excess
     reason: str
@@ -50,8 +50,7 @@ def calculate_ev_power(
     max_power_w: float = 11000,
     battery_full: bool = False,
 ) -> EVChargingResult:
-    """
-    Calculate target EV charging power from solar excess.
+    """Calculate target EV charging power from solar excess.
 
     Args:
         excess_w: Available solar excess in watts
@@ -60,6 +59,7 @@ def calculate_ev_power(
 
     Returns:
         EVChargingResult with target power, excess, and reason
+
     """
     if excess_w >= min_power_w:
         target = min(excess_w, max_power_w)

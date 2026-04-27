@@ -1,5 +1,4 @@
-"""
-Statistical load prediction using historical consumption data.
+"""Statistical load prediction using historical consumption data.
 
 Builds time-of-day profiles from historical data and generates
 P10/P50/P90 power forecasts (W) at 15-minute intervals.
@@ -10,7 +9,6 @@ not UTC, so that "morning peak" patterns align with actual user behavior.
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 import pandas as pd
 from influxdb_client import InfluxDBClient
@@ -31,7 +29,7 @@ class LoadPredictor:
         load_entity: str = "load_power",
         history_days: int = 90,
         local_timezone: str = "Europe/Zurich",
-    ):
+    ) -> None:
         self.host = host
         self.port = port
         self.token = token
@@ -40,17 +38,17 @@ class LoadPredictor:
         self.load_entity = load_entity
         self.history_days = history_days
         self.local_timezone = local_timezone
-        self.client: Optional[InfluxDBClient] = None
-        self.profile: Optional[pd.DataFrame] = None
+        self.client: InfluxDBClient | None = None
+        self.profile: pd.DataFrame | None = None
         logger.info(f"Using timezone: {local_timezone} for time-of-day profiles")
 
-    def connect(self):
+    def connect(self) -> None:
         """Connect to InfluxDB."""
         url = f"http://{self.host}:{self.port}"
         logger.info(f"Connecting to InfluxDB at {url}")
         self.client = InfluxDBClient(url=url, token=self.token, org=self.org)
 
-    def close(self):
+    def close(self) -> None:
         """Close connection."""
         if self.client:
             self.client.close()
@@ -91,8 +89,7 @@ class LoadPredictor:
         return df
 
     def build_profile(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Build time-of-day load profile with P10/P50/P90.
+        """Build time-of-day load profile with P10/P50/P90.
 
         Groups all historical data by 15-minute slot (0-95) and
         calculates percentiles for each slot.
@@ -121,11 +118,10 @@ class LoadPredictor:
 
     def generate_forecast(
         self,
-        start_time: Optional[datetime] = None,
+        start_time: datetime | None = None,
         hours: int = 120,
     ) -> pd.DataFrame:
-        """
-        Generate load forecast with P10/P50/P90.
+        """Generate load forecast with P10/P50/P90.
 
         Args:
             start_time: Forecast start (default: now, aligned to 15-min)
@@ -135,6 +131,7 @@ class LoadPredictor:
             DataFrame with columns: power_w_p10, power_w_p50, power_w_p90
             Each value represents instantaneous power (W) at that timestamp.
             Index is in UTC for consistency with InfluxDB storage.
+
         """
         if self.profile is None:
             raise ValueError("Profile not built. Call build_profile() first.")
@@ -157,7 +154,7 @@ class LoadPredictor:
 
         # Build forecast
         forecast_data = []
-        for ts_utc, ts_local in zip(timestamps_utc, timestamps_local):
+        for ts_utc, ts_local in zip(timestamps_utc, timestamps_local, strict=False):
             # Use LOCAL time for slot calculation (matches how profile was built)
             slot = ts_local.hour * 4 + ts_local.minute // 15
 

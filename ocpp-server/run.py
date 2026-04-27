@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-OCPP Server Add-on for Home Assistant.
+"""OCPP Server Add-on for Home Assistant.
 
 Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
@@ -15,7 +14,6 @@ import os
 import signal
 import time
 from pathlib import Path
-from typing import Optional
 
 import aiohttp
 import aiomqtt
@@ -56,12 +54,12 @@ CAR_READY_MAP = {
 class HAEntityManager:
     """Async Home Assistant REST API client for entity management."""
 
-    def __init__(self, url: str = "http://supervisor/core/api"):
+    def __init__(self, url: str = "http://supervisor/core/api") -> None:
         self.url = url.rstrip("/")
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._session: aiohttp.ClientSession | None = None
 
     @property
-    def _token(self) -> Optional[str]:
+    def _token(self) -> str | None:
         """Get supervisor token from environment."""
         return os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
 
@@ -72,17 +70,17 @@ class HAEntityManager:
             "Content-Type": "application/json",
         }
 
-    async def start(self):
+    async def start(self) -> None:
         """Create aiohttp session."""
         self._session = aiohttp.ClientSession()
 
-    async def stop(self):
+    async def stop(self) -> None:
         """Close aiohttp session."""
         if self._session:
             await self._session.close()
             self._session = None
 
-    async def set_state(self, entity_id: str, state, attributes: Optional[dict] = None):
+    async def set_state(self, entity_id: str, state, attributes: dict | None = None) -> None:
         """Set entity state via POST /api/states/{entity_id}."""
         if not self._session:
             logger.warning("HAEntityManager not started, cannot set state")
@@ -107,7 +105,7 @@ class HAEntityManager:
         except Exception as e:
             logger.error(f"Error setting {entity_id}: {e}")
 
-    async def get_state(self, entity_id: str) -> Optional[str]:
+    async def get_state(self, entity_id: str) -> str | None:
         """Get entity state via GET /api/states/{entity_id}. Returns state string."""
         if not self._session:
             return None
@@ -150,7 +148,7 @@ class HAEntityManager:
             logger.error(f"Error calling {domain}.{service}: {e}")
             return False
 
-    async def register_entities(self):
+    async def register_entities(self) -> None:
         """Register HA entity attributes; only set defaults for connectivity and controls.
 
         Sensor states (status, power, energy, transaction, phases) are NOT
@@ -182,7 +180,7 @@ class HAEntityManager:
 class OCPPServer:
     """OCPP 1.6j WebSocket server with HA entity integration."""
 
-    def __init__(self, options: dict):
+    def __init__(self, options: dict) -> None:
         self.options = options
         self.wallbox_id = options.get("wallbox_id", "wallbox1")
         self.min_current_a = options.get("min_current_a", 6)
@@ -197,7 +195,7 @@ class OCPPServer:
             "current_sensor_entity", "sensor.earu_breaker_bl0942_current"
         )
 
-        self.charge_point: Optional[ChargePointHandler] = None
+        self.charge_point: ChargePointHandler | None = None
         self.ha = HAEntityManager()
         self.ws_server = None
         self.running = False
@@ -206,7 +204,7 @@ class OCPPServer:
         self._mqtt_host = options.get("mqtt_host", "192.168.0.203")
         self._mqtt_port = options.get("mqtt_port", 1883)
         self._mqtt_topic = options.get("mqtt_topic", "wallbox")
-        self._mqtt_client: Optional[aiomqtt.Client] = None
+        self._mqtt_client: aiomqtt.Client | None = None
         self._last_mqtt_power: float = (
             0.0  # re-publish periodically to prevent staleness
         )
@@ -221,7 +219,7 @@ class OCPPServer:
         self.PHASE_SWITCH_LOCK_S = 300  # 5-minute time lock after phase switch
 
         # Track last-seen control states for change detection
-        self._last_power_limit: Optional[str] = None
+        self._last_power_limit: str | None = None
 
         # Throttle state for SetChargingProfile rate-limiting
         self._last_change_at: float = 0.0  # When value last changed
@@ -233,7 +231,7 @@ class OCPPServer:
 
         # SuspendedEV cloud correction
         self._cloud_charging_entity: str = options.get("cloud_charging_entity", "")
-        self._cloud_poll_task: Optional[asyncio.Task] = None
+        self._cloud_poll_task: asyncio.Task | None = None
         self._synthesized_suspended_ev: bool = False
 
         # Periodic reconciliation of HA power limit vs wallbox
@@ -242,7 +240,7 @@ class OCPPServer:
         # Synchronization: _watch_controls waits until _post_connect_setup finishes
         self._setup_complete = asyncio.Event()
 
-    async def _publish_power_limits(self):
+    async def _publish_power_limits(self) -> None:
         """Publish min/max wallbox power based on current phase count."""
         min_w = self.min_current_a * 230 * self._current_phases
         max_w = self.max_current_a * 230 * self._current_phases
@@ -256,7 +254,7 @@ class OCPPServer:
         idx = min(self._resend_retry_count, len(self.RESEND_INTERVALS) - 1)
         return self.RESEND_INTERVALS[idx]
 
-    async def _update_car_ready(self):
+    async def _update_car_ready(self) -> None:
         """Update binary_sensor.car_ready from wallbox status."""
         if not self._setup_complete.is_set():
             await self.ha.set_state("binary_sensor.car_ready", "off")
@@ -265,7 +263,7 @@ class OCPPServer:
         ready = CAR_READY_MAP.get(status, False)
         await self.ha.set_state("binary_sensor.car_ready", "on" if ready else "off")
 
-    async def _cloud_poll_suspended_ev(self):
+    async def _cloud_poll_suspended_ev(self) -> None:
         """Poll cloud charging entity to detect SuspendedEV (car full).
 
         The wallbox reports SuspendedEVSE when the car stops drawing current,
@@ -300,7 +298,7 @@ class OCPPServer:
         except asyncio.CancelledError:
             pass
 
-    async def _mqtt_loop(self):
+    async def _mqtt_loop(self) -> None:
         """Maintain MQTT connection and reconnect on failure."""
         if not self._mqtt_host:
             logger.info("MQTT disabled (no mqtt_host configured)")
@@ -335,7 +333,7 @@ class OCPPServer:
                     await asyncio.sleep(10)
         self._mqtt_client = None
 
-    async def _publish_mqtt_power(self, power_w: float):
+    async def _publish_mqtt_power(self, power_w: float) -> None:
         """Publish wallbox power to MQTT for ESP32 Modbus Proxy correction."""
         self._last_mqtt_power = power_w
         if self._mqtt_client is None:
@@ -346,7 +344,7 @@ class OCPPServer:
         except Exception as e:
             logger.warning(f"MQTT publish failed: {e}")
 
-    def _on_status_change(self, key: str, value):
+    def _on_status_change(self, key: str, value) -> None:
         """Callback when wallbox status changes — update HA entity and MQTT."""
         entity_id = STATUS_ENTITY_MAP.get(key)
         if not entity_id:
@@ -398,7 +396,7 @@ class OCPPServer:
                     self._cloud_poll_task = None
                 self._synthesized_suspended_ev = False
 
-    async def _abort_phase_switch(self, reason: str):
+    async def _abort_phase_switch(self, reason: str) -> None:
         """Abort phase switch: disable single-phase, restore previous profile."""
         if self.wallbox_type != "external_breaker":
             return
@@ -416,7 +414,7 @@ class OCPPServer:
                 self._last_sent_power_w, num_phases=self._current_phases
             )
 
-    async def _switch_phases(self, target_phases: int):
+    async def _switch_phases(self, target_phases: int) -> None:
         """Switch between 1-phase and 3-phase charging via EARU relay.
 
         Safety sequence with dual gates:
@@ -500,7 +498,7 @@ class OCPPServer:
         await self._publish_power_limits()
         logger.info(f"Phase switch complete: now {target_phases}-phase")
 
-    async def _meter_values_watchdog(self):
+    async def _meter_values_watchdog(self) -> None:
         """Reset power to 0 if no MeterValues received for 2 minutes."""
         METER_VALUES_TIMEOUT = 120  # seconds
         while self.running:
@@ -519,7 +517,7 @@ class OCPPServer:
                 cp.current_power_w = 0
                 self._on_status_change("power_w", 0)
 
-    async def _apply_current_power_limit(self):
+    async def _apply_current_power_limit(self) -> None:
         """Read the current HA power limit and apply it immediately.
 
         Called after post-connect setup and after transaction stop to avoid
@@ -540,7 +538,7 @@ class OCPPServer:
             self._last_power_limit = power_state
             await self._send_power_to_wallbox(power_w)
 
-    async def _send_power_to_wallbox(self, power_w: float):
+    async def _send_power_to_wallbox(self, power_w: float) -> None:
         """Send power limit to wallbox (phase switching, auto-start, SetChargingProfile).
 
         This method contains the actual wallbox communication logic,
@@ -648,7 +646,7 @@ class OCPPServer:
         logger.info(f"Sent power profile: {power_w}W")
 
 
-    async def _sync_ha_state(self):
+    async def _sync_ha_state(self) -> None:
         """Re-publish current wallbox state to HA after entity recovery."""
         cp = self.charge_point
         connected = cp is not None
@@ -670,7 +668,7 @@ class OCPPServer:
         await self._update_car_ready()
         logger.info(f"Synced HA state (connected={connected})")
 
-    async def _watch_controls(self):
+    async def _watch_controls(self) -> None:
         """Poll HA control entities for changes from EnergyManager.
 
         Detected changes are queued in _pending_power_w and only sent
@@ -770,7 +768,7 @@ class OCPPServer:
             except Exception as e:
                 logger.error(f"Control watcher error: {e}")
 
-    async def _post_connect_setup(self):
+    async def _post_connect_setup(self) -> None:
         """Sync state after wallbox connects (FSD 4.5).
 
         Accepts any message (Boot, Status, or Heartbeat) as proof the
@@ -842,7 +840,7 @@ class OCPPServer:
         # Apply current HA power limit immediately (don't wait for change)
         await self._apply_current_power_limit()
 
-    async def handle_websocket(self, websocket):
+    async def handle_websocket(self, websocket) -> None:
         """Handle incoming WebSocket connection from wallbox."""
         # Extract charge point ID from path (e.g., /AcTec001)
         # websockets v11+: path is on the request object
@@ -892,7 +890,7 @@ class OCPPServer:
                     self.ha.set_state("binary_sensor.car_ready", "off")
                 )
 
-    async def start_server(self):
+    async def start_server(self) -> None:
         """Start WebSocket server and HA integration."""
         # Initialize HA entity manager
         await self.ha.start()
@@ -950,7 +948,7 @@ class OCPPServer:
             mqtt_task.cancel()
             mv_watchdog.cancel()
 
-    async def stop(self):
+    async def stop(self) -> None:
         """Stop the server, MQTT, and close HA session."""
         self.running = False
         self._mqtt_client = None
@@ -969,7 +967,7 @@ def load_options() -> dict:
     return {}
 
 
-async def async_main():
+async def async_main() -> None:
     """Async main entry point."""
     logger.info("=" * 60)
     logger.info(f"OCPP Server Add-on v{__version__}")
@@ -988,7 +986,7 @@ async def async_main():
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 
-    def shutdown(signum):
+    def shutdown(signum) -> None:
         logger.info(f"Received signal {signum}, shutting down...")
         stop_event.set()
 
@@ -1002,7 +1000,7 @@ async def async_main():
     server_task.cancel()
 
 
-def main():
+def main() -> None:
     """Main entry point."""
     asyncio.run(async_main())
 

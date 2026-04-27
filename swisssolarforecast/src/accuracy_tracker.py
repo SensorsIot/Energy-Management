@@ -1,5 +1,4 @@
-"""
-Forecast accuracy tracking for SwissSolarForecast add-on.
+"""Forecast accuracy tracking for SwissSolarForecast add-on.
 
 Implements FSD Chapter 5.3: Forecast Accuracy #1 - Battery Discharge Optimization.
 
@@ -15,7 +14,6 @@ Phase 2: Evaluation (21:15 daily local time)
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -27,8 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class AccuracyTracker:
-    """
-    Tracks PV forecast accuracy for battery discharge optimization decisions.
+    """Tracks PV forecast accuracy for battery discharge optimization decisions.
 
     Phase 1: At 21:00 local time, snapshots the current forecast for the next 24h period
     and records decision context (SOC, discharge blocked status).
@@ -63,13 +60,12 @@ class AccuracyTracker:
         influx_org: str,
         pv_bucket: str = "pv_forecast",
         ha_url: str = "http://supervisor/core",
-        ha_token: Optional[str] = None,
+        ha_token: str | None = None,
         soc_entity: str = "sensor.battery_state_of_capacity",
         discharge_control_entity: str = "number.battery_maximum_discharging_power",
         local_timezone: str = "Europe/Zurich",
-    ):
-        """
-        Initialize accuracy tracker.
+    ) -> None:
+        """Initialize accuracy tracker.
 
         Args:
             influx_host: InfluxDB hostname
@@ -82,6 +78,7 @@ class AccuracyTracker:
             soc_entity: HA entity for battery SOC
             discharge_control_entity: HA entity for discharge control
             local_timezone: Local timezone for snapshot timing (default: Europe/Zurich)
+
         """
         self.influx_host = influx_host
         self.influx_port = influx_port
@@ -99,16 +96,16 @@ class AccuracyTracker:
             self._ha_token = os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
             if not self._ha_token:
                 try:
-                    with open("/run/secrets/supervisor_token", "r") as f:
+                    with open("/run/secrets/supervisor_token") as f:
                         self._ha_token = f.read().strip()
                 except FileNotFoundError:
                     pass
 
-        self.client: Optional[InfluxDBClient] = None
+        self.client: InfluxDBClient | None = None
         self.write_api = None
         self.query_api = None
 
-    def connect(self):
+    def connect(self) -> None:
         """Connect to InfluxDB."""
         url = f"http://{self.influx_host}:{self.influx_port}"
         logger.info(f"Accuracy tracker connecting to InfluxDB at {url}")
@@ -129,13 +126,13 @@ class AccuracyTracker:
             logger.error(f"Failed to connect to InfluxDB: {e}")
             raise
 
-    def close(self):
+    def close(self) -> None:
         """Close InfluxDB connection."""
         if self.client:
             self.client.close()
             logger.info("Accuracy tracker InfluxDB connection closed")
 
-    def _get_ha_state(self, entity_id: str) -> Optional[dict]:
+    def _get_ha_state(self, entity_id: str) -> dict | None:
         """Get entity state from Home Assistant API."""
         if not self._ha_token:
             logger.warning("No HA token available, cannot query HA API")
@@ -153,7 +150,7 @@ class AccuracyTracker:
             logger.error(f"Failed to get HA state for {entity_id}: {e}")
             return None
 
-    def _get_ha_numeric_value(self, entity_id: str) -> Optional[float]:
+    def _get_ha_numeric_value(self, entity_id: str) -> float | None:
         """Get numeric value from HA entity."""
         state = self._get_ha_state(entity_id)
         if not state:
@@ -167,11 +164,10 @@ class AccuracyTracker:
 
     def snapshot_forecast(
         self,
-        decision_time: Optional[datetime] = None,
+        decision_time: datetime | None = None,
         model: str = "hybrid",
     ) -> bool:
-        """
-        Snapshot current forecast for the next 24h period at decision time.
+        """Snapshot current forecast for the next 24h period at decision time.
 
         This is called at 21:00 daily to freeze the forecast that will be
         compared with actuals the next day. Called once per model (hybrid, local).
@@ -182,6 +178,7 @@ class AccuracyTracker:
 
         Returns:
             True if snapshot was successful
+
         """
         if decision_time is None:
             decision_time = datetime.now(timezone.utc)
@@ -265,9 +262,8 @@ class AccuracyTracker:
 
     def _query_actuals(
         self, entity_id: str, start: datetime, end: datetime
-    ) -> Optional[pd.DataFrame]:
-        """
-        Query actual PV production from HomeAssistant InfluxDB bucket.
+    ) -> pd.DataFrame | None:
+        """Query actual PV production from HomeAssistant InfluxDB bucket.
 
         Uses aggregateWindow to align to 15-min periods, then converts
         mean power (W) to energy (Wh) per period.
@@ -312,9 +308,8 @@ class AccuracyTracker:
     def _query_snapshot_for_inverter(
         self, inverter: str, snapshot_id: str, start: datetime, end: datetime,
         model: str = "hybrid",
-    ) -> Optional[pd.DataFrame]:
-        """
-        Query snapshot forecast data for a specific inverter and model.
+    ) -> pd.DataFrame | None:
+        """Query snapshot forecast data for a specific inverter and model.
 
         For 'total': query string=="total" directly and pivot.
         For 'EastWest'/'South': sum across strings using group() + sum(), then pivot.
@@ -374,9 +369,8 @@ class AccuracyTracker:
     def _query_snapshot_for_string(
         self, string_name: str, snapshot_id: str, start: datetime, end: datetime,
         model: str = "hybrid",
-    ) -> Optional[pd.DataFrame]:
-        """
-        Query snapshot forecast data for a specific string (e.g. East, West).
+    ) -> pd.DataFrame | None:
+        """Query snapshot forecast data for a specific string (e.g. East, West).
 
         Returns DataFrame with forecast_wh_p10/p50/p90 columns indexed by time.
         """
@@ -415,11 +409,10 @@ class AccuracyTracker:
 
     def evaluate_forecast(
         self,
-        evaluation_time: Optional[datetime] = None,
+        evaluation_time: datetime | None = None,
         model: str = "hybrid",
     ) -> bool:
-        """
-        Evaluate yesterday's snapshot forecast against actual PV production.
+        """Evaluate yesterday's snapshot forecast against actual PV production.
 
         Called at 21:15 daily, once per model. Compares the snapshot taken at
         yesterday's 21:00 with actual production data from HomeAssistant.
@@ -433,6 +426,7 @@ class AccuracyTracker:
 
         Returns:
             True if evaluation was successful
+
         """
         if evaluation_time is None:
             evaluation_time = datetime.now(timezone.utc)
@@ -463,8 +457,8 @@ class AccuracyTracker:
 
         # Collect joined DataFrames for weather factor computation
         # Keys: "East", "West", "South" (inverter-level for South = SouthFront+SouthBack)
-        string_joined: Dict[str, pd.DataFrame] = {}
-        inverter_joined: Dict[str, pd.DataFrame] = {}
+        string_joined: dict[str, pd.DataFrame] = {}
+        inverter_joined: dict[str, pd.DataFrame] = {}
 
         # --- Phase A+B: Query data and write basic accuracy points ---
 
@@ -705,7 +699,7 @@ class AccuracyTracker:
 
     def _query_forecast(
         self, start: datetime, end: datetime, model: str = "hybrid"
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame | None:
         """Query current PV forecast from InfluxDB, filtered by model tag."""
         start_str = start.isoformat()
         end_str = end.isoformat()
@@ -737,8 +731,7 @@ class AccuracyTracker:
     def _filter_forecast_by_string(
         self, forecast: pd.DataFrame, string_name: str, inverter_name: str
     ) -> pd.DataFrame:
-        """
-        Filter forecast data for a specific string.
+        """Filter forecast data for a specific string.
 
         The forecast data has columns like:
         - energy_wh_p50_total, energy_wh_p50_EastWest, energy_wh_p50_South
@@ -773,7 +766,7 @@ class AccuracyTracker:
         return result
 
 
-def create_accuracy_tracker(options: Dict) -> AccuracyTracker:
+def create_accuracy_tracker(options: dict) -> AccuracyTracker:
     """Factory function to create AccuracyTracker from options dict."""
     influx_config = options.get("influxdb", {})
     accuracy_config = options.get("accuracy_tracker", {})

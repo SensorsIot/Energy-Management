@@ -36,7 +36,7 @@ class EVBatteryOptimizer:
     def __init__(
         self,
         *,
-        influx_client: "InfluxDBClient",
+        influx_client: InfluxDBClient,
         bucket: str,
         capacity_wh: float,
         min_soc_percent: float,
@@ -107,6 +107,7 @@ class EVBatteryOptimizer:
 
         Returns:
             (hits_full, peak_soc or None, full_time_local "HH:MM" or None, end_of_today)
+
         """
         now = datetime.now(timezone.utc)
         now_local = now.astimezone(SWISS_TZ)

@@ -1,5 +1,4 @@
-"""
-Tests for two-flag battery discharge blocking (OR logic).
+"""Tests for two-flag battery discharge blocking (OR logic).
 
 The battery discharge is blocked when EITHER:
 - Battery protection blocks it (SOC forecast too low), OR
@@ -78,31 +77,31 @@ def manager():
 class TestUpdateDischargeControl:
     """Verify _update_discharge_control combines flags with OR logic."""
 
-    def test_both_off_allows_discharge(self, manager):
+    def test_both_off_allows_discharge(self, manager) -> None:
         manager._discharge_blocked_by_protection = False
         manager._discharge_blocked_by_ev = False
         manager._update_discharge_control()
         manager.control_battery.assert_called_once_with(True)
 
-    def test_protection_blocks(self, manager):
+    def test_protection_blocks(self, manager) -> None:
         manager._discharge_blocked_by_protection = True
         manager._discharge_blocked_by_ev = False
         manager._update_discharge_control()
         manager.control_battery.assert_called_once_with(False)
 
-    def test_ev_blocks(self, manager):
+    def test_ev_blocks(self, manager) -> None:
         manager._discharge_blocked_by_protection = False
         manager._discharge_blocked_by_ev = True
         manager._update_discharge_control()
         manager.control_battery.assert_called_once_with(False)
 
-    def test_both_block(self, manager):
+    def test_both_block(self, manager) -> None:
         manager._discharge_blocked_by_protection = True
         manager._discharge_blocked_by_ev = True
         manager._update_discharge_control()
         manager.control_battery.assert_called_once_with(False)
 
-    def test_no_call_when_unchanged(self, manager):
+    def test_no_call_when_unchanged(self, manager) -> None:
         """If last_discharge_allowed matches the computed value, skip."""
         manager.last_discharge_allowed = True
         manager._discharge_blocked_by_protection = False
@@ -110,13 +109,13 @@ class TestUpdateDischargeControl:
         manager._update_discharge_control()
         manager.control_battery.assert_not_called()
 
-    def test_calls_on_transition_allow_to_block(self, manager):
+    def test_calls_on_transition_allow_to_block(self, manager) -> None:
         manager.last_discharge_allowed = True
         manager._discharge_blocked_by_ev = True
         manager._update_discharge_control()
         manager.control_battery.assert_called_once_with(False)
 
-    def test_calls_on_transition_block_to_allow(self, manager):
+    def test_calls_on_transition_block_to_allow(self, manager) -> None:
         manager.last_discharge_allowed = False
         manager._discharge_blocked_by_protection = False
         manager._discharge_blocked_by_ev = False
@@ -129,7 +128,7 @@ class TestUpdateDischargeControl:
 # ===================================================================
 
 def _setup_ev_charging(manager, *, mode: str, wb_status: str = "Charging",
-                       is_cheap: bool = False):
+                       is_cheap: bool = False) -> None:
     """Configure mocks for a control_ev_charging() call via state machine.
 
     The state machine will derive the target power from mode / tariff / excess.
@@ -150,7 +149,7 @@ def _setup_ev_charging(manager, *, mode: str, wb_status: str = "Charging",
 
     # get_sensor_value: wallbox_power=0 by default, no dynamic min/max,
     # battery_soc=50, no EV SOC, no user power limit
-    def _fake_sensor(entity):
+    def _fake_sensor(entity) -> float | None:
         if entity == manager.wallbox_power_entity:
             return 0.0
         if entity in ("sensor.wallbox_min_power_w", "sensor.wallbox_max_power_w"):
@@ -181,14 +180,14 @@ def _setup_ev_charging(manager, *, mode: str, wb_status: str = "Charging",
 class TestEVFlagOnCharging:
     """EV flag is set when immediate/cheap mode charges with power > 0."""
 
-    def test_immediate_charging_blocks_discharge(self, manager):
+    def test_immediate_charging_blocks_discharge(self, manager) -> None:
         """Immediate mode → state machine outputs max power → blocks discharge."""
         assert manager._discharge_blocked_by_ev is False
         _setup_ev_charging(manager, mode="immediate")
         assert manager._discharge_blocked_by_ev is True
         manager.control_battery.assert_called_with(False)
 
-    def test_immediate_zero_power_clears_flag(self, manager):
+    def test_immediate_zero_power_clears_flag(self, manager) -> None:
         """Immediate mode with car not connected → 0W → clears flag."""
         manager._discharge_blocked_by_ev = True
         manager.last_discharge_allowed = False
@@ -197,7 +196,7 @@ class TestEVFlagOnCharging:
         assert manager._discharge_blocked_by_ev is False
         manager.control_battery.assert_called_with(True)
 
-    def test_flag_not_toggled_when_already_set(self, manager):
+    def test_flag_not_toggled_when_already_set(self, manager) -> None:
         """No redundant control_battery calls when flag is already True."""
         manager._discharge_blocked_by_ev = True
         manager.last_discharge_allowed = False
@@ -205,7 +204,7 @@ class TestEVFlagOnCharging:
         # Flag already True, last_discharge_allowed already False → no call
         manager.control_battery.assert_not_called()
 
-    def test_flag_not_toggled_when_already_clear(self, manager):
+    def test_flag_not_toggled_when_already_clear(self, manager) -> None:
         """No redundant control_battery calls when flag is already False."""
         manager._discharge_blocked_by_ev = False
         manager.last_discharge_allowed = True
@@ -218,7 +217,7 @@ class TestEVFlagOnCharging:
 class TestSolarModeClearsEVFlag:
     """Switching to solar mode clears the EV discharge block."""
 
-    def test_solar_mode_clears_ev_flag(self, manager):
+    def test_solar_mode_clears_ev_flag(self, manager) -> None:
         """Solar mode with no excess → NORMAL → 0W → clears EV flag."""
         manager._discharge_blocked_by_ev = True
         manager.last_discharge_allowed = False
@@ -226,7 +225,7 @@ class TestSolarModeClearsEVFlag:
         assert manager._discharge_blocked_by_ev is False
         manager.control_battery.assert_called_with(True)
 
-    def test_solar_mode_noop_when_flag_already_clear(self, manager):
+    def test_solar_mode_noop_when_flag_already_clear(self, manager) -> None:
         manager._discharge_blocked_by_ev = False
         manager.last_discharge_allowed = True
         _setup_ev_charging(manager, mode="solar")
@@ -242,7 +241,7 @@ class TestSolarModeClearsEVFlag:
 class TestCombinedBlocking:
     """Both flags interact correctly — discharge stays blocked until BOTH clear."""
 
-    def test_ev_stops_but_protection_keeps_blocked(self, manager):
+    def test_ev_stops_but_protection_keeps_blocked(self, manager) -> None:
         """EV finishes charging but protection still blocks → stays blocked."""
         manager._discharge_blocked_by_protection = True
         manager._discharge_blocked_by_ev = True
@@ -255,7 +254,7 @@ class TestCombinedBlocking:
         # Still blocked by protection → no call (unchanged)
         manager.control_battery.assert_not_called()
 
-    def test_protection_clears_but_ev_keeps_blocked(self, manager):
+    def test_protection_clears_but_ev_keeps_blocked(self, manager) -> None:
         """Protection clears but EV still charging → stays blocked."""
         manager._discharge_blocked_by_protection = True
         manager._discharge_blocked_by_ev = True
@@ -267,7 +266,7 @@ class TestCombinedBlocking:
         # Still blocked by EV → no call (unchanged)
         manager.control_battery.assert_not_called()
 
-    def test_both_clear_allows_discharge(self, manager):
+    def test_both_clear_allows_discharge(self, manager) -> None:
         """When both flags clear, discharge is allowed."""
         manager._discharge_blocked_by_protection = True
         manager._discharge_blocked_by_ev = True
@@ -279,7 +278,7 @@ class TestCombinedBlocking:
         manager._update_discharge_control()
         manager.control_battery.assert_called_once_with(True)
 
-    def test_ev_starts_during_protection_block(self, manager):
+    def test_ev_starts_during_protection_block(self, manager) -> None:
         """EV starts charging while protection already blocks — stays blocked."""
         manager._discharge_blocked_by_protection = True
         manager.last_discharge_allowed = False
@@ -298,14 +297,14 @@ class TestCombinedBlocking:
 class TestCheapModeBlocksDischarge:
     """IT-BATT-01: Cheap-mode EV charging blocks battery discharge."""
 
-    def test_cheap_charging_blocks_discharge(self, manager):
+    def test_cheap_charging_blocks_discharge(self, manager) -> None:
         """Cheap mode + cheap tariff → max power → blocks discharge."""
         assert manager._discharge_blocked_by_ev is False
         _setup_ev_charging(manager, mode="cheap", is_cheap=True)
         assert manager._discharge_blocked_by_ev is True
         manager.control_battery.assert_called_with(False)
 
-    def test_cheap_zero_power_clears_flag(self, manager):
+    def test_cheap_zero_power_clears_flag(self, manager) -> None:
         """Cheap mode + expensive tariff → 0W → clears discharge block."""
         manager._discharge_blocked_by_ev = True
         manager.last_discharge_allowed = False

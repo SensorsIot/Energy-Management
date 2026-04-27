@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Calibration verification sweep: set wallbox power 5000–11000W via HA,
+"""Calibration verification sweep: set wallbox power 5000–11000W via HA,
 wait for settling, read EBL grid meter and Huawei DTSU to verify.
 
 Usage: source ~/.secrets/env && python3 calibration_sweep.py
@@ -37,7 +36,7 @@ def ha_get(entity_id: str) -> str:
     return data["state"]
 
 
-def ha_set_state(entity_id: str, value: str):
+def ha_set_state(entity_id: str, value: str) -> None:
     """Set entity state via direct POST (preserves attributes)."""
     url = f"{HA_URL}/api/states/{entity_id}"
     current = json.loads(urllib.request.urlopen(
@@ -75,7 +74,7 @@ def average_readings(n: int, interval: float) -> dict:
     return avg
 
 
-def main():
+def main() -> None:
     # First ensure wallbox is paused for clean baseline
     print("Pausing wallbox for baseline measurement...")
     ha_set_state(POWER_LIMIT_ENTITY, "0")

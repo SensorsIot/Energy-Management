@@ -1,5 +1,4 @@
-"""
-Battery SOC trajectory simulation.
+"""Battery SOC trajectory simulation.
 
 Implements FSD Section 4.2: SOC Simulation
 
@@ -10,7 +9,6 @@ Implements FSD Section 4.2: SOC Simulation
 
 import logging
 from datetime import datetime, timezone
-from typing import Tuple
 
 import pandas as pd
 
@@ -18,8 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class SocSimulator:
-    """
-    Simulate battery SOC trajectory.
+    """Simulate battery SOC trajectory.
 
     FSD 4.2: The SOC simulation predicts battery state over the forecast horizon.
     This is the base curve for all energy management decisions.
@@ -30,14 +27,14 @@ class SocSimulator:
         capacity_wh: float = 10000,
         efficiency: float = 0.95,
         max_power_w: float = 5000,
-    ):
-        """
-        Initialize SOC simulator.
+    ) -> None:
+        """Initialize SOC simulator.
 
         Args:
             capacity_wh: Battery capacity in Wh (default: 10000)
             efficiency: Efficiency per direction, 0-1 (default: 0.95)
             max_power_w: Max charge/discharge power in W (default: 5000)
+
         """
         self.capacity_wh = capacity_wh
         self.efficiency = efficiency
@@ -51,8 +48,7 @@ class SocSimulator:
         pv_forecast: pd.DataFrame,
         load_forecast: pd.DataFrame,
     ) -> pd.DataFrame:
-        """
-        Simulate SOC trajectory over forecast horizon.
+        """Simulate SOC trajectory over forecast horizon.
 
         FSD 4.2.1: Basic Loop (net = PV - Load → battery flow)
         FSD 4.2.2: Efficiency (battery flow → SOC change)
@@ -64,6 +60,7 @@ class SocSimulator:
 
         Returns:
             DataFrame with 'soc_percent' column, indexed by time
+
         """
         if pv_forecast.empty or load_forecast.empty:
             logger.warning("Empty forecast, cannot simulate")
@@ -146,8 +143,7 @@ class SocSimulator:
         pv_forecast: pd.DataFrame,
         load_forecast: pd.DataFrame,
     ) -> pd.DataFrame:
-        """
-        Simulate SOC without clamping to 0-100% range.
+        """Simulate SOC without clamping to 0-100% range.
 
         Used for deficit/surplus calculation in optimization.
         Negative SOC = energy deficit (would need grid import)
@@ -160,6 +156,7 @@ class SocSimulator:
 
         Returns:
             DataFrame with 'soc_percent' column (can be negative or >100%)
+
         """
         if pv_forecast.empty or load_forecast.empty:
             logger.warning("Empty forecast, cannot simulate")
@@ -209,8 +206,7 @@ class SocSimulator:
         simulation: pd.DataFrame,
         target_time: datetime,
     ) -> float:
-        """
-        Get SOC at a specific target time.
+        """Get SOC at a specific target time.
 
         Args:
             simulation: DataFrame from simulate() or simulate_unclamped()
@@ -218,6 +214,7 @@ class SocSimulator:
 
         Returns:
             SOC percent at target time (or closest time before)
+
         """
         if simulation.empty:
             return 0.0
@@ -232,12 +229,12 @@ class SocSimulator:
     def find_minimum_soc(
         self,
         simulation: pd.DataFrame,
-    ) -> Tuple[float, datetime]:
-        """
-        Find the minimum SOC point in the simulation.
+    ) -> tuple[float, datetime]:
+        """Find the minimum SOC point in the simulation.
 
         Returns:
             (min_soc_percent, time_of_minimum)
+
         """
         if simulation.empty:
             return 0.0, datetime.now(timezone.utc)
@@ -251,8 +248,7 @@ class SocSimulator:
         self,
         soc_at_target_percent: float,
     ) -> float:
-        """
-        Calculate energy deficit in Wh.
+        """Calculate energy deficit in Wh.
 
         FSD 4.3.2: deficit_wh = |soc_at_target|/100 × capacity
 
@@ -261,6 +257,7 @@ class SocSimulator:
 
         Returns:
             Deficit in Wh (0 if no deficit)
+
         """
         if soc_at_target_percent >= 0:
             return 0.0

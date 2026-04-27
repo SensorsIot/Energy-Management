@@ -1,5 +1,4 @@
-"""
-Notification module for sending alerts via Telegram.
+"""Notification module for sending alerts via Telegram.
 
 Configure via user config file or environment variables:
 - telegram.bot_token: Bot token from @BotFather
@@ -17,13 +16,13 @@ _BOT_TOKEN: str = ""
 _CHAT_ID: str = ""
 
 
-def init_telegram(bot_token: str = "", chat_id: str = ""):
-    """
-    Initialize Telegram credentials from config.
+def init_telegram(bot_token: str = "", chat_id: str = "") -> None:
+    """Initialize Telegram credentials from config.
 
     Args:
         bot_token: Telegram bot token
         chat_id: Telegram chat ID
+
     """
     global _BOT_TOKEN, _CHAT_ID
 
@@ -47,8 +46,7 @@ def send_telegram(
     parse_mode: str = "HTML",
     disable_notification: bool = False,
 ) -> bool:
-    """
-    Send a message via Telegram.
+    """Send a message via Telegram.
 
     Args:
         message: Text message to send (supports HTML formatting)
@@ -57,6 +55,7 @@ def send_telegram(
 
     Returns:
         True if message was sent successfully
+
     """
     if not _BOT_TOKEN or not _CHAT_ID:
         logger.debug("Telegram not configured, skipping notification")
@@ -82,38 +81,38 @@ def send_telegram(
 
 
 def notify_warning(title: str, message: str, silent: bool = True) -> bool:
-    """
-    Send a warning notification.
+    """Send a warning notification.
 
     Args:
         title: Short title for the warning
         message: Detailed message
         silent: If True, don't trigger notification sound
+
     """
     text = f"<b>Warning: {title}</b>\n\n{message}"
     return send_telegram(text, disable_notification=silent)
 
 
 def notify_error(title: str, message: str) -> bool:
-    """
-    Send an error notification (with sound).
+    """Send an error notification (with sound).
 
     Args:
         title: Short title for the error
         message: Detailed message
+
     """
     text = f"<b>Error: {title}</b>\n\n{message}"
     return send_telegram(text, disable_notification=False)
 
 
 def notify_info(title: str, message: str, silent: bool = True) -> bool:
-    """
-    Send an info notification.
+    """Send an info notification.
 
     Args:
         title: Short title
         message: Detailed message
         silent: If True, don't trigger notification sound
+
     """
     text = f"<b>{title}</b>\n\n{message}"
     return send_telegram(text, disable_notification=silent)

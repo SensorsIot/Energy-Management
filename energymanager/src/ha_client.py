@@ -1,10 +1,8 @@
-"""
-Home Assistant REST API client.
-"""
+"""Home Assistant REST API client."""
 
 import logging
 import os
-from typing import Optional, Any
+from typing import Any
 
 import requests
 
@@ -17,14 +15,14 @@ class HAClient:
     def __init__(
         self,
         url: str = "http://supervisor/core",
-        token: Optional[str] = None,
-    ):
+        token: str | None = None,
+    ) -> None:
         self.url = url.rstrip("/")
         self._provided_token = token
         self._token = None
 
     @property
-    def token(self) -> Optional[str]:
+    def token(self) -> str | None:
         """Get token - check environment each time (no caching)."""
         # Use provided token first
         if self._provided_token:
@@ -37,7 +35,7 @@ class HAClient:
 
         # Try token file (used by some HA add-on versions)
         try:
-            with open("/run/secrets/supervisor_token", "r") as f:
+            with open("/run/secrets/supervisor_token") as f:
                 token = f.read().strip()
                 if token:
                     return token
@@ -62,12 +60,12 @@ class HAClient:
         else:
             return f"{self.url}/api{path}"
 
-    def get_state(self, entity_id: str) -> Optional[dict]:
-        """
-        Get entity state.
+    def get_state(self, entity_id: str) -> dict | None:
+        """Get entity state.
 
         Returns:
             dict with 'state' and 'attributes', or None on error
+
         """
         if not self.token:
             logger.warning("No token available for get_state")
@@ -89,12 +87,12 @@ class HAClient:
             logger.error(f"Failed to get state for {entity_id}: {e}")
             return None
 
-    def get_sensor_value(self, entity_id: str) -> Optional[float]:
-        """
-        Get numeric sensor value.
+    def get_sensor_value(self, entity_id: str) -> float | None:
+        """Get numeric sensor value.
 
         Returns:
             float value or None on error
+
         """
         state = self.get_state(entity_id)
         if not state:
@@ -114,8 +112,7 @@ class HAClient:
         max_retries: int = 5,
         retry_delay: float = 2.0,
     ) -> tuple[bool, str]:
-        """
-        Set a number entity value with retry logic.
+        """Set a number entity value with retry logic.
 
         Args:
             entity_id: The entity to set
@@ -126,6 +123,7 @@ class HAClient:
         Returns:
             Tuple of (success: bool, error_message: str)
             error_message is empty on success
+
         """
         import time
 
@@ -168,27 +166,27 @@ class HAClient:
         logger.error(f"Failed to set {entity_id} after {max_retries} attempts: {last_error}")
         return False, last_error
 
-    def get_battery_soc(self, entity_id: str = "sensor.battery_state_of_capacity") -> Optional[float]:
-        """
-        Get current battery SOC.
+    def get_battery_soc(self, entity_id: str = "sensor.battery_state_of_capacity") -> float | None:
+        """Get current battery SOC.
 
         Returns:
             SOC as percentage (0-100) or None on error
+
         """
         soc = self.get_sensor_value(entity_id)
         if soc is not None:
             logger.debug(f"Battery SOC: {soc}%")
         return soc
 
-    def get_number_value(self, entity_id: str) -> Optional[float]:
-        """
-        Get numeric value from a number entity.
+    def get_number_value(self, entity_id: str) -> float | None:
+        """Get numeric value from a number entity.
 
         Args:
             entity_id: The number entity to read
 
         Returns:
             float value or None on error
+
         """
         state = self.get_state(entity_id)
         if not state:
@@ -201,15 +199,15 @@ class HAClient:
             logger.error(f"Failed to parse number entity {entity_id}: {e}")
             return None
 
-    def get_battery_discharge_power(self, entity_id: str) -> Optional[float]:
-        """
-        Get current maximum battery discharge power setting.
+    def get_battery_discharge_power(self, entity_id: str) -> float | None:
+        """Get current maximum battery discharge power setting.
 
         Args:
             entity_id: The number entity to read
 
         Returns:
             Current power setting in watts, or None on error
+
         """
         value = self.get_number_value(entity_id)
         if value is not None:
@@ -222,8 +220,7 @@ class HAClient:
         power_w: float,
         max_retries: int = 5,
     ) -> tuple[bool, str]:
-        """
-        Set maximum battery discharge power with retry logic.
+        """Set maximum battery discharge power with retry logic.
 
         Args:
             entity_id: The number entity to control
@@ -232,25 +229,25 @@ class HAClient:
 
         Returns:
             Tuple of (success: bool, error_message: str)
+
         """
         return self.set_number(entity_id, power_w, max_retries=max_retries)
 
     def get_input_boolean(self, entity_id: str) -> bool:
-        """
-        Get input_boolean state.
+        """Get input_boolean state.
 
         Args:
             entity_id: The input_boolean entity ID
 
         Returns:
             True if "on", False otherwise (including errors)
+
         """
         state = self.get_state(entity_id)
         return state is not None and state.get("state") == "on"
 
     def set_input_boolean(self, entity_id: str, state: bool) -> bool:
-        """
-        Set input_boolean on or off.
+        """Set input_boolean on or off.
 
         Args:
             entity_id: The input_boolean entity ID
@@ -258,6 +255,7 @@ class HAClient:
 
         Returns:
             True on success, False on error
+
         """
         if not self.token:
             logger.warning("No token available for set_input_boolean")
@@ -307,10 +305,9 @@ class HAClient:
         self,
         entity_id: str,
         state: Any,
-        attributes: Optional[dict] = None,
+        attributes: dict | None = None,
     ) -> bool:
-        """
-        Set a sensor entity state directly via REST API.
+        """Set a sensor entity state directly via REST API.
 
         Args:
             entity_id: The sensor entity ID
@@ -319,6 +316,7 @@ class HAClient:
 
         Returns:
             True on success, False on error
+
         """
         if not self.token:
             logger.warning("No token available for set_sensor_state")

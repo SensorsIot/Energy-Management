@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""
-LoadForecast Home Assistant Add-on
+"""LoadForecast Home Assistant Add-on.
 
 Statistical load prediction using historical consumption data.
 Generates P10/P50/P90 forecasts per 15-minute period.
 """
 
-import json
 import logging
 import os
 import signal
@@ -134,7 +132,7 @@ def run_forecast(options: dict) -> bool:
         predictor.build_profile(historical_data)
         summary = predictor.get_profile_summary()
 
-        logger.info(f"Profile summary:")
+        logger.info("Profile summary:")
         logger.info(f"  Avg P50 power: {summary['avg_p50_power']:.0f} W")
         logger.info(f"  Daily energy (P50): {summary['daily_energy_p50']:.0f} Wh")
         logger.info(f"  Min samples/slot: {summary['min_samples_per_slot']:.0f}")
@@ -172,7 +170,7 @@ def run_forecast(options: dict) -> bool:
         predictor.close()
 
 
-def main():
+def main() -> None:
     """Main entry point for HA add-on."""
     import argparse
 
@@ -202,7 +200,7 @@ def main():
     # Handle signals
     running = True
 
-    def signal_handler(signum, frame):
+    def signal_handler(signum, frame) -> None:
         nonlocal running
         logger.info(f"Received signal {signum}, shutting down...")
         running = False

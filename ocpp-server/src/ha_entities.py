@@ -1,5 +1,4 @@
-"""
-Home Assistant entity definitions for the OCPP Server add-on.
+"""Home Assistant entity definitions for the OCPP Server add-on.
 
 Entities are published via the HA Supervisor REST API.
 The add-on updates entity states when OCPP messages arrive,

@@ -1,5 +1,4 @@
-"""
-ICON forecast data fetcher for MeteoSwiss STAC API.
+"""ICON forecast data fetcher for MeteoSwiss STAC API.
 Supports hybrid CH1+CH2 approach with ensemble members for uncertainty bands.
 
 - CH1: 1km resolution, 33h horizon, 11 ensemble members, runs every 3h
@@ -14,7 +13,6 @@ import logging
 import json
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
@@ -64,9 +62,8 @@ class IconFetcher:
         hour_end: int = None,
         include_ensemble: bool = True,
         max_workers: int = 4,
-    ):
-        """
-        Initialize the fetcher.
+    ) -> None:
+        """Initialize the fetcher.
 
         Args:
             model: "ch1" or "ch2"
@@ -78,6 +75,7 @@ class IconFetcher:
             hour_end: Last forecast hour to download (inclusive)
             include_ensemble: If True, download ensemble members (all 11/21 members)
             max_workers: Number of parallel download threads
+
         """
         if model not in COLLECTIONS:
             raise ValueError(f"Unknown model: {model}. Use 'ch1' or 'ch2'")
@@ -96,22 +94,22 @@ class IconFetcher:
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_local_run(self) -> Optional[str]:
+    def get_local_run(self) -> str | None:
         """Get the run ID of locally stored data, if any."""
         if not self.output_dir.exists():
             return None
-        
+
         runs = [d.name for d in self.output_dir.iterdir() if d.is_dir()]
         if not runs:
             return None
-        
+
         return max(runs)
 
     def get_expected_run_times(self, lookback_hours: int = 48) -> list[datetime]:
         """Calculate expected model run times within the lookback period."""
         now = datetime.now(timezone.utc)
         runs = []
-        
+
         for hours_ago in range(0, lookback_hours):
             check_time = now - timedelta(hours=hours_ago)
             if check_time.hour in self.config["schedule"]:
@@ -119,21 +117,21 @@ class IconFetcher:
                 pub_time = run_time + timedelta(hours=PUBLICATION_DELAY_HOURS)
                 if pub_time <= now:
                     runs.append(run_time)
-        
+
         return runs
 
     def check_run_available(self, run_datetime: datetime) -> bool:
         """Check if a specific run has data available."""
         url = f"{STAC_API_URL}/search"
         run_str = run_datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
-        
+
         params = {
             "collections": [self.collection],
             "forecast:reference_datetime": run_str,
             "forecast:perturbed": False,
             "limit": 1,
         }
-        
+
         try:
             r = requests.post(url, json=params, timeout=30)
             r.raise_for_status()
@@ -142,28 +140,28 @@ class IconFetcher:
         except:
             return False
 
-    def find_latest_available_run(self) -> Optional[datetime]:
+    def find_latest_available_run(self) -> datetime | None:
         """Find the most recent run that has data available."""
         expected_runs = self.get_expected_run_times()
-        
+
         logger.info(f"Checking {len(expected_runs)} expected {self.model.upper()} runs...")
-        
+
         for run_time in expected_runs:
             if self.check_run_available(run_time):
                 run_str = run_time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 logger.info(f"Found available run: {run_str}")
                 return run_time
-        
+
         return None
 
-    def fetch_item(self, run_str: str, var: str, hour: int, perturbed: bool) -> Optional[dict]:
+    def fetch_item(self, run_str: str, var: str, hour: int, perturbed: bool) -> dict | None:
         """Fetch a single STAC item."""
         url = f"{STAC_API_URL}/search"
-        
+
         days = hour // 24
         hours = hour % 24
         horizon_str = f"P{days}DT{hours:02d}H00M00S"
-        
+
         params = {
             "collections": [self.collection],
             "forecast:reference_datetime": run_str,
@@ -172,7 +170,7 @@ class IconFetcher:
             "forecast:horizon": horizon_str,
             "limit": 1,
         }
-        
+
         try:
             r = requests.post(url, json=params, timeout=60)
             r.raise_for_status()
@@ -182,10 +180,10 @@ class IconFetcher:
                 return items[0]
         except Exception as e:
             logger.debug(f"Error fetching {var} h{hour} perturbed={perturbed}: {e}")
-        
+
         return None
 
-    def extract_asset_url(self, item: dict) -> Optional[str]:
+    def extract_asset_url(self, item: dict) -> str | None:
         """Extract download URL from STAC item."""
         assets = item.get("assets", {})
         for asset in assets.values():
@@ -211,9 +209,8 @@ class IconFetcher:
             logger.debug(f"Download failed: {e}")
             return False
 
-    def download_item(self, run_iso: str, run_dir: Path, var: str, hour: int, member: int) -> Optional[str]:
-        """
-        Download a single forecast item (one variable, one hour, one member type).
+    def download_item(self, run_iso: str, run_dir: Path, var: str, hour: int, member: int) -> str | None:
+        """Download a single forecast item (one variable, one hour, one member type).
 
         MeteoSwiss provides two file types:
         - Control (perturbed=False): Single member (perturbationNumber=0)
@@ -225,6 +222,7 @@ class IconFetcher:
             var: Variable name (e.g., ASOB_S)
             hour: Forecast hour
             member: Ensemble member (0=control, 1+=perturbed - but perturbed file contains ALL members)
+
         """
         perturbed = member > 0
         member_str = "perturbed" if perturbed else "m00"
@@ -257,11 +255,11 @@ class IconFetcher:
 
         run_iso = latest_run.strftime("%Y-%m-%dT%H:%M:%SZ")
         run_str = latest_run.strftime("%Y%m%d%H%M")
-        
+
         # Check if we already have this run
         local_run = self.get_local_run()
         metadata_file = self.output_dir / run_str / "metadata.json"
-        
+
         if local_run and local_run >= run_str and not force and metadata_file.exists():
             logger.info(f"Already have latest {self.model.upper()} run: {local_run}")
             with open(metadata_file) as f:
@@ -289,13 +287,13 @@ class IconFetcher:
         # Download in parallel
         downloaded = []
         failed = []
-        
+
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
                 executor.submit(self.download_item, run_iso, run_dir, var, hour, member): (var, hour, member)
                 for var, hour, member in download_tasks
             }
-            
+
             for future in as_completed(futures):
                 var, hour, member = futures[future]
                 try:
@@ -338,7 +336,7 @@ class IconFetcher:
 
         return metadata
 
-    def _cleanup_old_runs(self, keep_run: str):
+    def _cleanup_old_runs(self, keep_run: str) -> None:
         """Remove old run directories and incomplete downloads."""
         if not self.output_dir.exists():
             return
@@ -369,27 +367,27 @@ def fetch_hybrid_forecast(
     output_dir: Path,
     target_hours: int = 120,
 ) -> dict:
-    """
-    Fetch hybrid CH1+CH2 forecast with ensemble data.
+    """Fetch hybrid CH1+CH2 forecast with ensemble data.
 
     - CH1: hours 0-33 (or until target_hours if less)
     - CH2: hours 33-target_hours (to fill the gap)
-    
+
     Args:
         latitude: Location latitude
         longitude: Location longitude
         output_dir: Base output directory
         target_hours: Total forecast hours needed (default 48)
-    
+
     Returns:
         Dict with metadata for both models
+
     """
     results = {}
-    
+
     # CH1: hours 0-33 (or less if target is shorter)
     ch1_end = min(33, target_hours)
     logger.info(f"Fetching CH1 ensemble: hours 0-{ch1_end}")
-    
+
     ch1_fetcher = IconFetcher(
         model="ch1",
         latitude=latitude,
@@ -400,13 +398,13 @@ def fetch_hybrid_forecast(
         include_ensemble=True,
     )
     results["ch1"] = ch1_fetcher.fetch_latest()
-    
+
     # CH2: hours 33-target_hours (only if needed)
     if target_hours > 33:
         ch2_start = 33
         ch2_end = target_hours
         logger.info(f"Fetching CH2 ensemble: hours {ch2_start}-{ch2_end}")
-        
+
         ch2_fetcher = IconFetcher(
             model="ch2",
             latitude=latitude,
@@ -430,8 +428,7 @@ def fetch_icon_data(
     hour_end: int = None,
     include_ensemble: bool = True,
 ) -> dict:
-    """
-    Convenience function to fetch ICON forecast data.
+    """Convenience function to fetch ICON forecast data.
 
     Args:
         model: "ch1" or "ch2"
@@ -444,6 +441,7 @@ def fetch_icon_data(
 
     Returns:
         Dict with metadata about the fetch
+
     """
     # Default hours: CH1 0-33, CH2 33-48 (no overlap)
     if hour_end is None:

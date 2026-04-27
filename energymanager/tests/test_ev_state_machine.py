@@ -1,6 +1,4 @@
-"""
-Tests for 4-state EV charging state machine.
-"""
+"""Tests for 4-state EV charging state machine."""
 
 import pytest
 
@@ -52,14 +50,14 @@ def make_sm(state: EVState = EVState.IDLE) -> EVStateMachine:
 # ===================================================================
 
 class TestEVStateEnum:
-    def test_str_inheritance(self):
+    def test_str_inheritance(self) -> None:
         assert isinstance(EVState.IDLE, str)
         assert EVState.IDLE == "idle"
 
-    def test_four_states(self):
+    def test_four_states(self) -> None:
         assert len(EVState) == 4
 
-    def test_snake_case_values(self):
+    def test_snake_case_values(self) -> None:
         for member in EVState:
             assert member.value == member.value.lower()
             assert " " not in member.value
@@ -70,7 +68,7 @@ class TestEVStateEnum:
 # ===================================================================
 
 class TestInit:
-    def test_initial_state_is_idle(self):
+    def test_initial_state_is_idle(self) -> None:
         sm = EVStateMachine()
         assert sm.state == EVState.IDLE
 
@@ -80,13 +78,13 @@ class TestInit:
 # ===================================================================
 
 class TestSolarEntry:
-    def test_power_positive_enters_solar(self):
+    def test_power_positive_enters_solar(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(ev_charging_power_w=6900))
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 6900
 
-    def test_power_zero_stays_idle(self):
+    def test_power_zero_stays_idle(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(ev_charging_power_w=0))
         assert out.state == EVState.IDLE
@@ -94,19 +92,19 @@ class TestSolarEntry:
 
 
 class TestSolarStay:
-    def test_power_positive_stays_solar(self):
+    def test_power_positive_stays_solar(self) -> None:
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(ev_charging_power_w=4140))
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 4140
 
-    def test_power_zero_exits_to_idle(self):
+    def test_power_zero_exits_to_idle(self) -> None:
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(ev_charging_power_w=0))
         assert out.state == EVState.IDLE
         assert out.target_power_w == 0
 
-    def test_power_updates(self):
+    def test_power_updates(self) -> None:
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(ev_charging_power_w=6900))
         assert out.target_power_w == 6900
@@ -119,7 +117,7 @@ class TestSolarStay:
 # ===================================================================
 
 class TestIdleStays:
-    def test_stays_when_no_conditions(self):
+    def test_stays_when_no_conditions(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(
             charging_mode="solar",
@@ -128,12 +126,12 @@ class TestIdleStays:
         assert out.state == EVState.IDLE
         assert out.target_power_w == 0
 
-    def test_stays_solar_no_wallbox(self):
+    def test_stays_solar_no_wallbox(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(wallbox_available=False))
         assert out.state == EVState.IDLE
 
-    def test_stays_solar_no_power(self):
+    def test_stays_solar_no_power(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(ev_charging_power_w=0))
         assert out.state == EVState.IDLE
@@ -145,38 +143,38 @@ class TestIdleStays:
 # ===================================================================
 
 class TestIdleTransitions:
-    def test_n1_immediate(self):
+    def test_n1_immediate(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(charging_mode="immediate"))
         assert out.state == EVState.IMMEDIATE
         assert out.target_power_w == 11000
 
-    def test_n1_immediate_no_wallbox_stays_idle(self):
+    def test_n1_immediate_no_wallbox_stays_idle(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(
             charging_mode="immediate", wallbox_available=False,
         ))
         assert out.state == EVState.IDLE
 
-    def test_n2_cheap(self):
+    def test_n2_cheap(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(charging_mode="cheap"))
         assert out.state == EVState.CHEAP
 
-    def test_n2_cheap_no_wallbox_stays_idle(self):
+    def test_n2_cheap_no_wallbox_stays_idle(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(
             charging_mode="cheap", wallbox_available=False,
         ))
         assert out.state == EVState.IDLE
 
-    def test_n3_solar_with_power(self):
+    def test_n3_solar_with_power(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(ev_charging_power_w=5000))
         assert out.state == EVState.SOLAR
         assert out.target_power_w == 5000
 
-    def test_n1_has_priority_over_n2(self):
+    def test_n1_has_priority_over_n2(self) -> None:
         """N1 fires before N2 when both could match."""
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(charging_mode="immediate"))
@@ -188,19 +186,19 @@ class TestIdleTransitions:
 # ===================================================================
 
 class TestSolarTransitions:
-    def test_s2_switch_to_immediate(self):
+    def test_s2_switch_to_immediate(self) -> None:
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(charging_mode="immediate"))
         assert out.state == EVState.IMMEDIATE
         assert out.target_power_w == 11000
 
-    def test_s3_switch_to_cheap(self):
+    def test_s3_switch_to_cheap(self) -> None:
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(charging_mode="cheap", is_cheap_tariff=True))
         assert out.state == EVState.CHEAP
         assert out.target_power_w == 11000
 
-    def test_s3_switch_to_cheap_expensive(self):
+    def test_s3_switch_to_cheap_expensive(self) -> None:
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(charging_mode="cheap", is_cheap_tariff=False))
         assert out.state == EVState.CHEAP
@@ -212,7 +210,7 @@ class TestSolarTransitions:
 # ===================================================================
 
 class TestCheapStays:
-    def test_stays_expensive_tariff(self):
+    def test_stays_expensive_tariff(self) -> None:
         sm = make_sm(EVState.CHEAP)
         out = sm.step(make_inputs(
             charging_mode="cheap", is_cheap_tariff=False,
@@ -220,7 +218,7 @@ class TestCheapStays:
         assert out.state == EVState.CHEAP
         assert out.target_power_w == 0
 
-    def test_stays_cheap_tariff(self):
+    def test_stays_cheap_tariff(self) -> None:
         sm = make_sm(EVState.CHEAP)
         out = sm.step(make_inputs(
             charging_mode="cheap", is_cheap_tariff=True,
@@ -234,12 +232,12 @@ class TestCheapStays:
 # ===================================================================
 
 class TestCheapTransitions:
-    def test_c2_mode_changed_to_solar(self):
+    def test_c2_mode_changed_to_solar(self) -> None:
         sm = make_sm(EVState.CHEAP)
         out = sm.step(make_inputs(charging_mode="solar"))
         assert out.state == EVState.IDLE
 
-    def test_c2_mode_changed_to_immediate(self):
+    def test_c2_mode_changed_to_immediate(self) -> None:
         sm = make_sm(EVState.CHEAP)
         out = sm.step(make_inputs(charging_mode="immediate"))
         assert out.state == EVState.IDLE
@@ -250,7 +248,7 @@ class TestCheapTransitions:
 # ===================================================================
 
 class TestCheapPowerToggle:
-    def test_max_when_cheap(self):
+    def test_max_when_cheap(self) -> None:
         sm = make_sm(EVState.CHEAP)
         out = sm.step(make_inputs(
             charging_mode="cheap", is_cheap_tariff=True,
@@ -258,7 +256,7 @@ class TestCheapPowerToggle:
         assert out.state == EVState.CHEAP
         assert out.target_power_w == 11000
 
-    def test_zero_when_expensive(self):
+    def test_zero_when_expensive(self) -> None:
         sm = make_sm(EVState.CHEAP)
         out = sm.step(make_inputs(
             charging_mode="cheap", is_cheap_tariff=False,
@@ -266,7 +264,7 @@ class TestCheapPowerToggle:
         assert out.state == EVState.CHEAP
         assert out.target_power_w == 0
 
-    def test_toggle_back_and_forth(self):
+    def test_toggle_back_and_forth(self) -> None:
         sm = make_sm(EVState.CHEAP)
         # expensive
         out = sm.step(make_inputs(charging_mode="cheap", is_cheap_tariff=False))
@@ -281,7 +279,7 @@ class TestCheapPowerToggle:
         assert out.state == EVState.CHEAP
         assert out.target_power_w == 0
 
-    def test_custom_max_power(self):
+    def test_custom_max_power(self) -> None:
         sm = make_sm(EVState.CHEAP)
         out = sm.step(make_inputs(
             charging_mode="cheap", is_cheap_tariff=True, manual_power_w=7400,
@@ -294,13 +292,13 @@ class TestCheapPowerToggle:
 # ===================================================================
 
 class TestMaxStays:
-    def test_stays_at_max(self):
+    def test_stays_at_max(self) -> None:
         sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(charging_mode="immediate"))
         assert out.state == EVState.IMMEDIATE
         assert out.target_power_w == 11000
 
-    def test_custom_max(self):
+    def test_custom_max(self) -> None:
         sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(
             charging_mode="immediate", manual_power_w=7400,
@@ -313,12 +311,12 @@ class TestMaxStays:
 # ===================================================================
 
 class TestMaxTransitions:
-    def test_m2_mode_changed_to_solar(self):
+    def test_m2_mode_changed_to_solar(self) -> None:
         sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(charging_mode="solar"))
         assert out.state == EVState.IDLE
 
-    def test_m2_mode_changed_to_cheap(self):
+    def test_m2_mode_changed_to_cheap(self) -> None:
         sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(charging_mode="cheap"))
         assert out.state == EVState.IDLE
@@ -329,33 +327,33 @@ class TestMaxTransitions:
 # ===================================================================
 
 class TestWallboxAvailable:
-    def test_immediate_blocked_without_wallbox(self):
+    def test_immediate_blocked_without_wallbox(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(
             charging_mode="immediate", wallbox_available=False,
         ))
         assert out.state == EVState.IDLE
 
-    def test_cheap_blocked_without_wallbox(self):
+    def test_cheap_blocked_without_wallbox(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(
             charging_mode="cheap", wallbox_available=False,
         ))
         assert out.state == EVState.IDLE
 
-    def test_solar_blocked_without_wallbox(self):
+    def test_solar_blocked_without_wallbox(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(wallbox_available=False))
         assert out.state == EVState.IDLE
 
-    def test_solar_exits_to_idle_without_wallbox(self):
+    def test_solar_exits_to_idle_without_wallbox(self) -> None:
         """NO-01 regression: SOLAR must exit to IDLE when wallbox disappears."""
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(wallbox_available=False, ev_charging_power_w=5000))
         assert out.state == EVState.IDLE
         assert out.target_power_w == 0
 
-    def test_cheap_exits_to_idle_without_wallbox(self):
+    def test_cheap_exits_to_idle_without_wallbox(self) -> None:
         sm = make_sm(EVState.CHEAP)
         out = sm.step(make_inputs(
             charging_mode="cheap", wallbox_available=False, is_cheap_tariff=True,
@@ -363,7 +361,7 @@ class TestWallboxAvailable:
         assert out.state == EVState.IDLE
         assert out.target_power_w == 0
 
-    def test_immediate_exits_to_idle_without_wallbox(self):
+    def test_immediate_exits_to_idle_without_wallbox(self) -> None:
         sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(
             charging_mode="immediate", wallbox_available=False,
@@ -377,31 +375,31 @@ class TestWallboxAvailable:
 # ===================================================================
 
 class TestIdleDetection:
-    def test_solar_idle_exits_to_idle(self):
+    def test_solar_idle_exits_to_idle(self) -> None:
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(wallbox_idle=True))
         assert out.state == EVState.IDLE
         assert out.target_power_w == 0
         assert "idle" in out.reason.lower()
 
-    def test_cheap_idle_exits_to_idle(self):
+    def test_cheap_idle_exits_to_idle(self) -> None:
         sm = make_sm(EVState.CHEAP)
         out = sm.step(make_inputs(charging_mode="cheap", wallbox_idle=True))
         assert out.state == EVState.IDLE
         assert out.target_power_w == 0
 
-    def test_immediate_idle_exits_to_idle(self):
+    def test_immediate_idle_exits_to_idle(self) -> None:
         sm = make_sm(EVState.IMMEDIATE)
         out = sm.step(make_inputs(charging_mode="immediate", wallbox_idle=True))
         assert out.state == EVState.IDLE
         assert out.target_power_w == 0
 
-    def test_solar_not_idle_stays(self):
+    def test_solar_not_idle_stays(self) -> None:
         sm = make_sm(EVState.SOLAR)
         out = sm.step(make_inputs(wallbox_idle=False, ev_charging_power_w=5000))
         assert out.state == EVState.SOLAR
 
-    def test_idle_ignores_idle_flag(self):
+    def test_idle_ignores_idle_flag(self) -> None:
         sm = make_sm(EVState.IDLE)
         out = sm.step(make_inputs(wallbox_idle=True, wallbox_available=False))
         assert out.state == EVState.IDLE
@@ -412,7 +410,7 @@ class TestIdleDetection:
 # ===================================================================
 
 class TestMultiStep:
-    def test_idle_to_solar_to_idle_on_power_stop(self):
+    def test_idle_to_solar_to_idle_on_power_stop(self) -> None:
         sm = EVStateMachine()
 
         # Start IDLE — no power
@@ -427,7 +425,7 @@ class TestMultiStep:
         out = sm.step(make_inputs(ev_charging_power_w=0))
         assert out.state == EVState.IDLE
 
-    def test_full_mode_cycle(self):
+    def test_full_mode_cycle(self) -> None:
         sm = EVStateMachine()
 
         # IDLE → IMMEDIATE
@@ -450,7 +448,7 @@ class TestMultiStep:
         out = sm.step(make_inputs(ev_charging_power_w=5000))
         assert out.state == EVState.SOLAR
 
-    def test_solar_to_immediate_and_back(self):
+    def test_solar_to_immediate_and_back(self) -> None:
         sm = EVStateMachine()
 
         # → SOLAR

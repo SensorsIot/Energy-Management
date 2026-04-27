@@ -1,5 +1,4 @@
-"""
-Adaptive shading correction for PV forecast.
+"""Adaptive shading correction for PV forecast.
 
 Stores observed shading ratios (actual/model) to InfluxDB after each sunny day.
 Calculates aggregated shading factors from recent sunny days and writes to YAML.
@@ -9,13 +8,10 @@ Measurements stored in pv_forecast bucket:
 """
 
 import logging
-import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
 
 import yaml
-import numpy as np
 import pandas as pd
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -47,9 +43,7 @@ NUM_SUNNY_DAYS = 10
 
 
 class ShadingTracker:
-    """
-    Tracks shading observations and calculates correction factors.
-    """
+    """Tracks shading observations and calculates correction factors."""
 
     def __init__(
         self,
@@ -59,8 +53,8 @@ class ShadingTracker:
         influx_org: str,
         bucket: str = "pv_forecast",
         local_timezone: str = "Europe/Zurich",
-        shading_yaml_path: Optional[str] = None,
-    ):
+        shading_yaml_path: str | None = None,
+    ) -> None:
         self.influx_host = influx_host
         self.influx_port = influx_port
         self.influx_token = influx_token
@@ -75,11 +69,11 @@ class ShadingTracker:
             # Default: alongside config_pv.yaml
             self.shading_yaml_path = Path(__file__).parent.parent / "shading_factors.yaml"
 
-        self.client: Optional[InfluxDBClient] = None
+        self.client: InfluxDBClient | None = None
         self.write_api = None
         self.query_api = None
 
-    def connect(self):
+    def connect(self) -> None:
         """Connect to InfluxDB."""
         url = f"http://{self.influx_host}:{self.influx_port}"
         self.client = InfluxDBClient(
@@ -89,7 +83,7 @@ class ShadingTracker:
         self.query_api = self.client.query_api()
         logger.info(f"ShadingTracker connected to InfluxDB at {url}")
 
-    def close(self):
+    def close(self) -> None:
         """Close InfluxDB connection."""
         if self.client:
             self.client.close()
@@ -101,9 +95,8 @@ class ShadingTracker:
         hour: int,
         ratio: float,
         weather_factor: float,
-    ):
-        """
-        Store a single shading observation to InfluxDB.
+    ) -> None:
+        """Store a single shading observation to InfluxDB.
 
         Args:
             snapshot_id: Date string (YYYY-MM-DD)
@@ -111,6 +104,7 @@ class ShadingTracker:
             hour: Local hour (0-23)
             ratio: Observed actual/model ratio
             weather_factor: Weather factor for the day
+
         """
         point = (
             Point("shading_observations")
@@ -124,8 +118,7 @@ class ShadingTracker:
         self.write_api.write(bucket=self.bucket, org=self.influx_org, record=point)
 
     def process_accuracy_data(self, snapshot_id: str) -> bool:
-        """
-        Process accuracy data for a snapshot and store shading observations.
+        """Process accuracy data for a snapshot and store shading observations.
 
         Stores ratios for ALL days (for analysis), returns True if sunny day
         (so caller knows to recalculate factors).
@@ -135,6 +128,7 @@ class ShadingTracker:
 
         Returns:
             True if this was a sunny day (weather_factor > threshold)
+
         """
         # Query accuracy data with weather factor
         query = f'''
@@ -211,15 +205,15 @@ class ShadingTracker:
 
     def calculate_shading_factors(
         self, num_days: int = NUM_SUNNY_DAYS
-    ) -> Dict[str, Dict[int, float]]:
-        """
-        Calculate shading factors from recent sunny day observations.
+    ) -> dict[str, dict[int, float]]:
+        """Calculate shading factors from recent sunny day observations.
 
         Args:
             num_days: Number of recent sunny days to average
 
         Returns:
             Dict mapping string -> hour -> factor
+
         """
         # Query recent shading observations
         query = f'''
@@ -278,14 +272,14 @@ class ShadingTracker:
             return DEFAULT_SHADING_FACTORS.copy()
 
     def update_shading_yaml(self, num_days: int = NUM_SUNNY_DAYS) -> bool:
-        """
-        Calculate shading factors and write to YAML file.
+        """Calculate shading factors and write to YAML file.
 
         Args:
             num_days: Number of recent sunny days to average
 
         Returns:
             True if YAML was updated
+
         """
         factors = self.calculate_shading_factors(num_days)
 
@@ -310,9 +304,8 @@ class ShadingTracker:
             logger.error(f"Failed to write shading YAML: {e}")
             return False
 
-    def load_shading_factors(self) -> Dict[str, Dict[int, float]]:
-        """
-        Load shading factors from YAML file.
+    def load_shading_factors(self) -> dict[str, dict[int, float]]:
+        """Load shading factors from YAML file.
         Falls back to defaults if file doesn't exist.
         """
         try:
@@ -337,8 +330,7 @@ class ShadingTracker:
         power_series: pd.Series,
         string_name: str,
     ) -> pd.Series:
-        """
-        Apply shading correction to a power forecast series.
+        """Apply shading correction to a power forecast series.
 
         Args:
             power_series: Power forecast with DatetimeIndex
@@ -346,6 +338,7 @@ class ShadingTracker:
 
         Returns:
             Corrected power series
+
         """
         factors = self.load_shading_factors()
         string_factors = factors.get(string_name, {})

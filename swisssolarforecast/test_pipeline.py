@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""
-Test script to run the full pipeline once:
+"""Test script to run the full pipeline once:
 1. Fetch ICON data from MeteoSwiss
 2. Parse GRIB files
 3. Calculate PV forecast with pvlib
-4. Write to InfluxDB
+4. Write to InfluxDB.
 """
 
 import logging
@@ -41,7 +40,7 @@ INFLUX_ORG = "spiessa"
 INFLUX_BUCKET = "pv_forecast"
 
 
-def main():
+def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     # Step 1: Fetch ICON-CH1 data

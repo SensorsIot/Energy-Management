@@ -1,10 +1,7 @@
-"""
-InfluxDB writer for EnergyManager simulation results.
-"""
+"""InfluxDB writer for EnergyManager simulation results."""
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 import pandas as pd
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -23,23 +20,23 @@ class SimulationWriter:
         token: str,
         org: str,
         bucket: str = "energy_manager",
-    ):
+    ) -> None:
         self.host = host
         self.port = port
         self.token = token
         self.org = org
         self.bucket = bucket
-        self.client: Optional[InfluxDBClient] = None
+        self.client: InfluxDBClient | None = None
         self.write_api = None
 
-    def connect(self):
+    def connect(self) -> None:
         """Connect to InfluxDB."""
         url = f"http://{self.host}:{self.port}"
         logger.info(f"Connecting to InfluxDB at {url}")
         self.client = InfluxDBClient(url=url, token=self.token, org=self.org)
         self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
 
-    def close(self):
+    def close(self) -> None:
         """Close connection."""
         if self.client:
             self.client.close()
@@ -48,9 +45,8 @@ class SimulationWriter:
         self,
         simulation: pd.DataFrame,
         scenario: str = "with_strategy",
-    ):
-        """
-        Write SOC forecast to InfluxDB.
+    ) -> None:
+        """Write SOC forecast to InfluxDB.
 
         FSD 4.2.3: Store only soc_percent to measurement 'soc_forecast'.
         PV/Load data is already in input buckets.
@@ -58,6 +54,7 @@ class SimulationWriter:
         Args:
             simulation: DataFrame with 'soc_percent' column, indexed by time
             scenario: Tag to identify the scenario ("with_strategy" or "without_strategy")
+
         """
         if simulation.empty:
             logger.warning("Empty simulation, nothing to write")
@@ -93,9 +90,8 @@ class SimulationWriter:
         min_soc_percent: float,
         min_soc_time: datetime,
         current_soc: float,
-    ):
-        """
-        Write discharge decision to InfluxDB.
+    ) -> None:
+        """Write discharge decision to InfluxDB.
 
         Args:
             discharge_allowed: Whether discharge is allowed
@@ -103,6 +99,7 @@ class SimulationWriter:
             min_soc_percent: Minimum SOC in simulation
             min_soc_time: Time of minimum SOC
             current_soc: Current battery SOC
+
         """
         now = datetime.now(timezone.utc)
 
@@ -122,9 +119,8 @@ class SimulationWriter:
     def write_forecast_snapshot(
         self,
         simulation: pd.DataFrame,
-    ):
-        """
-        Write forecast snapshot for accuracy tracking.
+    ) -> None:
+        """Write forecast snapshot for accuracy tracking.
 
         This creates a persistent record of what was forecasted at decision time.
         Only writes points from NOW onwards - earlier points remain from previous
@@ -134,6 +130,7 @@ class SimulationWriter:
 
         Args:
             simulation: DataFrame with 'soc_percent' column, indexed by time
+
         """
         if simulation.empty:
             logger.warning("Empty simulation, no snapshot to write")

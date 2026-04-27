@@ -34,7 +34,7 @@ class TestBootNotification:
     """Tests for BootNotification handling."""
 
     @pytest.mark.asyncio
-    async def test_boot_notification_accepted(self, handler):
+    async def test_boot_notification_accepted(self, handler) -> None:
         """Wallbox boot notification should be accepted."""
         result = await handler.on_boot_notification(
             charge_point_vendor="TestVendor",
@@ -48,7 +48,7 @@ class TestStatusNotification:
     """Tests for StatusNotification handling."""
 
     @pytest.mark.asyncio
-    async def test_status_change_callback(self, mock_connection):
+    async def test_status_change_callback(self, mock_connection) -> None:
         """Status change should trigger callback."""
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
@@ -67,7 +67,7 @@ class TestMeterValues:
     """Tests for MeterValues handling."""
 
     @pytest.mark.asyncio
-    async def test_power_meter_value(self, mock_connection):
+    async def test_power_meter_value(self, mock_connection) -> None:
         """Power meter value should be corrected and update current_power_w."""
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
@@ -93,7 +93,7 @@ class TestMeterValues:
         assert callback.call_args[0][1] == pytest.approx(expected, abs=0.1)
 
     @pytest.mark.asyncio
-    async def test_energy_meter_value(self, mock_connection):
+    async def test_energy_meter_value(self, mock_connection) -> None:
         """Energy meter value should update session_energy_wh."""
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
@@ -113,7 +113,7 @@ class TestMeterValues:
         callback.assert_called_with("energy_wh", 5000)
 
     @pytest.mark.asyncio
-    async def test_energy_only_message_preserves_power(self, mock_connection):
+    async def test_energy_only_message_preserves_power(self, mock_connection) -> None:
         """Energy-only MeterValues (Sample.Clock) must not zero current_power_w.
 
         The AcTec wallbox sends a Sample.Clock message at 15-minute boundaries
@@ -152,7 +152,7 @@ class TestTransactions:
     """Tests for transaction handling."""
 
     @pytest.mark.asyncio
-    async def test_start_transaction(self, handler):
+    async def test_start_transaction(self, handler) -> None:
         """Start transaction should return transaction ID."""
         result = await handler.on_start_transaction(
             connector_id=1,
@@ -166,7 +166,7 @@ class TestTransactions:
         assert handler.transaction_id == 1
 
     @pytest.mark.asyncio
-    async def test_stop_transaction(self, handler):
+    async def test_stop_transaction(self, handler) -> None:
         """Stop transaction should clear transaction ID."""
         # First start a transaction
         await handler.on_start_transaction(
@@ -191,7 +191,7 @@ class TestSetChargingPowerAmps:
     """Tests for SetChargingProfile converting watts to decimal amps."""
 
     @pytest.mark.asyncio
-    async def test_sends_amps_from_watts(self, handler):
+    async def test_sends_amps_from_watts(self, handler) -> None:
         """SetChargingProfile should convert watts to integer amps via demand calibration."""
         with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
             mock_call.return_value = type("R", (), {"status": "Accepted"})()
@@ -204,7 +204,7 @@ class TestSetChargingPowerAmps:
             assert schedule["charging_schedule_period"][0]["limit"] == 10
 
     @pytest.mark.asyncio
-    async def test_zero_power(self, handler):
+    async def test_zero_power(self, handler) -> None:
         """0W should send limit=0."""
         with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
             mock_call.return_value = type("R", (), {"status": "Accepted"})()
@@ -213,7 +213,7 @@ class TestSetChargingPowerAmps:
             assert profile["charging_schedule"]["charging_schedule_period"][0]["limit"] == 0
 
     @pytest.mark.asyncio
-    async def test_negative_power_clamped_to_zero(self, handler):
+    async def test_negative_power_clamped_to_zero(self, handler) -> None:
         """Negative power should be clamped to 0."""
         with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
             mock_call.return_value = type("R", (), {"status": "Accepted"})()
@@ -226,7 +226,7 @@ class TestAuthorization:
     """Tests for authorization handling."""
 
     @pytest.mark.asyncio
-    async def test_authorize_accepts_all(self, handler):
+    async def test_authorize_accepts_all(self, handler) -> None:
         """All authorization requests should be accepted."""
         result = await handler.on_authorize(id_tag="any_tag")
         assert result.id_tag_info["status"].value == "Accepted"
@@ -270,7 +270,7 @@ class TestThrottle:
         return srv
 
     @pytest.mark.asyncio
-    async def test_tc17_rapid_changes_only_last_sent(self, server):
+    async def test_tc17_rapid_changes_only_last_sent(self, server) -> None:
         """TC-17: Two rapid changes → only last value sent after interval."""
         # Simulate two rapid HA changes (only latest pending matters)
         server._pending_power_w = 3000.0
@@ -288,7 +288,7 @@ class TestThrottle:
         assert server._pending_power_w is None
 
     @pytest.mark.asyncio
-    async def test_tc17_throttle_blocks_during_interval(self, server):
+    async def test_tc17_throttle_blocks_during_interval(self, server) -> None:
         """TC-17: Pending value not sent when interval hasn't elapsed."""
         server._pending_power_w = 4000.0
         server._last_profile_sent_at = time.monotonic()  # just sent
@@ -300,7 +300,7 @@ class TestThrottle:
         assert server._pending_power_w == 4000.0
 
     @pytest.mark.asyncio
-    async def test_tc18_zero_watts_bypasses_throttle(self, server):
+    async def test_tc18_zero_watts_bypasses_throttle(self, server) -> None:
         """TC-18: 0W sent immediately (bypasses throttle), pending queue cleared."""
         # Queue a pending value
         server._pending_power_w = 5000.0
@@ -317,7 +317,7 @@ class TestThrottle:
         assert server._pending_power_w is None
 
     @pytest.mark.asyncio
-    async def test_ha_restart_resyncs_connected_state(self, server):
+    async def test_ha_restart_resyncs_connected_state(self, server) -> None:
         """After HA restart, re-registration should re-sync wallbox_connected.
 
         Scenario: wallbox is connected (heartbeats flowing), HA core restarts,
@@ -353,7 +353,7 @@ class TestThrottle:
         assert calls["sensor.wallbox_transaction"] == "charging"
 
     @pytest.mark.asyncio
-    async def test_ha_restart_no_wallbox_stays_disconnected(self, server):
+    async def test_ha_restart_no_wallbox_stays_disconnected(self, server) -> None:
         """When wallbox is not connected, _sync_ha_state sets connected=off."""
         server.charge_point = None
 
@@ -370,7 +370,7 @@ class TestThrottle:
     @pytest.mark.asyncio
     async def test_tc19_first_zero_immediate_nonzero_queued_final_zero_immediate(
         self, server
-    ):
+    ) -> None:
         """TC-19: First 0W sent immediately, >0W queued, final 0W sent immediately."""
         server._last_change_at = time.monotonic() - 10  # interval elapsed
 
@@ -392,7 +392,7 @@ class TestThrottle:
         assert server._pending_power_w is None
 
     @pytest.mark.asyncio
-    async def test_tc22_rapid_nonzero_zero_nonzero(self, server):
+    async def test_tc22_rapid_nonzero_zero_nonzero(self, server) -> None:
         """TC-22: Rapid >0W → 0W → >0W: 0W sent immediately, >0W queued."""
         server._last_change_at = time.monotonic() - 10  # interval elapsed
 
@@ -424,7 +424,7 @@ class TestPowerZeroing:
     """Tests for power zeroing on status transitions (Item 1)."""
 
     @pytest.mark.asyncio
-    async def test_suspended_evse_zeros_power(self, mock_connection):
+    async def test_suspended_evse_zeros_power(self, mock_connection) -> None:
         """SuspendedEVSE with power > 0 should zero power and fire callback."""
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
@@ -438,7 +438,7 @@ class TestPowerZeroing:
         callback.assert_any_call("power_w", 0)
 
     @pytest.mark.asyncio
-    async def test_suspended_evse_already_zero_no_callback(self, mock_connection):
+    async def test_suspended_evse_already_zero_no_callback(self, mock_connection) -> None:
         """SuspendedEVSE with power = 0 should not fire power_w callback."""
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
@@ -453,7 +453,7 @@ class TestPowerZeroing:
         assert power_calls == []
 
     @pytest.mark.asyncio
-    async def test_charging_status_keeps_power(self, mock_connection):
+    async def test_charging_status_keeps_power(self, mock_connection) -> None:
         """Charging status should not zero power."""
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
@@ -466,7 +466,7 @@ class TestPowerZeroing:
         assert handler.current_power_w == 5000
 
     @pytest.mark.asyncio
-    async def test_stop_transaction_zeros_power(self, mock_connection):
+    async def test_stop_transaction_zeros_power(self, mock_connection) -> None:
         """StopTransaction with power > 0 should zero power and fire callback."""
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
@@ -481,7 +481,7 @@ class TestPowerZeroing:
         callback.assert_any_call("power_w", 0)
 
     @pytest.mark.asyncio
-    async def test_connector_0_ignored(self, mock_connection):
+    async def test_connector_0_ignored(self, mock_connection) -> None:
         """Connector 0 (charge point level) status should be ignored."""
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
@@ -532,7 +532,7 @@ class TestPhaseSwitchDecision:
         return srv
 
     @pytest.mark.asyncio
-    async def test_low_power_switches_to_1_phase(self, phase_server):
+    async def test_low_power_switches_to_1_phase(self, phase_server) -> None:
         """Power < 4140W on 3-phase should switch to 1-phase."""
         phase_server._current_phases = 3
 
@@ -545,7 +545,7 @@ class TestPhaseSwitchDecision:
         assert phase_server._current_phases == 1
 
     @pytest.mark.asyncio
-    async def test_high_power_switches_to_3_phase(self, phase_server):
+    async def test_high_power_switches_to_3_phase(self, phase_server) -> None:
         """Power >= 4140W on 1-phase should switch to 3-phase."""
         phase_server._current_phases = 1
 
@@ -558,7 +558,7 @@ class TestPhaseSwitchDecision:
         assert phase_server._current_phases == 3
 
     @pytest.mark.asyncio
-    async def test_same_phase_no_switch(self, phase_server):
+    async def test_same_phase_no_switch(self, phase_server) -> None:
         """Already on correct phase count should not call relay service."""
         phase_server._current_phases = 3
 
@@ -573,7 +573,7 @@ class TestPhaseSwitchDecision:
         assert relay_calls == []
 
     @pytest.mark.asyncio
-    async def test_phase_switching_disabled_no_switch(self, phase_server):
+    async def test_phase_switching_disabled_no_switch(self, phase_server) -> None:
         """Phase switching disabled should not attempt switch."""
         phase_server._phase_switching_disabled = True
         phase_server._current_phases = 3
@@ -624,7 +624,7 @@ class TestPhaseSwitchSafetyAbort:
         return srv
 
     @pytest.mark.asyncio
-    async def test_high_current_aborts_phase_switch(self, phase_server):
+    async def test_high_current_aborts_phase_switch(self, phase_server) -> None:
         """BL0942 current >= 0.5A should abort phase switch and disable it."""
         phase_server._current_phases = 3
         # BL0942 returns high current
@@ -638,7 +638,7 @@ class TestPhaseSwitchSafetyAbort:
         )
 
     @pytest.mark.asyncio
-    async def test_abort_on_1_phase_forces_3_phase(self, phase_server):
+    async def test_abort_on_1_phase_forces_3_phase(self, phase_server) -> None:
         """Abort while on 1-phase should force back to 3-phase."""
         phase_server._current_phases = 1
         phase_server.ha.get_state = AsyncMock(return_value="2.5")
@@ -650,7 +650,7 @@ class TestPhaseSwitchSafetyAbort:
         assert phase_server._current_phases == 3
 
     @pytest.mark.asyncio
-    async def test_abort_on_3_phase_stays_3_phase(self, phase_server):
+    async def test_abort_on_3_phase_stays_3_phase(self, phase_server) -> None:
         """Abort while on 3-phase should stay 3-phase, no relay call."""
         phase_server._current_phases = 3
         phase_server.ha.get_state = AsyncMock(return_value="2.5")
@@ -702,7 +702,7 @@ class TestResendOnSuspendedEVSE:
         return srv
 
     @pytest.mark.asyncio
-    async def test_resend_when_suspended_with_power(self, server):
+    async def test_resend_when_suspended_with_power(self, server) -> None:
         """SuspendedEVSE + last sent > 0 + interval elapsed → re-send."""
         server.charge_point.current_status = "SuspendedEVSE"
         server._last_sent_power_w = 5000.0
@@ -723,7 +723,7 @@ class TestResendOnSuspendedEVSE:
         )
 
     @pytest.mark.asyncio
-    async def test_no_resend_when_last_sent_zero(self, server):
+    async def test_no_resend_when_last_sent_zero(self, server) -> None:
         """SuspendedEVSE + last sent = 0 → condition fails, no re-send."""
         server.charge_point.current_status = "SuspendedEVSE"
         server._last_sent_power_w = 0.0
@@ -734,7 +734,7 @@ class TestResendOnSuspendedEVSE:
         assert not (server._last_sent_power_w > 0)
 
     @pytest.mark.asyncio
-    async def test_no_resend_when_charging(self, server):
+    async def test_no_resend_when_charging(self, server) -> None:
         """Charging + last sent > 0 → condition fails, no re-send."""
         server.charge_point.current_status = "Charging"
         server._last_sent_power_w = 5000.0
@@ -745,7 +745,7 @@ class TestResendOnSuspendedEVSE:
         assert not (server.charge_point.current_status == "SuspendedEVSE")
 
     @pytest.mark.asyncio
-    async def test_no_resend_when_pending_queued(self, server):
+    async def test_no_resend_when_pending_queued(self, server) -> None:
         """SuspendedEVSE + pending queued → condition fails, no re-send."""
         server.charge_point.current_status = "SuspendedEVSE"
         server._last_sent_power_w = 5000.0
@@ -787,7 +787,7 @@ class TestPostConnectSetup:
         return srv
 
     @pytest.mark.asyncio
-    async def test_status_event_completes_setup(self, server_with_cp):
+    async def test_status_event_completes_setup(self, server_with_cp) -> None:
         """StatusNotification arriving should complete post-connect setup."""
         cp = server_with_cp.charge_point
         cp.current_status = "Preparing"
@@ -799,7 +799,7 @@ class TestPostConnectSetup:
         cp.trigger_meter_values.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_boot_event_completes_setup(self, server_with_cp):
+    async def test_boot_event_completes_setup(self, server_with_cp) -> None:
         """Boot event arriving should complete post-connect setup."""
         cp = server_with_cp.charge_point
         cp.current_status = "Available"
@@ -810,7 +810,7 @@ class TestPostConnectSetup:
         assert server_with_cp._setup_complete.is_set()
 
     @pytest.mark.asyncio
-    async def test_charging_status_triggers_recovery(self, server_with_cp):
+    async def test_charging_status_triggers_recovery(self, server_with_cp) -> None:
         """Charging status should complete setup and trigger meter values."""
         cp = server_with_cp.charge_point
         cp.current_status = "Charging"
@@ -822,7 +822,7 @@ class TestPostConnectSetup:
         cp.trigger_meter_values.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_no_message_timeout_setup_incomplete(self, server_with_cp):
+    async def test_no_message_timeout_setup_incomplete(self, server_with_cp) -> None:
         """No message within timeout should leave setup incomplete."""
 
         # Don't set any events — patch asyncio.wait to return empty done set
@@ -867,7 +867,7 @@ class TestCarReady:
         return srv
 
     @pytest.mark.asyncio
-    async def test_car_ready_on_for_preparing(self, server):
+    async def test_car_ready_on_for_preparing(self, server) -> None:
         """Preparing status → car_ready on."""
         server._setup_complete.set()
         server.charge_point.current_status = "Preparing"
@@ -875,7 +875,7 @@ class TestCarReady:
         server.ha.set_state.assert_called_with("binary_sensor.car_ready", "on")
 
     @pytest.mark.asyncio
-    async def test_car_ready_on_for_charging(self, server):
+    async def test_car_ready_on_for_charging(self, server) -> None:
         """Charging status → car_ready on."""
         server._setup_complete.set()
         server.charge_point.current_status = "Charging"
@@ -883,7 +883,7 @@ class TestCarReady:
         server.ha.set_state.assert_called_with("binary_sensor.car_ready", "on")
 
     @pytest.mark.asyncio
-    async def test_car_ready_on_for_suspended_evse(self, server):
+    async def test_car_ready_on_for_suspended_evse(self, server) -> None:
         """SuspendedEVSE status → car_ready on."""
         server._setup_complete.set()
         server.charge_point.current_status = "SuspendedEVSE"
@@ -891,7 +891,7 @@ class TestCarReady:
         server.ha.set_state.assert_called_with("binary_sensor.car_ready", "on")
 
     @pytest.mark.asyncio
-    async def test_car_ready_off_for_available(self, server):
+    async def test_car_ready_off_for_available(self, server) -> None:
         """Available status → car_ready off."""
         server._setup_complete.set()
         server.charge_point.current_status = "Available"
@@ -899,7 +899,7 @@ class TestCarReady:
         server.ha.set_state.assert_called_with("binary_sensor.car_ready", "off")
 
     @pytest.mark.asyncio
-    async def test_car_ready_off_for_suspended_ev(self, server):
+    async def test_car_ready_off_for_suspended_ev(self, server) -> None:
         """SuspendedEV status → car_ready off."""
         server._setup_complete.set()
         server.charge_point.current_status = "SuspendedEV"
@@ -907,7 +907,7 @@ class TestCarReady:
         server.ha.set_state.assert_called_with("binary_sensor.car_ready", "off")
 
     @pytest.mark.asyncio
-    async def test_car_ready_off_for_finishing(self, server):
+    async def test_car_ready_off_for_finishing(self, server) -> None:
         """Finishing status → car_ready off."""
         server._setup_complete.set()
         server.charge_point.current_status = "Finishing"
@@ -915,14 +915,14 @@ class TestCarReady:
         server.ha.set_state.assert_called_with("binary_sensor.car_ready", "off")
 
     @pytest.mark.asyncio
-    async def test_car_ready_off_before_setup_complete(self, server):
+    async def test_car_ready_off_before_setup_complete(self, server) -> None:
         """Before _setup_complete → car_ready off regardless of status."""
         server.charge_point.current_status = "Charging"
         await server._update_car_ready()
         server.ha.set_state.assert_called_with("binary_sensor.car_ready", "off")
 
     @pytest.mark.asyncio
-    async def test_car_ready_off_on_disconnect(self, server):
+    async def test_car_ready_off_on_disconnect(self, server) -> None:
         """Disconnect → car_ready off."""
         server._setup_complete.set()
         server.charge_point = None
@@ -961,7 +961,7 @@ class TestGapHandling:
         return srv
 
     @pytest.mark.asyncio
-    async def test_gap_1_phase_clamps_down(self, server):
+    async def test_gap_1_phase_clamps_down(self, server) -> None:
         """3900W on 1-phase → clamp to 3680W."""
         server._current_phases = 1
         await server._send_power_to_wallbox(3900.0)
@@ -970,7 +970,7 @@ class TestGapHandling:
         )
 
     @pytest.mark.asyncio
-    async def test_gap_3_phase_clamps_up(self, server):
+    async def test_gap_3_phase_clamps_up(self, server) -> None:
         """3900W on 3-phase → clamp to 4140W."""
         server._current_phases = 3
         await server._send_power_to_wallbox(3900.0)
@@ -979,7 +979,7 @@ class TestGapHandling:
         )
 
     @pytest.mark.asyncio
-    async def test_boundary_3680_unchanged(self, server):
+    async def test_boundary_3680_unchanged(self, server) -> None:
         """3680W (below gap) should pass through unchanged."""
         server._current_phases = 1
         await server._send_power_to_wallbox(3680.0)
@@ -988,7 +988,7 @@ class TestGapHandling:
         )
 
     @pytest.mark.asyncio
-    async def test_boundary_4140_unchanged(self, server):
+    async def test_boundary_4140_unchanged(self, server) -> None:
         """4140W (above gap) should pass through unchanged."""
         server._current_phases = 3
         await server._send_power_to_wallbox(4140.0)
@@ -1033,7 +1033,7 @@ class TestPhaseTimeLock:
         return srv
 
     @pytest.mark.asyncio
-    async def test_clamp_during_lock_1_phase(self, server):
+    async def test_clamp_during_lock_1_phase(self, server) -> None:
         """During lock on 1-phase, power > 3680W clamped to 3680W."""
         server._current_phases = 1
         server._last_phase_switch_time = time.monotonic()  # just switched
@@ -1050,7 +1050,7 @@ class TestPhaseTimeLock:
         assert relay_calls == []
 
     @pytest.mark.asyncio
-    async def test_clamp_during_lock_3_phase(self, server):
+    async def test_clamp_during_lock_3_phase(self, server) -> None:
         """During lock on 3-phase, power < 4140W clamped to 4140W."""
         server._current_phases = 3
         server._last_phase_switch_time = time.monotonic()
@@ -1062,7 +1062,7 @@ class TestPhaseTimeLock:
         )
 
     @pytest.mark.asyncio
-    async def test_switch_allowed_after_lock_expires(self, server):
+    async def test_switch_allowed_after_lock_expires(self, server) -> None:
         """After 300s, phase switch should be allowed."""
         server._current_phases = 3
         server._last_phase_switch_time = time.monotonic() - 301  # lock expired
@@ -1097,7 +1097,7 @@ class TestEscalatingResend:
         srv.ha.get_state = AsyncMock(return_value="0")
         return srv
 
-    def test_intervals_escalate(self, server):
+    def test_intervals_escalate(self, server) -> None:
         """Retry count 0→10s, 1→30s, 2→60s, 3→60s (capped)."""
         server._resend_retry_count = 0
         assert server._current_resend_interval == 10
@@ -1111,7 +1111,7 @@ class TestEscalatingResend:
         server._resend_retry_count = 10
         assert server._current_resend_interval == 60  # capped at last
 
-    def test_reset_on_status_change(self, server):
+    def test_reset_on_status_change(self, server) -> None:
         """Leaving SuspendedEVSE should reset retry count."""
         server._resend_retry_count = 5
 
@@ -1124,7 +1124,7 @@ class TestEscalatingResend:
         server._on_status_change("status", "Charging")
         assert server._resend_retry_count == 0
 
-    def test_no_reset_when_staying_suspended_evse(self, server):
+    def test_no_reset_when_staying_suspended_evse(self, server) -> None:
         """Staying in SuspendedEVSE should not reset retry count."""
         server._resend_retry_count = 3
 
@@ -1160,7 +1160,7 @@ class TestSuspendedEVCloudCorrection:
         return srv
 
     @pytest.mark.asyncio
-    async def test_cloud_raw_25_synthesizes_suspended_ev(self, server):
+    async def test_cloud_raw_25_synthesizes_suspended_ev(self, server) -> None:
         """Cloud raw=25 should synthesize SuspendedEV status."""
         server._setup_complete.set()
         server.charge_point = MagicMock()
@@ -1168,7 +1168,7 @@ class TestSuspendedEVCloudCorrection:
         server.ha.get_state = AsyncMock(return_value="25")
 
         # Call _cloud_poll_suspended_ev with a short run
-        async def run_one_poll():
+        async def run_one_poll() -> None:
             """Run a single iteration of the cloud poll loop."""
             await asyncio.sleep(0)  # yield
             raw = await server.ha.get_state(server._cloud_charging_entity)
@@ -1184,7 +1184,7 @@ class TestSuspendedEVCloudCorrection:
         server.ha.set_state.assert_any_call("sensor.wallbox_status", "SuspendedEV")
 
     @pytest.mark.asyncio
-    async def test_cloud_raw_changes_reverts_to_suspended_evse(self, server):
+    async def test_cloud_raw_changes_reverts_to_suspended_evse(self, server) -> None:
         """Cloud raw changes from 25 → other should revert to SuspendedEVSE."""
         server._setup_complete.set()
         server.charge_point = MagicMock()
@@ -1202,7 +1202,7 @@ class TestSuspendedEVCloudCorrection:
         assert server._synthesized_suspended_ev is False
         server.ha.set_state.assert_any_call("sensor.wallbox_status", "SuspendedEVSE")
 
-    def test_no_cloud_poll_when_last_sent_zero(self, server):
+    def test_no_cloud_poll_when_last_sent_zero(self, server) -> None:
         """Cloud poll should not start when _last_sent_power_w = 0."""
         server.charge_point = MagicMock()
         server.charge_point.current_status = "SuspendedEVSE"
@@ -1213,7 +1213,7 @@ class TestSuspendedEVCloudCorrection:
 
         assert server._cloud_poll_task is None
 
-    def test_cloud_poll_starts_when_suspended_evse_with_power(self, server):
+    def test_cloud_poll_starts_when_suspended_evse_with_power(self, server) -> None:
         """Cloud poll should start when SuspendedEVSE and last_sent > 0."""
         server.charge_point = MagicMock()
         server.charge_point.current_status = "SuspendedEVSE"
@@ -1226,7 +1226,7 @@ class TestSuspendedEVCloudCorrection:
         # Clean up
         server._cloud_poll_task.cancel()
 
-    def test_resend_blocked_when_synthesized(self, server):
+    def test_resend_blocked_when_synthesized(self, server) -> None:
         """Re-send should be blocked when _synthesized_suspended_ev is True."""
         server._synthesized_suspended_ev = True
         server._pending_power_w = None
@@ -1273,7 +1273,7 @@ class TestInnerSync:
         return srv
 
     @pytest.mark.asyncio
-    async def test_charging_waits_for_meter_values(self, server_with_cp):
+    async def test_charging_waits_for_meter_values(self, server_with_cp) -> None:
         """Charging status should wait for MeterValues before completing setup."""
         cp = server_with_cp.charge_point
         cp.current_status = "Charging"
@@ -1287,7 +1287,7 @@ class TestInnerSync:
         cp.trigger_meter_values.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_charging_timeout_completes_anyway(self, server_with_cp):
+    async def test_charging_timeout_completes_anyway(self, server_with_cp) -> None:
         """MeterValues timeout should not block setup completion."""
         cp = server_with_cp.charge_point
         cp.current_status = "Charging"
@@ -1299,7 +1299,7 @@ class TestInnerSync:
         assert server_with_cp._setup_complete.is_set()
 
     @pytest.mark.asyncio
-    async def test_available_skips_meter_values_wait(self, server_with_cp):
+    async def test_available_skips_meter_values_wait(self, server_with_cp) -> None:
         """Available status should skip MeterValues wait."""
         cp = server_with_cp.charge_point
         cp.current_status = "Available"
@@ -1316,7 +1316,7 @@ class TestMeterValuesEvent:
     """Tests for meter_values_event on ChargePointHandler."""
 
     @pytest.mark.asyncio
-    async def test_meter_values_sets_event(self, mock_connection):
+    async def test_meter_values_sets_event(self, mock_connection) -> None:
         """on_meter_values should set meter_values_event."""
         handler = ChargePointHandler("test", mock_connection)
 
@@ -1366,12 +1366,12 @@ class TestThreePhaseOnly:
 
         return srv
 
-    def test_single_phase_not_supported(self, server):
+    def test_single_phase_not_supported(self, server) -> None:
         """three_phase type should report single_phase_supported=False."""
         assert server.single_phase_supported is False
 
     @pytest.mark.asyncio
-    async def test_below_minimum_pauses(self, server):
+    async def test_below_minimum_pauses(self, server) -> None:
         """Power below 4140W (6A×3×230V) should be clamped to 0W."""
         await server._send_power_to_wallbox(3000.0)
 
@@ -1381,7 +1381,7 @@ class TestThreePhaseOnly:
         assert call_args.args[0] == 0 or call_args.kwargs.get("power_w") == 0
 
     @pytest.mark.asyncio
-    async def test_above_minimum_sends_power(self, server):
+    async def test_above_minimum_sends_power(self, server) -> None:
         """Power >= 4140W should be sent as-is."""
         await server._send_power_to_wallbox(5000.0)
 
@@ -1390,7 +1390,7 @@ class TestThreePhaseOnly:
         )
 
     @pytest.mark.asyncio
-    async def test_no_phase_switching(self, server):
+    async def test_no_phase_switching(self, server) -> None:
         """three_phase should never call relay service."""
         server._current_phases = 3
 
@@ -1405,7 +1405,7 @@ class TestThreePhaseOnly:
         assert server._current_phases == 3
 
     @pytest.mark.asyncio
-    async def test_abort_phase_switch_noop(self, server):
+    async def test_abort_phase_switch_noop(self, server) -> None:
         """_abort_phase_switch should be a no-op for three_phase."""
         server._current_phases = 1  # hypothetical
         await server._abort_phase_switch("test reason")
@@ -1448,12 +1448,12 @@ class TestUniversalWallbox:
 
         return srv
 
-    def test_single_phase_supported(self, server):
-        """universal type should report single_phase_supported=True."""
+    def test_single_phase_supported(self, server) -> None:
+        """Universal type should report single_phase_supported=True."""
         assert server.single_phase_supported is True
 
     @pytest.mark.asyncio
-    async def test_low_power_tracks_1_phase(self, server):
+    async def test_low_power_tracks_1_phase(self, server) -> None:
         """Power < threshold should track 1-phase without relay toggle."""
         server._current_phases = 3
 
@@ -1469,7 +1469,7 @@ class TestUniversalWallbox:
         assert relay_calls == []
 
     @pytest.mark.asyncio
-    async def test_high_power_tracks_3_phase(self, server):
+    async def test_high_power_tracks_3_phase(self, server) -> None:
         """Power >= threshold should track 3-phase without relay toggle."""
         server._current_phases = 1
 
@@ -1484,7 +1484,7 @@ class TestUniversalWallbox:
         assert relay_calls == []
 
     @pytest.mark.asyncio
-    async def test_same_phase_no_update(self, server):
+    async def test_same_phase_no_update(self, server) -> None:
         """Already on correct phase count should not re-publish."""
         server._current_phases = 3
         server.ha.set_state.reset_mock()
@@ -1538,7 +1538,7 @@ class TestTransactionStopRestart:
         return srv
 
     @pytest.mark.asyncio
-    async def test_transaction_stop_resets_last_sent(self, server):
+    async def test_transaction_stop_resets_last_sent(self, server) -> None:
         """StopTransaction should reset _last_sent_power_w to 0."""
         assert server._last_sent_power_w == 4354.0
 
@@ -1547,9 +1547,10 @@ class TestTransactionStopRestart:
         assert server._last_sent_power_w == 0
 
     @pytest.mark.asyncio
-    async def test_transaction_stop_applies_current_limit(self, server):
+    async def test_transaction_stop_applies_current_limit(self, server) -> None:
         """After StopTransaction, _apply_current_power_limit should send
-        the current HA value to the wallbox."""
+        the current HA value to the wallbox.
+        """
         server.charge_point.transaction_id = None  # transaction ended
 
         # HA entity has 4354W
@@ -1561,7 +1562,7 @@ class TestTransactionStopRestart:
         assert server._last_power_limit == "4354"
 
     @pytest.mark.asyncio
-    async def test_transaction_stop_zero_limit_does_nothing(self, server):
+    async def test_transaction_stop_zero_limit_does_nothing(self, server) -> None:
         """If HA power limit is 0 after transaction stop, don't send."""
         server.ha.get_state = AsyncMock(return_value="0")
 
@@ -1570,9 +1571,10 @@ class TestTransactionStopRestart:
         server.charge_point.set_charging_power.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_reconciliation_detects_mismatch_after_stop(self, server):
+    async def test_reconciliation_detects_mismatch_after_stop(self, server) -> None:
         """After transaction stop, _last_sent_power_w=0 should cause
-        reconciliation to detect a mismatch with HA value."""
+        reconciliation to detect a mismatch with HA value.
+        """
         server._on_status_change("transaction", "stopped")
 
         # Simulate reconciliation check
@@ -1580,7 +1582,7 @@ class TestTransactionStopRestart:
         assert ha_power_w != server._last_sent_power_w  # 4354 != 0
 
     @pytest.mark.asyncio
-    async def test_apply_limit_no_wallbox(self, server):
+    async def test_apply_limit_no_wallbox(self, server) -> None:
         """_apply_current_power_limit with no charge point should not crash."""
         server.charge_point = None
         server.ha.get_state = AsyncMock(return_value="4354")
@@ -1621,7 +1623,7 @@ class TestPostConnectApplyLimit:
         return srv
 
     @pytest.mark.asyncio
-    async def test_apply_existing_ha_limit_on_connect(self, server):
+    async def test_apply_existing_ha_limit_on_connect(self, server) -> None:
         """After connect, if HA already has a power limit, apply it."""
         server.ha.get_state = AsyncMock(return_value="5117")
 
@@ -1631,7 +1633,7 @@ class TestPostConnectApplyLimit:
         assert server._last_power_limit == "5117"
 
     @pytest.mark.asyncio
-    async def test_apply_zero_limit_on_connect_does_nothing(self, server):
+    async def test_apply_zero_limit_on_connect_does_nothing(self, server) -> None:
         """After connect, if HA power limit is 0, don't send."""
         server.ha.get_state = AsyncMock(return_value="0")
 
@@ -1640,7 +1642,7 @@ class TestPostConnectApplyLimit:
         server.charge_point.set_charging_power.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_apply_limit_entity_missing(self, server):
+    async def test_apply_limit_entity_missing(self, server) -> None:
         """If HA entity doesn't exist yet, don't crash."""
         server.ha.get_state = AsyncMock(return_value=None)
 
@@ -1649,7 +1651,7 @@ class TestPostConnectApplyLimit:
         server.charge_point.set_charging_power.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_apply_limit_invalid_value(self, server):
+    async def test_apply_limit_invalid_value(self, server) -> None:
         """If HA entity has non-numeric value, don't crash."""
         server.ha.get_state = AsyncMock(return_value="unavailable")
 

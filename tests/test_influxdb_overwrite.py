@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Test script to verify InfluxDB overwrite behavior for forecast data.
+"""Test script to verify InfluxDB overwrite behavior for forecast data.
 
 This tests that writing to the same measurement + tags + timestamp
 overwrites existing data when run_time is a FIELD (not a tag).
@@ -47,9 +46,8 @@ def connect(host: str, port: int, token: str, org: str) -> InfluxDBClient:
 
 
 def write_test_data(client: InfluxDBClient, bucket: str, org: str,
-                    run_id: str, value_offset: float = 0):
-    """
-    Write test forecast data with a specific run_id.
+                    run_id: str, value_offset: float = 0) -> None:
+    """Write test forecast data with a specific run_id.
 
     Args:
         client: InfluxDB client
@@ -57,6 +55,7 @@ def write_test_data(client: InfluxDBClient, bucket: str, org: str,
         org: Organization
         run_id: Identifier for this test run (stored in run_time field)
         value_offset: Add this to base values to distinguish different writes
+
     """
     write_api = client.write_api(write_options=SYNCHRONOUS)
 
@@ -119,14 +118,14 @@ def query_test_data(client: InfluxDBClient, bucket: str, org: str) -> list:
     return results
 
 
-def delete_test_data(client: InfluxDBClient, bucket: str, org: str):
+def delete_test_data(client: InfluxDBClient, bucket: str, org: str) -> None:
     """Clean up test data."""
     delete_api = client.delete_api()
 
     start = datetime.now(timezone.utc) - timedelta(hours=1)
     stop = datetime.now(timezone.utc) + timedelta(days=1)
 
-    print(f"Deleting test_forecast data...")
+    print("Deleting test_forecast data...")
     delete_api.delete(
         start=start,
         stop=stop,
@@ -137,9 +136,8 @@ def delete_test_data(client: InfluxDBClient, bucket: str, org: str):
     print("Deleted test data")
 
 
-def run_overwrite_test(client: InfluxDBClient, bucket: str, org: str):
-    """
-    Test that overwriting works correctly.
+def run_overwrite_test(client: InfluxDBClient, bucket: str, org: str) -> bool:
+    """Test that overwriting works correctly.
 
     1. Write data with run_id="first"
     2. Query and verify
@@ -211,7 +209,7 @@ def run_overwrite_test(client: InfluxDBClient, bucket: str, org: str):
         return False
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Test InfluxDB overwrite behavior")
     parser.add_argument("--host", default="192.168.0.203", help="InfluxDB host")
     parser.add_argument("--port", type=int, default=8087, help="InfluxDB port")

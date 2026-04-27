@@ -1,5 +1,4 @@
-"""
-MeteoSwiss local point forecast fetcher.
+"""MeteoSwiss local point forecast fetcher.
 
 Downloads pre-extracted point forecasts from the ogd-local-forecasting collection.
 Data is available per ZIP code, updated hourly, with 192h horizon.
@@ -39,11 +38,11 @@ class LocalFetcher:
         self,
         point_id: int = 441500,
         parameters: dict[str, str] | None = None,
-    ):
-        """
-        Args:
-            point_id: MeteoSwiss point ID (441500 = Lausen/4415)
-            parameters: Mapping of standard names to MeteoSwiss parameter codes
+    ) -> None:
+        """Args:
+        point_id: MeteoSwiss point ID (441500 = Lausen/4415)
+        parameters: Mapping of standard names to MeteoSwiss parameter codes.
+
         """
         self.point_id = point_id
         self.parameters = parameters or DEFAULT_PARAMETERS
@@ -86,8 +85,7 @@ class LocalFetcher:
         return None
 
     def _find_latest_run_assets(self, item: dict) -> dict[str, str]:
-        """
-        Find download URLs for the latest run within a STAC item.
+        """Find download URLs for the latest run within a STAC item.
 
         Each item contains assets for multiple runs (hourly updates).
         Asset keys follow: vnut12.lssw.YYYYMMDDHHMM.{param}.csv
@@ -154,8 +152,7 @@ class LocalFetcher:
             return None
 
     def fetch_latest(self, max_hours: int = 120) -> pd.DataFrame:
-        """
-        Fetch the latest local point forecast.
+        """Fetch the latest local point forecast.
 
         Args:
             max_hours: Trim forecast to this many hours from now (default 120,
@@ -165,6 +162,7 @@ class LocalFetcher:
             DataFrame with columns: ghi, dhi, dni, temp_air, wind_speed
             Index: DatetimeIndex (UTC)
             Empty DataFrame if fetch fails.
+
         """
         item = self._find_latest_item()
         if not item:

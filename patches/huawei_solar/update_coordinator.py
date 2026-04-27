@@ -131,7 +131,6 @@ async def create_optimizer_update_coordinator(
     update_interval: timedelta | None,
 ) -> HuaweiSolarOptimizerUpdateCoordinator:
     """Create and refresh entities of an HuaweiSolarOptimizerUpdateCoordinator."""
-
     coordinator = HuaweiSolarOptimizerUpdateCoordinator(
         hass,
         _LOGGER,
