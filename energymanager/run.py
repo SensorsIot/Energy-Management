@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.6"
+__version__ = "1.8.7"
 
 import json
 import logging
@@ -260,7 +260,17 @@ class EnergyManager:
         )
         self.smart_car_capacity_kwh = float(smart_opts.get("capacity_kwh", 100.0))
         self.smart_car_charge_efficiency = float(
-            smart_opts.get("charge_efficiency", 0.9)
+            smart_opts.get("charge_efficiency", 0.88)
+        )
+        # Phase 3 — manual-charge kWh budget entities
+        self.ev_target_soc_entity = ev_opts.get(
+            "target_soc_entity", "input_number.ev_target_soc"
+        )
+        self.car_soc_last_known_entity = smart_opts.get(
+            "soc_last_known_entity", "sensor.smart_battery_last_known"
+        )
+        self.wallbox_session_energy_entity = ev_opts.get(
+            "wallbox_session_energy_entity", "sensor.wallbox_energy"
         )
         self._last_wallbox_status: str | None = None
         self._last_ev_charging_mode: str | None = None
@@ -967,6 +977,16 @@ class EnergyManager:
                 idle_minutes = 0.0
                 wallbox_idle = False
 
+            # Phase 3 — manual-charge budget inputs (immediate/cheap only)
+            target_soc_raw = self.ha_client.get_sensor_value(self.ev_target_soc_entity)
+            target_soc = float(target_soc_raw) if target_soc_raw is not None else 100.0
+            car_soc_raw = self.ha_client.get_sensor_value(self.car_soc_last_known_entity)
+            car_soc = float(car_soc_raw) if car_soc_raw is not None else None
+            session_wh_raw = self.ha_client.get_sensor_value(
+                self.wallbox_session_energy_entity
+            )
+            session_energy_wh = float(session_wh_raw) if session_wh_raw is not None else 0.0
+
             # Build inputs and run state machine
             inputs = EVInputs(
                 wallbox_available=wallbox_available,
@@ -983,6 +1003,11 @@ class EnergyManager:
                 min_power_w=ev_min_power,
                 manual_power_w=manual_power,
                 ev_charging_power_w=ev_charging_power_w,
+                target_soc=target_soc,
+                car_soc=car_soc,
+                session_energy_wh=session_energy_wh,
+                capacity_kwh=self.smart_car_capacity_kwh,
+                efficiency=self.smart_car_charge_efficiency,
             )
             prev_ev_state = self._ev_sm.state
             output = self._ev_sm.step(inputs)
@@ -1031,9 +1056,14 @@ class EnergyManager:
             else:
                 logger.debug(ev_log_line)
 
-            # Auto-revert: immediate/cheap idle timeout → switch mode back to solar
-            if wallbox_idle and ev_mode in ("immediate", "cheap"):
-                logger.info("Charging complete — reverting mode to solar")
+            # Auto-revert: state machine exited IMMEDIATE/CHEAP back to IDLE
+            # (covers wallbox-idle timeout AND kWh-budget / safety stop).
+            if (
+                prev_ev_state in (EVState.IMMEDIATE, EVState.CHEAP)
+                and output.state == EVState.IDLE
+                and ev_mode in ("immediate", "cheap")
+            ):
+                logger.info(f"Reverting mode to solar — {output.reason}")
                 self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
                 self._ev_idle_since = None
 

@@ -468,5 +468,152 @@ class TestMultiStep:
         assert out.state == EVState.SOLAR
 
 
+# ===================================================================
+# Phase 3 — manual-charge kWh budget + safety stop
+# ===================================================================
+
+def budget_inputs(**overrides) -> EVInputs:
+    """EVInputs preset for a manual-charge (immediate) session.
+
+    Defaults: car_soc=20%, target=25%, capacity=17.6 kWh (Smart EQ), η=0.88.
+    Budget = (25-20)/100 * 17.6 * 1000 / 0.88 ≈ 1000 Wh.
+    """
+    defaults = dict(
+        charging_mode="immediate",
+        wallbox_status="Charging",
+        target_soc=25.0,
+        car_soc=20.0,
+        session_energy_wh=0.0,
+        capacity_kwh=17.6,
+        efficiency=0.88,
+        ev_charging_power_w=0.0,  # immediate ignores it
+    )
+    defaults.update(overrides)
+    return make_inputs(**defaults)
+
+
+class TestBudgetStop:
+    def test_snapshot_taken_on_idle_to_immediate(self) -> None:
+        sm = EVStateMachine()
+        out = sm.step(budget_inputs())
+        assert out.state == EVState.IMMEDIATE
+        assert sm._budget_start_soc == 20.0
+        assert sm._budget_start_session_wh == 0.0
+
+    def test_snapshot_taken_on_idle_to_cheap(self) -> None:
+        sm = EVStateMachine()
+        out = sm.step(budget_inputs(charging_mode="cheap", is_cheap_tariff=True))
+        assert out.state == EVState.CHEAP
+        assert sm._budget_start_soc == 20.0
+
+    def test_snapshot_taken_on_solar_to_immediate(self) -> None:
+        sm = make_sm(EVState.SOLAR)
+        out = sm.step(budget_inputs())
+        assert out.state == EVState.IMMEDIATE
+        assert sm._budget_start_soc == 20.0
+        assert sm._budget_start_session_wh == 0.0
+
+    def test_kwh_budget_stops_charging(self) -> None:
+        sm = EVStateMachine()
+        # Enter immediate, budget = ~1000 Wh
+        sm.step(budget_inputs())
+        # 999 Wh delivered — still under budget
+        out = sm.step(budget_inputs(session_energy_wh=999.0))
+        assert out.state == EVState.IMMEDIATE
+        # 1001 Wh delivered — over budget → stop
+        out = sm.step(budget_inputs(session_energy_wh=1001.0))
+        assert out.state == EVState.IDLE
+        assert "Budget reached" in out.reason
+        # Budget cleared on stop
+        assert sm._budget_start_soc is None
+
+    def test_safety_stop_when_car_soc_reaches_target_plus_10(self) -> None:
+        sm = EVStateMachine()
+        sm.step(budget_inputs())  # snapshot start_soc=20%, target=25%
+        # Car SOC jumps to 35% (target+10) but delivered Wh still low
+        out = sm.step(budget_inputs(session_energy_wh=100.0, car_soc=35.0))
+        assert out.state == EVState.IDLE
+        assert "Safety stop" in out.reason
+
+    def test_already_at_target_on_entry(self) -> None:
+        sm = EVStateMachine()
+        # car_soc 30% already above target 25%
+        out = sm.step(budget_inputs(car_soc=30.0))
+        assert out.state == EVState.IDLE
+        assert "Already at target" in out.reason
+
+    def test_slider_drag_mid_session_extends_budget(self) -> None:
+        sm = EVStateMachine()
+        sm.step(budget_inputs())  # target 25%, start 20%, budget ~1000 Wh
+        # User drags slider up to 40% — new budget ~4000 Wh
+        out = sm.step(budget_inputs(target_soc=40.0, session_energy_wh=999.0))
+        assert out.state == EVState.IMMEDIATE
+        # Still well under the new budget at 1500 Wh
+        out = sm.step(budget_inputs(target_soc=40.0, session_energy_wh=1500.0))
+        assert out.state == EVState.IMMEDIATE
+
+    def test_slider_drag_down_mid_session_triggers_stop(self) -> None:
+        sm = EVStateMachine()
+        sm.step(budget_inputs(target_soc=80.0))  # generous target, big budget
+        # 500 Wh delivered, user drags target down to 21% (just barely above start)
+        # budget = (21-20)/100 * 17.6 * 1000 / 0.88 ≈ 200 Wh, already exceeded
+        out = sm.step(budget_inputs(target_soc=21.0, session_energy_wh=500.0))
+        assert out.state == EVState.IDLE
+        assert "Budget reached" in out.reason
+
+    def test_session_reset_resnapshots(self) -> None:
+        sm = EVStateMachine()
+        sm.step(budget_inputs())
+        # Mid session — 500 Wh delivered, well under 1000 budget
+        sm.step(budget_inputs(session_energy_wh=500.0))
+        # Wallbox session resets (unplug/replug): energy goes back to 0
+        # at this point car_soc has advanced from 20 to 23
+        out = sm.step(budget_inputs(session_energy_wh=0.0, car_soc=23.0))
+        assert out.state == EVState.IMMEDIATE
+        # New snapshot recorded
+        assert sm._budget_start_soc == 23.0
+        assert sm._budget_start_session_wh == 0.0
+        # New budget = (25-23)/100 * 17.6 * 1000 / 0.88 ≈ 400 Wh
+        # 500 Wh delivered → over new budget
+        out = sm.step(budget_inputs(session_energy_wh=500.0, car_soc=23.0))
+        assert out.state == EVState.IDLE
+        assert "Budget reached" in out.reason
+
+    def test_budget_cleared_on_wallbox_idle(self) -> None:
+        sm = EVStateMachine()
+        sm.step(budget_inputs())
+        assert sm._budget_start_soc is not None
+        # Car finishes (wallbox_idle = True)
+        out = sm.step(budget_inputs(wallbox_idle=True))
+        assert out.state == EVState.IDLE
+        assert sm._budget_start_soc is None
+
+    def test_budget_cleared_on_mode_switch(self) -> None:
+        sm = EVStateMachine()
+        sm.step(budget_inputs())
+        assert sm._budget_start_soc is not None
+        # User switches mode back to solar
+        out = sm.step(budget_inputs(charging_mode="solar"))
+        assert out.state == EVState.IDLE
+        assert sm._budget_start_soc is None
+
+    def test_car_soc_unknown_skips_kwh_budget(self) -> None:
+        """If car_soc is None at entry, start_soc snapshot is None and the
+        kWh budget can't be computed — fall back to legacy no-cap behavior.
+        Wallbox-idle path and safety stop (if car_soc later appears) still apply."""
+        sm = EVStateMachine()
+        sm.step(budget_inputs(car_soc=None))
+        # Snapshot exists, but start_soc is None
+        assert sm._budget_start_soc is None
+        assert sm._budget_start_session_wh == 0.0
+        # Huge delivered, but kWh check is skipped — stay in IMMEDIATE
+        out = sm.step(budget_inputs(car_soc=None, session_energy_wh=100_000.0))
+        assert out.state == EVState.IMMEDIATE
+        # Once car_soc appears and overshoots target+10%, safety stop fires
+        out = sm.step(budget_inputs(car_soc=40.0, session_energy_wh=100_000.0))
+        assert out.state == EVState.IDLE
+        assert "Safety stop" in out.reason
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

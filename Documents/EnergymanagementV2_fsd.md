@@ -2043,6 +2043,7 @@ The machine stays in its current state unless one of the listed conditions trigg
 | C0 | `NOT wallbox_available` | IDLE |
 | C1 | `wallbox_idle` | IDLE |
 | C2 | `charging_mode != "cheap"` | IDLE |
+| C3 | Manual-charge kWh budget reached or safety stop (Section 4.3.5.1) | IDLE |
 
 Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expensive. No state change on tariff toggle.
 
@@ -2053,6 +2054,32 @@ Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expe
 | M0 | `NOT wallbox_available` | IDLE |
 | M1 | `wallbox_idle` | IDLE |
 | M2 | `charging_mode != "immediate"` | IDLE |
+| M3 | Manual-charge kWh budget reached or safety stop (Section 4.3.5.1) | IDLE |
+
+#### 4.3.5.1 Manual-Charge kWh Budget and Safety Stop
+
+The CHEAP and IMMEDIATE modes are manual charging sessions where the user specifies a **target SOC** via `input_number.ev_target_soc` (clamped at input time to `sensor.smart_charging_max_last_known`). Because `sensor.smart_battery` updates only every few minutes and can be stale, the state machine does not rely on car SOC alone — it tracks delivered energy via the wallbox session counter.
+
+**On entry** to IMMEDIATE or CHEAP (from IDLE or SOLAR), the state machine snapshots:
+
+| Field | Source |
+|-------|--------|
+| `start_soc` | `sensor.smart_battery_last_known` (may be `None` if unavailable) |
+| `start_session_wh` | `sensor.wallbox_energy` (OCPP cumulative session energy) |
+| `target_soc` | `input_number.ev_target_soc` |
+| `capacity_kwh` | `smart_car.capacity_kwh` (config) |
+| `efficiency` | `smart_car.charge_efficiency` (config, default **0.88**) |
+
+**Each tick** while in CHEAP/IMMEDIATE:
+
+1. **Session reset detection** — if `session_energy_wh` dropped below the last observed value (OCPP transaction restarted on unplug/replug), re-snapshot and continue.
+2. **Safety stop** — if `car_soc ≥ target_soc + 10`, exit to IDLE.
+3. **Primary stop (kWh budget)** — compute `budget_wh = (target_soc − start_soc) / 100 × capacity_kwh × 1000 / efficiency`. If `delivered_wh = session_energy_wh − start_session_wh ≥ budget_wh`, exit to IDLE.
+4. **Already at target** — if `start_soc ≥ target_soc` at entry, exit to IDLE immediately with reason `"Already at target"`.
+
+**Fallback** — if `car_soc` is `None` at entry (smart-car API stale), the kWh budget is **not** enforced (no `start_soc` to anchor against). Charging stops only via wallbox-idle path or safety stop once `car_soc` becomes available.
+
+**Auto-revert** — when CHEAP/IMMEDIATE → IDLE for any reason while `input_select.ev_charging_mode` is still `cheap`/`immediate`, `run.py` sets the mode back to `solar` so the dashboard reflects the stop.
 
 #### Shared Concepts
 
@@ -2072,6 +2099,11 @@ Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expe
 | `is_cheap_tariff` | Tariff schedule (Section 4.1.3) | CHEAP power toggle |
 | `ev_charging_power_w` | EV Charging Power Calculation (Section 4.3.6) | SOLAR entry + power |
 | `manual_power_w` | `input_number.ev_manual_power` | CHEAP/IMMEDIATE power |
+| `target_soc` | `input_number.ev_target_soc` | CHEAP/IMMEDIATE budget |
+| `car_soc` | `sensor.smart_battery_last_known` | CHEAP/IMMEDIATE budget + safety |
+| `session_energy_wh` | `sensor.wallbox_energy` | CHEAP/IMMEDIATE delivered kWh |
+| `capacity_kwh` | `smart_car.capacity_kwh` (config) | CHEAP/IMMEDIATE budget |
+| `efficiency` | `smart_car.charge_efficiency` (config, default 0.88) | CHEAP/IMMEDIATE budget |
 
 **Output:**
 
@@ -2257,6 +2289,8 @@ Because `control_ev_charging()` runs every 10 seconds with live surplus, the sys
 
 The EV battery SOC is read from the Hello Smart API and published as `sensor.smart_battery`. Polling frequency adapts to wallbox state to balance freshness against API rate limits.
 
+> **Interface:** the `smarthashtag` HACS integration, the local `pysmarthashtag` patch, the rate-limit behavior (HTTP `403048`, adaptive backoff, `MAX_TRANSIENT_FAILURES = 10`), the `HelloSmartClient` session caching strategy (2 vs 6 requests/poll), the `sensor.smart_battery_last_known` template sensor, and debug-logging configuration are all documented in `Home-Installation-fsd.md §7.7` "Smart car interface (smarthashtag)". This section only covers how the energymanager *consumes* that interface.
+
 #### Polling Strategy
 
 | Trigger | Frequency | Condition |
@@ -2270,18 +2304,6 @@ The EV battery SOC is read from the Hello Smart API and published as `sensor.sma
 
 **Connected states** (no re-poll on transitions between these): `Preparing`, `Charging`, `SuspendedEV`, `SuspendedEVSE`, `Finishing`.
 
-#### Client Caching
-
-The `HelloSmartClient` session is cached across polls to avoid full re-authentication on every call.
-
-| Scenario | HTTP requests per poll |
-|----------|----------------------|
-| Cached client (normal) | 2 (session refresh + vehicle status) |
-| After error (re-auth) | 6 (full authentication flow) |
-| Hourly baseline | 6 (fresh client each hour) |
-
-On any API exception, the cached client is cleared (`self._smart_car_client = None`). The next poll creates a fresh client with full re-authentication.
-
 #### Implementation
 
 - **Adaptive polling** runs inside `control_ev_charging()` (10-second loop), checking wallbox status transitions
@@ -2290,34 +2312,15 @@ On any API exception, the cached client is cleared (`self._smart_car_client = No
 - **Wallbox status tracking** via `_last_wallbox_status` detects connection events (transition to `Preparing`)
 - **Mode tracking** via `_last_ev_charging_mode` detects charging mode changes (skips first cycle to avoid false trigger on startup)
 
-#### Last-Known Value Fallback
+#### Python-side Last-Known Fallback
 
-The Hello Smart integration drops to `unavailable` when the car goes to sleep (minutes after last charge/drive). Downstream consumers (Car SOC Forecast, dashboard cards) still need a number. Two layers of fallback keep them working:
+The Hello Smart integration drops to `unavailable` when the car goes to sleep (minutes after last charge/drive) or when the API is rate-limited beyond the 10-failure grace window. Downstream consumers (Car SOC Forecast, dashboard cards) still need a number. The energymanager's `_read_car_soc_with_fallback()` in `run.py`:
 
-**Python side (`_read_car_soc_with_fallback()` in `run.py`):**
 1. Read live state of `smart_car.soc_entity`; return its numeric value if present.
 2. If unavailable/unknown, call `_query_last_value()` to read the last numeric value from the `HomeAssistant` InfluxDB bucket over the past 7 days.
 3. If nothing found, return `None` and skip the car SOC forecast for this cycle (logged at WARN).
 
-**HA dashboard side (trigger-based template sensor):**
-
-A `sensor.smart_battery_last_known` sensor in `/config/templates.yaml` caches the last numeric reading of `sensor.smart_battery`:
-
-```yaml
-- trigger:
-    - platform: state
-      entity_id: sensor.smart_battery
-      not_to: ["unavailable", "unknown", "none", ""]
-  sensor:
-    - name: "Smart Battery Last Known"
-      unique_id: smart_battery_last_known
-      unit_of_measurement: "%"
-      device_class: battery
-      state_class: measurement
-      state: "{{ trigger.to_state.state }}"
-```
-
-Because the trigger filters invalid transitions, the sensor retains its last value across `unavailable` periods. The Lausen Amazon Fire dashboard (`lovelace-amazonfire`) references `sensor.smart_battery_last_known` in all cards and button-card JS logic instead of `sensor.smart_battery`.
+This is independent of — and complementary to — the HA-side `sensor.smart_battery_last_known` trigger template (used by dashboards), which is defined in `Home-Installation-fsd.md §7.8`.
 
 ### 4.3.8 Car SOC Forecast
 
