@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.8"
+__version__ = "1.8.9"
 
 import json
 import logging
@@ -1074,12 +1074,22 @@ class EnergyManager:
             else:
                 logger.debug(ev_log_line)
 
-            # Auto-revert: state machine exited IMMEDIATE/CHEAP back to IDLE
-            # (covers wallbox-idle timeout, SOC stop, and kWh budget stop).
+            # Auto-revert: state machine ended this tick at IDLE while the
+            # user-set mode is cheap/immediate, AND either:
+            #   - we were charging (prev_ev_state in IMMEDIATE/CHEAP) — covers
+            #     wallbox-idle timeout, SOC stop, kWh budget, wallbox unplug;
+            #   - the wallbox was available, so the state machine just entered
+            #     IMMEDIATE/CHEAP and immediately bounced back to IDLE because
+            #     the target was already met.
+            # If wallbox is *not* available and we weren't charging, leave mode
+            # armed — user pressed Cheap Charge before plugging in.
             if (
-                prev_ev_state in (EVState.IMMEDIATE, EVState.CHEAP)
-                and output.state == EVState.IDLE
+                output.state == EVState.IDLE
                 and ev_mode in ("immediate", "cheap")
+                and (
+                    prev_ev_state in (EVState.IMMEDIATE, EVState.CHEAP)
+                    or wallbox_available
+                )
             ):
                 logger.info(f"Reverting mode to solar — {output.reason}")
                 self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
