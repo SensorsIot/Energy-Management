@@ -2043,7 +2043,7 @@ The machine stays in its current state unless one of the listed conditions trigg
 | C0 | `NOT wallbox_available` | IDLE |
 | C1 | `wallbox_idle` | IDLE |
 | C2 | `charging_mode != "cheap"` | IDLE |
-| C3 | Manual-charge kWh budget reached or safety stop (Section 4.3.5.1) | IDLE |
+| C3 | Manual-charge SOC stop or kWh budget reached (Section 4.3.5.1) | IDLE |
 
 Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expensive. No state change on tariff toggle.
 
@@ -2054,9 +2054,9 @@ Power toggles internally: `manual_power_w` when `is_cheap_tariff`, `0` when expe
 | M0 | `NOT wallbox_available` | IDLE |
 | M1 | `wallbox_idle` | IDLE |
 | M2 | `charging_mode != "immediate"` | IDLE |
-| M3 | Manual-charge kWh budget reached or safety stop (Section 4.3.5.1) | IDLE |
+| M3 | Manual-charge SOC stop or kWh budget reached (Section 4.3.5.1) | IDLE |
 
-#### 4.3.5.1 Manual-Charge kWh Budget and Safety Stop
+#### 4.3.5.1 Manual-Charge SOC Stop and kWh Budget
 
 The CHEAP and IMMEDIATE modes are manual charging sessions where the user specifies a **target SOC** via `input_number.ev_target_soc` (clamped at input time to `sensor.smart_charging_max_last_known`). Because `sensor.smart_battery` updates only every few minutes and can be stale, the state machine does not rely on car SOC alone — it tracks delivered energy via the wallbox session counter.
 

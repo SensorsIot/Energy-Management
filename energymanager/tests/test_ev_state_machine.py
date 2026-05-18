@@ -469,7 +469,7 @@ class TestMultiStep:
 
 
 # ===================================================================
-# Phase 3 — manual-charge kWh budget + safety stop
+# Phase 3 — manual-charge SOC stop + kWh budget
 # ===================================================================
 
 def budget_inputs(**overrides) -> EVInputs:

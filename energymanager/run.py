@@ -1075,7 +1075,7 @@ class EnergyManager:
                 logger.debug(ev_log_line)
 
             # Auto-revert: state machine exited IMMEDIATE/CHEAP back to IDLE
-            # (covers wallbox-idle timeout AND kWh-budget / safety stop).
+            # (covers wallbox-idle timeout, SOC stop, and kWh budget stop).
             if (
                 prev_ev_state in (EVState.IMMEDIATE, EVState.CHEAP)
                 and output.state == EVState.IDLE

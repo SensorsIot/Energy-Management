@@ -122,10 +122,10 @@ class EVStateMachine:
         """Return a stop-reason if charging should end, else None.
 
         Re-snapshots when the OCPP session energy regresses (new session).
-        Safety stop: car SOC reached target + 10%.
-        Primary stop: delivered Wh ≥ (target − start_soc) × capacity / η.
+        SOC stop: car_soc ≥ target_soc (symmetric, no buffer).
+        kWh budget: delivered Wh ≥ (target − start_soc) × capacity / η.
         If start_soc was unknown at snapshot (car SOC unavailable), the kWh
-        budget is not enforced — wallbox-idle and the safety stop still are.
+        budget is not enforced — wallbox-idle and the SOC stop still are.
         """
         # No snapshot yet (shouldn't normally happen here) — snap and skip.
         if self._budget_start_session_wh is None:
