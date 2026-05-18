@@ -527,20 +527,34 @@ class TestBudgetStop:
         # Budget cleared on stop
         assert sm._budget_start_soc is None
 
-    def test_safety_stop_when_car_soc_reaches_target_plus_10(self) -> None:
+    def test_target_reached_stops_charging(self) -> None:
         sm = EVStateMachine()
         sm.step(budget_inputs())  # snapshot start_soc=20%, target=25%
-        # Car SOC jumps to 35% (target+10) but delivered Wh still low
-        out = sm.step(budget_inputs(session_energy_wh=100.0, car_soc=35.0))
+        # Car SOC catches up to target exactly — stop, regardless of delivered Wh.
+        out = sm.step(budget_inputs(session_energy_wh=100.0, car_soc=25.0))
         assert out.state == EVState.IDLE
-        assert "Safety stop" in out.reason
+        assert "Target reached" in out.reason
+
+    def test_target_reached_logs_freshness(self) -> None:
+        sm = EVStateMachine()
+        sm.step(budget_inputs(car_soc_age_s=60.0))
+        # Fresh reading hits target
+        out = sm.step(budget_inputs(car_soc=25.0, car_soc_age_s=30.0))
+        assert out.state == EVState.IDLE
+        assert "age=30s" in out.reason
+        # Reset and try with stale reading
+        sm2 = EVStateMachine()
+        sm2.step(budget_inputs(car_soc_age_s=3600.0))
+        out = sm2.step(budget_inputs(car_soc=25.0, car_soc_age_s=3600.0))
+        assert out.state == EVState.IDLE
+        assert "age=3600s" in out.reason
 
     def test_already_at_target_on_entry(self) -> None:
         sm = EVStateMachine()
-        # car_soc 30% already above target 25%
+        # car_soc 30% already above target 25% — SOC stop fires on entry tick
         out = sm.step(budget_inputs(car_soc=30.0))
         assert out.state == EVState.IDLE
-        assert "Already at target" in out.reason
+        assert "Target reached" in out.reason
 
     def test_slider_drag_mid_session_extends_budget(self) -> None:
         sm = EVStateMachine()
@@ -599,8 +613,9 @@ class TestBudgetStop:
 
     def test_car_soc_unknown_skips_kwh_budget(self) -> None:
         """If car_soc is None at entry, start_soc snapshot is None and the
-        kWh budget can't be computed — fall back to legacy no-cap behavior.
-        Wallbox-idle path and safety stop (if car_soc later appears) still apply."""
+        kWh budget can't be computed — fall back to no-cap behavior.
+        Wallbox-idle path still works; once car_soc appears and meets
+        target, the SOC stop fires."""
         sm = EVStateMachine()
         sm.step(budget_inputs(car_soc=None))
         # Snapshot exists, but start_soc is None
@@ -609,10 +624,10 @@ class TestBudgetStop:
         # Huge delivered, but kWh check is skipped — stay in IMMEDIATE
         out = sm.step(budget_inputs(car_soc=None, session_energy_wh=100_000.0))
         assert out.state == EVState.IMMEDIATE
-        # Once car_soc appears and overshoots target+10%, safety stop fires
-        out = sm.step(budget_inputs(car_soc=40.0, session_energy_wh=100_000.0))
+        # Once car_soc reappears at/above target, SOC stop fires
+        out = sm.step(budget_inputs(car_soc=25.0, session_energy_wh=100_000.0))
         assert out.state == EVState.IDLE
-        assert "Safety stop" in out.reason
+        assert "Target reached" in out.reason
 
 
 if __name__ == "__main__":

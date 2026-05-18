@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.7"
+__version__ = "1.8.8"
 
 import json
 import logging
@@ -986,6 +986,23 @@ class EnergyManager:
                 self.wallbox_session_energy_entity
             )
             session_energy_wh = float(session_wh_raw) if session_wh_raw is not None else 0.0
+            # Age of the raw smarthashtag reading.  Used for logging only —
+            # the SOC stop fires regardless of freshness.  Read against the
+            # raw source (not *_last_known, whose last_updated lies when the
+            # value stays flat) so the age reflects real polling cadence.
+            car_soc_age_s: float | None = None
+            raw_soc_state = self.ha_client.get_state(self.smart_car_soc_entity)
+            if (
+                raw_soc_state
+                and raw_soc_state.get("state") not in ("unknown", "unavailable", "none", None)
+            ):
+                lu = raw_soc_state.get("last_updated")
+                if lu:
+                    try:
+                        ts = datetime.fromisoformat(lu.replace("Z", "+00:00"))
+                        car_soc_age_s = (datetime.now(UTC) - ts).total_seconds()
+                    except ValueError:
+                        pass
 
             # Build inputs and run state machine
             inputs = EVInputs(
@@ -1005,6 +1022,7 @@ class EnergyManager:
                 ev_charging_power_w=ev_charging_power_w,
                 target_soc=target_soc,
                 car_soc=car_soc,
+                car_soc_age_s=car_soc_age_s,
                 session_energy_wh=session_energy_wh,
                 capacity_kwh=self.smart_car_capacity_kwh,
                 efficiency=self.smart_car_charge_efficiency,

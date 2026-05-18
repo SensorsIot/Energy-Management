@@ -57,6 +57,7 @@ class EVInputs:
     # Phase 3 — manual-charge kWh budget (immediate/cheap only; solar ignores)
     target_soc: float = 100.0          # input_number.ev_target_soc (% car SOC)
     car_soc: float | None = None       # sensor.smart_battery_last_known; None if unknown
+    car_soc_age_s: float | None = None # seconds since sensor.smart_battery last update
     session_energy_wh: float = 0.0     # sensor.wallbox_energy (OCPP session, Wh)
     capacity_kwh: float = 100.0        # car battery usable capacity (kWh)
     efficiency: float = 0.88           # AC→battery charging efficiency
@@ -148,11 +149,15 @@ class EVStateMachine:
             return None
         self._last_session_wh = i.session_energy_wh
 
-        # Safety: car self-reports SOC ≥ target + 10%
-        if i.car_soc is not None and i.car_soc >= i.target_soc + 10:
+        # SOC-based stop — symmetric, no buffer. If we're early, the user
+        # presses the button again and a fresh budget is computed from
+        # the new lower start_soc.  If we're late, no buffer would help.
+        if i.car_soc is not None and i.car_soc >= i.target_soc:
+            age = (f"age={i.car_soc_age_s:.0f}s"
+                   if i.car_soc_age_s is not None else "age=unknown")
             return (
-                f"Safety stop — car SOC {i.car_soc:.0f}% "
-                f"≥ target {i.target_soc:.0f}% + 10%"
+                f"Target reached — car SOC {i.car_soc:.0f}% "
+                f"≥ target {i.target_soc:.0f}% ({age})"
             )
 
         # kWh budget requires a known start_soc; otherwise skip (no-cap).

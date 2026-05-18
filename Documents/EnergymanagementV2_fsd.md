@@ -2073,11 +2073,12 @@ The CHEAP and IMMEDIATE modes are manual charging sessions where the user specif
 **Each tick** while in CHEAP/IMMEDIATE:
 
 1. **Session reset detection** — if `session_energy_wh` dropped below the last observed value (OCPP transaction restarted on unplug/replug), re-snapshot and continue.
-2. **Safety stop** — if `car_soc ≥ target_soc + 10`, exit to IDLE.
-3. **Primary stop (kWh budget)** — compute `budget_wh = (target_soc − start_soc) / 100 × capacity_kwh × 1000 / efficiency`. If `delivered_wh = session_energy_wh − start_session_wh ≥ budget_wh`, exit to IDLE.
-4. **Already at target** — if `start_soc ≥ target_soc` at entry, exit to IDLE immediately with reason `"Already at target"`.
+2. **SOC stop** — if `car_soc ≥ target_soc`, exit to IDLE. Symmetric, no buffer: if we stopped too early because the kWh budget was off, the user re-presses the button and a fresh budget is computed from the new lower `start_soc`. If too late we've already overshot — no buffer would have helped.
+3. **kWh budget** — compute `budget_wh = (target_soc − start_soc) / 100 × capacity_kwh × 1000 / efficiency`. If `delivered_wh = session_energy_wh − start_session_wh ≥ budget_wh`, exit to IDLE.
 
-**Fallback** — if `car_soc` is `None` at entry (smart-car API stale), the kWh budget is **not** enforced (no `start_soc` to anchor against). Charging stops only via wallbox-idle path or safety stop once `car_soc` becomes available.
+Freshness of `car_soc` (age of `sensor.smart_battery.last_updated`) is logged in the SOC-stop reason for diagnosis but does not affect the threshold.
+
+**Fallback** — if `car_soc` is `None` at entry (smart-car API stale), the kWh budget is **not** enforced (no `start_soc` to anchor against). Charging stops only via the wallbox-idle path or the SOC stop once `car_soc` becomes available.
 
 **Auto-revert** — when CHEAP/IMMEDIATE → IDLE for any reason while `input_select.ev_charging_mode` is still `cheap`/`immediate`, `run.py` sets the mode back to `solar` so the dashboard reflects the stop.
 
@@ -2100,7 +2101,8 @@ The CHEAP and IMMEDIATE modes are manual charging sessions where the user specif
 | `ev_charging_power_w` | EV Charging Power Calculation (Section 4.3.6) | SOLAR entry + power |
 | `manual_power_w` | `input_number.ev_manual_power` | CHEAP/IMMEDIATE power |
 | `target_soc` | `input_number.ev_target_soc` | CHEAP/IMMEDIATE budget |
-| `car_soc` | `sensor.smart_battery_last_known` | CHEAP/IMMEDIATE budget + safety |
+| `car_soc` | `sensor.smart_battery_last_known` | CHEAP/IMMEDIATE SOC stop |
+| `car_soc_age_s` | `now − sensor.smart_battery.last_updated` | Logging only |
 | `session_energy_wh` | `sensor.wallbox_energy` | CHEAP/IMMEDIATE delivered kWh |
 | `capacity_kwh` | `smart_car.capacity_kwh` (config) | CHEAP/IMMEDIATE budget |
 | `efficiency` | `smart_car.charge_efficiency` (config, default 0.88) | CHEAP/IMMEDIATE budget |
