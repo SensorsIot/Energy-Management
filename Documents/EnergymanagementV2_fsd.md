@@ -1992,11 +1992,16 @@ The user selects one of three charging modes via the kitchen dashboard (Amazon F
 
 | Mode | `input_select` value | Dashboard Label | Description |
 |------|---------------------|----------------|-------------|
-| **Auto PV Excess** | `auto_pv_excess` | *(default)* | Charge from stable PV excess only |
-| **Immediate** | `immediate` | Immediate Charge | Charge now at fixed power |
-| **Cheap Tariff** | `cheap_tariff` | Cheap Charge | Charge only during the cheap tariff at fixed power |
+| **Solar** | `solar` | *(default — button-card greyed)* | Follow PV surplus only; safety-gated by 48-h SOC forecast |
+| **Immediate** | `immediate` | Charge Now | Charge at `manual_power_w` regardless of tariff or surplus |
+| **Cheap** | `cheap` | Cheap Charge | Charge at `manual_power_w` during cheap tariff, 0 W during expensive |
 
-**Control entity:** The dashboard provides two buttons ("Cheap Charge" and "Charge Now") that toggle between the selected mode. If both are unselected, `auto_pv_excess` is active. Charge now starts charging immediately.
+**Control entity:** Two custom button-cards on `lovelace-amazonfire/test` (Cheap Charge / Charge Now). Each `tap_action` calls `script.ev_toggle_manual_charge` with the mode value. The script branches:
+
+- If `input_select.ev_charging_mode` already equals the pressed mode → revert to `solar` (Stop).
+- Otherwise → call `script.ev_start_manual_charge`, which clamps `input_number.ev_target_soc` against `sensor.smart_charging_max_last_known` and sets `input_select.ev_charging_mode` to the pressed mode.
+
+There is **no off mode** — solar is the resting state. The target-SOC slider lives on `lovelace-amazonfire/energy-manager` inside the **Car** card; a server-side automation (`clamp_ev_target_soc_to_car_max`) snaps the slider back if the user drags it above the car's reported max.
 
 ### 4.3.5 EV Charging State Machine
 
@@ -3752,9 +3757,12 @@ See Section 4.3.7 for adaptive polling logic.
 
 **End of Document**
 
-*Version 2.48 - April 2026*
+*Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.50: Dropped the +10 SOC safety buffer in the manual-charge stop (Section 4.3.5.1). Stop is now symmetric: `car_soc >= target_soc` regardless of freshness. Rationale: if we stop too early the user re-presses the button and a fresh budget is computed from the new lower `start_soc`; if too late no buffer would have helped. Added `car_soc_age_s` input (computed in `run.py` from `sensor.smart_battery.last_updated`) — logged in the stop reason for diagnosis only, not used as a threshold. Test 47 → 60 (`test_target_reached_stops_charging`, `test_target_reached_logs_freshness`). **Validated live 2026-05-18 21:41**: 26%→30%, 3680 Wh delivered, age=1 s, mode auto-reverted to solar. (v1.8.7 → v1.8.8)
+- v2.49: Phase 3 — manual-charge kWh budget and SOC stop (new Section 4.3.5.1). CHEAP and IMMEDIATE modes now stop automatically at a user-set target SOC instead of running until the car reaches its own max. On entry the state machine snapshots `start_soc` (`sensor.smart_battery_last_known`) and `start_session_wh` (`sensor.wallbox_energy`); each tick checks `car_soc >= target_soc` (SOC stop) and `delivered_wh >= (target - start) × capacity / η` (kWh budget). Session-energy regression (OCPP transaction restart on unplug/replug) triggers a re-snapshot. `run.py` auto-reverts `input_select.ev_charging_mode` to `solar` on any IMMEDIATE/CHEAP → IDLE transition. New EVInputs fields: `target_soc`, `car_soc`, `session_energy_wh`, `capacity_kwh`, `efficiency`. `smart_car.charge_efficiency` default bumped 0.9 → 0.88. 12 new tests in `test_ev_state_machine.py`. (v1.8.6 → v1.8.7)
 - v2.48: Operational polish for the EV control loop. The 10-s loop was spamming ~34k INFO lines/day (apscheduler heartbeats + EV safety line + EV decision line) and firing two InfluxDB queries every cycle purely for dashboard diagnostics. Fixes: (a) silenced `apscheduler.executors.default` and `apscheduler.scheduler` at WARNING — removes the per-cycle "Running job…" chatter and its UTC timestamps; (b) `EVBatteryOptimizer.check_ev_safe` log dropped to DEBUG; (c) short-circuit in `control_ev_charging` — when no EV candidate (surplus < threshold, mode not solar, or wallbox unavailable), skip `check_ev_safe`/`will_battery_hit_full` and read cached values instead (~17k Flux queries/day saved); (d) cache primed in `run_optimization` after the SOC forecast is written, so the dashboard always reflects a real value from the most recent 15-min cycle; (e) single dense INFO log per EV cycle (`EV [state] power  mode=… surplus=…W±threshold  batt=…% [min48h=…%±floor]  src=…`) with dedup — DEBUG on no-change, INFO on state/power/source change, 60-s INFO heartbeat while idle; (f) stray mislabeled `DEBUG:` messages at INFO demoted to actual DEBUG; (g) startup timestamps rendered in Swiss local time via `swiss_datetime()` throughout (`run.py`, `forecast_reader.py`, scheduler next-run line). No FSD-content changes — this is operational only. (v1.8.3 → v1.8.5)
 - v2.47: Split the EV safety floor from `battery.reserve_percent`. Added **`ev_charging.reserve_percent`** (default **20 %**) — an independent config option for the 48-h EV safety rule. Rationale: `battery.reserve_percent` = 0 (site default) makes the old shared rule toothless because the simulator clamps SOC at 0, so `min_soc >= 0` is always true. The two floors now answer different questions and evolve independently. Updated Section 4.1.4 (Battery configuration), Section 4.3.6 (Safety rule + "Independence from nightly battery protection"), example YAML, and README. (v1.8.2)
 - v2.46: Moved `will_battery_hit_full()` from the main runtime class into `EVBatteryOptimizer` (its only caller). Dropped the misnamed "Shared Forecast Helpers" section — it had no shared helpers left. Folded the `will_battery_hit_full` description into Section 4.3.6 as a dashboard-diagnostic subsection. Renumbered 4.6 → 4.5, 4.7 → 4.6, 4.8 → 4.7 for InfluxDB Storage / Dashboard / Error Handling. Also: `_extra_load_percent` remains a private helper on each consumer class (one line of `wh / capacity_wh × 100`) — not worth extracting. 2 new unit tests covering the moved method. (v1.8.1)

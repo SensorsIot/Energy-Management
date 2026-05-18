@@ -10,7 +10,7 @@ Household energy optimizer for PV self-consumption, battery discharge control, E
 ## Features
 
 - **Battery Discharge Control**: Blocks discharge during cheap tariff hours when the PV forecast is insufficient, so stored energy covers expensive-hour consumption
-- **EV Charging (4 modes)**: Solar surplus with a 48-h min-SOC safety rule, immediate, cheap-tariff, and off
+- **EV Charging (3 modes)**: Solar surplus with a 48-h min-SOC safety rule, immediate, and cheap-tariff. Immediate and cheap stop automatically when the user-set target SOC or computed kWh budget is reached.
 - **Appliance Signal**: Traffic-light signal (GREEN/ORANGE/RED) indicating whether to run high-power appliances
 - **Smart Car SOC**: Reads EV battery level from the Hello Smart API and publishes as a HA sensor
 - **SOC Simulation**: Forward-looking battery state-of-charge simulation using PV and load forecasts
@@ -83,9 +83,27 @@ Control via `input_select.ev_charging_mode`:
 
 | Mode | Behavior |
 |------|----------|
-| **solar** | Follow `sensor.surplus_power` (PV − house_load). EV runs only while the 48-h min home-battery SOC forecast stays ≥ `ev_charging.reserve_percent` (default 20 %) |
-| **immediate** | Charge at max power regardless of tariff |
-| **cheap** | Charge at max during cheap tariff, pause during expensive |
+| **solar** | Follow `sensor.surplus_power` (PV − house_load). EV runs only while the 48-h min home-battery SOC forecast stays ≥ `ev_charging.reserve_percent` (default 20 %). No target-SOC cap — runs until the car is full or surplus drops out. |
+| **immediate** | Charge at `input_number.ev_manual_power` regardless of tariff. Stops at the target SOC (see Manual Charge). |
+| **cheap** | Charge at `input_number.ev_manual_power` during cheap tariff, 0 W during expensive. Stops at the target SOC (see Manual Charge). |
+
+### Manual Charge (immediate / cheap)
+
+The user sets a target SOC via `input_number.ev_target_soc`. On press of **Cheap Charge** or **Charge Now**, the state machine snapshots `start_soc` (`sensor.smart_battery_last_known`) and the wallbox session energy (`sensor.wallbox_energy`). Two stops run in parallel each tick — whichever fires first ends the session:
+
+- **SOC stop** — `car_soc ≥ target_soc`. Symmetric, no buffer.
+- **kWh budget** — `delivered_wh ≥ (target_soc − start_soc) × capacity_kwh × 1000 / η`. Primary protection against a stale car SOC.
+
+When either stop fires the mode auto-reverts to `solar`. Pressing the same button again while the mode is active toggles it off (revert to `solar`).
+
+Required `smart_car` config:
+
+```yaml
+smart_car:
+  enabled: true
+  capacity_kwh: 17.6        # EV battery usable capacity
+  charge_efficiency: 0.88   # AC-to-battery efficiency
+```
 
 ## Appliance Signal
 
