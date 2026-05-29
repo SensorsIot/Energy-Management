@@ -1727,6 +1727,16 @@ The SOC simulation predicts battery state over the forecast horizon. This is the
 
 `simulate_soc(soc_percent, forecast, block_from, block_until)` supports optional discharge-block windows; `calculate_decision()` uses this to generate the `with_strategy` curve.
 
+> **Note — charging is modelled as greedy.** The simulation charges the
+> battery from surplus as soon as it is available (up to `max_charge_w`). It
+> does **not** model the export-peak-shaving deferral (4.2.3). On days when
+> shaving is active (car disconnected/full), the *intraday* SOC curve will
+> therefore be lower in the morning than plotted, then catch up at the peak.
+> End-of-day SOC is unaffected (shaving still targets 100 %), and the EV
+> safety rule is unaffected (it only matters while the car is connected,
+> when shaving is off). The mismatch is cosmetic — it touches the Grafana
+> curve and the washer signal's intraday min-SOC on shaving days only.
+
 #### Basic Loop (net = PV − Load → battery flow)
 
 ```
@@ -2025,8 +2035,17 @@ are two top-level use cases, selected by `_charge_gate_active()`:
 
 | # | Use case | Criteria (gate) | Behaviour | Charge limit |
 |---|----------|-----------------|-----------|-------------|
-| **A** | **EV owns the surplus** | feature enabled **AND** car connected **AND** car not full (`binary_sensor.wallbox_connected = on` **AND** `smart_battery_last_known < smart_charging_max_last_known`) | Charge **released** — EV solar charging (4.3) takes the surplus; the battery acts only as the gap buffer per Rule 2. Shaving stays out of the way. | `max_charge_w` |
+| **A** | **EV owns the surplus** | feature enabled **AND** car connected **AND** car not full (`binary_sensor.wallbox_connected = on` **AND** `smart_battery_last_known < smart_charging_max_last_known`) | Charge **released**; the battery charges **greedily** to capture every remaining Wh (see rationale below). | `max_charge_w` |
 | **B** | **Export-peak shaving** | feature enabled **AND** car disconnected (or OCPP down) **OR** car full | Defer/allow charging per the water-fill below, so the battery's headroom absorbs the export peak. | `0` or `max_charge_w` |
+
+**Why use case A doesn't shave:** when the car needs energy it *is* the
+peak-shaving load — EV charging draws the midday surplus directly, which
+flattens the export curve just as battery deferral would. So there is
+nothing left for the battery to shave; instead the battery charges greedily
+to grab whatever surplus the car doesn't take. Shaving (deferring battery
+charge) only makes sense in use case B, where there is **no** car load to
+absorb the peak. The two mechanisms are therefore mutually exclusive by
+design, never competing for the same surplus.
 
 When the feature is **disabled** (`charge_shaving_enabled = false`,
 default), `control_battery_charge()` is a no-op and the charge limit is
