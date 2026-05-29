@@ -2683,57 +2683,103 @@ cards:
 
 ### 4.6.3 Solar Decision Card (Amazon Fire Dashboard)
 
-Displays the **EV charging** decision with the active rule and pass/fail
-status. A `custom:button-card` whose `label` template reads
-`sensor.ev_target_power` attributes. The authoritative `reason` attribute is
-shown at the bottom and already encodes the EOD snap-up forecast gate
-(4.3.6), so no extra attribute is needed for it.
+Plain-language **EV charging** status. A `custom:button-card` whose `label`
+template builds human sentences from the structured `sensor.ev_target_power`
+attributes (it does **not** print the raw `reason` string — that stays in
+the logs). It also reads `binary_sensor.wallbox_connected` for the "no car"
+state. Design goal: a headline status anyone can read at a glance, plus 1–2
+plain supporting lines.
 
-**Card layout — live examples:**
+**Card layout — live examples (Balanced, English):**
 
-Rule 2 charging (surplus above threshold, 48-h safety passed):
 ```
-Surplus: 4200W   Threshold: 1380W   ✅
-Grid export: 4200W
-
-☀️ Rule 2: Solar Surplus 4200W
-  Home battery SOC: 82%
-  48 h min SOC: 64% vs floor 20% 🟢 safe
-  🟢 Home battery will reach 100% at 13:30
-
-→ 4830W
-  Surplus 4200W ≥ 1380W, forecast → 4830W (forecast EOD 78% < target 85% — snap-up allowed)
+🚗  Charging the car
+    4.8 kW from solar surplus
+    Home battery 82%, protected
 ```
-
-Blocked by the 48-h home-battery safety rule (surplus available, but the
-forecast dips below the floor):
 ```
-Surplus: 3870W   Threshold: 3000W   ✅
-Grid export: 3870W
-
-⏸️ Not charging
-  🔴 Blocked by home-battery 48 h safety
-  48 h min SOC: 11% vs floor 20% 🔴 blocked
-
-→ no charging
-  No charging — min SOC forecast 11% < floor 20%
+🚗  Car on hold
+    Protecting the home battery
+    It would drop to 11% (keeps at least 20%)
+```
+```
+🚗  Waiting for sun
+    Solar surplus 0.8 kW — needs 3.0 kW
+```
+```
+🚗  No car connected
 ```
 
-Below threshold:
+**Status mapping** (technical → human):
+
+| Condition | Headline | Supporting lines |
+|-----------|----------|------------------|
+| `wallbox_connected` ≠ on | No car connected | — |
+| `snap_power_w` > 0 | Charging the car | power + source; home battery SOC |
+| `surplus_power_w` < `threshold_w` | Waiting for sun | surplus vs needed |
+| `ev_safe` = false | Car on hold | protecting battery; forecast dip vs floor |
+| otherwise | Not charging | — |
+
+**Card YAML** (`custom:button-card`, `entity: sensor.ev_target_power`):
+
+```yaml
+type: custom:button-card
+entity: sensor.ev_target_power
+show_name: false
+show_state: false
+show_label: true
+show_icon: false
+label: >-
+  [[[
+  const a = entity.attributes;
+  const kw = (w) => (w == null ? '?' : (Math.abs(w) >= 1000 ? (w / 1000).toFixed(1) + ' kW' : Math.round(w) + ' W'));
+  const rule = a.ev_charging_rule || 'none';
+  const power = a.snap_power_w || 0;
+  const surplus = a.surplus_power_w;
+  const threshold = a.threshold_w;
+  const soc = a.battery_soc != null ? Math.round(a.battery_soc) : '?';
+  const min48 = a.battery_min_soc_forecast_48h != null ? Math.round(a.battery_min_soc_forecast_48h) : '?';
+  const floor = a.battery_min_soc_floor != null ? Math.round(a.battery_min_soc_floor) : '?';
+  const evSafe = a.ev_safe;
+  const wc = states['binary_sensor.wallbox_connected'];
+  const connected = wc ? wc.state === 'on' : true;
+  let title; let lines = [];
+  if (!connected) { title = '🚗  No car connected'; }
+  else if (power > 0) {
+    title = '🚗  Charging the car';
+    lines.push(kw(power) + (rule === 'battery_full' ? ' (home battery full)' : ' from solar surplus'));
+    lines.push('Home battery ' + soc + '%, protected');
+  } else if (surplus != null && threshold != null && surplus < threshold) {
+    title = '🚗  Waiting for sun';
+    lines.push('Solar surplus ' + kw(surplus) + ' — needs ' + kw(threshold));
+  } else if (evSafe === false) {
+    title = '🚗  Car on hold';
+    lines.push('Protecting the home battery');
+    lines.push('It would drop to ' + min48 + '% (keeps at least ' + floor + '%)');
+  } else { title = '🚗  Not charging'; }
+  let html = '<b>' + title + '</b>';
+  for (const l of lines) { html += '<br><span style="opacity:0.75">' + l + '</span>'; }
+  return html;
+  ]]]
+tap_action:
+  action: none
+styles:
+  card:
+    - padding: 16px
+    - background-color: var(--card-background-color)
+  label:
+    - font-size: 15px
+    - justify-self: start
+    - white-space: normal
+    - line-height: "1.6"
 ```
-Surplus: 800W   Threshold: 1380W   ❌
 
-⏸️ Not charging
-  Surplus 800W < threshold 1380W
-
-→ no charging
-```
-
-**Sensor attributes used by card** (published on `sensor.ev_target_power`, run.py):
+**Attributes published on `sensor.ev_target_power`** (run.py). The card uses
+the structured fields below; `reason` is no longer rendered (kept for logs):
 
 | Attribute | Purpose |
 |-----------|---------|
-| `reason` | Authoritative decision string (includes the EOD snap-up gate result) |
+| `reason` | Full decision string incl. EOD snap-up gate (logs/debug; not shown on card) |
 | `ev_charging_rule` | Active rule: `battery_full`, `solar_surplus`, or `none` |
 | `threshold_w` | Min solar power threshold (W) |
 | `surplus_power_w` | Solar surplus = PV − house load (W) |
@@ -2774,31 +2820,41 @@ cycle. State string: `discharge=on|off charge=<action>`.
 | `charge_reason` | Human-readable charge-shaving reason |
 | `charge_limit_w` | Charge limit being applied (W); `0` = deferred, `null` = not managed |
 
-**Card layout — live examples:**
+The card builds plain sentences from the structured attributes (it does
+**not** print the raw `*_reason` strings — those stay in the logs). It also
+reads `sensor.surplus_power` so it can say "idle" when there is no sun.
+
+**Card layout — live examples (Balanced, English):**
 
 Use case B, deferring to shave the peak:
 ```
-Home battery: 55%
-
-🔋 Discharge: 🟢 allowed
-  Expensive tariff — allow discharge (min SOC 41%)
-
-⚡ Charge: ⏸️ deferred (use case B)
-  surplus now 620Wh, headroom 4500Wh → defer (shaving export peak)
-  limit → 0W
+🔋  Home battery 55%
+    Saving room for the midday peak
+    Powers the house when needed
+```
+Use case A, car charging (battery charges greedily, discharge reserved for car):
+```
+🔋  Home battery 82%
+    Charging from solar
+    Reserved for the car
+```
+Evening, holding for the expensive hours:
+```
+🔋  Home battery 90%
+    Idle — no solar surplus
+    Holding charge for tonight
 ```
 
-Use case A, car charging (battery charges greedily):
-```
-Home battery: 82%
+**Status mapping** (technical → human):
 
-🔋 Discharge: 🔴 blocked — EV charging
-  EV active in immediate mode
-
-⚡ Charge: ▶️ released (use case A)
-  car connected & not full — battery charges greedily (the car shaves the export peak)
-  limit → 5000W
-```
+| Field | Value | Phrase |
+|-------|-------|--------|
+| `charge_action` | `deferred` | Saving room for the midday peak |
+| `charge_action` | `charging`/`released` + surplus | Charging from solar (+ "(peak)" if charging) |
+| `charge_action` | released + no surplus | Idle — no solar surplus |
+| `discharge_blocked_by_ev` | true | Reserved for the car |
+| `discharge_blocked_by_protection` | true | Holding charge for tonight |
+| `discharge_allowed` | true | Powers the house when needed |
 
 **Card YAML** (`custom:button-card`, `entity: sensor.battery_decision`):
 
@@ -2813,27 +2869,27 @@ label: >-
   [[[
   const a = entity.attributes;
   const soc = a.battery_soc != null ? Math.round(a.battery_soc) : '?';
-  const dis = a.discharge_allowed;
-  const disReason = a.discharge_reason || '';
+  const enabled = a.charge_shaving_enabled;
+  const action = a.charge_action || '';
   const byEv = a.discharge_blocked_by_ev;
   const byProt = a.discharge_blocked_by_protection;
-  const uc = a.charge_use_case || 'disabled';
-  const act = a.charge_action || '';
-  const chgReason = a.charge_reason || '';
-  const lim = a.charge_limit_w;
-  const head = '<b>Home battery:</b> ' + soc + '%';
-  let disBlock;
-  if (dis) { disBlock = '🔋 <b>Discharge:</b> 🟢 allowed'; }
-  else {
-    const why = byEv ? 'EV charging' : (byProt ? 'battery protection' : '');
-    disBlock = '🔋 <b>Discharge:</b> 🔴 blocked' + (why ? ' — ' + why : '');
+  const disAllowed = a.discharge_allowed;
+  let surplus = null;
+  const sp = states['sensor.surplus_power'];
+  if (sp && sp.state && !isNaN(parseFloat(sp.state))) { surplus = parseFloat(sp.state); }
+  let lines = [];
+  if (enabled) {
+    if (action === 'deferred') { lines.push('Saving room for the midday peak'); }
+    else if (surplus != null && surplus < 100) { lines.push('Idle — no solar surplus'); }
+    else if (action === 'charging') { lines.push('Charging from solar (peak)'); }
+    else { lines.push('Charging from solar'); }
   }
-  disBlock += '<br>&nbsp;&nbsp;' + disReason;
-  const actIcon = act === 'charging' ? '🟢' : (act === 'deferred' ? '⏸️' : (act === 'released' ? '▶️' : '➖'));
-  let chgBlock = '⚡ <b>Charge:</b> ' + actIcon + ' ' + act + (uc !== 'disabled' ? ' (use case ' + uc + ')' : '');
-  chgBlock += '<br>&nbsp;&nbsp;' + chgReason;
-  if (lim != null) { chgBlock += '<br>&nbsp;&nbsp;limit → ' + lim + 'W'; }
-  return head + '<br><br>' + disBlock + '<br><br>' + chgBlock;
+  if (byEv) { lines.push('Reserved for the car'); }
+  else if (byProt) { lines.push('Holding charge for tonight'); }
+  else if (disAllowed) { lines.push('Powers the house when needed'); }
+  let html = '<b>🔋  Home battery ' + soc + '%</b>';
+  for (const l of lines) { html += '<br><span style="opacity:0.75">' + l + '</span>'; }
+  return html;
   ]]]
 tap_action:
   action: none
