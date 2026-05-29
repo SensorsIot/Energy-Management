@@ -487,3 +487,59 @@ class BatteryOptimizer:
             sim_full,
             sim_with_strategy,
         )
+
+
+def should_charge_now(
+    remaining_surplus_wh: list[float],
+    headroom_wh: float,
+    current_surplus_wh: float,
+) -> bool:
+    """Decide whether to charge the home battery now (export-peak shaving).
+
+    Defers battery charging so its remaining headroom absorbs the highest
+    part of the day's grid-export curve. The inverter regulates to zero
+    export, so when charging is ON it absorbs the *whole* surplus of the
+    interval. We therefore pick the highest-surplus intervals of the rest
+    of the day until their full surplus fills the headroom — the "water
+    level" L is the surplus of the lowest selected interval — and charge
+    now iff the current interval is in that top band.
+
+    This is evaluated every 15 min and is fully self-correcting: headroom
+    is re-read from the actual SOC each tick, so as the battery fills, L
+    rises, the band narrows, and charging stops once full.
+
+    Args:
+        remaining_surplus_wh: per-15-min net surplus (Wh) for the rest of
+            today, including the current interval (negatives allowed).
+        headroom_wh: energy needed to reach the target SOC (Wh).
+        current_surplus_wh: this interval's net surplus (Wh).
+
+    Returns:
+        True to charge (or release control), False to defer charging.
+
+    """
+    # No surplus right now → nothing to defer; let normal behaviour run.
+    if current_surplus_wh <= 0:
+        return True
+    # Battery already full → no benefit in deferring.
+    if headroom_wh <= 0:
+        return True
+
+    positives = [e for e in remaining_surplus_wh if e > 0]
+    total_surplus = sum(positives)
+    # Can't fill the battery from the remaining surplus → charge ASAP.
+    if total_surplus <= headroom_wh:
+        return True
+
+    # Water-fill: accumulate the highest-surplus intervals until the
+    # headroom is met; L is the surplus of the last (lowest) one included.
+    accumulated = 0.0
+    water_level = 0.0
+    for surplus in sorted(positives, reverse=True):
+        accumulated += surplus
+        water_level = surplus
+        if accumulated >= headroom_wh:
+            break
+
+    # Charge now iff this interval is in the selected top band.
+    return current_surplus_wh >= water_level

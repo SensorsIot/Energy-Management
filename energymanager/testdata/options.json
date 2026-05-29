@@ -23,7 +23,9 @@
     "max_charge_w": 5000,
     "max_discharge_w": 5000,
     "soc_entity": "sensor.battery_state_of_capacity",
-    "discharge_control_entity": "number.batteries_maximum_discharging_power"
+    "discharge_control_entity": "number.batteries_maximum_discharging_power",
+    "charge_shaving_enabled": false,
+    "charge_control_entity": "number.battery_maximum_charging_power"
   },
   "tariff": {
     "weekday_cheap_start": "21:00",

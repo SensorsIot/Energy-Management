@@ -1639,7 +1639,9 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | `charge_efficiency` | 0.95 | Simulator (charge branch) |
 | `discharge_efficiency` | 0.95 | Simulator (discharge branch) |
 | `soc_entity` | `sensor.battery_state_of_capacity` | Current SOC readback |
-| `discharge_control_entity` | `number.battery_maximum_discharging_power` | Control output |
+| `discharge_control_entity` | `number.battery_maximum_discharging_power` | Discharge control output |
+| `charge_shaving_enabled` | `false` | Enable export-peak-shaving charge control (Section 4.2.3) |
+| `charge_control_entity` | `number.battery_maximum_charging_power` | Charge control output (Section 4.2.3) |
 
 **YAML `ev_charging` — safety-rule floor (independent from `battery.reserve_percent`):**
 
@@ -1937,6 +1939,80 @@ data:
 See [Appendix D.1 — Battery Discharge Optimizer Tests](#d1-battery-discharge-optimizer-tests). Test file: `energymanager/tests/test_battery_optimizer.py` (14 tests passing as of v1.5.0).
 
 See [Appendix D.4 — Discharge Blocking Tests](#d4-discharge-blocking-tests). Test file: `energymanager/tests/test_discharge_blocking.py` (17 tests passing as of v1.6.19).
+
+---
+
+### 4.2.3 Export-Peak-Shaving Charge Control
+
+#### Problem
+
+On a clear day the battery charges greedily at sunrise and reaches its
+target well before solar noon. The midday production peak is then exported
+to the grid — wasting the highest-power part of the day and pushing grid
+export toward the feed-in limit (clipping). If instead the battery's
+headroom is held for the peak, the inverter (regulating to zero export)
+absorbs that surplus into the battery, **shaving the maximum of the export
+curve**.
+
+This optimisation only runs when the **car is disconnected or full** — so
+it never competes with EV solar charging for the surplus.
+
+#### Mechanism
+
+A single output: `number.battery_maximum_charging_power`, set to `0`
+(defer) or `max_charge_w` (charge). Power modulation during the peak is
+left to the inverter's native zero-export regulation; energymanager only
+decides **whether** charging is on. Discharge is unaffected (a 0 charge
+limit never blocks discharge), so house load is always covered.
+
+#### Algorithm — stateless, every 15 min
+
+Because `run_optimization()` runs every 15 min, no start-time or latch is
+stored. Each tick re-decides from the current SOC and forecast:
+
+```
+headroom_wh        = (100 − current_soc) / 100 × capacity_wh
+remaining_surplus  = net_energy_wh per 15-min for the rest of today (Europe/Zurich)
+charge = should_charge_now(remaining_surplus, headroom_wh, current_surplus)
+```
+
+`should_charge_now()` (in `battery_optimizer.py`) is a **water-fill**: pick
+the highest-surplus intervals of the rest of the day until their *full*
+surplus fills the headroom; the surplus of the lowest selected interval is
+the water level **L**. Charge now iff the current interval's surplus ≥ L.
+
+Self-correcting and self-terminating:
+
+| Case | Result |
+|------|--------|
+| No surplus now (`current ≤ 0`) | charge / release (nothing to defer) |
+| Battery full (`headroom ≤ 0`) | charge / release |
+| Remaining surplus ≤ headroom | charge ASAP (can't overfill) |
+| Current surplus ≥ L | charge (in the peak band) |
+| Current surplus < L | **defer** (shaving the peak) |
+
+As the battery fills, `headroom` shrinks → `L` rises → the band narrows →
+charging stops once full. Handles cloudy and double-peak days naturally.
+
+#### Gate
+
+`_charge_gate_active()` is true when the car is disconnected
+(`binary_sensor.wallbox_connected` ≠ on, or OCPP down) **or** full
+(`sensor.smart_battery_last_known ≥ sensor.smart_charging_max_last_known`).
+When the gate is inactive the feature releases charging to `max_charge_w`,
+so it never leaves charging stuck off while the car wants surplus.
+
+#### Configuration
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `battery.charge_shaving_enabled` | `false` | Master switch (off → method is a no-op) |
+| `battery.charge_control_entity` | `number.battery_maximum_charging_power` | Control output |
+
+#### Test Cases
+
+Test file: `energymanager/tests/test_battery_optimizer.py`
+(`TestShouldChargeNow`).
 
 ---
 

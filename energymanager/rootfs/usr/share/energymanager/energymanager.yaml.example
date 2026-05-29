@@ -31,6 +31,11 @@ battery:
   max_discharge_w: 5000
   soc_entity: "sensor.battery_state_of_capacity"
   discharge_control_entity: "number.battery_maximum_discharging_power"
+  # Export-peak shaving: defer battery charging so its headroom absorbs
+  # the midday export peak (only when the car is disconnected or full).
+  # Re-evaluated every 15 min. Off by default. See FSD 4.4.
+  charge_shaving_enabled: false
+  charge_control_entity: "number.battery_maximum_charging_power"
 
 # Electricity tariff settings
 tariff:

@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.10"
+__version__ = "1.8.11"
 
 import json
 import logging
@@ -22,7 +22,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 
 from src.forecast_reader import ForecastReader
 from src.ha_client import HAClient
-from src.battery_optimizer import BatteryOptimizer
+from src.battery_optimizer import BatteryOptimizer, should_charge_now
 from src.appliance_signal import ApplianceSignal
 from src.ev_battery import EVBatteryOptimizer
 from src.ev_state_machine import EVStateMachine, EVInputs, EVState
@@ -144,6 +144,19 @@ class EnergyManager:
         self.discharge_control_entity = battery_opts.get(
             "discharge_control_entity", "number.battery_maximum_discharging_power"
         )
+        # Export-peak-shaving charge control: defer battery charging so its
+        # headroom absorbs the midday export peak. Only active when the car
+        # is disconnected or full. Off by default — flip on in the add-on
+        # config to enable. See FSD 4.4.
+        self.charge_shaving_enabled = battery_opts.get(
+            "charge_shaving_enabled", False
+        )
+        self.charge_control_entity = battery_opts.get(
+            "charge_control_entity", "number.battery_maximum_charging_power"
+        )
+        self.charge_max_w = battery_opts.get("max_charge_w", 5000)
+        # Tracks last applied charge state to only write/log on change.
+        self._last_charge_allowed: bool | None = None
 
         # Appliance signal config
         appliance_opts = options.get("appliances", {})
@@ -574,6 +587,93 @@ class EnergyManager:
             )
             self.control_battery(discharge_allowed)
 
+    def _charge_gate_active(self) -> bool:
+        """Return True when export-peak-shaving may manage charging.
+
+        Active only when the car is disconnected or already full — so the
+        feature never competes with EV solar charging for the surplus.
+        """
+        wb_state = self.ha_client.get_state(self.wallbox_connected_entity)
+        connected = wb_state is not None and wb_state.get("state") == "on"
+        if not connected:
+            return True  # no car (or OCPP down) → free to shave
+        car_soc = self.ha_client.get_sensor_value(self.smart_car_soc_entity)
+        target = self.ha_client.get_sensor_value(self.car_charging_max_entity)
+        if car_soc is not None and target is not None and car_soc >= float(target):
+            return True  # car full → free to shave
+        return False
+
+    def control_battery_charge(self, current_soc: float, forecast, now) -> None:
+        """Defer battery charging to shave the export peak (FSD 4.4).
+
+        Stateless per-tick decision (re-evaluated every 15 min): hold the
+        battery's headroom for the highest-surplus intervals of the rest of
+        the day so it absorbs the export peak instead of charging greedily
+        at sunrise. Sets number.battery_maximum_charging_power to 0 (defer)
+        or max (charge). Releases to max when the gate is inactive or the
+        feature is disabled, so it never leaves charging stuck off.
+        """
+        if not self.charge_shaving_enabled:
+            return
+
+        if not self._charge_gate_active():
+            self._apply_charge_control(True, "car charging — charge released")
+            return
+
+        headroom_wh = max(0.0, (100.0 - current_soc) / 100.0 * self.capacity_wh)
+
+        # Build the rest-of-today (Europe/Zurich) per-interval surplus curve
+        # from the forecast. net_energy_wh = PV − load per 15 min = export.
+        eod = (
+            datetime.now(SWISS_TZ)
+            .replace(hour=23, minute=59, second=59, microsecond=0)
+            .astimezone(UTC)
+        )
+        start_aligned = now.replace(
+            minute=(now.minute // 15) * 15, second=0, microsecond=0
+        )
+        remaining: list[float] = []
+        current_surplus = 0.0
+        for t in forecast.index:
+            ts = t if t.tzinfo else t.replace(tzinfo=UTC)
+            if ts < start_aligned or ts > eod:
+                continue
+            net = float(forecast.loc[t].get("net_energy_wh", 0.0))
+            if not remaining:
+                current_surplus = net  # first qualifying interval = now
+            remaining.append(net)
+
+        charge = should_charge_now(remaining, headroom_wh, current_surplus)
+        reason = (
+            f"surplus now {current_surplus:.0f}Wh, headroom {headroom_wh:.0f}Wh → "
+            f"{'charge' if charge else 'defer (shaving export peak)'}"
+        )
+        self._apply_charge_control(charge, reason)
+
+    def _apply_charge_control(self, charge_allowed: bool, reason: str) -> None:
+        """Set max charging power to max (charge) or 0 (defer) if changed."""
+        if charge_allowed == self._last_charge_allowed:
+            return
+        target = self.charge_max_w if charge_allowed else 0
+        logger.info(
+            f"Battery charge {'allowed' if charge_allowed else 'deferred'} "
+            f"→ {self.charge_control_entity}={target}W ({reason})"
+        )
+        success, error_msg = self.ha_client.set_number(
+            self.charge_control_entity, target, max_retries=5
+        )
+        if not success:
+            logger.error(f"Failed to set charge power: {error_msg}")
+            notify_error(
+                title="Battery Charge Control Failed",
+                message=(
+                    f"Failed to set {self.charge_control_entity} to {target}W "
+                    f"after 5 attempts.\nError: {error_msg}"
+                ),
+            )
+            return
+        self._last_charge_allowed = charge_allowed
+
     def run_optimization(self) -> None:
         """Run battery optimization cycle."""
         logger.info("=" * 50)
@@ -661,6 +761,9 @@ class EnergyManager:
             # Control battery (protection flag — combined with EV flag)
             self._discharge_blocked_by_protection = not decision.discharge_allowed
             self._update_discharge_control()
+
+            # Export-peak-shaving charge control (no-op unless enabled)
+            self.control_battery_charge(current_soc, forecast, now)
 
             # Calculate appliance signal using full simulation
             # (checks if battery has enough energy to run appliance without grid import)

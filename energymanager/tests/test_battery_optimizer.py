@@ -12,7 +12,11 @@ import pandas as pd
 from datetime import datetime, UTC
 from zoneinfo import ZoneInfo
 
-from src.battery_optimizer import BatteryOptimizer, DischargeDecision
+from src.battery_optimizer import (
+    BatteryOptimizer,
+    DischargeDecision,
+    should_charge_now,
+)
 
 SWISS_TZ = ZoneInfo("Europe/Zurich")
 
@@ -592,6 +596,59 @@ class TestHysteresis:
                 return
 
         pytest.skip("Could not find borderline SOC for this forecast")
+
+
+class TestShouldChargeNow:
+    """Export-peak-shaving charge decision (FSD 4.2.3 water-fill)."""
+
+    def test_no_surplus_now_releases(self) -> None:
+        """No surplus this interval → charge/release (nothing to defer)."""
+        assert should_charge_now(
+            [0.0, 500.0, 1000.0], headroom_wh=2000, current_surplus_wh=0.0
+        ) is True
+
+    def test_negative_surplus_now_releases(self) -> None:
+        """Net import this interval → release."""
+        assert should_charge_now(
+            [-100.0, 500.0], headroom_wh=2000, current_surplus_wh=-100.0
+        ) is True
+
+    def test_battery_full_releases(self) -> None:
+        """Zero headroom → release (no benefit deferring)."""
+        assert should_charge_now(
+            [800.0, 900.0], headroom_wh=0.0, current_surplus_wh=800.0
+        ) is True
+
+    def test_cannot_fill_charges_asap(self) -> None:
+        """Total remaining surplus ≤ headroom → charge now (can't overfill)."""
+        # total = 1500 < headroom 5000
+        assert should_charge_now(
+            [500.0, 1000.0], headroom_wh=5000, current_surplus_wh=500.0
+        ) is True
+
+    def test_defers_outside_peak_band(self) -> None:
+        """Low-surplus interval below water level L → defer."""
+        # surplus profile: now=300 (low), peak ahead 1000+1200. headroom=1000.
+        # top band to fill 1000: [1200] then [1000] → L=1000. current 300 < L.
+        remaining = [300.0, 1000.0, 1200.0]
+        assert should_charge_now(remaining, headroom_wh=1000, current_surplus_wh=300.0) is False
+
+    def test_charges_inside_peak_band(self) -> None:
+        """High-surplus interval at/above L → charge."""
+        # headroom=1000; sorted desc 1200,1000,300; accumulate 1200 ≥1000 → L=1200.
+        # current 1200 ≥ L → charge.
+        remaining = [1200.0, 1000.0, 300.0]
+        assert should_charge_now(remaining, headroom_wh=1000, current_surplus_wh=1200.0) is True
+
+    def test_water_level_picks_top_intervals(self) -> None:
+        """Headroom spanning two intervals: both top ticks charge, low defers."""
+        remaining = [400.0, 1000.0, 900.0, 200.0]  # current = 400
+        # headroom=1900 → sorted 1000,900,400,200; accumulate 1000(→1000),900(→1900)≥1900 → L=900.
+        # current 400 < 900 → defer.
+        assert should_charge_now(remaining, headroom_wh=1900, current_surplus_wh=400.0) is False
+        # the 1000 and 900 intervals (≥L) would charge:
+        assert should_charge_now(remaining, headroom_wh=1900, current_surplus_wh=900.0) is True
+        assert should_charge_now(remaining, headroom_wh=1900, current_surplus_wh=1000.0) is True
 
 
 if __name__ == "__main__":
