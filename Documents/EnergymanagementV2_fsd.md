@@ -1944,75 +1944,96 @@ See [Appendix D.4 — Discharge Blocking Tests](#d4-discharge-blocking-tests). T
 
 ### 4.2.3 Export-Peak-Shaving Charge Control
 
+This controls **when the home battery is allowed to charge from PV**. It is
+separate from, and runs *after*, the discharge decision (4.2.2): discharge
+controls `number.battery_maximum_discharging_power`, this controls
+`number.battery_maximum_charging_power`. The two never conflict — a `0`
+charge limit never blocks discharge, so house load is always covered.
+
+> The home battery is **PV-only**; it is never grid-charged. Setting the
+> charge limit to `0` therefore only ever defers PV charging, never grid
+> import.
+
 #### Problem
 
 On a clear day the battery charges greedily at sunrise and reaches its
 target well before solar noon. The midday production peak is then exported
 to the grid — wasting the highest-power part of the day and pushing grid
 export toward the feed-in limit (clipping). If instead the battery's
-headroom is held for the peak, the inverter (regulating to zero export)
+headroom is **held for the peak**, the inverter (regulating to zero export)
 absorbs that surplus into the battery, **shaving the maximum of the export
 curve**.
 
-This optimisation only runs when the **car is disconnected or full** — so
-it never competes with EV solar charging for the surplus.
+#### Two distinct use cases
+
+The charge limit is set every 15 min by `control_battery_charge()`. There
+are two top-level use cases, selected by `_charge_gate_active()`:
+
+| # | Use case | Criteria (gate) | Behaviour | Charge limit |
+|---|----------|-----------------|-----------|-------------|
+| **A** | **EV owns the surplus** | feature enabled **AND** car connected **AND** car not full (`binary_sensor.wallbox_connected = on` **AND** `smart_battery_last_known < smart_charging_max_last_known`) | Charge **released** — EV solar charging (4.3) takes the surplus; the battery acts only as the gap buffer per Rule 2. Shaving stays out of the way. | `max_charge_w` |
+| **B** | **Export-peak shaving** | feature enabled **AND** car disconnected (or OCPP down) **OR** car full | Defer/allow charging per the water-fill below, so the battery's headroom absorbs the export peak. | `0` or `max_charge_w` |
+
+When the feature is **disabled** (`charge_shaving_enabled = false`,
+default), `control_battery_charge()` is a no-op and the charge limit is
+left at whatever HA/the inverter holds it — neither use case applies.
+
+#### Use case B — sub-cases (water-fill decision)
+
+Within use case B, `should_charge_now()` decides ON/OFF each tick. It is a
+**water-fill**: take the highest-surplus 15-min intervals of the rest of
+today until their *full* surplus fills the battery headroom; the surplus of
+the lowest selected interval is the water level **L**. Inputs each tick:
+
+```
+headroom_wh       = (100 − current_soc) / 100 × capacity_wh
+remaining_surplus = net_energy_wh per 15-min for the rest of today (Europe/Zurich)
+current_surplus   = net_energy_wh of the current interval
+```
+
+| Sub-case | Criteria | Behaviour | Charge limit |
+|----------|----------|-----------|-------------|
+| B1 No surplus now | `current_surplus ≤ 0` | Nothing to defer → release | `max_charge_w` |
+| B2 Battery full | `headroom_wh ≤ 0` | No benefit deferring → release | `max_charge_w` |
+| B3 Cannot fill today | `Σ remaining_surplus ≤ headroom_wh` | Forecast can't fill the battery → charge ASAP (e.g. cloudy day) | `max_charge_w` |
+| B4 **In the peak band** | `current_surplus ≥ L` | This interval is one of the top-surplus intervals → **charge**; inverter absorbs surplus (zero export) | `max_charge_w` |
+| B5 **Below the peak band** | `current_surplus < L` | Off-peak surplus → **defer**; surplus is exported now, headroom held for the peak | `0` |
+
+Evaluated top-to-bottom; first matching row wins.
+
+**Self-correcting & self-terminating:** `headroom_wh` is re-read from the
+*actual* SOC each tick, so as the battery fills, `L` rises, the peak band
+narrows, and charging stops once full (B2). No start-time or latch is
+stored, so cloudy days (B3) and double-peak days are handled naturally.
+
+#### Worked example
+
+Capacity 10 kWh, SOC 50% → headroom 5 kWh. Rest-of-day forecast surplus
+(kWh/15 min): morning 0.3–0.6, midday peak 1.0–1.4, afternoon 0.4–0.7.
+Water-fill picks the midday intervals whose full surplus sums to 5 kWh →
+`L ≈ 1.0`. Result: mornings/afternoons (`< L`) **defer** (B5, exported),
+midday (`≥ L`) **charges** (B4) → the export curve is clipped flat across
+the peak while the battery still reaches 100%.
 
 #### Mechanism
 
-A single output: `number.battery_maximum_charging_power`, set to `0`
-(defer) or `max_charge_w` (charge). Power modulation during the peak is
-left to the inverter's native zero-export regulation; energymanager only
-decides **whether** charging is on. Discharge is unaffected (a 0 charge
-limit never blocks discharge), so house load is always covered.
-
-#### Algorithm — stateless, every 15 min
-
-Because `run_optimization()` runs every 15 min, no start-time or latch is
-stored. Each tick re-decides from the current SOC and forecast:
-
-```
-headroom_wh        = (100 − current_soc) / 100 × capacity_wh
-remaining_surplus  = net_energy_wh per 15-min for the rest of today (Europe/Zurich)
-charge = should_charge_now(remaining_surplus, headroom_wh, current_surplus)
-```
-
-`should_charge_now()` (in `battery_optimizer.py`) is a **water-fill**: pick
-the highest-surplus intervals of the rest of the day until their *full*
-surplus fills the headroom; the surplus of the lowest selected interval is
-the water level **L**. Charge now iff the current interval's surplus ≥ L.
-
-Self-correcting and self-terminating:
-
-| Case | Result |
-|------|--------|
-| No surplus now (`current ≤ 0`) | charge / release (nothing to defer) |
-| Battery full (`headroom ≤ 0`) | charge / release |
-| Remaining surplus ≤ headroom | charge ASAP (can't overfill) |
-| Current surplus ≥ L | charge (in the peak band) |
-| Current surplus < L | **defer** (shaving the peak) |
-
-As the battery fills, `headroom` shrinks → `L` rises → the band narrows →
-charging stops once full. Handles cloudy and double-peak days naturally.
-
-#### Gate
-
-`_charge_gate_active()` is true when the car is disconnected
-(`binary_sensor.wallbox_connected` ≠ on, or OCPP down) **or** full
-(`sensor.smart_battery_last_known ≥ sensor.smart_charging_max_last_known`).
-When the gate is inactive the feature releases charging to `max_charge_w`,
-so it never leaves charging stuck off while the car wants surplus.
+energymanager only decides **whether** charging is on (limit `0` or
+`max_charge_w`); the inverter's native zero-export regulation does the
+power modulation during the peak. `_apply_charge_control()` writes the
+limit only when it changes (logged as `Battery charge allowed/deferred`).
 
 #### Configuration
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `battery.charge_shaving_enabled` | `false` | Master switch (off → method is a no-op) |
-| `battery.charge_control_entity` | `number.battery_maximum_charging_power` | Control output |
+| `battery.charge_shaving_enabled` | `false` | Master switch (off → no-op; neither use case runs) |
+| `battery.charge_control_entity` | `number.battery_maximum_charging_power` | Control output (use case A & B) |
+| `battery.max_charge_w` | `5000` | Charge limit written when charging is allowed |
 
 #### Test Cases
 
 Test file: `energymanager/tests/test_battery_optimizer.py`
-(`TestShouldChargeNow`).
+(`TestShouldChargeNow`) — covers sub-cases B1–B5.
 
 ---
 
