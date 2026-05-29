@@ -1594,6 +1594,60 @@ union(tables: [forecast, actual])
 
 # Chapter 4: EnergyManager Add-on
 
+## 4.0 Optimization Overview
+
+EnergyManager runs a set of **independent optimizations, each owning one
+controllable resource (entity)**. They share the same forecast/state inputs
+(Section 4.1) but make separate decisions. This section is the map: *what*
+is optimized, *for which entity*, on *what criteria*, with *what output*.
+
+### Controlled entities and their optimizations
+
+| Entity | Optimization | Goal | Decides | Control output | Cadence | Section |
+|--------|--------------|------|---------|----------------|---------|---------|
+| **Home battery** | Discharge blocking (battery protection) | Keep enough SOC to cover the expensive tariff window (and the EV) instead of dumping it early | Allow / block discharge | `number.battery_maximum_discharging_power` (`max`/`0`) | 15 min | 4.2.2 |
+| **Home battery** | Export-peak-shaving charge control | Defer PV charging so the battery's headroom absorbs the midday **export** peak (zero-export, less clipping) | Allow / defer charging | `number.battery_maximum_charging_power` (`max`/`0`) | 15 min | 4.2.3 |
+| **EV (car)** | Solar-surplus charging | Maximize solar self-consumption into the car without draining the home battery | Wallbox charge power (amp step) | `number.wallbox_power_limit` (via REST `set_sensor_state`) | 10 s | 4.3.6 |
+| **EV (car)** | Cheap / immediate charging (manual modes) | Reach the user's target SOC by a kWh budget + SOC stop | Wallbox power + discharge block | `number.wallbox_power_limit` & `_discharge_blocked_by_ev` | 10 s | 4.3.4–4.3.6 |
+| **Appliance (washer)** | Run-now signal | Advise when a high-power appliance can run on solar without forcing grid import | green / orange / red | `sensor.appliance_signal` (**advisory — no actuation**) | 15 min | 4.4 |
+
+### Execution order (decision DAG)
+
+The home battery runs **first**: its SOC forecast (4.2.1) is the shared
+input the others read. Order and interactions:
+
+```
+1. Home battery   → SOC simulation (4.2.1)
+                  → discharge blocking (4.2.2)
+                  → charge shaving (4.2.3)
+2. EV (car)       → reads the home-battery SOC forecast as a 48-h safety gate (4.3.6)
+3. Appliance      → reads the same SOC simulation to grade the signal (4.4)
+```
+
+Key cross-entity interactions (criteria that make one optimization yield to
+another):
+
+- **EV solar charging is gated by home-battery safety** — it stops if the
+  home-battery SOC forecast would fall below `ev_charging.reserve_percent`
+  over the next 48 h (4.3.6).
+- **Charge shaving yields to the EV** — when the car is connected and not
+  full, charge shaving releases the battery charge limit so the EV owns the
+  surplus (use case A, 4.2.3).
+- **EV manual charging blocks home-battery discharge** — immediate/cheap
+  modes set `_discharge_blocked_by_ev` so the house battery is not drained
+  into the car (4.2.2 truth table).
+- **Washer is advisory only** — it never actuates; it informs the user (or
+  an HA automation) whether to start the appliance (4.4).
+
+### Control vs. advisory
+
+| Type | Optimizations | Effect |
+|------|---------------|--------|
+| **Actuating** (writes an HA control entity) | battery discharge, battery charge shaving, all EV charging | Directly changes battery/wallbox behaviour |
+| **Advisory** (publishes a state for the user/automations) | washer signal | No direct actuation |
+
+---
+
 ## 4.1 Prerequisites
 
 Everything the decision logic (Sections 4.2–4.5) reads from. All consumers share these inputs; consumer-specific transforms happen inside each consumer's section.
