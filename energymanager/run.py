@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.11"
+__version__ = "1.8.12"
 
 import json
 import logging
@@ -147,7 +147,7 @@ class EnergyManager:
         # Export-peak-shaving charge control: defer battery charging so its
         # headroom absorbs the midday export peak. Only active when the car
         # is disconnected or full. Off by default — flip on in the add-on
-        # config to enable. See FSD 4.4.
+        # config to enable. See FSD 4.2.3.
         self.charge_shaving_enabled = battery_opts.get(
             "charge_shaving_enabled", False
         )
@@ -157,6 +157,14 @@ class EnergyManager:
         self.charge_max_w = battery_opts.get("max_charge_w", 5000)
         # Tracks last applied charge state to only write/log on change.
         self._last_charge_allowed: bool | None = None
+        # Battery decision reasoning, published to sensor.battery_decision
+        # for the dashboard (FSD 4.6.4). Recorded by control_battery_charge.
+        self.battery_decision_entity = battery_opts.get(
+            "battery_decision_entity", "sensor.battery_decision"
+        )
+        self._charge_use_case: str = "disabled"
+        self._charge_action: str = "released"
+        self._charge_reason: str = "charge shaving disabled"
 
         # Appliance signal config
         appliance_opts = options.get("appliances", {})
@@ -604,7 +612,7 @@ class EnergyManager:
         return False
 
     def control_battery_charge(self, current_soc: float, forecast, now) -> None:
-        """Defer battery charging to shave the export peak (FSD 4.4).
+        """Defer battery charging to shave the export peak (FSD 4.2.3).
 
         Stateless per-tick decision (re-evaluated every 15 min): hold the
         battery's headroom for the highest-surplus intervals of the rest of
@@ -612,14 +620,30 @@ class EnergyManager:
         at sunrise. Sets number.battery_maximum_charging_power to 0 (defer)
         or max (charge). Releases to max when the gate is inactive or the
         feature is disabled, so it never leaves charging stuck off.
+
+        Records the decision (use case / action / reason) on self for
+        publication to sensor.battery_decision (FSD 4.6.4).
         """
         if not self.charge_shaving_enabled:
+            self._charge_use_case = "disabled"
+            self._charge_action = "released"
+            self._charge_reason = "charge shaving disabled"
             return
 
         if not self._charge_gate_active():
+            # Use case A: car needs energy → it is the peak-shaving load;
+            # the battery charges greedily to capture the rest.
+            self._charge_use_case = "A"
+            self._charge_action = "released"
+            self._charge_reason = (
+                "car connected & not full — battery charges greedily "
+                "(the car shaves the export peak)"
+            )
             self._apply_charge_control(True, "car charging — charge released")
             return
 
+        # Use case B: no car load → defer to shave the export peak.
+        self._charge_use_case = "B"
         headroom_wh = max(0.0, (100.0 - current_soc) / 100.0 * self.capacity_wh)
 
         # Build the rest-of-today (Europe/Zurich) per-interval surplus curve
@@ -648,6 +672,8 @@ class EnergyManager:
             f"surplus now {current_surplus:.0f}Wh, headroom {headroom_wh:.0f}Wh → "
             f"{'charge' if charge else 'defer (shaving export peak)'}"
         )
+        self._charge_action = "charging" if charge else "deferred"
+        self._charge_reason = reason
         self._apply_charge_control(charge, reason)
 
     def _apply_charge_control(self, charge_allowed: bool, reason: str) -> None:
@@ -673,6 +699,45 @@ class EnergyManager:
             )
             return
         self._last_charge_allowed = charge_allowed
+
+    def publish_battery_decision(self, decision, current_soc: float) -> None:
+        """Publish combined battery reasoning to sensor.battery_decision.
+
+        Surfaces both home-battery decisions for the dashboard (FSD 4.6.4):
+        the discharge decision (4.2.2, two block flags) and the charge-
+        shaving decision (4.2.3, use case A/B). Advisory display only.
+        """
+        discharge_allowed = not (
+            self._discharge_blocked_by_protection or self._discharge_blocked_by_ev
+        )
+        charge_limit_w = None
+        if self.charge_shaving_enabled and self._last_charge_allowed is not None:
+            charge_limit_w = self.charge_max_w if self._last_charge_allowed else 0
+        state = (
+            f"discharge={'on' if discharge_allowed else 'off'} "
+            f"charge={self._charge_action}"
+        )
+        self.ha_client.set_sensor_state(
+            self.battery_decision_entity,
+            state,
+            attributes={
+                "friendly_name": "Battery Decision",
+                "battery_soc": round(current_soc, 1),
+                # Discharge decision (FSD 4.2.2)
+                "discharge_allowed": discharge_allowed,
+                "discharge_reason": decision.reason,
+                "discharge_blocked_by_protection": self._discharge_blocked_by_protection,
+                "discharge_blocked_by_ev": self._discharge_blocked_by_ev,
+                "discharge_min_soc_percent": round(decision.min_soc_percent, 1),
+                # Charge-shaving decision (FSD 4.2.3)
+                "charge_shaving_enabled": self.charge_shaving_enabled,
+                "charge_use_case": self._charge_use_case,
+                "charge_action": self._charge_action,
+                "charge_reason": self._charge_reason,
+                "charge_limit_w": charge_limit_w,
+                "icon": "mdi:home-battery",
+            },
+        )
 
     def run_optimization(self) -> None:
         """Run battery optimization cycle."""
@@ -764,6 +829,9 @@ class EnergyManager:
 
             # Export-peak-shaving charge control (no-op unless enabled)
             self.control_battery_charge(current_soc, forecast, now)
+
+            # Publish combined battery reasoning for the dashboard
+            self.publish_battery_decision(decision, current_soc)
 
             # Calculate appliance signal using full simulation
             # (checks if battery has enough energy to run appliance without grid import)

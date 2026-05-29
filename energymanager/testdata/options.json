@@ -25,7 +25,8 @@
     "soc_entity": "sensor.battery_state_of_capacity",
     "discharge_control_entity": "number.batteries_maximum_discharging_power",
     "charge_shaving_enabled": false,
-    "charge_control_entity": "number.battery_maximum_charging_power"
+    "charge_control_entity": "number.battery_maximum_charging_power",
+    "battery_decision_entity": "sensor.battery_decision"
   },
   "tariff": {
     "weekday_cheap_start": "21:00",

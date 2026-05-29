@@ -1611,7 +1611,7 @@ is optimized, *for which entity*, on *what criteria*, with *what output*.
 | **EV (car)** | Cheap / immediate charging (manual modes) | Reach the user's target SOC by a kWh budget + SOC stop | Wallbox power + discharge block | `number.wallbox_power_limit` & `_discharge_blocked_by_ev` | 10 s | 4.3.4–4.3.6 |
 | **Appliance (washer)** | Run-now signal | Advise when a high-power appliance can run on solar without forcing grid import | green / orange / red | `sensor.appliance_signal` (**advisory — no actuation**) | 15 min | 4.4 |
 
-### Execution order (decision DAG)
+### Execution order (decision DAG, Directed Acyclic Graph)
 
 The home battery runs **first**: its SOC forecast (4.2.1) is the shared
 input the others read. Order and interactions:
@@ -1726,16 +1726,6 @@ The SOC simulation predicts battery state over the forecast horizon. This is the
 | `without_strategy` | Raw simulation with free discharge — the "why we block" reference | Grafana only |
 
 `simulate_soc(soc_percent, forecast, block_from, block_until)` supports optional discharge-block windows; `calculate_decision()` uses this to generate the `with_strategy` curve.
-
-> **Note — charging is modelled as greedy.** The simulation charges the
-> battery from surplus as soon as it is available (up to `max_charge_w`). It
-> does **not** model the export-peak-shaving deferral (4.2.3). On days when
-> shaving is active (car disconnected/full), the *intraday* SOC curve will
-> therefore be lower in the morning than plotted, then catch up at the peak.
-> End-of-day SOC is unaffected (shaving still targets 100 %), and the EV
-> safety rule is unaffected (it only matters while the car is connected,
-> when shaving is off). The mismatch is cosmetic — it touches the Grafana
-> curve and the washer signal's intraday min-SOC on shaving days only.
 
 #### Basic Loop (net = PV − Load → battery flow)
 
@@ -2035,17 +2025,8 @@ are two top-level use cases, selected by `_charge_gate_active()`:
 
 | # | Use case | Criteria (gate) | Behaviour | Charge limit |
 |---|----------|-----------------|-----------|-------------|
-| **A** | **EV owns the surplus** | feature enabled **AND** car connected **AND** car not full (`binary_sensor.wallbox_connected = on` **AND** `smart_battery_last_known < smart_charging_max_last_known`) | Charge **released**; the battery charges **greedily** to capture every remaining Wh (see rationale below). | `max_charge_w` |
+| **A** | **EV owns the surplus** | feature enabled **AND** car connected **AND** car not full (`binary_sensor.wallbox_connected = on` **AND** `smart_battery_last_known < smart_charging_max_last_known`) | Charge **released** — EV solar charging (4.3) takes the surplus; the battery acts only as the gap buffer per Rule 2. Shaving stays out of the way. | `max_charge_w` |
 | **B** | **Export-peak shaving** | feature enabled **AND** car disconnected (or OCPP down) **OR** car full | Defer/allow charging per the water-fill below, so the battery's headroom absorbs the export peak. | `0` or `max_charge_w` |
-
-**Why use case A doesn't shave:** when the car needs energy it *is* the
-peak-shaving load — EV charging draws the midday surplus directly, which
-flattens the export curve just as battery deferral would. So there is
-nothing left for the battery to shave; instead the battery charges greedily
-to grab whatever surplus the car doesn't take. Shaving (deferring battery
-charge) only makes sense in use case B, where there is **no** car load to
-absorb the peak. The two mechanisms are therefore mutually exclusive by
-design, never competing for the same surplus.
 
 When the feature is **disabled** (`charge_shaving_enabled = false`,
 default), `control_battery_charge()` is a no-op and the charge limit is
@@ -2702,52 +2683,170 @@ cards:
 
 ### 4.6.3 Solar Decision Card (Amazon Fire Dashboard)
 
-Displays EV charging decision with case evaluation and pass/fail status. Uses `sensor.ev_target_power` attributes.
+Displays the **EV charging** decision with the active rule and pass/fail
+status. A `custom:button-card` whose `label` template reads
+`sensor.ev_target_power` attributes. The authoritative `reason` attribute is
+shown at the bottom and already encodes the EOD snap-up forecast gate
+(4.3.6), so no extra attribute is needed for it.
 
-**Card layout — case evaluation with live values:**
+**Card layout — live examples:**
 
+Rule 2 charging (surplus above threshold, 48-h safety passed):
 ```
-Surplus: 4200W  Threshold: 1380W  ✅
+Surplus: 4200W   Threshold: 1380W   ✅
+Grid export: 4200W
 
-🟢 Battery will be full → Case 1
-   Snap-to-amp: 7A → 4830W
+☀️ Rule 2: Solar Surplus 4200W
+  Home battery SOC: 82%
+  48 h min SOC: 64% vs floor 20% 🟢 safe
+  🟢 Home battery will reach 100% at 13:30
 
-📊 FORECAST → 4830W
-```
-
-```
-Surplus: 4200W  Threshold: 1380W  ✅
-
-⚪ Battery will NOT be full → Case 2
-   Step-down: 8A → 7A → 4830W
-   reaches target SOC? 🟢 yes (82%)
-   battery will hit min? 🟢 no
-
-📊 FORECAST → 4830W
+→ 4830W
+  Surplus 4200W ≥ 1380W, forecast → 4830W (forecast EOD 78% < target 85% — snap-up allowed)
 ```
 
+Blocked by the 48-h home-battery safety rule (surplus available, but the
+forecast dips below the floor):
 ```
-Surplus: 800W  Threshold: 1380W  ❌
+Surplus: 3870W   Threshold: 3000W   ✅
+Grid export: 3870W
 
-⏸️ NO CHARGING → 0W
+⏸️ Not charging
+  🔴 Blocked by home-battery 48 h safety
+  48 h min SOC: 11% vs floor 20% 🔴 blocked
+
+→ no charging
+  No charging — min SOC forecast 11% < floor 20%
 ```
 
-**Sensor attributes used by card:**
+Below threshold:
+```
+Surplus: 800W   Threshold: 1380W   ❌
+
+⏸️ Not charging
+  Surplus 800W < threshold 1380W
+
+→ no charging
+```
+
+**Sensor attributes used by card** (published on `sensor.ev_target_power`, run.py):
 
 | Attribute | Purpose |
 |-----------|---------|
+| `reason` | Authoritative decision string (includes the EOD snap-up gate result) |
+| `ev_charging_rule` | Active rule: `battery_full`, `solar_surplus`, or `none` |
 | `threshold_w` | Min solar power threshold (W) |
 | `surplus_power_w` | Solar surplus = PV − house load (W) |
-| `surplus_capture_w` | Capture power offered to wallbox (W) |
 | `grid_export_w` | Current grid export (W) |
-| `candidate_power_w` | Winning charging power from `snap_to_power_step()` (W) |
+| `snap_power_w` | Winning charging power from `snap_to_power_step()` (W); 0 = no charging |
+| `battery_soc` | Current home-battery SOC (%) |
 | `battery_will_be_full` | Informational: does peak SOC today reach 100%? |
+| `battery_full_time` | Forecast time the home battery reaches 100% (if any) |
 | `ev_safe` | `check_ev_safe` passed — EV allowed this cycle |
-| `battery_min_soc_forecast_48h` | Min forecast SOC over next 48 h, with EV load subtracted (%) |
-| `battery_min_soc_floor` | Floor value used by the safety rule (= `battery.reserve_percent`) |
-| `ev_charging_source` | Active source: `surplus`, `forecast`, or `none` |
+| `battery_min_soc_forecast_48h` | Min forecast home-battery SOC over next 48 h, EV load subtracted (%) |
+| `battery_min_soc_floor` | Floor used by the safety rule (= `ev_charging.reserve_percent`) |
 
-**Result icons:** ⚡ Rule 1 (Battery Full), 📊 Rule 2 (Solar Surplus), ⏸️ no charging.
+**Result icons:** ⚡ Rule 1 (Battery Full), ☀️ Rule 2 (Solar Surplus), ⏸️ no charging.
+
+### 4.6.4 Battery Decision Card
+
+Companion to 4.6.3 for the **home battery**. Surfaces both home-battery
+decisions — the discharge decision (4.2.2) and the charge-shaving decision
+(4.2.3) — that otherwise live only in the logs. Advisory display only; the
+card never actuates.
+
+`publish_battery_decision()` writes `sensor.battery_decision` every 15-min
+cycle. State string: `discharge=on|off charge=<action>`.
+
+**Sensor attributes used by card** (published on `sensor.battery_decision`, run.py):
+
+| Attribute | Purpose |
+|-----------|---------|
+| `battery_soc` | Current home-battery SOC (%) |
+| `discharge_allowed` | Combined discharge decision (4.2.2) |
+| `discharge_reason` | Human-readable discharge reason |
+| `discharge_blocked_by_protection` | SOC-forecast protection flag |
+| `discharge_blocked_by_ev` | EV manual-charge block flag |
+| `discharge_min_soc_percent` | Min forecast SOC over the protection window (%) |
+| `charge_shaving_enabled` | Master switch (4.2.3) |
+| `charge_use_case` | `A` (EV owns surplus), `B` (shaving), or `disabled` |
+| `charge_action` | `charging`, `deferred`, `released`, or `disabled` |
+| `charge_reason` | Human-readable charge-shaving reason |
+| `charge_limit_w` | Charge limit being applied (W); `0` = deferred, `null` = not managed |
+
+**Card layout — live examples:**
+
+Use case B, deferring to shave the peak:
+```
+Home battery: 55%
+
+🔋 Discharge: 🟢 allowed
+  Expensive tariff — allow discharge (min SOC 41%)
+
+⚡ Charge: ⏸️ deferred (use case B)
+  surplus now 620Wh, headroom 4500Wh → defer (shaving export peak)
+  limit → 0W
+```
+
+Use case A, car charging (battery charges greedily):
+```
+Home battery: 82%
+
+🔋 Discharge: 🔴 blocked — EV charging
+  EV active in immediate mode
+
+⚡ Charge: ▶️ released (use case A)
+  car connected & not full — battery charges greedily (the car shaves the export peak)
+  limit → 5000W
+```
+
+**Card YAML** (`custom:button-card`, `entity: sensor.battery_decision`):
+
+```yaml
+type: custom:button-card
+entity: sensor.battery_decision
+show_name: false
+show_state: false
+show_label: true
+show_icon: false
+label: >-
+  [[[
+  const a = entity.attributes;
+  const soc = a.battery_soc != null ? Math.round(a.battery_soc) : '?';
+  const dis = a.discharge_allowed;
+  const disReason = a.discharge_reason || '';
+  const byEv = a.discharge_blocked_by_ev;
+  const byProt = a.discharge_blocked_by_protection;
+  const uc = a.charge_use_case || 'disabled';
+  const act = a.charge_action || '';
+  const chgReason = a.charge_reason || '';
+  const lim = a.charge_limit_w;
+  const head = '<b>Home battery:</b> ' + soc + '%';
+  let disBlock;
+  if (dis) { disBlock = '🔋 <b>Discharge:</b> 🟢 allowed'; }
+  else {
+    const why = byEv ? 'EV charging' : (byProt ? 'battery protection' : '');
+    disBlock = '🔋 <b>Discharge:</b> 🔴 blocked' + (why ? ' — ' + why : '');
+  }
+  disBlock += '<br>&nbsp;&nbsp;' + disReason;
+  const actIcon = act === 'charging' ? '🟢' : (act === 'deferred' ? '⏸️' : (act === 'released' ? '▶️' : '➖'));
+  let chgBlock = '⚡ <b>Charge:</b> ' + actIcon + ' ' + act + (uc !== 'disabled' ? ' (use case ' + uc + ')' : '');
+  chgBlock += '<br>&nbsp;&nbsp;' + chgReason;
+  if (lim != null) { chgBlock += '<br>&nbsp;&nbsp;limit → ' + lim + 'W'; }
+  return head + '<br><br>' + disBlock + '<br><br>' + chgBlock;
+  ]]]
+tap_action:
+  action: none
+styles:
+  card:
+    - padding: 16px
+    - background-color: var(--card-background-color)
+  label:
+    - font-size: 15px
+    - justify-self: start
+    - white-space: normal
+    - line-height: "1.6"
+```
 
 ## 4.7 Error Handling and Notifications
 

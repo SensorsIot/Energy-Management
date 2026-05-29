@@ -36,6 +36,9 @@ battery:
   # Re-evaluated every 15 min. Off by default. See FSD 4.4.
   charge_shaving_enabled: false
   charge_control_entity: "number.battery_maximum_charging_power"
+  # Dashboard sensor that surfaces the combined battery reasoning
+  # (discharge + charge-shaving). Advisory only. See FSD 4.6.4.
+  battery_decision_entity: "sensor.battery_decision"
 
 # Electricity tariff settings
 tariff:
