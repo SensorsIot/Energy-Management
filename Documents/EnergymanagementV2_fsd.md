@@ -2757,9 +2757,9 @@ label: >-
     lines.push('Protecting the home battery');
     lines.push('It would drop to ' + min48 + '% (keeps at least ' + floor + '%)');
   } else { title = '🚗  Not charging'; }
-  let html = '<b>' + title + '</b>';
-  for (const l of lines) { html += '<br><span style="opacity:0.75">' + l + '</span>'; }
-  return html;
+  let out = '<b>' + title + '</b>';
+  for (const l of lines) { out += '<br><span style="opacity:0.75">' + l + '</span>'; }
+  return out;
   ]]]
 tap_action:
   action: none
@@ -2890,9 +2890,9 @@ label: >-
   if (byEv) { lines.push('Reserved for the car'); }
   else if (byProt) { lines.push('Holding charge for tonight'); }
   else if (disAllowed) { lines.push('Powers the house when needed'); }
-  let html = '<b>🔋  Home battery ' + soc + '%</b>';
-  for (const l of lines) { html += '<br><span style="opacity:0.75">' + l + '</span>'; }
-  return html;
+  let out = '<b>🔋  Home battery ' + soc + '%</b>';
+  for (const l of lines) { out += '<br><span style="opacity:0.75">' + l + '</span>'; }
+  return out;
   ]]]
 tap_action:
   action: none
