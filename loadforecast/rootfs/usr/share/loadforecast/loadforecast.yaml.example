@@ -17,7 +17,7 @@ influxdb:
 
 # Load sensor settings
 load_sensor:
-  entity_id: "load_power"
+  entity_id: "house_load_power"
 
 # Forecast settings
 forecast:

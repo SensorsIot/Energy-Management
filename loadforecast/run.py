@@ -118,7 +118,7 @@ def run_forecast(options: dict) -> bool:
         token=influx_config.get("token", ""),
         org=influx_config.get("org", "energymanagement"),
         source_bucket=influx_config.get("source_bucket", "HomeAssistant"),
-        load_entity=sensor_config.get("entity_id", "load_power"),
+        load_entity=sensor_config.get("entity_id", "house_load_power"),
         history_days=forecast_config.get("history_days", 90),
         local_timezone=options.get("timezone", "Europe/Zurich"),
     )
@@ -181,7 +181,7 @@ def main() -> None:
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("LoadForecast Add-on v1.2.1")
+    logger.info("LoadForecast Add-on v1.2.8")
     logger.info("=" * 60)
 
     options = load_options(args.config)

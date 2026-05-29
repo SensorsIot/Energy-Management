@@ -45,7 +45,7 @@ influxdb:
   target_bucket: "load_forecast"
 
 load_sensor:
-  entity_id: "load_power"
+  entity_id: "house_load_power"
 
 forecast:
   history_days: 90
@@ -61,7 +61,7 @@ schedule:
 |--------|-------------|---------|
 | `source_bucket` | InfluxDB bucket with historical data | `HomeAssistant` |
 | `target_bucket` | InfluxDB bucket for forecast output | `load_forecast` |
-| `entity_id` | Home Assistant entity for load power | `load_power` |
+| `entity_id` | Home Assistant entity for load power | `house_load_power` |
 | `history_days` | Days of history to analyze | `90` |
 | `horizon_hours` | Forecast horizon in hours | `48` |
 | `cron` | Schedule for forecast updates | `15 * * * *` |
