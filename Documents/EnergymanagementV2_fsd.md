@@ -62,7 +62,7 @@ The system consists of three Home Assistant add-ons that work together:
 ```
 MeteoSwiss STAC API                    InfluxDB (HomeAssistant bucket)
         │                                        │
-        │ GRIB weather data                      │ Historical load_power
+        │ GRIB weather data                      │ Historical house_load_power
         ▼                                        ▼
 ┌─────────────────┐                    ┌─────────────────┐
 │SwissSolarForecast│                    │   LoadForecast  │
@@ -373,7 +373,7 @@ entities:
     entity: sensor.battery_charge_discharge_power
     state_of_charge: sensor.battery_state_of_capacity
   home:
-    entity: sensor.load_power
+    entity: sensor.house_load_power
   individual:
     - entity: sensor.wallbox_power
       name: EV
@@ -1413,7 +1413,7 @@ LoadForecast generates statistical household load consumption forecasts using hi
 │                                                                      │
 │  FORECAST CYCLE (every hour at :15)                                  │
 │  ┌────────────────────────────────────────────────────────────────┐  │
-│  │ 1. Query 90 days of load_power from HomeAssistant bucket       │  │
+│  │ 1. Query 90 days of house_load_power from HomeAssistant bucket │  │
 │  │                                                                 │  │
 │  │ 2. Build time-of-day profile:                                  │  │
 │  │    • Group into 96 daily slots (15-min periods)                │  │
@@ -1482,7 +1482,7 @@ influxdb:
   target_bucket: "load_forecast"     # Where to write forecasts
 
 load_sensor:
-  entity_id: "load_power"            # HA entity to use for load
+  entity_id: "house_load_power"      # HA entity to use for load
 
 forecast:
   history_days: 90                   # Days of history to analyze
@@ -1524,7 +1524,7 @@ The add-on queries historical consumption data from the `HomeAssistant` InfluxDB
 ```flux
 from(bucket: "HomeAssistant")
   |> range(start: -90d)
-  |> filter(fn: (r) => r.entity_id == "load_power")
+  |> filter(fn: (r) => r.entity_id == "house_load_power")
   |> filter(fn: (r) => r._field == "value")
   |> aggregateWindow(every: 15m, fn: mean)
 ```
@@ -1569,7 +1569,7 @@ forecast = from(bucket: "load_forecast")
 
 actual = from(bucket: "HomeAssistant")
   |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r.entity_id == "load_power")
+  |> filter(fn: (r) => r.entity_id == "house_load_power")
   |> aggregateWindow(every: 15m, fn: mean)
 
 union(tables: [forecast, actual])
@@ -3315,7 +3315,7 @@ curl -H "Authorization: Token YOUR_TOKEN" \
 ```flux
 from(bucket: "HomeAssistant")
   |> range(start: -7d)
-  |> filter(fn: (r) => r.entity_id == "load_power")
+  |> filter(fn: (r) => r.entity_id == "house_load_power")
   |> count()
 ```
 
