@@ -2849,6 +2849,7 @@ Evening, holding for the expensive hours:
 
 | Field | Value | Phrase |
 |-------|-------|--------|
+| `battery_soc` | ≥ 100 + surplus | Full — surplus exported (else line omitted) |
 | `charge_action` | `deferred` | Saving room for the midday peak |
 | `charge_action` | `charging`/`released` + surplus | Charging from solar (+ "(peak)" if charging) |
 | `charge_action` | released + no surplus | Idle — no solar surplus |
@@ -2877,10 +2878,12 @@ label: >-
   let surplus = null;
   const sp = states['sensor.surplus_power'];
   if (sp && sp.state && !isNaN(parseFloat(sp.state))) { surplus = parseFloat(sp.state); }
+  const hasSun = surplus != null && surplus >= 100;
   let lines = [];
   if (enabled) {
-    if (action === 'deferred') { lines.push('Saving room for the midday peak'); }
-    else if (surplus != null && surplus < 100) { lines.push('Idle — no solar surplus'); }
+    if (soc !== '?' && soc >= 100) { if (hasSun) { lines.push('Full — surplus exported'); } }
+    else if (action === 'deferred') { lines.push('Saving room for the midday peak'); }
+    else if (!hasSun) { lines.push('Idle — no solar surplus'); }
     else if (action === 'charging') { lines.push('Charging from solar (peak)'); }
     else { lines.push('Charging from solar'); }
   }
