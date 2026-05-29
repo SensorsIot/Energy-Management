@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.9"
+__version__ = "1.8.10"
 
 import json
 import logging
@@ -26,7 +26,11 @@ from src.battery_optimizer import BatteryOptimizer
 from src.appliance_signal import ApplianceSignal
 from src.ev_battery import EVBatteryOptimizer
 from src.ev_state_machine import EVStateMachine, EVInputs, EVState
-from src.ev_charging import snap_to_power_step, POWER_STEPS_3P
+from src.ev_charging import (
+    build_solar_candidates,
+    snap_to_power_step,
+    POWER_STEPS_3P,
+)
 from src.influxdb_writer import SimulationWriter
 from src.integration_observer import CycleSnapshot, IntegrationObserver
 from src.notifications import init_telegram, notify_error
@@ -245,6 +249,12 @@ class EnergyManager:
         self._last_mode_error_notified: str | None = None
         self._ev_safe: bool = False
         self._battery_min_soc_forecast: float = 0.0
+        # End-of-day (today, Europe/Zurich) car SOC forecast — refreshed
+        # every 15 min by write_energy_balance(). Used by the EV control
+        # loop to decide whether the snap-up step (which drains the home
+        # battery) is needed to reach the EV target. None = no forecast
+        # yet (startup) or smart_car disabled → keep current snap-up.
+        self.ev_soc_forecast_eod_today: float | None = None
         # Log dedup: one INFO line per state/power change; DEBUG between,
         # with an INFO heartbeat every 60 s so the log stays alive while idle.
         self._ev_log_signature: tuple | None = None
@@ -268,6 +278,12 @@ class EnergyManager:
         )
         self.car_soc_last_known_entity = smart_opts.get(
             "soc_last_known_entity", "sensor.smart_battery_last_known"
+        )
+        # EV target SOC (car-side limit) — used by the solar-mode snap-up
+        # gate: only drain the home battery if the EOD forecast won't
+        # reach this target.
+        self.car_charging_max_entity = smart_opts.get(
+            "charging_max_entity", "sensor.smart_charging_max_last_known"
         )
         self.wallbox_session_energy_entity = ev_opts.get(
             "wallbox_session_energy_entity", "sensor.wallbox_energy"
@@ -377,6 +393,17 @@ class EnergyManager:
             house_kwh = max(0.0, min(house_cap_kwh, house_soc / 100 * house_cap_kwh))
             car_kwh_added = 0.0
 
+        # End-of-day cutoff (today 23:59:59 Europe/Zurich) as UTC for
+        # comparison against forecast point timestamps. Car SOC is
+        # monotonic non-decreasing, so the latest point ≤ cutoff gives
+        # the EOD value.
+        eod_today_utc = (
+            datetime.now(SWISS_TZ)
+            .replace(hour=23, minute=59, second=59, microsecond=0)
+            .astimezone(UTC)
+        )
+        eod_car_soc_pct: float | None = None
+
         points = []
         cumulative_wh = 0.0
         for t in forecast.index:
@@ -411,8 +438,15 @@ class EnergyManager:
                     car_soc + car_kwh_added / self.smart_car_capacity_kwh * 100,
                 )
                 point = point.field("car_soc_percent", float(car_soc_pct))
+                if ts <= eod_today_utc:
+                    eod_car_soc_pct = float(car_soc_pct)
 
             points.append(point)
+
+        # Publish EOD forecast for the EV control loop's snap-up gate.
+        # None if no car forecast was computed this run (e.g. car_soc
+        # unavailable) — gate then falls back to current snap-up behavior.
+        self.ev_soc_forecast_eod_today = eod_car_soc_pct
 
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=points)
         logger.info(
@@ -904,19 +938,22 @@ class EnergyManager:
                 candidate_power = snap_to_power_step(
                     surplus_power, ev_min_power, ev_max_power
                 )
-                # Try one step above surplus first (snap-up uses battery
-                # to bridge the gap to the next amp step), then step down
-                # through discrete power steps until the safety check passes.
-                snap_up = [
-                    s for s in POWER_STEPS_3P
-                    if s > candidate_power and s >= threshold
-                ]
-                snap_up_step = [snap_up[0]] if snap_up else []
-                snap_down = [
-                    s for s in reversed(POWER_STEPS_3P)
-                    if s <= candidate_power and s >= threshold
-                ]
-                candidates = snap_up_step + snap_down
+                # Forecast gate: only snap up (drain home battery to bridge
+                # the gap to the next amp step) if the EOD car SOC forecast
+                # won't reach the EV target by today 23:59. The forecast
+                # already assumes house battery fills first and only the
+                # overflow goes to the car — so if it predicts the target
+                # is reached, we know "charge ≤ surplus" suffices.
+                ev_target_max = self.ha_client.get_sensor_value(
+                    self.car_charging_max_entity
+                )
+                forecast_eod = self.ev_soc_forecast_eod_today
+                candidates, snap_up_gate_reason = build_solar_candidates(
+                    candidate_power=candidate_power,
+                    threshold=threshold,
+                    forecast_eod=forecast_eod,
+                    ev_target_max=ev_target_max,
+                )
 
                 ev_charging_power_w = 0.0
                 ev_safe = False
@@ -936,7 +973,8 @@ class EnergyManager:
                             detail = ""
                         ev_source_reason = (
                             f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
-                            f"forecast → {ev_charging_power_w:.0f}W{detail}"
+                            f"forecast → {ev_charging_power_w:.0f}W{detail} "
+                            f"({snap_up_gate_reason})"
                         )
                         break
 

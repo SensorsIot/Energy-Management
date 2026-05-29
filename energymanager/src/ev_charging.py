@@ -99,3 +99,50 @@ def snap_to_power_step(
         return best[-1]
     # Surplus below all steps — return minimum (battery covers gap)
     return valid[0]
+
+
+def build_solar_candidates(
+    candidate_power: int,
+    threshold: float,
+    forecast_eod: float | None,
+    ev_target_max: float | None,
+) -> tuple[list[int], str]:
+    """Decide solar-mode power-step candidates with EOD forecast gate.
+
+    The "snap-up" step (one level above candidate_power) drains the home
+    battery to bridge the gap to the next amp step. Only include it when
+    the EV's end-of-today SOC forecast does NOT reach the user-configured
+    target (sensor.smart_charging_max_last_known). Otherwise stay
+    at-or-below surplus so the home battery is not drained.
+
+    Returns (candidates, gate_reason) where candidates is the ordered
+    list passed to the home-battery safety loop.
+    """
+    if (
+        forecast_eod is not None
+        and ev_target_max is not None
+        and forecast_eod >= float(ev_target_max)
+    ):
+        snap_up_step: list[int] = []
+        gate_reason = (
+            f"forecast EOD {forecast_eod:.0f}% ≥ "
+            f"target {float(ev_target_max):.0f}% — no battery drain"
+        )
+    else:
+        snap_up = [
+            s for s in POWER_STEPS_3P
+            if s > candidate_power and s >= threshold
+        ]
+        snap_up_step = [snap_up[0]] if snap_up else []
+        if forecast_eod is None or ev_target_max is None:
+            gate_reason = "no forecast — snap-up allowed"
+        else:
+            gate_reason = (
+                f"forecast EOD {forecast_eod:.0f}% < "
+                f"target {float(ev_target_max):.0f}% — snap-up allowed"
+            )
+    snap_down = [
+        s for s in reversed(POWER_STEPS_3P)
+        if s <= candidate_power and s >= threshold
+    ]
+    return snap_up_step + snap_down, gate_reason

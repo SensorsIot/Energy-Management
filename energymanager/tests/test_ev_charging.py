@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from src.ev_charging import calculate_ev_power, resolve_phase_gap, snap_to_power_step
+from src.ev_charging import (
+    build_solar_candidates,
+    calculate_ev_power,
+    resolve_phase_gap,
+    snap_to_power_step,
+)
 
 
 # --- snap_to_power_step unit tests ---
@@ -145,3 +150,91 @@ class TestPhaseGapStability:
         assert all(p == 4140 for p in powers), (
             f"Expected all 4140, got {powers}"
         )
+
+
+# --- Solar candidate gate (EOD car SOC forecast) ---
+
+
+class TestBuildSolarCandidates:
+    """Gate: only include snap-up step when EV won't reach target by EOD.
+
+    candidate_power=5117 (8A) chosen so that snap_up=[5727] and
+    snap_down=[5117, 4354, 3962] under default threshold=3500.
+    """
+
+    def test_forecast_reaches_target_drops_snap_up(self) -> None:
+        """Forecast 85% ≥ target 80% → no snap-up; stays at-or-below surplus."""
+        candidates, reason = build_solar_candidates(
+            candidate_power=5117,
+            threshold=3500,
+            forecast_eod=85.0,
+            ev_target_max=80.0,
+        )
+        assert candidates == [5117, 4354, 3962]
+        assert "no battery drain" in reason
+
+    def test_forecast_below_target_keeps_snap_up(self) -> None:
+        """Forecast 70% < target 80% → snap-up included (battery drain allowed)."""
+        candidates, reason = build_solar_candidates(
+            candidate_power=5117,
+            threshold=3500,
+            forecast_eod=70.0,
+            ev_target_max=80.0,
+        )
+        assert candidates == [5727, 5117, 4354, 3962]
+        assert "snap-up allowed" in reason
+
+    def test_forecast_equals_target_drops_snap_up(self) -> None:
+        """Boundary: forecast == target → target is reached → no drain."""
+        candidates, reason = build_solar_candidates(
+            candidate_power=5117,
+            threshold=3500,
+            forecast_eod=80.0,
+            ev_target_max=80.0,
+        )
+        assert 5727 not in candidates
+        assert candidates == [5117, 4354, 3962]
+        assert "no battery drain" in reason
+
+    def test_no_forecast_falls_back_to_snap_up(self) -> None:
+        """forecast_eod None (e.g. car SOC unknown) → keep current snap-up behavior."""
+        candidates, reason = build_solar_candidates(
+            candidate_power=5117,
+            threshold=3500,
+            forecast_eod=None,
+            ev_target_max=80.0,
+        )
+        assert candidates == [5727, 5117, 4354, 3962]
+        assert "no forecast" in reason
+
+    def test_no_target_falls_back_to_snap_up(self) -> None:
+        """ev_target_max None (entity missing) → keep current snap-up behavior."""
+        candidates, reason = build_solar_candidates(
+            candidate_power=5117,
+            threshold=3500,
+            forecast_eod=85.0,
+            ev_target_max=None,
+        )
+        assert candidates == [5727, 5117, 4354, 3962]
+        assert "no forecast" in reason
+
+    def test_candidate_at_top_step_no_snap_up_exists(self) -> None:
+        """candidate=7624 (max) → snap_up list is empty regardless of gate."""
+        candidates, _ = build_solar_candidates(
+            candidate_power=7624,
+            threshold=3500,
+            forecast_eod=50.0,  # would normally allow snap-up
+            ev_target_max=80.0,
+        )
+        # No step above 7624 exists; snap_down only.
+        assert candidates == [7624, 7034, 6288, 5727, 5117, 4354, 3962]
+
+    def test_threshold_filters_low_steps_out(self) -> None:
+        """threshold=5000 filters 3962/4354 from snap_down."""
+        candidates, _ = build_solar_candidates(
+            candidate_power=5117,
+            threshold=5000,
+            forecast_eod=70.0,  # snap-up allowed
+            ev_target_max=80.0,
+        )
+        assert candidates == [5727, 5117]
