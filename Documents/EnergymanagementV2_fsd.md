@@ -2695,7 +2695,8 @@ plain supporting lines.
 ```
 🚗  Charging the car
     4.8 kW from solar surplus
-    Home battery 82%, protected
+    Home battery 82%, adding 0.5 kW
+    Reaches 100% at 17:42 (in 2h 30m)
 ```
 ```
 🚗  Car on hold
@@ -2715,7 +2716,7 @@ plain supporting lines.
 | Condition | Headline | Supporting lines |
 |-----------|----------|------------------|
 | `wallbox_connected` ≠ on | No car connected | — |
-| `snap_power_w` > 0 | Charging the car | power + source; home battery SOC |
+| `snap_power_w` > 0 | Charging the car | power + source; home battery SOC + live contribution (`sensor.battery_charge_discharge_power`); ETA to car target (`sensor.smart_charging_time_remaining` / `sensor.smart_charging_target`) |
 | `surplus_power_w` < `threshold_w` | Waiting for sun | surplus vs needed |
 | `ev_safe` = false | Car on hold | protecting battery; forecast dip vs floor |
 | otherwise | Not charging | — |
@@ -2733,6 +2734,7 @@ label: >-
   [[[
   const a = entity.attributes;
   const kw = (w) => (w == null ? '?' : (Math.abs(w) >= 1000 ? (w / 1000).toFixed(1) + ' kW' : Math.round(w) + ' W'));
+  const num = (id) => { const s = states[id]; return s && !isNaN(parseFloat(s.state)) ? parseFloat(s.state) : null; };
   const rule = a.ev_charging_rule || 'none';
   const power = a.snap_power_w || 0;
   const surplus = a.surplus_power_w;
@@ -2748,7 +2750,23 @@ label: >-
   else if (power > 0) {
     title = '🚗  Charging the car';
     lines.push(kw(power) + (rule === 'battery_full' ? ' (home battery full)' : ' from solar surplus'));
-    lines.push('Home battery ' + soc + '%, protected');
+    // Live home-battery contribution (Huawei sign: <0 = discharging into the load)
+    const bp = num('sensor.battery_charge_discharge_power');
+    let battLine = 'Home battery ' + soc + '%, protected';
+    if (bp != null && bp < -50) { battLine = 'Home battery ' + soc + '%, adding ' + kw(-bp); }
+    else if (bp != null && bp > 50) { battLine = 'Home battery ' + soc + '%, charging ' + kw(bp); }
+    lines.push(battLine);
+    // ETA to the car's own target SOC (car's estimate — accounts for taper)
+    const tr = num('sensor.smart_charging_time_remaining');
+    const tgt = num('sensor.smart_charging_target');
+    if (tr != null && tr > 0) {
+      const eta = new Date(Date.now() + tr * 60000);
+      const hh = ('0' + eta.getHours()).slice(-2);
+      const mm = ('0' + eta.getMinutes()).slice(-2);
+      const h = Math.floor(tr / 60); const m = Math.round(tr % 60);
+      const dur = (h > 0 ? h + 'h ' : '') + m + 'm';
+      lines.push('Reaches ' + (tgt != null ? Math.round(tgt) + '%' : 'target') + ' at ' + hh + ':' + mm + ' (in ' + dur + ')');
+    }
   } else if (surplus != null && threshold != null && surplus < threshold) {
     title = '🚗  Waiting for sun';
     lines.push('Solar surplus ' + kw(surplus) + ' — needs ' + kw(threshold));
