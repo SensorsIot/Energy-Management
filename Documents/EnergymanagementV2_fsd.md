@@ -2369,7 +2369,7 @@ Lives on `EVBatteryOptimizer`. Returns whether the **peak home-battery SOC** rea
 - If peak ≥ 99 % → battery will be full; queries `first()` where `soc_percent >= 99` to find the time
 - Returns `(hits_full, peak_soc, full_time_local "HH:MM" or None, end_of_today)`
 
-**Used by:** `full_time_local` is published as the `battery_full_time` attribute on `sensor.ev_target_power` for dashboard display. The boolean is informational only — it does **not** gate EV charging; the 48-h safety rule below is the sole gate.
+**Used by:** `full_time_local` is published as the `battery_full_time` attribute on both `sensor.ev_target_power` (only while the car solar-charges) and `sensor.battery_decision` (every 15-min cycle, independent of EV state — see Section 4.6.4) for dashboard display. The boolean is informational only — it does **not** gate EV charging; the 48-h safety rule below is the sole gate.
 
 ##### Rule 2: Solar Surplus Charging
 
@@ -2837,10 +2837,16 @@ cycle. State string: `discharge=on|off charge=<action>`.
 | `charge_action` | `charging`, `deferred`, `released`, or `disabled` |
 | `charge_reason` | Human-readable charge-shaving reason |
 | `charge_limit_w` | Charge limit being applied (W); `0` = deferred, `null` = not managed |
+| `battery_will_be_full` | Forecast: does peak SOC reach 100% today? (`null` if forecast unavailable) |
+| `battery_full_time` | Forecast time the home battery first reaches 100% today (`HH:MM` local, else `null`) |
+| `battery_peak_soc` | Forecast peak home-battery SOC today (%) |
 
 The card builds plain sentences from the structured attributes (it does
 **not** print the raw `*_reason` strings — those stay in the logs). It also
-reads `sensor.surplus_power` so it can say "idle" when there is no sun.
+reads `sensor.surplus_power` so it can say "idle" when there is no sun. The
+last three attributes come from `will_battery_hit_full()` (today's
+`with_strategy` SOC forecast) and are published independently of EV state, so
+the card can show "Full by HH:MM" even with no car plugged in.
 
 **Card layout — live examples (Balanced, English):**
 
@@ -2854,6 +2860,7 @@ Use case A, car charging (battery charges greedily, discharge reserved for car):
 ```
 🔋  Home battery 82%
     Charging from solar
+    Full by 12:30
     Reserved for the car
 ```
 Evening, holding for the expensive hours:
@@ -2871,6 +2878,8 @@ Evening, holding for the expensive hours:
 | `charge_action` | `deferred` | Saving room for the midday peak |
 | `charge_action` | `charging`/`released` + surplus | Charging from solar (+ "(peak)" if charging) |
 | `charge_action` | released + no surplus | Idle — no solar surplus |
+| `battery_will_be_full` | true (+ SOC < 100) | Full by `battery_full_time` |
+| `battery_will_be_full` | false (+ peak > SOC, surplus) | Peaks at ~`battery_peak_soc`% today |
 | `discharge_blocked_by_ev` | true | Reserved for the car |
 | `discharge_blocked_by_protection` | true | Holding charge for tonight |
 | `discharge_allowed` | true | Powers the house when needed |
@@ -2893,6 +2902,9 @@ label: >-
   const byEv = a.discharge_blocked_by_ev;
   const byProt = a.discharge_blocked_by_protection;
   const disAllowed = a.discharge_allowed;
+  const willFull = a.battery_will_be_full;
+  const fullTime = a.battery_full_time;
+  const peak = a.battery_peak_soc;
   let surplus = null;
   const sp = states['sensor.surplus_power'];
   if (sp && sp.state && !isNaN(parseFloat(sp.state))) { surplus = parseFloat(sp.state); }
@@ -2904,6 +2916,10 @@ label: >-
     else if (!hasSun) { lines.push('Idle — no solar surplus'); }
     else if (action === 'charging') { lines.push('Charging from solar (peak)'); }
     else { lines.push('Charging from solar'); }
+  }
+  if (soc !== '?' && soc < 100) {
+    if (willFull === true && fullTime) { lines.push('Full by ' + fullTime); }
+    else if (willFull === false && peak != null && peak >= soc + 1 && hasSun) { lines.push('Peaks at ~' + peak + '% today'); }
   }
   if (byEv) { lines.push('Reserved for the car'); }
   else if (byProt) { lines.push('Holding charge for tonight'); }
