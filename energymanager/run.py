@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.12"
+__version__ = "1.8.13"
 
 import json
 import logging
@@ -713,6 +713,21 @@ class EnergyManager:
         charge_limit_w = None
         if self.charge_shaving_enabled and self._last_charge_allowed is not None:
             charge_limit_w = self.charge_max_w if self._last_charge_allowed else 0
+        # When is the home battery forecast to reach 100% today (SOC forecast,
+        # with_strategy scenario)? Independent of EV state so the battery card
+        # can show "Full by HH:MM" even when no car is plugged in.
+        battery_will_be_full = None
+        battery_full_time = None
+        battery_peak_soc = None
+        if self.ev_battery_optimizer is not None:
+            try:
+                battery_will_be_full, peak_soc, battery_full_time, _ = (
+                    self.ev_battery_optimizer.will_battery_hit_full()
+                )
+                if peak_soc is not None:
+                    battery_peak_soc = round(peak_soc)
+            except Exception as e:
+                logger.debug(f"will_battery_hit_full failed: {e}")
         state = (
             f"discharge={'on' if discharge_allowed else 'off'} "
             f"charge={self._charge_action}"
@@ -735,6 +750,10 @@ class EnergyManager:
                 "charge_action": self._charge_action,
                 "charge_reason": self._charge_reason,
                 "charge_limit_w": charge_limit_w,
+                # Forecast — when does the home battery reach 100% today
+                "battery_will_be_full": battery_will_be_full,
+                "battery_full_time": battery_full_time,
+                "battery_peak_soc": battery_peak_soc,
                 "icon": "mdi:home-battery",
             },
         )
