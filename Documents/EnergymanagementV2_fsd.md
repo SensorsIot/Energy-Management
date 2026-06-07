@@ -1694,7 +1694,7 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | `discharge_efficiency` | 0.95 | Simulator (discharge branch) |
 | `soc_entity` | `sensor.battery_state_of_capacity` | Current SOC readback |
 | `discharge_control_entity` | `number.battery_maximum_discharging_power` | Discharge control output |
-| `charge_shaving_enabled` | `false` | Enable export-peak-shaving charge control (Section 4.2.3) |
+| `charge_shaving_enabled` | `true` | Enable export-peak-shaving charge control (Section 4.2.3) |
 | `charge_control_entity` | `number.battery_maximum_charging_power` | Charge control output (Section 4.2.3) |
 
 **YAML `ev_charging` — safety-rule floor (independent from `battery.reserve_percent`):**
@@ -2025,12 +2025,13 @@ are two top-level use cases, selected by `_charge_gate_active()`:
 
 | # | Use case | Criteria (gate) | Behaviour | Charge limit |
 |---|----------|-----------------|-----------|-------------|
-| **A** | **EV owns the surplus** | feature enabled **AND** car connected **AND** car not full (`binary_sensor.wallbox_connected = on` **AND** `smart_battery_last_known < smart_charging_max_last_known`) | Charge **released** — EV solar charging (4.3) takes the surplus; the battery acts only as the gap buffer per Rule 2. Shaving stays out of the way. | `max_charge_w` |
+| **A** | **EV owns the surplus** | feature enabled **AND** car connected **AND** car not full (`binary_sensor.car_ready = on` **AND** `smart_battery_last_known < smart_charging_max_last_known`) | Charge **released** — EV solar charging (4.3) takes the surplus; the battery acts only as the gap buffer per Rule 2. Shaving stays out of the way. | `max_charge_w` |
 | **B** | **Export-peak shaving** | feature enabled **AND** car disconnected (or OCPP down) **OR** car full | Defer/allow charging per the water-fill below, so the battery's headroom absorbs the export peak. | `0` or `max_charge_w` |
 
-When the feature is **disabled** (`charge_shaving_enabled = false`,
-default), `control_battery_charge()` is a no-op and the charge limit is
-left at whatever HA/the inverter holds it — neither use case applies.
+The feature is **enabled by default** (`charge_shaving_enabled = true`).
+When explicitly **disabled** (`charge_shaving_enabled = false`),
+`control_battery_charge()` is a no-op and the charge limit is left at
+whatever HA/the inverter holds it — neither use case applies.
 
 #### Use case B — sub-cases (water-fill decision)
 
@@ -2080,7 +2081,7 @@ limit only when it changes (logged as `Battery charge allowed/deferred`).
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `battery.charge_shaving_enabled` | `false` | Master switch (off → no-op; neither use case runs) |
+| `battery.charge_shaving_enabled` | `true` | Master switch (off → no-op; neither use case runs) |
 | `battery.charge_control_entity` | `number.battery_maximum_charging_power` | Control output (use case A & B) |
 | `battery.max_charge_w` | `5000` | Charge limit written when charging is allowed |
 

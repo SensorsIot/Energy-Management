@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.13"
+__version__ = "1.8.14"
 
 import json
 import logging
@@ -146,10 +146,10 @@ class EnergyManager:
         )
         # Export-peak-shaving charge control: defer battery charging so its
         # headroom absorbs the midday export peak. Only active when the car
-        # is disconnected or full. Off by default — flip on in the add-on
-        # config to enable. See FSD 4.2.3.
+        # is disconnected or full. On by default — set to false in the add-on
+        # config to disable. See FSD 4.2.3.
         self.charge_shaving_enabled = battery_opts.get(
-            "charge_shaving_enabled", False
+            "charge_shaving_enabled", True
         )
         self.charge_control_entity = battery_opts.get(
             "charge_control_entity", "number.battery_maximum_charging_power"
@@ -601,10 +601,14 @@ class EnergyManager:
         Active only when the car is disconnected or already full — so the
         feature never competes with EV solar charging for the surplus.
         """
-        wb_state = self.ha_client.get_state(self.wallbox_connected_entity)
-        connected = wb_state is not None and wb_state.get("state") == "on"
-        if not connected:
-            return True  # no car (or OCPP down) → free to shave
+        # Gate on actual car presence (car_ready), NOT wallbox_connected —
+        # the latter is the wallbox↔server WebSocket link (~always on), so
+        # gating on it would keep us permanently in use case A and shaving
+        # would never run. car_ready is off for Available/SuspendedEV (no car).
+        car_state = self.ha_client.get_state(self.car_ready_entity)
+        car_present = car_state is not None and car_state.get("state") == "on"
+        if not car_present:
+            return True  # no car plugged in (or OCPP down) → free to shave
         car_soc = self.ha_client.get_sensor_value(self.smart_car_soc_entity)
         target = self.ha_client.get_sensor_value(self.car_charging_max_entity)
         if car_soc is not None and target is not None and car_soc >= float(target):
