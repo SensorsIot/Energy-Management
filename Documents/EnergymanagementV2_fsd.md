@@ -1696,6 +1696,7 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | `discharge_control_entity` | `number.battery_maximum_discharging_power` | Discharge control output |
 | `charge_shaving_enabled` | `true` | Enable export-peak-shaving charge control (Section 4.2.3) |
 | `charge_shaving_power_w` | `2500` | Charge power while shaving the export peak (Section 4.2.3) |
+| `charge_shaving_full_by_hour` | `13` | Marginal-day gate: shave only if the battery fills (greedily) before this local hour (Section 4.2.3, B0) |
 | `charge_control_entity` | `number.battery_maximum_charging_power` | Charge control output (Section 4.2.3) |
 
 **YAML `ev_charging` — safety-rule floor (independent from `battery.reserve_percent`):**
@@ -2043,9 +2044,33 @@ When explicitly **disabled** (`charge_shaving_enabled = false`),
 `control_battery_charge()` is a no-op and the charge limit is left at
 whatever HA/the inverter holds it — neither use case applies.
 
+#### Use case B0 — marginal-day gate (run *before* the water-fill)
+
+Shaving is only worthwhile on an **abundant** day — one with a real midday
+export peak to clip. On a marginal shoulder-season day the battery fills
+late or not at all, so deferring its headroom risks under-filling for little
+benefit. Before running the water-fill, `control_battery_charge()` therefore
+asks `_fills_before_cutoff()`: **would the battery, charging greedily, reach
+≥99% today before `charge_shaving_full_by_hour` (default 13:00 ≈ solar noon
+in Lausen)?**
+
+- **No** (fills after the cutoff, or not at all) → **marginal day**: skip
+  shaving entirely and **charge greedily at `max_charge_w`** to capture the
+  scarce surplus. Sets `use case = B`, `action = charging`, reason
+  `marginal day — …`.
+- **Yes** → abundant day: fall through to the water-fill below.
+
+The fill-time comes from `BatteryOptimizer.simulate_soc()`, which charges
+**greedily** (no deferral). The prediction is therefore independent of the
+shaving decision, so this gate **cannot create a feedback loop** (deferring
+never pushes the predicted fill-time later). A battery already full now
+counts as "before cutoff" (the abundant case → water-fill, which releases at
+B2).
+
 #### Use case B — sub-cases (water-fill decision)
 
-Within use case B, `should_charge_now()` decides ON/OFF each tick. It is a
+Reached only on an abundant day (B0 = yes). `should_charge_now()` decides
+ON/OFF each tick. It is a
 **water-fill**: take the highest-surplus 15-min intervals of the rest of
 today until their *absorbed* energy fills the battery headroom; the surplus
 of the lowest selected interval is the water level **L**. Each interval
@@ -2089,7 +2114,9 @@ stored, so cloudy days (B3) and double-peak days are handled naturally.
 
 #### Worked example
 
-Capacity 10 kWh, SOC 50% → headroom 5 kWh. Rest-of-day forecast surplus
+Capacity 10 kWh, SOC 50% → headroom 5 kWh. This is an abundant day: charging
+greedily it would be full before 13:00, so the B0 gate passes and the
+water-fill runs. Rest-of-day forecast surplus
 (kWh/15 min): morning 0.3–0.6, midday peak 1.0–1.4, afternoon 0.4–0.7. At
 2500 W each interval absorbs ≤ 0.625 kWh, so the water-fill picks the
 **broader** midday band whose *capped* absorption sums to 5 kWh → `L`
@@ -2117,13 +2144,16 @@ shaving power) is still detected even though charging stays on.
 | `battery.charge_shaving_enabled` | `true` | Master switch (off → no-op; neither use case runs) |
 | `battery.charge_control_entity` | `number.battery_maximum_charging_power` | Control output (use case A & B) |
 | `battery.charge_shaving_power_w` | `2500` | Charge limit while shaving the peak (use case B) — gentle C-rate |
-| `battery.max_charge_w` | `5000` | Charge limit when use case A releases (car owns the surplus) |
+| `battery.charge_shaving_full_by_hour` | `13` | Marginal-day gate (B0): shave only if the battery greedily fills before this local hour |
+| `battery.max_charge_w` | `5000` | Charge limit when use case A releases, or on a marginal day (B0) |
 
 #### Test Cases
 
-Test file: `energymanager/tests/test_battery_optimizer.py`
-(`TestShouldChargeNow`) — covers sub-cases B1–B5 and the per-interval
-absorption cap (band widening, capped-fill, below-band defer).
+Test files: `energymanager/tests/test_battery_optimizer.py`
+(`TestShouldChargeNow`) — sub-cases B1–B5 and the per-interval absorption
+cap; `energymanager/tests/test_charge_gate.py` (`TestMarginalDayGate`) — the
+B0 marginal-day gate (fills-before-cutoff, fills-late, never-fills, and
+end-to-end greedy routing).
 
 ---
 
