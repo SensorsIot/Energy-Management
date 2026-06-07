@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.16"
+__version__ = "1.8.17"
 
 import json
 import logging
@@ -144,9 +144,9 @@ class EnergyManager:
         )
         # Export-peak-shaving charge control: defer battery charging so its
         # headroom absorbs the midday export peak. Only active when the car
-        # is disconnected or full. On by default — set to false in the add-on
-        # config to disable. See FSD 4.2.3.
-        self.charge_shaving_enabled = battery_opts.get("charge_shaving_enabled", True)
+        # is disconnected or full. Always on (no enable/disable switch — the
+        # gate logic already releases to full power when shaving doesn't
+        # apply). See FSD 4.2.3.
         self.charge_control_entity = battery_opts.get(
             "charge_control_entity", "number.battery_maximum_charging_power"
         )
@@ -613,18 +613,13 @@ class EnergyManager:
         battery's headroom for the highest-surplus intervals of the rest of
         the day so it absorbs the export peak instead of charging greedily
         at sunrise. Sets number.battery_maximum_charging_power to 0 (defer)
-        or max (charge). Releases to max when the gate is inactive or the
-        feature is disabled, so it never leaves charging stuck off.
+        or a charge power. Always releases to max when the gate is inactive
+        (use case A) or the day is marginal (B0), so it never leaves charging
+        stuck off.
 
         Records the decision (use case / action / reason) on self for
         publication to sensor.battery_decision (FSD 4.6.4).
         """
-        if not self.charge_shaving_enabled:
-            self._charge_use_case = "disabled"
-            self._charge_action = "released"
-            self._charge_reason = "charge shaving disabled"
-            return
-
         if not self._charge_gate_active():
             # Use case A: car needs energy → it is the peak-shaving load;
             # the battery charges greedily to capture the rest.
@@ -781,7 +776,7 @@ class EnergyManager:
             self._discharge_blocked_by_protection or self._discharge_blocked_by_ev
         )
         charge_limit_w = None
-        if self.charge_shaving_enabled and self._last_charge_power_w is not None:
+        if self._last_charge_power_w is not None:
             charge_limit_w = self._last_charge_power_w
         # When is the home battery forecast to reach 100% today (SOC forecast,
         # with_strategy scenario)? Independent of EV state so the battery card
@@ -812,7 +807,6 @@ class EnergyManager:
                 "discharge_blocked_by_ev": self._discharge_blocked_by_ev,
                 "discharge_min_soc_percent": round(decision.min_soc_percent, 1),
                 # Charge-shaving decision (FSD 4.2.3)
-                "charge_shaving_enabled": self.charge_shaving_enabled,
                 "charge_use_case": self._charge_use_case,
                 "charge_action": self._charge_action,
                 "charge_reason": self._charge_reason,

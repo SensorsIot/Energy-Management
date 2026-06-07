@@ -1694,7 +1694,6 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | `discharge_efficiency` | 0.95 | Simulator (discharge branch) |
 | `soc_entity` | `sensor.battery_state_of_capacity` | Current SOC readback |
 | `discharge_control_entity` | `number.battery_maximum_discharging_power` | Discharge control output |
-| `charge_shaving_enabled` | `true` | Enable export-peak-shaving charge control (Section 4.2.3) |
 | `charge_shaving_power_w` | `2500` | Charge power while shaving the export peak (Section 4.2.3) |
 | `charge_shaving_full_by_hour` | `13` | Marginal-day gate: shave only if the battery fills (greedily) before this local hour (Section 4.2.3, B0) |
 | `charge_control_entity` | `number.battery_maximum_charging_power` | Charge control output (Section 4.2.3) |
@@ -2036,13 +2035,13 @@ are two top-level use cases, selected by `_charge_gate_active()`:
 
 | # | Use case | Criteria (gate) | Behaviour | Charge limit |
 |---|----------|-----------------|-----------|-------------|
-| **A** | **EV owns the surplus** | feature enabled **AND** car connected **AND** car not full (`binary_sensor.car_ready = on` **AND** `smart_battery_last_known < smart_charging_max_last_known`) | Charge **released** — EV solar charging (4.3) takes the surplus; the battery acts only as the gap buffer per Rule 2. Shaving stays out of the way. | `max_charge_w` |
-| **B** | **Export-peak shaving** | feature enabled **AND** car disconnected (or OCPP down) **OR** car full | Defer/allow charging per the water-fill below, so the battery's headroom absorbs the export peak at a gentle, capped rate. | `0` or `charge_shaving_power_w` |
+| **A** | **EV owns the surplus** | car connected **AND** car not full (`binary_sensor.car_ready = on` **AND** `smart_battery_last_known < smart_charging_max_last_known`) | Charge **released** — EV solar charging (4.3) takes the surplus; the battery acts only as the gap buffer per Rule 2. Shaving stays out of the way. | `max_charge_w` |
+| **B** | **Export-peak shaving** | car disconnected (or OCPP down) **OR** car full | Defer/allow charging per the water-fill below, so the battery's headroom absorbs the export peak at a gentle, capped rate. | `0` or `charge_shaving_power_w` |
 
-The feature is **enabled by default** (`charge_shaving_enabled = true`).
-When explicitly **disabled** (`charge_shaving_enabled = false`),
-`control_battery_charge()` is a no-op and the charge limit is left at
-whatever HA/the inverter holds it — neither use case applies.
+The feature is **always on** — there is no enable/disable switch. The gate
+logic itself guarantees charging is never left stuck off: use case A and the
+B0 marginal-day gate both release to `max_charge_w`, and within use case B
+the limit is only ever `0` (deferring) or `charge_shaving_power_w` (charging).
 
 #### Use case B0 — marginal-day gate (run *before* the water-fill)
 
@@ -2141,7 +2140,6 @@ shaving power) is still detected even though charging stays on.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `battery.charge_shaving_enabled` | `true` | Master switch (off → no-op; neither use case runs) |
 | `battery.charge_control_entity` | `number.battery_maximum_charging_power` | Control output (use case A & B) |
 | `battery.charge_shaving_power_w` | `2500` | Charge limit while shaving the peak (use case B) — gentle C-rate |
 | `battery.charge_shaving_full_by_hour` | `13` | Marginal-day gate (B0): shave only if the battery greedily fills before this local hour |
@@ -2902,9 +2900,8 @@ cycle. State string: `discharge=on|off charge=<action>`.
 | `discharge_blocked_by_protection` | SOC-forecast protection flag |
 | `discharge_blocked_by_ev` | EV manual-charge block flag |
 | `discharge_min_soc_percent` | Min forecast SOC over the protection window (%) |
-| `charge_shaving_enabled` | Master switch (4.2.3) |
-| `charge_use_case` | `A` (EV owns surplus), `B` (shaving), or `disabled` |
-| `charge_action` | `charging`, `deferred`, `released`, or `disabled` |
+| `charge_use_case` | `A` (EV owns surplus) or `B` (shaving) |
+| `charge_action` | `charging`, `deferred`, or `released` |
 | `charge_reason` | Human-readable charge-shaving reason |
 | `charge_limit_w` | Charge limit being applied (W); `0` = deferred, `null` = not managed |
 | `battery_will_be_full` | Forecast: does peak SOC reach 100% today? (`null` if forecast unavailable) |
@@ -2967,7 +2964,6 @@ label: >-
   [[[
   const a = entity.attributes;
   const soc = a.battery_soc != null ? Math.round(a.battery_soc) : '?';
-  const enabled = a.charge_shaving_enabled;
   const action = a.charge_action || '';
   const byEv = a.discharge_blocked_by_ev;
   const byProt = a.discharge_blocked_by_protection;
@@ -2980,13 +2976,11 @@ label: >-
   if (sp && sp.state && !isNaN(parseFloat(sp.state))) { surplus = parseFloat(sp.state); }
   const hasSun = surplus != null && surplus >= 100;
   let lines = [];
-  if (enabled) {
-    if (soc !== '?' && soc >= 100) { if (hasSun) { lines.push('Full — surplus exported'); } }
-    else if (action === 'deferred') { lines.push('Saving room for the midday peak'); }
-    else if (!hasSun) { lines.push('Idle — no solar surplus'); }
-    else if (action === 'charging') { lines.push('Charging from solar (peak)'); }
-    else { lines.push('Charging from solar'); }
-  }
+  if (soc !== '?' && soc >= 100) { if (hasSun) { lines.push('Full — surplus exported'); } }
+  else if (action === 'deferred') { lines.push('Saving room for the midday peak'); }
+  else if (!hasSun) { lines.push('Idle — no solar surplus'); }
+  else if (action === 'charging') { lines.push('Charging from solar (peak)'); }
+  else { lines.push('Charging from solar'); }
   if (soc !== '?' && soc < 100) {
     if (willFull === true && fullTime) { lines.push('Full by ' + fullTime); }
     else if (willFull === false && peak != null && peak >= soc + 1 && hasSun) { lines.push('Peaks at ~' + peak + '% today'); }
