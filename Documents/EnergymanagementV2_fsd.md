@@ -2687,8 +2687,8 @@ cards:
 Plain-language **EV charging** status. A `custom:button-card` whose `label`
 template builds human sentences from the structured `sensor.ev_target_power`
 attributes (it does **not** print the raw `reason` string — that stays in
-the logs). It also reads `binary_sensor.wallbox_connected` for the "no car"
-state. Design goal: a headline status anyone can read at a glance, plus 1–2
+the logs). It also reads `binary_sensor.car_ready` for the "no car"
+state (NOT `wallbox_connected`, which is only the server WebSocket link). Design goal: a headline status anyone can read at a glance, plus 1–2
 plain supporting lines.
 
 **Card layout — live examples (Balanced, English):**
@@ -2716,7 +2716,7 @@ plain supporting lines.
 
 | Condition | Headline | Supporting lines |
 |-----------|----------|------------------|
-| `wallbox_connected` ≠ on | No car connected | — |
+| `car_ready` ≠ on | No car connected | — |
 | `snap_power_w` > 0 | Charging the car | power + source; home battery SOC + live contribution (`sensor.battery_charge_discharge_power`); ETA to car target (`sensor.smart_charging_time_remaining` / `sensor.smart_charging_target`) |
 | `surplus_power_w` < `threshold_w` | Waiting for sun | surplus vs needed |
 | `ev_safe` = false | Car on hold | protecting battery; forecast dip vs floor |
@@ -2744,7 +2744,7 @@ label: >-
   const min48 = a.battery_min_soc_forecast_48h != null ? Math.round(a.battery_min_soc_forecast_48h) : '?';
   const floor = a.battery_min_soc_floor != null ? Math.round(a.battery_min_soc_floor) : '?';
   const evSafe = a.ev_safe;
-  const wc = states['binary_sensor.wallbox_connected'];
+  const wc = states['binary_sensor.car_ready'];
   const connected = wc ? wc.state === 'on' : true;
   let title; let lines = [];
   if (!connected) { title = '🚗  No car connected'; }
