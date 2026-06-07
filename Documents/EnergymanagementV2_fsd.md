@@ -2641,7 +2641,11 @@ The EV card on the kitchen dashboard maps the raw OCPP `sensor.wallbox_status` t
 | `Finishing` | "Finished" | Green |
 | `Faulted` | Raw status | Default |
 | SOC >= target | "Full" | Default |
-| Wallbox disconnected | "Offline" | Default |
+
+The dashboard derives all display state from `sensor.wallbox_status` (and
+power/SOC) only. It does **not** read `binary_sensor.wallbox_connected`:
+a dropped wallbox↔server WebSocket link is an error condition owned by the
+OCPP server (recovery/alerting), not a dashboard display state.
 
 **SuspendedEVSE vs SuspendedEV:** EVSE = paused by charger (power limit = 0 A). EV = paused by car (car's BMS stopped drawing current).
 
