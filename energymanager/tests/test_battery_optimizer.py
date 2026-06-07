@@ -51,11 +51,14 @@ def make_forecast(
     load_wh = [val * 0.25 for val in load_extended]
     net_wh = [p - ld for p, ld in zip(pv_wh, load_wh, strict=False)]
 
-    return pd.DataFrame({
-        "pv_energy_wh": pv_wh,
-        "load_energy_wh": load_wh,
-        "net_energy_wh": net_wh,
-    }, index=times)
+    return pd.DataFrame(
+        {
+            "pv_energy_wh": pv_wh,
+            "load_energy_wh": load_wh,
+            "net_energy_wh": net_wh,
+        },
+        index=times,
+    )
 
 
 class TestExpensiveTariff:
@@ -292,11 +295,14 @@ class TestDischargeFloor:
         pv_pattern = [0] * 32 + [3000] * 48 + [0] * 16
         load_pattern = [500] * 96
 
-        forecast = make_forecast(start=now, hours=48,
-                                 pv_pattern=pv_pattern, load_pattern=load_pattern)
+        forecast = make_forecast(
+            start=now, hours=48, pv_pattern=pv_pattern, load_pattern=load_pattern
+        )
 
         decision, _, _ = optimizer.calculate_decision(
-            soc_percent=71, forecast=forecast, now=now,
+            soc_percent=71,
+            forecast=forecast,
+            now=now,
         )
         # Old algorithm would block; new algorithm allows (above floor)
         assert decision.discharge_allowed is True
@@ -314,12 +320,15 @@ class TestDischargeFloor:
         pv_pattern = [0] * 36 + [1500] * 48 + [0] * 12
         load_pattern = [800] * 96
 
-        forecast = make_forecast(start=now, hours=48,
-                                 pv_pattern=pv_pattern, load_pattern=load_pattern)
+        forecast = make_forecast(
+            start=now, hours=48, pv_pattern=pv_pattern, load_pattern=load_pattern
+        )
 
         # With 0% reserve, blocking only happens via hysteresis (previously_blocked)
         decision, _, _ = optimizer.calculate_decision(
-            soc_percent=12, forecast=forecast, now=now,
+            soc_percent=12,
+            forecast=forecast,
+            now=now,
             previously_blocked=True,
         )
         assert decision.discharge_allowed is False
@@ -539,8 +548,9 @@ class TestHysteresis:
         # Night: 0 PV, 300W load.  Day: enough PV to recover
         pv_pattern = [0] * 32 + [2500] * 48 + [0] * 16
         load_pattern = [300] * 96
-        forecast = make_forecast(start=now, hours=48,
-                                 pv_pattern=pv_pattern, load_pattern=load_pattern)
+        forecast = make_forecast(
+            start=now, hours=48, pv_pattern=pv_pattern, load_pattern=load_pattern
+        )
         return optimizer, forecast, now
 
     def test_previously_blocked_requires_margin_to_reallow(self) -> None:
@@ -551,13 +561,17 @@ class TestHysteresis:
         # Try a range to find the right one
         for soc in range(1, 40):
             decision, _, _ = optimizer.calculate_decision(
-                soc_percent=soc, forecast=forecast, now=now,
+                soc_percent=soc,
+                forecast=forecast,
+                now=now,
                 previously_blocked=False,
             )
             if 0 <= decision.min_soc_percent < 2 and decision.discharge_allowed:
                 # Found a borderline case — now test with previously_blocked=True
                 decision_blocked, _, _ = optimizer.calculate_decision(
-                    soc_percent=soc, forecast=forecast, now=now,
+                    soc_percent=soc,
+                    forecast=forecast,
+                    now=now,
                     previously_blocked=True,
                 )
                 # Same inputs, but with hysteresis: should block (needs min_soc >= 2%)
@@ -575,7 +589,9 @@ class TestHysteresis:
 
         # High SOC — min_soc will be well above 2%
         decision, _, _ = optimizer.calculate_decision(
-            soc_percent=90, forecast=forecast, now=now,
+            soc_percent=90,
+            forecast=forecast,
+            now=now,
             previously_blocked=True,
         )
         assert decision.discharge_allowed is True
@@ -587,7 +603,9 @@ class TestHysteresis:
         # Find SOC where min_soc is just above 0%
         for soc in range(1, 40):
             decision, _, _ = optimizer.calculate_decision(
-                soc_percent=soc, forecast=forecast, now=now,
+                soc_percent=soc,
+                forecast=forecast,
+                now=now,
                 previously_blocked=False,
             )
             if 0 <= decision.min_soc_percent < 2 and decision.discharge_allowed:
@@ -603,28 +621,27 @@ class TestShouldChargeNow:
 
     def test_no_surplus_now_releases(self) -> None:
         """No surplus this interval → charge/release (nothing to defer)."""
-        assert should_charge_now(
-            [0.0, 500.0, 1000.0], headroom_wh=2000, current_surplus_wh=0.0
-        ) is True
+        assert (
+            should_charge_now([0.0, 500.0, 1000.0], headroom_wh=2000, current_surplus_wh=0.0)
+            is True
+        )
 
     def test_negative_surplus_now_releases(self) -> None:
         """Net import this interval → release."""
-        assert should_charge_now(
-            [-100.0, 500.0], headroom_wh=2000, current_surplus_wh=-100.0
-        ) is True
+        assert (
+            should_charge_now([-100.0, 500.0], headroom_wh=2000, current_surplus_wh=-100.0) is True
+        )
 
     def test_battery_full_releases(self) -> None:
         """Zero headroom → release (no benefit deferring)."""
-        assert should_charge_now(
-            [800.0, 900.0], headroom_wh=0.0, current_surplus_wh=800.0
-        ) is True
+        assert should_charge_now([800.0, 900.0], headroom_wh=0.0, current_surplus_wh=800.0) is True
 
     def test_cannot_fill_charges_asap(self) -> None:
         """Total remaining surplus ≤ headroom → charge now (can't overfill)."""
         # total = 1500 < headroom 5000
-        assert should_charge_now(
-            [500.0, 1000.0], headroom_wh=5000, current_surplus_wh=500.0
-        ) is True
+        assert (
+            should_charge_now([500.0, 1000.0], headroom_wh=5000, current_surplus_wh=500.0) is True
+        )
 
     def test_defers_outside_peak_band(self) -> None:
         """Low-surplus interval below water level L → defer."""
@@ -649,6 +666,55 @@ class TestShouldChargeNow:
         # the 1000 and 900 intervals (≥L) would charge:
         assert should_charge_now(remaining, headroom_wh=1900, current_surplus_wh=900.0) is True
         assert should_charge_now(remaining, headroom_wh=1900, current_surplus_wh=1000.0) is True
+
+    def test_cap_widens_band_so_lower_interval_charges(self) -> None:
+        """A per-interval cap widens the band (gentler feed-in, FSD 4.2.3).
+
+        Same profile/headroom: uncapped the 400 interval defers (L=900); with
+        a 625 Wh cap each top interval absorbs less, so more intervals are
+        needed and the 400 interval falls inside the band (L=400).
+        """
+        remaining = [400.0, 1000.0, 900.0, 200.0]
+        # Uncapped: sorted 1000,900 fills 1500 → L=900 → 400 defers.
+        assert should_charge_now(remaining, headroom_wh=1500, current_surplus_wh=400.0) is False
+        # Capped at 625 Wh: 625+625+400 ≥ 1500 → L=400 → 400 charges.
+        assert (
+            should_charge_now(
+                remaining,
+                headroom_wh=1500,
+                current_surplus_wh=400.0,
+                max_charge_per_interval_wh=625.0,
+            )
+            is True
+        )
+
+    def test_cap_lowers_absorbable_total_charges_asap(self) -> None:
+        """Cap can make remaining surplus unfillable → charge ASAP."""
+        remaining = [400.0, 1000.0, 900.0, 200.0]
+        # Capped absorbable = 625+625+400+200 = 1850 < headroom 1900 → release.
+        assert (
+            should_charge_now(
+                remaining,
+                headroom_wh=1900,
+                current_surplus_wh=400.0,
+                max_charge_per_interval_wh=625.0,
+            )
+            is True
+        )
+
+    def test_cap_still_defers_below_band(self) -> None:
+        """Even with the wider capped band, intervals under L still defer."""
+        remaining = [200.0, 1000.0, 900.0, 400.0]
+        # Capped 625, headroom 1500 → L=400; current 200 < 400 → defer.
+        assert (
+            should_charge_now(
+                remaining,
+                headroom_wh=1500,
+                current_surplus_wh=200.0,
+                max_charge_per_interval_wh=625.0,
+            )
+            is False
+        )
 
 
 if __name__ == "__main__":

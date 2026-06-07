@@ -158,10 +158,7 @@ class BatteryOptimizer:
             while self.is_cheap_day(check_day):
                 check_day += timedelta(days=1)
 
-            cheap_end = check_day.replace(
-                hour=self.cheap_end_hour,
-                minute=self.cheap_end_minute
-            )
+            cheap_end = check_day.replace(hour=self.cheap_end_hour, minute=self.cheap_end_minute)
             target = check_day.replace(hour=21, minute=0)
 
             # Cheap started at previous evening or start of weekend
@@ -171,21 +168,16 @@ class BatteryOptimizer:
         else:
             # Weekday
             today_cheap_start = today.replace(
-                hour=self.cheap_start_hour,
-                minute=self.cheap_start_minute
+                hour=self.cheap_start_hour, minute=self.cheap_start_minute
             )
-            today_cheap_end = today.replace(
-                hour=self.cheap_end_hour,
-                minute=self.cheap_end_minute
-            )
+            today_cheap_end = today.replace(hour=self.cheap_end_hour, minute=self.cheap_end_minute)
 
             if now.hour < self.cheap_end_hour or (
                 now.hour == self.cheap_end_hour and now.minute < self.cheap_end_minute
             ):
                 # Case 3: Weekday night (00:00-06:00)
                 cheap_start = (today - timedelta(days=1)).replace(
-                    hour=self.cheap_start_hour,
-                    minute=self.cheap_start_minute
+                    hour=self.cheap_start_hour, minute=self.cheap_start_minute
                 )
                 cheap_end = today_cheap_end
                 target = today.replace(hour=21, minute=0)
@@ -203,14 +195,12 @@ class BatteryOptimizer:
                     while self.is_cheap_day(check_day):
                         check_day += timedelta(days=1)
                     cheap_end = check_day.replace(
-                        hour=self.cheap_end_hour,
-                        minute=self.cheap_end_minute
+                        hour=self.cheap_end_hour, minute=self.cheap_end_minute
                     )
                     target = check_day.replace(hour=21, minute=0)
                 else:
                     cheap_end = tomorrow.replace(
-                        hour=self.cheap_end_hour,
-                        minute=self.cheap_end_minute
+                        hour=self.cheap_end_hour, minute=self.cheap_end_minute
                     )
                     target = tomorrow.replace(hour=21, minute=0)
 
@@ -220,8 +210,7 @@ class BatteryOptimizer:
                 # Case 1: Daytime expensive period (06:00 - 21:00)
                 cheap_start = today_cheap_start
                 cheap_end = (today + timedelta(days=1)).replace(
-                    hour=self.cheap_end_hour,
-                    minute=self.cheap_end_minute
+                    hour=self.cheap_end_hour, minute=self.cheap_end_minute
                 )
                 # Target is tomorrow 21:00 (end of next expensive period)
                 target = (today + timedelta(days=1)).replace(hour=21, minute=0)
@@ -261,19 +250,19 @@ class BatteryOptimizer:
             net_wh = row["net_energy_wh"]
 
             # Record SOC at START of this period (before energy changes)
-            results.append({
-                "time": t,
-                "soc_percent": e_bat / self.capacity_wh * 100,
-                "soc_wh": e_bat,
-                "soc_wh_unclamped": e_bat_unclamped,
-                "net_wh": net_wh,  # For grid export calculation
-                "discharge_wh": 0,  # Will be updated below
-            })
+            results.append(
+                {
+                    "time": t,
+                    "soc_percent": e_bat / self.capacity_wh * 100,
+                    "soc_wh": e_bat,
+                    "soc_wh_unclamped": e_bat_unclamped,
+                    "net_wh": net_wh,  # For grid export calculation
+                    "discharge_wh": 0,  # Will be updated below
+                }
+            )
             # Block only in the specified time window
             in_block_window = (
-                block_until and
-                (block_from is None or t >= block_from) and
-                t < block_until
+                block_until and (block_from is None or t >= block_from) and t < block_until
             )
             discharge_blocked = in_block_window
 
@@ -286,8 +275,7 @@ class BatteryOptimizer:
                 )
                 e_bat += charge
                 e_bat_unclamped = min(
-                    e_bat_unclamped + net_wh * self.charge_efficiency,
-                    self.capacity_wh
+                    e_bat_unclamped + net_wh * self.charge_efficiency, self.capacity_wh
                 )
                 discharge_wh = 0
             elif discharge_blocked:
@@ -344,8 +332,10 @@ class BatteryOptimizer:
         """
         tariff = self.get_tariff_periods(now)
 
-        logger.debug(f"Tariff: cheap={tariff.is_cheap_now}, "
-                    f"cheap_end={tariff.cheap_end}, target={tariff.target}")
+        logger.debug(
+            f"Tariff: cheap={tariff.is_cheap_now}, "
+            f"cheap_end={tariff.cheap_end}, target={tariff.target}"
+        )
 
         if forecast.empty:
             logger.warning("No forecast data available")
@@ -437,19 +427,25 @@ class BatteryOptimizer:
 
             soc_floor = min(self.min_soc_percent + morning_drop, 100.0)
 
-            logger.info(f"SOC floor: {soc_floor:.0f}% (need {self.min_soc_percent:.0f}% + "
-                       f"{morning_drop:.0f}% morning drop)")
+            logger.info(
+                f"SOC floor: {soc_floor:.0f}% (need {self.min_soc_percent:.0f}% + "
+                f"{morning_drop:.0f}% morning drop)"
+            )
 
             if soc_percent > soc_floor:
                 # Above floor — allow discharge, re-check in 15 min
                 discharge_allowed = True
-                reason = (f"SOC {soc_percent:.0f}% above floor {soc_floor:.0f}% "
-                         f"(protect {self.min_soc_percent:.0f}% at {swiss_time(min_soc_time)})")
+                reason = (
+                    f"SOC {soc_percent:.0f}% above floor {soc_floor:.0f}% "
+                    f"(protect {self.min_soc_percent:.0f}% at {swiss_time(min_soc_time)})"
+                )
             else:
                 # At or below floor — block to preserve for expensive hours
                 discharge_allowed = False
-                reason = (f"Block - SOC {soc_percent:.0f}% at floor {soc_floor:.0f}% "
-                         f"(protect {self.min_soc_percent:.0f}% at {swiss_time(min_soc_time)})")
+                reason = (
+                    f"Block - SOC {soc_percent:.0f}% at floor {soc_floor:.0f}% "
+                    f"(protect {self.min_soc_percent:.0f}% at {swiss_time(min_soc_time)})"
+                )
 
         logger.info(f"Decision: discharge_allowed={discharge_allowed}")
 
@@ -457,10 +453,7 @@ class BatteryOptimizer:
         if not discharge_allowed:
             # Blocking from now — show that trajectory
             sim_with_strategy = self.simulate_soc(
-                soc_percent,
-                forecast,
-                block_from=now,
-                block_until=tariff.cheap_end
+                soc_percent, forecast, block_from=now, block_until=tariff.cheap_end
             )
         elif not soc_ok and tariff.is_cheap_now:
             # Above floor but will need to block later — show deferred block
@@ -493,16 +486,22 @@ def should_charge_now(
     remaining_surplus_wh: list[float],
     headroom_wh: float,
     current_surplus_wh: float,
+    max_charge_per_interval_wh: float | None = None,
 ) -> bool:
     """Decide whether to charge the home battery now (export-peak shaving).
 
     Defers battery charging so its remaining headroom absorbs the highest
-    part of the day's grid-export curve. The inverter regulates to zero
-    export, so when charging is ON it absorbs the *whole* surplus of the
-    interval. We therefore pick the highest-surplus intervals of the rest
-    of the day until their full surplus fills the headroom — the "water
-    level" L is the surplus of the lowest selected interval — and charge
-    now iff the current interval is in that top band.
+    part of the day's grid-export curve. We pick the highest-surplus
+    intervals of the rest of the day until their absorbed energy fills the
+    headroom — the "water level" L is the surplus of the lowest selected
+    interval — and charge now iff the current interval is in that top band.
+
+    Each interval absorbs at most ``max_charge_per_interval_wh`` (the charge
+    power × 0.25 h); surplus above that is exported even while charging. A
+    lower charge power therefore raises the per-interval cap's bite, so more
+    intervals are needed to fill the headroom (a wider, gentler band → a
+    flatter feed-in profile). When the cap is None the interval absorbs its
+    whole surplus (the original zero-export behaviour).
 
     This is evaluated every 15 min and is fully self-correcting: headroom
     is re-read from the actual SOC each tick, so as the battery fills, L
@@ -513,6 +512,8 @@ def should_charge_now(
             today, including the current interval (negatives allowed).
         headroom_wh: energy needed to reach the target SOC (Wh).
         current_surplus_wh: this interval's net surplus (Wh).
+        max_charge_per_interval_wh: cap on energy the battery can absorb in
+            one 15-min interval (None = uncapped / whole surplus).
 
     Returns:
         True to charge (or release control), False to defer charging.
@@ -525,18 +526,24 @@ def should_charge_now(
     if headroom_wh <= 0:
         return True
 
+    def _absorbed(surplus: float) -> float:
+        if max_charge_per_interval_wh is None:
+            return surplus
+        return min(surplus, max_charge_per_interval_wh)
+
     positives = [e for e in remaining_surplus_wh if e > 0]
-    total_surplus = sum(positives)
-    # Can't fill the battery from the remaining surplus → charge ASAP.
-    if total_surplus <= headroom_wh:
+    total_absorbable = sum(_absorbed(e) for e in positives)
+    # Can't fill the battery from the remaining (capped) surplus → charge ASAP.
+    if total_absorbable <= headroom_wh:
         return True
 
-    # Water-fill: accumulate the highest-surplus intervals until the
-    # headroom is met; L is the surplus of the last (lowest) one included.
+    # Water-fill: accumulate the highest-surplus intervals (each contributing
+    # at most the per-interval cap) until the headroom is met; L is the
+    # surplus of the last (lowest) one included.
     accumulated = 0.0
     water_level = 0.0
     for surplus in sorted(positives, reverse=True):
-        accumulated += surplus
+        accumulated += _absorbed(surplus)
         water_level = surplus
         if accumulated >= headroom_wh:
             break

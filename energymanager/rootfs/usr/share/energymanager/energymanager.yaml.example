@@ -35,6 +35,11 @@ battery:
   # the midday export peak (only when the car is disconnected or full).
   # Re-evaluated every 15 min. On by default. See FSD 4.4.
   charge_shaving_enabled: true
+  # Charge power (W) used while shaving the export peak (use case B). Lower
+  # than max_charge_w on purpose: a gentler C-rate is easier on the battery
+  # and spreads absorption over more intervals → flatter feed-in. Use case A
+  # (car connected & not full) still releases to max_charge_w.
+  charge_shaving_power_w: 2500
   charge_control_entity: "number.battery_maximum_charging_power"
   # Dashboard sensor that surfaces the combined battery reasoning
   # (discharge + charge-shaving). Advisory only. See FSD 4.6.4.

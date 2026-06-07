@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.14"
+__version__ = "1.8.15"
 
 import json
 import logging
@@ -138,9 +138,7 @@ class EnergyManager:
             holidays=tariff_opts.get("holidays", []),
         )
 
-        self.soc_entity = battery_opts.get(
-            "soc_entity", "sensor.battery_state_of_capacity"
-        )
+        self.soc_entity = battery_opts.get("soc_entity", "sensor.battery_state_of_capacity")
         self.discharge_control_entity = battery_opts.get(
             "discharge_control_entity", "number.battery_maximum_discharging_power"
         )
@@ -148,15 +146,20 @@ class EnergyManager:
         # headroom absorbs the midday export peak. Only active when the car
         # is disconnected or full. On by default — set to false in the add-on
         # config to disable. See FSD 4.2.3.
-        self.charge_shaving_enabled = battery_opts.get(
-            "charge_shaving_enabled", True
-        )
+        self.charge_shaving_enabled = battery_opts.get("charge_shaving_enabled", True)
         self.charge_control_entity = battery_opts.get(
             "charge_control_entity", "number.battery_maximum_charging_power"
         )
         self.charge_max_w = battery_opts.get("max_charge_w", 5000)
-        # Tracks last applied charge state to only write/log on change.
-        self._last_charge_allowed: bool | None = None
+        # Charge power used while shaving the export peak (use case B). Lower
+        # than max_charge_w on purpose: a gentler C-rate is easier on the
+        # battery and spreads absorption across more intervals → flatter
+        # feed-in. Use case A (car present) still releases to max_charge_w.
+        self.charge_shaving_power_w = battery_opts.get("charge_shaving_power_w", 2500)
+        # Tracks last applied charge power (W) to only write/log on change.
+        # Tracks power, not a bool, so a use-case A→B transition (max→shaving
+        # power) is still detected even though "charging" stays true.
+        self._last_charge_power_w: int | None = None
         # Battery decision reasoning, published to sensor.battery_decision
         # for the dashboard (FSD 4.6.4). Recorded by control_battery_charge.
         self.battery_decision_entity = battery_opts.get(
@@ -246,18 +249,14 @@ class EnergyManager:
         self.manual_power_entity = ev_opts.get(
             "manual_power_entity", "input_number.ev_manual_power"
         )
-        self.ev_charging_mode_entity = ev_opts.get(
-            "mode_entity", "input_select.ev_charging_mode"
-        )
+        self.ev_charging_mode_entity = ev_opts.get("mode_entity", "input_select.ev_charging_mode")
         self.ev_charge_status_entity = ev_opts.get(
             "charge_status_entity", "sensor.ev_charge_status"
         )
         self.ev_wallbox_status_entity = ev_opts.get(
             "wallbox_status_entity", "sensor.wallbox_status"
         )
-        self.car_ready_entity = ev_opts.get(
-            "car_ready_entity", "binary_sensor.car_ready"
-        )
+        self.car_ready_entity = ev_opts.get("car_ready_entity", "binary_sensor.car_ready")
         self.ev_auto_reset_timeout_min = ev_opts.get("auto_reset_timeout_min", 5)
         # EV safety rule floor — independent from battery.reserve_percent.
         # The nightly battery-discharge block uses battery.reserve_percent
@@ -286,17 +285,11 @@ class EnergyManager:
         # Smart car config (FSD 4.5 Step 2 — hourly SOC readback)
         smart_opts = options.get("smart_car", {})
         self.smart_car_enabled = smart_opts.get("enabled", False)
-        self.smart_car_soc_entity = smart_opts.get(
-            "soc_entity", "sensor.smart_battery"
-        )
+        self.smart_car_soc_entity = smart_opts.get("soc_entity", "sensor.smart_battery")
         self.smart_car_capacity_kwh = float(smart_opts.get("capacity_kwh", 100.0))
-        self.smart_car_charge_efficiency = float(
-            smart_opts.get("charge_efficiency", 0.88)
-        )
+        self.smart_car_charge_efficiency = float(smart_opts.get("charge_efficiency", 0.88))
         # Phase 3 — manual-charge kWh budget entities
-        self.ev_target_soc_entity = ev_opts.get(
-            "target_soc_entity", "input_number.ev_target_soc"
-        )
+        self.ev_target_soc_entity = ev_opts.get("target_soc_entity", "input_number.ev_target_soc")
         self.car_soc_last_known_entity = smart_opts.get(
             "soc_last_known_entity", "sensor.smart_battery_last_known"
         )
@@ -318,9 +311,7 @@ class EnergyManager:
         logger.info("Connecting to services...")
         self.forecast_reader.connect()
         self.influx_client = InfluxDBClient(
-            url=self.influx_url,
-            token=self.influx_token,
-            org=self.influx_org
+            url=self.influx_url, token=self.influx_token, org=self.influx_org
         )
         self.write_api = self.influx_client.write_api(write_options=SYNCHRONOUS)
         self.simulation_writer.connect()
@@ -404,11 +395,7 @@ class EnergyManager:
             return
 
         car_soc = self._read_car_soc_with_fallback() if self.smart_car_enabled else None
-        sim_car = (
-            car_soc is not None
-            and house_soc is not None
-            and self.smart_car_capacity_kwh > 0
-        )
+        sim_car = car_soc is not None and house_soc is not None and self.smart_car_capacity_kwh > 0
         if sim_car:
             house_cap_kwh = self.capacity_wh / 1000
             house_kwh = max(0.0, min(house_cap_kwh, house_soc / 100 * house_cap_kwh))
@@ -503,9 +490,7 @@ class EnergyManager:
         action = "enable" if discharge_allowed else "block"
 
         # Read current actual value from Home Assistant
-        current_value = self.ha_client.get_battery_discharge_power(
-            self.discharge_control_entity
-        )
+        current_value = self.ha_client.get_battery_discharge_power(self.discharge_control_entity)
 
         if current_value is None:
             logger.warning(
@@ -547,9 +532,7 @@ class EnergyManager:
 
         # Verify the change took effect
         time.sleep(1)  # Give HA time to process
-        verified_value = self.ha_client.get_battery_discharge_power(
-            self.discharge_control_entity
-        )
+        verified_value = self.ha_client.get_battery_discharge_power(self.discharge_control_entity)
 
         if verified_value is not None and abs(verified_value - target_value) < 1:
             self.last_discharge_allowed = discharge_allowed
@@ -657,9 +640,7 @@ class EnergyManager:
             .replace(hour=23, minute=59, second=59, microsecond=0)
             .astimezone(UTC)
         )
-        start_aligned = now.replace(
-            minute=(now.minute // 15) * 15, second=0, microsecond=0
-        )
+        start_aligned = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
         remaining: list[float] = []
         current_surplus = 0.0
         for t in forecast.index:
@@ -671,20 +652,33 @@ class EnergyManager:
                 current_surplus = net  # first qualifying interval = now
             remaining.append(net)
 
-        charge = should_charge_now(remaining, headroom_wh, current_surplus)
+        # Per-interval absorption cap (Wh) at the shaving power. The water-fill
+        # must account for it: at a reduced power each 15-min interval absorbs
+        # at most this much, so more intervals are needed to fill the headroom.
+        max_charge_per_interval_wh = self.charge_shaving_power_w * 0.25
+        charge = should_charge_now(
+            remaining, headroom_wh, current_surplus, max_charge_per_interval_wh
+        )
         reason = (
             f"surplus now {current_surplus:.0f}Wh, headroom {headroom_wh:.0f}Wh → "
             f"{'charge' if charge else 'defer (shaving export peak)'}"
         )
         self._charge_action = "charging" if charge else "deferred"
         self._charge_reason = reason
-        self._apply_charge_control(charge, reason)
+        self._apply_charge_control(charge, reason, self.charge_shaving_power_w)
 
-    def _apply_charge_control(self, charge_allowed: bool, reason: str) -> None:
-        """Set max charging power to max (charge) or 0 (defer) if changed."""
-        if charge_allowed == self._last_charge_allowed:
+    def _apply_charge_control(
+        self, charge_allowed: bool, reason: str, power_w: int | None = None
+    ) -> None:
+        """Set max charging power and write/log only when the value changes.
+
+        power_w is the charge limit to apply when charging is allowed; defaults
+        to charge_max_w (use case A — greedy release). Use case B passes the
+        lower charge_shaving_power_w. When deferring, the limit is always 0.
+        """
+        target = (power_w if power_w is not None else self.charge_max_w) if charge_allowed else 0
+        if target == self._last_charge_power_w:
             return
-        target = self.charge_max_w if charge_allowed else 0
         logger.info(
             f"Battery charge {'allowed' if charge_allowed else 'deferred'} "
             f"→ {self.charge_control_entity}={target}W ({reason})"
@@ -702,7 +696,7 @@ class EnergyManager:
                 ),
             )
             return
-        self._last_charge_allowed = charge_allowed
+        self._last_charge_power_w = target
 
     def publish_battery_decision(self, decision, current_soc: float) -> None:
         """Publish combined battery reasoning to sensor.battery_decision.
@@ -715,8 +709,8 @@ class EnergyManager:
             self._discharge_blocked_by_protection or self._discharge_blocked_by_ev
         )
         charge_limit_w = None
-        if self.charge_shaving_enabled and self._last_charge_allowed is not None:
-            charge_limit_w = self.charge_max_w if self._last_charge_allowed else 0
+        if self.charge_shaving_enabled and self._last_charge_power_w is not None:
+            charge_limit_w = self._last_charge_power_w
         # When is the home battery forecast to reach 100% today (SOC forecast,
         # with_strategy scenario)? Independent of EV state so the battery card
         # can show "Full by HH:MM" even when no car is plugged in.
@@ -732,10 +726,7 @@ class EnergyManager:
                     battery_peak_soc = round(peak_soc)
             except Exception as e:
                 logger.debug(f"will_battery_hit_full failed: {e}")
-        state = (
-            f"discharge={'on' if discharge_allowed else 'off'} "
-            f"charge={self._charge_action}"
-        )
+        state = f"discharge={'on' if discharge_allowed else 'off'} charge={self._charge_action}"
         self.ha_client.set_sensor_state(
             self.battery_decision_entity,
             state,
@@ -784,9 +775,11 @@ class EnergyManager:
             end = max(tariff.target + timedelta(hours=1), pv_horizon)
 
             logger.info(f"Fetching forecasts from {swiss_datetime(start)} to {swiss_datetime(end)}")
-            logger.info(f"Tariff: cheap={'Yes' if tariff.is_cheap_now else 'No'}, "
-                       f"cheap_end={swiss_datetime(tariff.cheap_end)}, "
-                       f"target={swiss_datetime(tariff.target)}")
+            logger.info(
+                f"Tariff: cheap={'Yes' if tariff.is_cheap_now else 'No'}, "
+                f"cheap_end={swiss_datetime(tariff.cheap_end)}, "
+                f"target={swiss_datetime(tariff.target)}"
+            )
 
             forecast = self.forecast_reader.get_combined_forecast(
                 start=start,
@@ -819,8 +812,10 @@ class EnergyManager:
                 )
 
             # Log decision
-            logger.info(f"Decision: discharge_allowed={decision.discharge_allowed}, "
-                       f"min_soc={decision.min_soc_percent:.0f}%")
+            logger.info(
+                f"Decision: discharge_allowed={decision.discharge_allowed}, "
+                f"min_soc={decision.min_soc_percent:.0f}%"
+            )
             logger.info(f"Reason: {decision.reason}")
 
             # Write results to InfluxDB
@@ -897,10 +892,7 @@ class EnergyManager:
                 # ORANGE: appliance won't cause grid import until 21:00
                 signal = ApplianceSignal(
                     signal="orange",
-                    reason=(
-                        f"No grid import needed "
-                        f"(min SOC {min_soc:.0f}% with appliance)"
-                    ),
+                    reason=(f"No grid import needed (min SOC {min_soc:.0f}% with appliance)"),
                     excess_power_w=excess_power,
                     min_soc_percent=min_soc,
                 )
@@ -944,7 +936,6 @@ class EnergyManager:
 
         except Exception as e:
             logger.error(f"Failed to calculate appliance signal: {e}")
-
 
     def _read_grid_power(self) -> float:
         """Read grid power, preferring M-Bus smart meter if fresh (<20s)."""
@@ -1004,10 +995,12 @@ class EnergyManager:
                     self._last_car_soc_poll = now_mono
 
                 # Car just connected (transition to Preparing from disconnected state)
-                elif (
-                    wb_status == "Preparing"
-                    and self._last_wallbox_status
-                    not in ("Preparing", "Charging", "SuspendedEV", "SuspendedEVSE", "Finishing")
+                elif wb_status == "Preparing" and self._last_wallbox_status not in (
+                    "Preparing",
+                    "Charging",
+                    "SuspendedEV",
+                    "SuspendedEVSE",
+                    "Finishing",
                 ):
                     logger.info("Smart car: car connected, polling SOC")
                     self.update_car_soc()
@@ -1036,22 +1029,15 @@ class EnergyManager:
 
             # Wallbox available = car_ready binary sensor from OCPP server
             car_ready_state = self.ha_client.get_state(self.car_ready_entity)
-            wallbox_available = (
-                car_ready_state is not None
-                and car_ready_state.get("state") == "on"
-            )
+            wallbox_available = car_ready_state is not None and car_ready_state.get("state") == "on"
 
             # Read inputs for state machine
             ev_mode = self.ha_client.get_input_select(self.ev_charging_mode_entity)
 
             # Guard: only solar/immediate/cheap are valid — no "off" state
             if ev_mode not in ("solar", "immediate", "cheap"):
-                logger.warning(
-                    f"EV charging mode '{ev_mode}' is invalid, resetting to solar"
-                )
-                self.ha_client.set_input_select(
-                    self.ev_charging_mode_entity, "solar"
-                )
+                logger.warning(f"EV charging mode '{ev_mode}' is invalid, resetting to solar")
+                self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
                 ev_mode = "solar"
 
             now = datetime.now(UTC)
@@ -1061,11 +1047,7 @@ class EnergyManager:
 
             # User power slider (manual_power for immediate/cheap modes)
             manual_power_raw = self.ha_client.get_sensor_value(self.manual_power_entity)
-            manual_power = (
-                int(manual_power_raw)
-                if manual_power_raw is not None
-                else ev_max_power
-            )
+            manual_power = int(manual_power_raw) if manual_power_raw is not None else ev_max_power
 
             pv_power = self.ha_client.get_sensor_value(self.pv_power_entity) or 0.0
             load_power = self.ha_client.get_sensor_value(self.load_power_entity) or 0.0
@@ -1092,9 +1074,9 @@ class EnergyManager:
             ev_threshold = 0.0
             battery_full_time = None
             if ev_mode == "solar":
-                threshold = self.ha_client.get_sensor_value(
-                    self.ev_min_solar_power_entity
-                ) or ev_min_power
+                threshold = (
+                    self.ha_client.get_sensor_value(self.ev_min_solar_power_entity) or ev_min_power
+                )
                 ev_threshold = threshold
 
                 # Rule 1: Battery Full — surplus capture (no battery check)
@@ -1129,18 +1111,14 @@ class EnergyManager:
                 )
                 ev_min_power = POWER_STEPS_3P[0]
                 ev_max_power = POWER_STEPS_3P[-1]
-                candidate_power = snap_to_power_step(
-                    surplus_power, ev_min_power, ev_max_power
-                )
+                candidate_power = snap_to_power_step(surplus_power, ev_min_power, ev_max_power)
                 # Forecast gate: only snap up (drain home battery to bridge
                 # the gap to the next amp step) if the EOD car SOC forecast
                 # won't reach the EV target by today 23:59. The forecast
                 # already assumes house battery fills first and only the
                 # overflow goes to the car — so if it predicts the target
                 # is reached, we know "charge ≤ surplus" suffices.
-                ev_target_max = self.ha_client.get_sensor_value(
-                    self.car_charging_max_entity
-                )
+                ev_target_max = self.ha_client.get_sensor_value(self.car_charging_max_entity)
                 forecast_eod = self.ev_soc_forecast_eod_today
                 candidates, snap_up_gate_reason = build_solar_candidates(
                     candidate_power=candidate_power,
@@ -1154,8 +1132,8 @@ class EnergyManager:
                 min_soc_forecast = 0.0
                 for try_power in candidates:
                     ev_load_wh = try_power * 0.25
-                    ev_safe, min_soc_forecast = (
-                        self.ev_battery_optimizer.check_ev_safe(ev_load_wh=ev_load_wh)
+                    ev_safe, min_soc_forecast = self.ev_battery_optimizer.check_ev_safe(
+                        ev_load_wh=ev_load_wh
                     )
                     if ev_safe:
                         ev_charging_power_w = try_power
@@ -1194,8 +1172,7 @@ class EnergyManager:
                 # Explain why neither rule fired
                 if surplus_power < ev_threshold:
                     ev_source_reason = (
-                        f"No charging — surplus {surplus_power:.0f}W"
-                        f" < {ev_threshold:.0f}W"
+                        f"No charging — surplus {surplus_power:.0f}W < {ev_threshold:.0f}W"
                     )
 
             # Compute wallbox idle state (all modes)
@@ -1214,9 +1191,7 @@ class EnergyManager:
             target_soc = float(target_soc_raw) if target_soc_raw is not None else 100.0
             car_soc_raw = self.ha_client.get_sensor_value(self.car_soc_last_known_entity)
             car_soc = float(car_soc_raw) if car_soc_raw is not None else None
-            session_wh_raw = self.ha_client.get_sensor_value(
-                self.wallbox_session_energy_entity
-            )
+            session_wh_raw = self.ha_client.get_sensor_value(self.wallbox_session_energy_entity)
             session_energy_wh = float(session_wh_raw) if session_wh_raw is not None else 0.0
             # Age of the raw smarthashtag reading.  Used for logging only —
             # the SOC stop fires regardless of freshness.  Read against the
@@ -1224,9 +1199,11 @@ class EnergyManager:
             # value stays flat) so the age reflects real polling cadence.
             car_soc_age_s: float | None = None
             raw_soc_state = self.ha_client.get_state(self.smart_car_soc_entity)
-            if (
-                raw_soc_state
-                and raw_soc_state.get("state") not in ("unknown", "unavailable", "none", None)
+            if raw_soc_state and raw_soc_state.get("state") not in (
+                "unknown",
+                "unavailable",
+                "none",
+                None,
             ):
                 lu = raw_soc_state.get("last_updated")
                 if lu:
@@ -1268,20 +1245,13 @@ class EnergyManager:
             parts = [f"EV [{output.state.value}] {output.target_power_w:.0f}W"]
             parts.append(f"mode={ev_mode}")
             if ev_mode == "solar":
-                op = (
-                    "≥" if surplus_power >= ev_threshold else "<"
-                ) if ev_threshold else "="
-                parts.append(
-                    f"surplus={surplus_power:.0f}W{op}{ev_threshold:.0f}W"
-                )
+                op = ("≥" if surplus_power >= ev_threshold else "<") if ev_threshold else "="
+                parts.append(f"surplus={surplus_power:.0f}W{op}{ev_threshold:.0f}W")
                 parts.append(f"batt={battery_soc:.0f}%")
                 if ev_charging_source != "none" or ev_safe is False:
-                    floor_op = (
-                        "≥" if min_soc_forecast >= self.ev_reserve_percent else "<"
-                    )
+                    floor_op = "≥" if min_soc_forecast >= self.ev_reserve_percent else "<"
                     parts.append(
-                        f"min48h={min_soc_forecast:.0f}%"
-                        f"{floor_op}{self.ev_reserve_percent:.0f}%"
+                        f"min48h={min_soc_forecast:.0f}%{floor_op}{self.ev_reserve_percent:.0f}%"
                     )
             else:
                 parts.append(f"batt={battery_soc:.0f}%")
@@ -1296,9 +1266,7 @@ class EnergyManager:
             )
             now_mono = time.monotonic()
             changed = signature != self._ev_log_signature
-            heartbeat_due = (
-                now_mono - self._ev_log_last_info_monotonic >= 60
-            )
+            heartbeat_due = now_mono - self._ev_log_last_info_monotonic >= 60
             if changed or heartbeat_due:
                 logger.info(ev_log_line)
                 self._ev_log_signature = signature
@@ -1318,10 +1286,7 @@ class EnergyManager:
             if (
                 output.state == EVState.IDLE
                 and ev_mode in ("immediate", "cheap")
-                and (
-                    prev_ev_state in (EVState.IMMEDIATE, EVState.CHEAP)
-                    or wallbox_available
-                )
+                and (prev_ev_state in (EVState.IMMEDIATE, EVState.CHEAP) or wallbox_available)
             ):
                 logger.info(f"Reverting mode to solar — {output.reason}")
                 self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
@@ -1355,8 +1320,7 @@ class EnergyManager:
 
             # Discharge blocking: block when IMMEDIATE/CHEAP and power > 0
             should_block = (
-                output.state in (EVState.IMMEDIATE, EVState.CHEAP)
-                and output.target_power_w > 0
+                output.state in (EVState.IMMEDIATE, EVState.CHEAP) and output.target_power_w > 0
             )
             if should_block != self._discharge_blocked_by_ev:
                 self._discharge_blocked_by_ev = should_block
@@ -1364,21 +1328,23 @@ class EnergyManager:
 
             # Integration test observer
             if self._observer is not None:
-                self._observer.observe(CycleSnapshot(
-                    inputs=inputs,
-                    output=output,
-                    prev_state=prev_ev_state,
-                    discharge_blocked_by_ev=self._discharge_blocked_by_ev,
-                    last_power_limit_sent=self._last_ev_power_limit,
-                    wb_connected=wb_connected,
-                    idle_since=self._ev_idle_since,
-                    excess_w=(
-                        (pv_power - load_power)
-                        if battery_soc < 100
-                        else (-grid_power + wallbox_power)
-                    ),
-                    ts=datetime.now(UTC),
-                ))
+                self._observer.observe(
+                    CycleSnapshot(
+                        inputs=inputs,
+                        output=output,
+                        prev_state=prev_ev_state,
+                        discharge_blocked_by_ev=self._discharge_blocked_by_ev,
+                        last_power_limit_sent=self._last_ev_power_limit,
+                        wb_connected=wb_connected,
+                        idle_since=self._ev_idle_since,
+                        excess_w=(
+                            (pv_power - load_power)
+                            if battery_soc < 100
+                            else (-grid_power + wallbox_power)
+                        ),
+                        ts=datetime.now(UTC),
+                    )
+                )
 
             # Publish dashboard sensors
             self.ha_client.set_sensor_state(
@@ -1480,8 +1446,10 @@ class EnergyManager:
         # Try to restore from InfluxDB history
         restored = self._query_last_value(entity_id)
         state = restored if restored is not None else default_state
-        logger.info(f"Creating sensor {entity_id} with state={state}"
-                     f"{' (from InfluxDB)' if restored is not None else ' (default)'}")
+        logger.info(
+            f"Creating sensor {entity_id} with state={state}"
+            f"{' (from InfluxDB)' if restored is not None else ' (default)'}"
+        )
         self.ha_client.set_sensor_state(entity_id, state, attributes=attributes)
 
     def _publish_initial_sensors(self) -> None:
@@ -1490,14 +1458,21 @@ class EnergyManager:
             self._ensure_sensor_exists(
                 self.ev_target_power_entity,
                 0,
-                {"friendly_name": "EV Target Power", "unit_of_measurement": "W",
-                 "reason": "Waiting for first update", "icon": "mdi:ev-station"},
+                {
+                    "friendly_name": "EV Target Power",
+                    "unit_of_measurement": "W",
+                    "reason": "Waiting for first update",
+                    "icon": "mdi:ev-station",
+                },
             )
             self._ensure_sensor_exists(
                 self.ev_charge_status_entity,
                 "unknown",
-                {"friendly_name": "EV Charge Status",
-                 "status_text": "Waiting for first update", "icon": "mdi:ev-station"},
+                {
+                    "friendly_name": "EV Charge Status",
+                    "status_text": "Waiting for first update",
+                    "icon": "mdi:ev-station",
+                },
             )
             logger.info("Initial sensor check complete")
         except Exception as e:
