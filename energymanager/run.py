@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.17"
+__version__ = "1.8.18"
 
 import json
 import logging
@@ -156,14 +156,6 @@ class EnergyManager:
         # battery and spreads absorption across more intervals → flatter
         # feed-in. Use case A (car present) still releases to max_charge_w.
         self.charge_shaving_power_w = battery_opts.get("charge_shaving_power_w", 2500)
-        # Marginal-day gate (use case B0): only shave the export peak when the
-        # battery would (greedily) reach full before this local hour — i.e. an
-        # abundant day with a real midday peak to clip. On a marginal/shoulder-
-        # season day it fills late or not at all, so deferring risks under-
-        # filling for little benefit → charge greedily instead. 13:00 ≈ solar
-        # noon in Lausen. The fill-time uses a greedy sim (no deferral), so the
-        # gate is independent of the shaving decision — no feedback loop.
-        self.charge_shaving_full_by_hour = battery_opts.get("charge_shaving_full_by_hour", 13)
         # Tracks last applied charge power (W) to only write/log on change.
         # Tracks power, not a bool, so a use-case A→B transition (max→shaving
         # power) is still detected even though "charging" stays true.
@@ -606,7 +598,7 @@ class EnergyManager:
             return True  # car full → free to shave
         return False
 
-    def control_battery_charge(self, current_soc: float, forecast, now) -> None:
+    def control_battery_charge(self, current_soc: float, forecast, gate_forecast, now) -> None:
         """Defer battery charging to shave the export peak (FSD 4.2.3).
 
         Stateless per-tick decision (re-evaluated every 15 min): hold the
@@ -637,17 +629,15 @@ class EnergyManager:
         headroom_wh = max(0.0, (100.0 - current_soc) / 100.0 * self.capacity_wh)
 
         # B0 marginal-day gate: only shave on an abundant day, i.e. one where
-        # the battery would greedily reach full before the cutoff hour. If not,
-        # the day is too marginal to gamble headroom on — charge greedily at
-        # full power to capture the scarce surplus.
-        full_before, fill_time = self._fills_before_cutoff(current_soc, forecast, now)
-        if not full_before:
+        # the battery would greedily reach full today even under a conservative
+        # (p10 PV) forecast. If it would not fill under that pessimistic
+        # estimate, the day is too marginal to gamble headroom on — charge
+        # greedily at full power to capture the scarce surplus.
+        if not self._will_fill_today(current_soc, gate_forecast, now):
             self._charge_action = "charging"
             self._charge_reason = (
-                f"marginal day — battery "
-                f"{'full ' + fill_time if fill_time else 'not full today'} "
-                f"(≥ {self.charge_shaving_full_by_hour:02d}:00) → "
-                f"charge greedily, no shaving"
+                "marginal day — battery not forecast to fill today "
+                "(conservative p10 PV) → charge greedily, no shaving"
             )
             self._apply_charge_control(True, self._charge_reason)
             return
@@ -686,29 +676,28 @@ class EnergyManager:
         self._charge_reason = reason
         self._apply_charge_control(charge, reason, self.charge_shaving_power_w)
 
-    def _fills_before_cutoff(self, current_soc: float, forecast, now) -> tuple[bool, str | None]:
-        """Check if the battery reaches full today before the shaving cutoff.
+    def _will_fill_today(self, current_soc: float, gate_forecast, now) -> bool:
+        """Check whether the battery is forecast to reach full (~100%) today.
 
         Runs a greedy SOC simulation (charge at max_charge_w, no deferral) over
-        today's forecast and finds the first interval at ≥99% SOC. Because the
-        sim never defers, the answer is independent of the shaving decision —
-        so gating shaving on it cannot create a feedback loop.
+        today's *conservative* forecast (p10 PV, p50 load) and asks whether any
+        interval reaches ≥99% SOC. If the battery fills even under that
+        pessimistic production estimate, the day is abundant enough to shave the
+        export peak; otherwise it is marginal and we charge greedily.
+
+        The greedy sim never defers, so the result is independent of the shaving
+        decision — no feedback loop. The p10 PV margin means a marginal day
+        cannot trip shaving and then fail to fill the battery.
 
         Returns:
-            (reaches_full_before_cutoff, fill_time_local "HH:MM" or None). A
-            battery already full now counts as "before cutoff" (abundant case).
+            True if the battery reaches full today under the conservative
+            forecast (a battery already full now counts), else False. An empty
+            forecast is treated as marginal (charge greedily — never defer
+            blindly).
 
         """
-        cutoff = (
-            now.astimezone(SWISS_TZ)
-            .replace(
-                hour=self.charge_shaving_full_by_hour,
-                minute=0,
-                second=0,
-                microsecond=0,
-            )
-            .astimezone(UTC)
-        )
+        if gate_forecast is None or gate_forecast.empty:
+            return False
         eod = (
             datetime.now(SWISS_TZ)
             .replace(hour=23, minute=59, second=59, microsecond=0)
@@ -717,22 +706,14 @@ class EnergyManager:
         start_aligned = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
         mask = [
             start_aligned <= (t if t.tzinfo else t.replace(tzinfo=UTC)) <= eod
-            for t in forecast.index
+            for t in gate_forecast.index
         ]
-        today = forecast[mask]
+        today = gate_forecast[mask]
         if today.empty:
-            return False, None
+            return False
 
         sim = self.optimizer.simulate_soc(current_soc, today)
-        full = sim[sim["soc_percent"] >= 99.0]
-        if full.empty:
-            return False, None  # not forecast to fill today → marginal
-
-        fill_ts = full.index[0]
-        fill_ts = fill_ts if fill_ts.tzinfo else fill_ts.replace(tzinfo=UTC)
-        fill_local = fill_ts.astimezone(SWISS_TZ).strftime("%H:%M")
-        already_full = full.index[0] == sim.index[0]
-        return (already_full or fill_ts <= cutoff), fill_local
+        return bool((sim["soc_percent"] >= 99.0).any())
 
     def _apply_charge_control(
         self, charge_allowed: bool, reason: str, power_w: int | None = None
@@ -857,6 +838,18 @@ class EnergyManager:
                 logger.error("No forecast data available")
                 return
 
+            # Conservative forecast for the marginal-day fill check (B0): low
+            # PV (p10) against median load (p50). Shaving only runs when the
+            # battery fills today even under this pessimistic estimate, so a
+            # marginal day cannot trip shaving and then fail to fill. Everything
+            # else (discharge, water-fill, dashboards) stays on p50 above.
+            gate_forecast = self.forecast_reader.get_combined_forecast(
+                start=start,
+                end=end,
+                pv_percentile="p10",
+                load_percentile="p50",
+            )
+
             logger.info(f"Got {len(forecast)} forecast periods")
             logger.debug(
                 f"Forecast range: {swiss_datetime(forecast.index[0])} → "
@@ -911,8 +904,8 @@ class EnergyManager:
             self._discharge_blocked_by_protection = not decision.discharge_allowed
             self._update_discharge_control()
 
-            # Export-peak-shaving charge control (no-op unless enabled)
-            self.control_battery_charge(current_soc, forecast, now)
+            # Export-peak-shaving charge control
+            self.control_battery_charge(current_soc, forecast, gate_forecast, now)
 
             # Publish combined battery reasoning for the dashboard
             self.publish_battery_decision(decision, current_soc)

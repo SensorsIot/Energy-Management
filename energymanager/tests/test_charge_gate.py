@@ -92,39 +92,35 @@ def _forecast(now_utc: datetime, nets: list[float]) -> pd.DataFrame:
 
 
 class TestMarginalDayGate:
-    """B0 marginal-day gate (FSD 4.2.3): only shave when the battery would
-    greedily reach full before charge_shaving_full_by_hour (default 13:00)."""
+    """B0 marginal-day gate (FSD 4.2.3): only shave when the battery is
+    forecast to reach full today under the conservative p10-PV forecast.
+
+    The gate just runs a greedy sim over whatever forecast it is handed; the
+    p10-vs-p50 conservatism is applied at the fetch layer (run loop), so these
+    tests pass the already-conservative forecast directly.
+    """
 
     def _real_optimizer(self, manager) -> None:
         manager.optimizer = BatteryOptimizer(capacity_wh=10000, max_charge_w=5000)
-        manager.charge_shaving_full_by_hour = 13
 
-    def test_abundant_day_fills_before_cutoff(self, manager) -> None:
+    def test_abundant_day_fills_today(self, manager) -> None:
         self._real_optimizer(manager)
-        # 06:00 UTC = 08:00 Swiss; strong surplus → full well before 13:00.
         now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
-        fc = _forecast(now, [1500.0] * 64)  # 6 kW surplus for 16 h
-        full_before, fill_time = manager._fills_before_cutoff(50.0, fc, now)
-        assert full_before is True
-        assert fill_time is not None and int(fill_time.split(":")[0]) < 13
-
-    def test_marginal_day_fills_after_cutoff(self, manager) -> None:
-        self._real_optimizer(manager)
-        # 09:00 UTC = 11:00 Swiss; weak surplus → fills ~13:15, after cutoff.
-        now = datetime(2026, 6, 7, 9, 0, tzinfo=UTC)
-        fc = _forecast(now, [600.0] * 52)  # 2.4 kW surplus
-        full_before, fill_time = manager._fills_before_cutoff(50.0, fc, now)
-        assert full_before is False
-        assert fill_time is not None  # it does fill, just too late
+        fc = _forecast(now, [1500.0] * 64)  # strong surplus → fills today
+        assert manager._will_fill_today(50.0, fc, now) is True
 
     def test_marginal_day_never_fills(self, manager) -> None:
         self._real_optimizer(manager)
         # 16:00 UTC = 18:00 Swiss; trickle surplus, short window → never full.
         now = datetime(2026, 6, 7, 16, 0, tzinfo=UTC)
         fc = _forecast(now, [50.0] * 24)
-        full_before, fill_time = manager._fills_before_cutoff(50.0, fc, now)
-        assert full_before is False
-        assert fill_time is None
+        assert manager._will_fill_today(50.0, fc, now) is False
+
+    def test_empty_gate_forecast_is_marginal(self, manager) -> None:
+        """No conservative forecast → treat as marginal (never defer blindly)."""
+        self._real_optimizer(manager)
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+        assert manager._will_fill_today(50.0, pd.DataFrame(), now) is False
 
     def test_marginal_day_routes_to_greedy_charge(self, manager) -> None:
         """End-to-end: no car + marginal day → charge greedily at full power."""
@@ -134,7 +130,7 @@ class TestMarginalDayGate:
         now = datetime(2026, 6, 7, 16, 0, tzinfo=UTC)
         fc = _forecast(now, [50.0] * 24)  # marginal → never fills today
 
-        manager.control_battery_charge(50.0, fc, now)
+        manager.control_battery_charge(50.0, fc, fc, now)
 
         assert manager._charge_use_case == "B"
         assert manager._charge_action == "charging"
@@ -143,3 +139,18 @@ class TestMarginalDayGate:
         manager.ha_client.set_number.assert_called_once_with(
             manager.charge_control_entity, manager.charge_max_w, max_retries=5
         )
+
+    def test_abundant_day_routes_to_shaving(self, manager) -> None:
+        """End-to-end: no car + abundant day → gate passes to the water-fill
+        (not the greedy 'marginal' path)."""
+        self._real_optimizer(manager)
+        _wire(manager, car_ready="off")
+        manager.ha_client.set_number.return_value = (True, None)
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+        # Low surplus now, big peak later → fills today, water-fill defers now.
+        fc = _forecast(now, [200.0] + [3000.0] * 40 + [200.0] * 23)
+
+        manager.control_battery_charge(50.0, fc, fc, now)
+
+        assert manager._charge_use_case == "B"
+        assert "marginal" not in manager._charge_reason  # gate let it through

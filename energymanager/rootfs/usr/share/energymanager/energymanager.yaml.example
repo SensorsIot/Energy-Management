@@ -39,11 +39,12 @@ battery:
   # and spreads absorption over more intervals → flatter feed-in. Use case A
   # (car connected & not full) still releases to max_charge_w.
   charge_shaving_power_w: 2500
-  # Marginal-day gate: only shave the export peak when the battery would
-  # greedily reach full before this local hour (≈ solar noon). On a marginal
-  # shoulder-season day it fills late or not at all → charge greedily, no
-  # shaving. See FSD 4.2.3 sub-case B0.
-  charge_shaving_full_by_hour: 13
+  # Marginal-day gate (B0): shaving only runs on an abundant day — one where
+  # the battery is forecast to reach full today even under a conservative,
+  # low-production estimate (p10 PV vs p50 load). On a marginal shoulder-season
+  # day it would not fill under that pessimistic forecast → charge greedily, no
+  # shaving. No tuning knob: the p10/p50 forecast band is the safety margin.
+  # See FSD 4.2.3 sub-case B0.
   charge_control_entity: "number.battery_maximum_charging_power"
   # Dashboard sensor that surfaces the combined battery reasoning
   # (discharge + charge-shaving). Advisory only. See FSD 4.6.4.

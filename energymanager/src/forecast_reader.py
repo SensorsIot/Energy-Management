@@ -148,18 +148,30 @@ class ForecastReader:
         start: datetime,
         end: datetime,
         percentile: str = "p50",
+        pv_percentile: str | None = None,
+        load_percentile: str | None = None,
     ) -> pd.DataFrame:
         """Get combined PV and Load forecast.
 
         When PV forecast extends beyond load forecast, the load is filled
         by repeating the last available day's pattern cyclically.
 
+        Args:
+            start: Start time.
+            end: End time.
+            percentile: Default percentile for both PV and load.
+            pv_percentile: Override the PV percentile (falls back to percentile).
+            load_percentile: Override the load percentile (falls back to
+                percentile). Lets callers build a conservative net forecast,
+                e.g. pv_percentile="p10" with load_percentile="p50" for the
+                marginal-day fill check (Section 4.2.3, B0).
+
         Returns:
             DataFrame with columns: pv_energy_wh, load_energy_wh, net_energy_wh
 
         """
-        pv = self.get_pv_forecast(start, end, percentile)
-        load = self.get_load_forecast(start, end, percentile)
+        pv = self.get_pv_forecast(start, end, pv_percentile or percentile)
+        load = self.get_load_forecast(start, end, load_percentile or percentile)
 
         if pv.empty or load.empty:
             logger.warning("Missing forecast data")
