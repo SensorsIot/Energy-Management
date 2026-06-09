@@ -2058,20 +2058,10 @@ SOC at some point today — even under a conservative, low-production forecast
   `marginal day — battery not forecast to fill today (conservative p10 PV) …`.
 - **Yes** → abundant day: fall through to the water-fill below.
 
-**Why p10 PV, not a clock cutoff.** An earlier version (≤ 1.8.17) gated on a
-fixed local hour (`charge_shaving_full_by_hour`, default 13:00) — shave only
-if the greedy fill-time landed before it. That was a fragile knife-edge: in
-summer the predicted fill-time clusters around 12:00–14:00 and the forecast
-is volatile, so a small forecast revision could push it 15 min past the
-cutoff and flip the whole day from "shave" to "greedy" — which then filled
-the battery early and *defeated* shaving (observed live 2026-06-08: a 13:15
-prediction tripped greedy charging, filling by 11:21 and exporting the whole
-midday peak unshaved). The gate now asks the physical question the cutoff was
-a proxy for — *will the day fill the battery at all?* — and takes its safety
-margin from the **forecast uncertainty band** instead of a tuning constant:
-requiring the fill under **p10 PV** (production exceeded ~90 % of the time)
-means a marginal day cannot trip shaving and then fail to fill. There is no
-clock parameter.
+**Why p10 PV.** The gate takes its safety margin from the **forecast
+uncertainty band** rather than a tuning constant: requiring the fill under
+**p10 PV** (production exceeded ~90 % of the time) means a marginal day cannot
+trip shaving and then fail to fill. There is no clock or hour parameter.
 
 The fill check comes from `BatteryOptimizer.simulate_soc()`, which charges
 **greedily** (no deferral). The prediction is therefore independent of the
