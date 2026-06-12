@@ -263,7 +263,11 @@ class ShadingTracker:
                     hour_data = string_data[string_data["hour"] == hour]
                     if not hour_data.empty:
                         avg_ratio = hour_data["ratio"].mean()
-                        hourly_factors[hour] = round(max(0.1, min(1.2, avg_ratio)), 2)
+                        # Cast to plain float: np.float64 serializes as a
+                        # python/object/apply:numpy tag that yaml.safe_load
+                        # cannot read back (forecast then silently falls back
+                        # to defaults every run).
+                        hourly_factors[hour] = round(float(max(0.1, min(1.2, avg_ratio))), 2)
                     else:
                         # Fall back to default
                         hourly_factors[hour] = (

@@ -43,8 +43,17 @@ battery:
   # the battery is forecast to reach full today even under a conservative,
   # low-production estimate (p10 PV vs p50 load). On a marginal shoulder-season
   # day it would not fill under that pessimistic forecast → charge greedily, no
-  # shaving. No tuning knob: the p10/p50 forecast band is the safety margin.
-  # See FSD 4.2.3 sub-case B0.
+  # shaving. The p10/p50 forecast band is the safety margin. See FSD 4.2.3 B0.
+  # Fill-margin: shave only when the day's surplus exceeds the headroom by at
+  # least this factor (1.2 = 20% more than needed to fill). A day that only
+  # just fills, or fills near sunset, has no real export peak worth deferring
+  # for → it routes to greedy charging instead.
+  charge_shaving_fill_margin: 1.2
+  # Fail-safe: if the PV forecast heartbeat is older than this many minutes,
+  # the forecast is stale/untrusted (SwissSolarForecast keeps the last-good
+  # forecast when the weather download is incomplete/stale) → don't shave,
+  # charge greedily (the safe default that never under-fills the battery).
+  forecast_max_age_minutes: 120
   charge_control_entity: "number.battery_maximum_charging_power"
   # Dashboard sensor that surfaces the combined battery reasoning
   # (discharge + charge-shaving). Advisory only. See FSD 4.6.4.

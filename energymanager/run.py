@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.18"
+__version__ = "1.8.19"
 
 import json
 import logging
@@ -156,6 +156,16 @@ class EnergyManager:
         # battery and spreads absorption across more intervals → flatter
         # feed-in. Use case A (car present) still releases to max_charge_w.
         self.charge_shaving_power_w = battery_opts.get("charge_shaving_power_w", 2500)
+        # B0 fill-margin: only shave when the day's (conservative p10) surplus
+        # comfortably exceeds the headroom, not merely fills it. A day that only
+        # just fills (or fills near sunset) has no real export peak to clip, so
+        # deferring just risks under-filling → route it to greedy charging.
+        self.charge_shaving_fill_margin = battery_opts.get("charge_shaving_fill_margin", 1.2)
+        # Fail-safe: if the PV forecast heartbeat is older than this, the
+        # forecast is stale/untrusted (upstream guard keeping last-good on bad
+        # weather) → don't shave, charge greedily. Set on each tick by the loop.
+        self.forecast_max_age_minutes = battery_opts.get("forecast_max_age_minutes", 120)
+        self._forecast_fresh: bool = True
         # Tracks last applied charge power (W) to only write/log on change.
         # Tracks power, not a bool, so a use-case A→B transition (max→shaving
         # power) is still detected even though "charging" stays true.
@@ -628,11 +638,23 @@ class EnergyManager:
         self._charge_use_case = "B"
         headroom_wh = max(0.0, (100.0 - current_soc) / 100.0 * self.capacity_wh)
 
+        # Fail-safe: a stale forecast (upstream guard keeping last-good because
+        # the weather input went bad) must not drive shaving. Charge greedily —
+        # the safe default that never leaves the battery under-filled.
+        if not self._forecast_fresh:
+            self._charge_action = "charging"
+            self._charge_reason = (
+                "PV forecast stale → charge greedily, no shaving (fail-safe)"
+            )
+            self._apply_charge_control(True, self._charge_reason)
+            return
+
         # B0 marginal-day gate: only shave on an abundant day, i.e. one where
         # the battery would greedily reach full today even under a conservative
-        # (p10 PV) forecast. If it would not fill under that pessimistic
-        # estimate, the day is too marginal to gamble headroom on — charge
-        # greedily at full power to capture the scarce surplus.
+        # (p10 PV) forecast, with a comfortable surplus margin. If it would not
+        # fill (or only barely fills) under that pessimistic estimate, the day
+        # is too marginal to gamble headroom on — charge greedily at full power
+        # to capture the scarce surplus.
         if not self._will_fill_today(current_soc, gate_forecast, now):
             self._charge_action = "charging"
             self._charge_reason = (
@@ -687,13 +709,16 @@ class EnergyManager:
 
         The greedy sim never defers, so the result is independent of the shaving
         decision — no feedback loop. The p10 PV margin means a marginal day
-        cannot trip shaving and then fail to fill the battery.
+        cannot trip shaving and then fail to fill the battery. A second margin
+        (charge_shaving_fill_margin) requires the day's surplus to *comfortably*
+        exceed the headroom, not merely reach it — a day that only just fills,
+        or fills near sunset, has no real export peak worth deferring for.
 
         Returns:
             True if the battery reaches full today under the conservative
-            forecast (a battery already full now counts), else False. An empty
-            forecast is treated as marginal (charge greedily — never defer
-            blindly).
+            forecast AND the day's surplus exceeds headroom × fill_margin (a
+            battery already full now counts), else False. An empty forecast is
+            treated as marginal (charge greedily — never defer blindly).
 
         """
         if gate_forecast is None or gate_forecast.empty:
@@ -713,7 +738,14 @@ class EnergyManager:
             return False
 
         sim = self.optimizer.simulate_soc(current_soc, today)
-        return bool((sim["soc_percent"] >= 99.0).any())
+        if not bool((sim["soc_percent"] >= 99.0).any()):
+            return False  # would not fill today → marginal
+
+        # Fill-margin: the rest-of-today surplus must comfortably exceed the
+        # headroom, else it's a marginal day with no real peak to shave.
+        headroom_wh = max(0.0, (100.0 - current_soc) / 100.0 * self.capacity_wh)
+        total_surplus_wh = float(today["net_energy_wh"].clip(lower=0).sum())
+        return total_surplus_wh >= headroom_wh * self.charge_shaving_fill_margin
 
     def _apply_charge_control(
         self, charge_allowed: bool, reason: str, power_w: int | None = None
@@ -849,6 +881,20 @@ class EnergyManager:
                 pv_percentile="p10",
                 load_percentile="p50",
             )
+
+            # Fail-safe: a stale forecast heartbeat means the upstream guard is
+            # keeping the last-good forecast because the weather input is bad.
+            # Don't trust it for shaving → charge greedily instead. A missing
+            # heartbeat (None) is treated as fresh so shaving still works before
+            # the heartbeat feature is deployed / if metadata is absent.
+            age_s = self.forecast_reader.get_forecast_age_seconds(now)
+            self._forecast_fresh = age_s is None or age_s <= self.forecast_max_age_minutes * 60
+            if not self._forecast_fresh:
+                logger.warning(
+                    f"PV forecast heartbeat is {age_s / 60:.0f} min old "
+                    f"(> {self.forecast_max_age_minutes} min) — shaving will fall "
+                    f"back to greedy charging"
+                )
 
             logger.info(f"Got {len(forecast)} forecast periods")
             logger.debug(

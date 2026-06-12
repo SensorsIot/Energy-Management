@@ -61,6 +61,7 @@ class ForecastReader:
         start: datetime,
         end: datetime,
         percentile: str = "p50",
+        model: str = "hybrid",
     ) -> pd.Series:
         """Get PV energy forecast.
 
@@ -68,6 +69,10 @@ class ForecastReader:
             start: Start time
             end: End time
             percentile: Which percentile (p10, p50, p90)
+            model: Which forecast model to read. SwissSolarForecast publishes
+                both "hybrid" (ICON ensemble) and "local" (MeteoSwiss point) at
+                the same timestamps; without this filter both are returned and
+                deduplicated arbitrarily. "hybrid" is the primary ensemble.
 
         Returns:
             Series with energy_wh indexed by time
@@ -81,6 +86,7 @@ class ForecastReader:
           |> range(start: {start.isoformat()}, stop: {end.isoformat()})
           |> filter(fn: (r) => r._measurement == "pv_forecast")
           |> filter(fn: (r) => r.inverter == "total")
+          |> filter(fn: (r) => r.model == "{model}")
           |> filter(fn: (r) => r._field == "power_w_{percentile}")
           |> map(fn: (r) => ({{r with _value: r._value * 0.25}}))
           |> keep(columns: ["_time", "_value"])
@@ -211,6 +217,43 @@ class ForecastReader:
         )
 
         return df
+
+    def get_forecast_age_seconds(self, now: datetime) -> float | None:
+        """Age (seconds) of the last *good* PV forecast, from its heartbeat.
+
+        SwissSolarForecast writes a `forecast_heartbeat` metadata point only
+        after publishing a forecast that passes its physical sanity check. A
+        large age means the forecast is stale (the upstream guard has been
+        keeping the last good one because the weather input was bad), so
+        consumers should not trust it for shaving.
+
+        Returns:
+            Age in seconds, or None if no heartbeat exists (treat as unknown —
+            do not disable shaving solely on a missing heartbeat).
+
+        """
+        query_api = self.client.query_api()
+        query = f'''
+        from(bucket: "{self.pv_bucket}")
+          |> range(start: -7d)
+          |> filter(fn: (r) => r._measurement == "pv_forecast_metadata")
+          |> filter(fn: (r) => r.key == "forecast_heartbeat")
+          |> filter(fn: (r) => r._field == "value")
+          |> last()
+        '''
+        try:
+            result = query_api.query(query)
+            for table in result:
+                for record in table.records:
+                    ts = record.get_time()
+                    if ts is None:
+                        continue
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=UTC)
+                    return (now - ts).total_seconds()
+        except Exception as e:
+            logger.warning(f"Failed to read forecast heartbeat: {e}")
+        return None
 
     def get_current_soc(
         self,

@@ -40,6 +40,7 @@ from src.local_fetcher import LocalFetcher
 from src.config import PVSystemConfig
 from src.accuracy_tracker import AccuracyTracker, create_accuracy_tracker
 from src.shading_tracker import ShadingTracker, create_shading_tracker
+from src.data_integrity import weather_run_complete
 
 
 class SwissSolarForecast:
@@ -54,6 +55,14 @@ class SwissSolarForecast:
         self.data_dir = Path(storage_config.get("data_path", "/share/swisssolarforecast"))
         self.data_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Data directory: {self.data_dir}")
+
+        # Max age of the latest weather run before we treat it as stale and
+        # refuse to publish a (potentially garbage) forecast from it. CH1 runs
+        # 3-hourly, CH2 6-hourly, plus a publish delay, so the freshest run is
+        # normally < ~9 h old; 12 h tolerates a couple of missed cycles.
+        self.weather_max_run_age_hours = float(
+            storage_config.get("max_run_age_hours", 12)
+        )
 
         # Initialize PV system config from user options
         self.pv_config = PVSystemConfig.from_options(options)
@@ -253,6 +262,24 @@ class SwissSolarForecast:
             )
             logger.info(f"Generated PV forecast with {len(pv_forecast)} time steps")
 
+            # Data-integrity guard: only publish if the underlying weather runs
+            # downloaded completely and are fresh. A partial/stale download
+            # (e.g. during a WAN outage) is rejected so we keep the last good
+            # forecast instead of overwriting it with garbage. This validates
+            # the *input*, not the output shape, so it never false-rejects a
+            # legitimately unusual (e.g. evening-clearing) weather day.
+            for model_dir in ("icon-ch1", "icon-ch2"):
+                ok, reason = weather_run_complete(
+                    self.data_dir, model_dir, self.weather_max_run_age_hours
+                )
+                if not ok:
+                    logger.error(
+                        f"Weather data not usable — keeping last good hybrid "
+                        f"forecast, skipping write: {reason}"
+                    )
+                    return
+                logger.debug(f"Weather check: {reason}")
+
             # Write PV forecast to InfluxDB (15-min intervals)
             if self.influx_writer:
                 run_time = datetime.now(UTC)
@@ -268,6 +295,12 @@ class SwissSolarForecast:
                     resample_minutes=15,
                     battery_soc=battery_soc,
                     discharge_power_limit=discharge_power,
+                )
+                # Heartbeat: a plausible forecast was just published. Consumers
+                # (energymanager shaving) treat a stale heartbeat as "don't
+                # trust the forecast" and fall back to safe greedy charging.
+                self.influx_writer.write_metadata(
+                    "forecast_heartbeat", run_time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 )
                 logger.info("PV forecast written to InfluxDB")
 
@@ -315,6 +348,21 @@ class SwissSolarForecast:
             for col in ["ghi", "temp_air"]:
                 if col in pv_forecast.columns:
                     output[col] = pv_forecast[col]
+
+            # Data-integrity guard (local path has no metadata.json): the point
+            # forecast must extend well into the future. A stale/partial CSV
+            # (e.g. a failed/old download during a WAN outage) won't cover the
+            # coming hours → keep last good rather than publish garbage.
+            idx = output.index
+            if idx.tz is None:
+                idx = idx.tz_localize("UTC")
+            future_hours = (idx.max() - datetime.now(UTC)).total_seconds() / 3600.0
+            if future_hours < 12:
+                logger.error(
+                    f"Local forecast covers only {future_hours:.1f} h ahead "
+                    f"(stale/partial download?) — keeping last good, skipping write"
+                )
+                return
 
             # Write to InfluxDB with model="local" tag
             if self.influx_writer:

@@ -2149,10 +2149,24 @@ shaving power) is still detected even though charging stays on.
 | `battery.charge_control_entity` | `number.battery_maximum_charging_power` | Control output (use case A & B) |
 | `battery.charge_shaving_power_w` | `2500` | Charge limit while shaving the peak (use case B) — gentle C-rate |
 | `battery.max_charge_w` | `5000` | Charge limit when use case A releases, or on a marginal day (B0) |
+| `battery.charge_shaving_fill_margin` | `1.2` | B0 fill-margin: shave only if the day's surplus exceeds headroom by this factor |
+| `battery.forecast_max_age_minutes` | `120` | Fail-safe: shave only if the PV forecast heartbeat is fresher than this |
 
-The marginal-day gate (B0) has **no tuning knob**: it gates on whether the
-battery fills today under the conservative p10-PV forecast, with the
-p10/p50 uncertainty band serving as the safety margin.
+The marginal-day gate (B0) gates on whether the battery fills today under the
+conservative p10-PV forecast, with the p10/p50 uncertainty band as the safety
+margin. Two additional safeguards make it robust to a bad forecast:
+
+- **Fill-margin** (`charge_shaving_fill_margin`): the rest-of-today surplus
+  must exceed the headroom by this factor (default 1.2 = 20 %), not merely
+  reach it. A day that only just fills, or fills near sunset, has no real
+  export peak to clip → it routes to greedy charging instead.
+- **Stale-forecast fail-safe** (`forecast_max_age_minutes`): SwissSolar
+  forecast writes a `forecast_heartbeat` only after publishing a forecast
+  built from complete, fresh weather data (it keeps the last-good forecast when
+  the weather download is partial/stale, validated via the fetcher's per-run
+  `metadata.json` — `files_failed`/run-age, not the output curve). If the
+  heartbeat is older than this, energymanager treats the forecast as untrusted
+  and charges greedily rather than shave on garbage. Garbage-in fails safe.
 
 #### Test Cases
 

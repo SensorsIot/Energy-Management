@@ -154,3 +154,36 @@ class TestMarginalDayGate:
 
         assert manager._charge_use_case == "B"
         assert "marginal" not in manager._charge_reason  # gate let it through
+
+    def test_fills_but_below_margin_is_marginal(self, manager) -> None:
+        """Fills today but surplus only just exceeds headroom (< ×1.2 margin)
+        → treated as marginal (no real peak to shave)."""
+        self._real_optimizer(manager)
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+        # SOC 50% → headroom 5000 Wh. ~5200 Wh surplus fills it (×0.95 eff →
+        # ~99.4%) but is under the 1.2 margin (6000 Wh) → marginal.
+        fc = _forecast(now, [1300.0] * 4 + [0.0] * 12)
+        assert manager._will_fill_today(50.0, fc, now) is False
+
+    def test_fills_with_margin_is_abundant(self, manager) -> None:
+        self._real_optimizer(manager)
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+        fc = _forecast(now, [1300.0] * 8 + [0.0] * 8)  # ~10.4 kWh >> 6 kWh margin
+        assert manager._will_fill_today(50.0, fc, now) is True
+
+    def test_stale_forecast_routes_to_greedy(self, manager) -> None:
+        """Fail-safe: a stale PV forecast → greedy charging, never shave."""
+        self._real_optimizer(manager)
+        _wire(manager, car_ready="off")
+        manager.ha_client.set_number.return_value = (True, None)
+        manager._forecast_fresh = False
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+        fc = _forecast(now, [3000.0] * 40)  # abundant, but forecast not trusted
+
+        manager.control_battery_charge(50.0, fc, fc, now)
+
+        assert manager._charge_action == "charging"
+        assert "stale" in manager._charge_reason
+        manager.ha_client.set_number.assert_called_once_with(
+            manager.charge_control_entity, manager.charge_max_w, max_retries=5
+        )
