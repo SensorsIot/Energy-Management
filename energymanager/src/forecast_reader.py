@@ -233,7 +233,7 @@ class ForecastReader:
 
         """
         query_api = self.client.query_api()
-        query = f'''
+        heartbeat_query = f'''
         from(bucket: "{self.pv_bucket}")
           |> range(start: -7d)
           |> filter(fn: (r) => r._measurement == "pv_forecast_metadata")
@@ -242,7 +242,7 @@ class ForecastReader:
           |> last()
         '''
         try:
-            result = query_api.query(query)
+            result = query_api.query(heartbeat_query)
             for table in result:
                 for record in table.records:
                     ts = record.get_time()
@@ -253,6 +253,32 @@ class ForecastReader:
                     return (now - ts).total_seconds()
         except Exception as e:
             logger.warning(f"Failed to read forecast heartbeat: {e}")
+
+        # Fallback when no heartbeat exists (older SwissSolarForecast, or it has
+        # been keeping the last-good forecast so long no heartbeat was written):
+        # use the stored forecast's own run_time. The plausibility guard only
+        # writes validated forecasts, so a stale run_time means stale data — the
+        # exact case the fail-safe must catch.
+        runtime_query = f'''
+        from(bucket: "{self.pv_bucket}")
+          |> range(start: -7d)
+          |> filter(fn: (r) => r._measurement == "pv_forecast")
+          |> filter(fn: (r) => r.inverter == "total")
+          |> filter(fn: (r) => r.model == "hybrid")
+          |> filter(fn: (r) => r._field == "run_time")
+          |> last()
+        '''
+        try:
+            result = query_api.query(runtime_query)
+            for table in result:
+                for record in table.records:
+                    raw = record.get_value()
+                    if not raw:
+                        continue
+                    ts = pd.to_datetime(raw, utc=True).to_pydatetime()
+                    return (now - ts).total_seconds()
+        except Exception as e:
+            logger.warning(f"Failed to read forecast run_time: {e}")
         return None
 
     def get_current_soc(

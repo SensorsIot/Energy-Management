@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.19"
+__version__ = "1.8.20"
 
 import json
 import logging
