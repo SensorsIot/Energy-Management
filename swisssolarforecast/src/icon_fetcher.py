@@ -179,6 +179,10 @@ class IconFetcher:
             items = data.get("features", [])
             if items:
                 return items[0]
+            # Search succeeded but the asset isn't published yet (common for the
+            # far-horizon tail right after a run). Logged so scattered gaps can
+            # be told apart from HTTP errors when investigating.
+            logger.debug(f"No STAC item for {var} h{hour} perturbed={perturbed} (not published?)")
         except Exception as e:
             logger.debug(f"Error fetching {var} h{hour} perturbed={perturbed}: {e}")
 
@@ -294,6 +298,8 @@ class IconFetcher:
         # Download in parallel
         downloaded = []
         failed = []
+        failed_hours: set[int] = set()
+        ok_hours: set[int] = set()
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
@@ -309,13 +315,37 @@ class IconFetcher:
                     result = future.result()
                     if result:
                         downloaded.append(result)
+                        ok_hours.add(hour)
                     else:
                         failed.append(f"{var} h{hour} m{member}")
+                        failed_hours.add(hour)
                 except Exception as e:
                     failed.append(f"{var} h{hour} m{member}: {e}")
+                    failed_hours.add(hour)
 
         if failed:
-            logger.warning(f"Failed to download {len(failed)} items")
+            # Classify the failure pattern so a real download-reliability issue
+            # is distinguishable from benign publish-lag of the far-future tail.
+            # If every failed hour is beyond the last successfully fetched hour,
+            # the model simply hasn't published its tail yet (expected shortly
+            # after a run); scattered gaps inside the fetched range are not.
+            fh = sorted(failed_hours)
+            max_ok = max(ok_hours) if ok_hours else -1
+            tail_only = bool(fh) and min(fh) > max_ok
+            if tail_only:
+                logger.info(
+                    f"{self.model.upper()} run {run_str}: {len(failed)} items "
+                    f"pending — far-horizon tail not published yet "
+                    f"(hours {fh[0]}–{fh[-1]}, fetched through h{max_ok}). Benign."
+                )
+            else:
+                logger.warning(
+                    f"{self.model.upper()} run {run_str}: {len(failed)} items "
+                    f"failed with GAPS inside the fetched range "
+                    f"(failed hours {fh}, fetched through h{max_ok}) — likely a "
+                    f"download-reliability problem, investigate. "
+                    f"Examples: {failed[:5]}"
+                )
 
         # Save metadata
         # Note: perturbed file contains all 10 perturbed members,

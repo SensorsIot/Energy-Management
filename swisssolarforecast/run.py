@@ -262,23 +262,28 @@ class SwissSolarForecast:
             )
             logger.info(f"Generated PV forecast with {len(pv_forecast)} time steps")
 
-            # Data-integrity guard: only publish if the underlying weather runs
-            # downloaded completely and are fresh. A partial/stale download
-            # (e.g. during a WAN outage) is rejected so we keep the last good
+            # Data-integrity guard: only publish if the near-term weather data
+            # downloaded completely and is fresh, so a partial/stale download
+            # (e.g. during a WAN outage) is rejected and we keep the last good
             # forecast instead of overwriting it with garbage. This validates
             # the *input*, not the output shape, so it never false-rejects a
             # legitimately unusual (e.g. evening-clearing) weather day.
-            for model_dir in ("icon-ch1", "icon-ch2"):
-                ok, reason = weather_run_complete(
-                    self.data_dir, model_dir, self.weather_max_run_age_hours
+            #
+            # Gate on CH1 only: it covers hours 0–33 (today + tomorrow morning),
+            # which is what shaving uses. CH2 only extends the multi-day tail
+            # (days 2–5); its far-horizon files publish progressively and are
+            # routinely still missing right after a run (benign publish-lag), so
+            # blocking on CH2 completeness would false-reject a usable forecast.
+            ok, reason = weather_run_complete(
+                self.data_dir, "icon-ch1", self.weather_max_run_age_hours
+            )
+            if not ok:
+                logger.error(
+                    f"Near-term weather (CH1) not usable — keeping last good "
+                    f"hybrid forecast, skipping write: {reason}"
                 )
-                if not ok:
-                    logger.error(
-                        f"Weather data not usable — keeping last good hybrid "
-                        f"forecast, skipping write: {reason}"
-                    )
-                    return
-                logger.debug(f"Weather check: {reason}")
+                return
+            logger.debug(f"Weather check: {reason}")
 
             # Write PV forecast to InfluxDB (15-min intervals)
             if self.influx_writer:
