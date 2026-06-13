@@ -151,7 +151,7 @@ class SwissSolarForecast:
         self.scheduler = ForecastScheduler(
             data_dir=self.data_dir,
             ch1_cron=schedule_config.get("ch1_cron", "30 2,5,8,11,14,17,20,23 * * *"),
-            ch2_cron=schedule_config.get("ch2_cron", "45 2,8,14,20 * * *"),
+            ch2_cron=schedule_config.get("ch2_cron", "0 4,10,16,22 * * *"),
             calculator_interval_minutes=schedule_config.get("calculator_interval_minutes", 15),
             timezone="UTC",  # Weather fetch cron schedules are in UTC
             local_timezone=self.timezone,  # Accuracy tracking uses local time (21:00 decision)

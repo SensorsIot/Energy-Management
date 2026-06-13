@@ -29,7 +29,7 @@ class ForecastScheduler:
         self,
         data_dir: Path,
         ch1_cron: str = "30 2,5,8,11,14,17,20,23 * * *",
-        ch2_cron: str = "45 2,8,14,20 * * *",
+        ch2_cron: str = "0 4,10,16,22 * * *",
         calculator_interval_minutes: int = 15,
         timezone: str = "UTC",
         local_timezone: str = "Europe/Zurich",
@@ -39,7 +39,9 @@ class ForecastScheduler:
         Args:
             data_dir: Directory for GRIB file storage
             ch1_cron: Cron expression for CH1 fetch (default: 2.5h after model runs)
-            ch2_cron: Cron expression for CH2 fetch (default: 2.75h after model runs)
+            ch2_cron: Cron expression for CH2 fetch (default: 4h after model runs —
+                CH2's full 120h horizon isn't published until ~run+3h, so run+2.75h
+                hit non-monotonic publish gaps; run+4h reads a complete run)
             calculator_interval_minutes: How often to run calculator
             timezone: Timezone for cron schedules (weather fetching, UTC)
             local_timezone: Local timezone for accuracy tracking (decision time)

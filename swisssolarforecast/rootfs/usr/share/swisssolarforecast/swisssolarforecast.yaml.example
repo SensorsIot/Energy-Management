@@ -70,7 +70,9 @@ plants:
 # Schedule settings (cron in UTC)
 schedule:
   ch1_cron: "30 2,5,8,11,14,17,20,23 * * *"
-  ch2_cron: "45 2,8,14,20 * * *"
+  # CH2: run+4h. CH2's full 120h horizon isn't published until ~run+3h, so an
+  # earlier fetch hits non-monotonic publish gaps (false "GAPS inside range" warnings).
+  ch2_cron: "0 4,10,16,22 * * *"
   calculator_interval_minutes: 15
 
 # Storage settings
