@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.20"
+__version__ = "1.8.21"
 
 import json
 import logging
@@ -285,6 +285,13 @@ class EnergyManager:
         # battery) is needed to reach the EV target. None = no forecast
         # yet (startup) or smart_car disabled → keep current snap-up.
         self.ev_soc_forecast_eod_today: float | None = None
+        # Forecast-based "car reaches target SOC at" prediction (solar-aware,
+        # from the car SOC forecast in write_energy_balance). ISO-UTC string of
+        # the first forecast timestamp where car SOC ≥ target, plus the target
+        # used (sensor.smart_charging_max_last_known). None = not forecast to
+        # reach target within the horizon, or no car forecast this run.
+        self.ev_soc_forecast_full_time: str | None = None
+        self.ev_soc_forecast_target_soc: float | None = None
         # Log dedup: one INFO line per state/power change; DEBUG between,
         # with an INFO heartbeat every 60 s so the log stays alive while idle.
         self._ev_log_signature: tuple | None = None
@@ -406,10 +413,21 @@ class EnergyManager:
 
         car_soc = self._read_car_soc_with_fallback() if self.smart_car_enabled else None
         sim_car = car_soc is not None and house_soc is not None and self.smart_car_capacity_kwh > 0
+        # Target SOC the car charges toward (car-side limit,
+        # sensor.smart_charging_max_last_known). Used to predict the first
+        # forecast timestamp the car reaches the target — published as the
+        # car_target_time attribute on sensor.ev_target_power.
+        target_soc: float | None = None
+        car_full_time: str | None = None
         if sim_car:
             house_cap_kwh = self.capacity_wh / 1000
             house_kwh = max(0.0, min(house_cap_kwh, house_soc / 100 * house_cap_kwh))
             car_kwh_added = 0.0
+            raw_target = self.ha_client.get_sensor_value(self.car_charging_max_entity)
+            try:
+                target_soc = float(raw_target) if raw_target is not None else None
+            except (TypeError, ValueError):
+                target_soc = None
 
         # End-of-day cutoff (today 23:59:59 Europe/Zurich) as UTC for
         # comparison against forecast point timestamps. Car SOC is
@@ -458,6 +476,12 @@ class EnergyManager:
                 point = point.field("car_soc_percent", float(car_soc_pct))
                 if ts <= eod_today_utc:
                     eod_car_soc_pct = float(car_soc_pct)
+                if (
+                    car_full_time is None
+                    and target_soc is not None
+                    and car_soc_pct >= target_soc
+                ):
+                    car_full_time = ts.isoformat()
 
             points.append(point)
 
@@ -465,6 +489,8 @@ class EnergyManager:
         # None if no car forecast was computed this run (e.g. car_soc
         # unavailable) — gate then falls back to current snap-up behavior.
         self.ev_soc_forecast_eod_today = eod_car_soc_pct
+        self.ev_soc_forecast_full_time = car_full_time
+        self.ev_soc_forecast_target_soc = target_soc
 
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=points)
         logger.info(
@@ -1477,6 +1503,8 @@ class EnergyManager:
                     "battery_min_soc_floor": self.ev_reserve_percent,
                     "battery_will_be_full": battery_will_be_full,
                     "battery_full_time": battery_full_time,
+                    "car_target_time": self.ev_soc_forecast_full_time,
+                    "car_target_soc": self.ev_soc_forecast_target_soc,
                     "ev_safe": self._ev_safe,
                     "threshold_w": ev_threshold,
                     "surplus_power_w": surplus_power,
