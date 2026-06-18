@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.21"
+__version__ = "1.8.22"
 
 import json
 import logging
@@ -292,6 +292,11 @@ class EnergyManager:
         # reach target within the horizon, or no car forecast this run.
         self.ev_soc_forecast_full_time: str | None = None
         self.ev_soc_forecast_target_soc: float | None = None
+        # Snap-up gate (Section 4.3.6): does the HOME battery still reach full
+        # today with the EV load accounted for? Recomputed every 15 min in
+        # run_optimization, read by the 10-s EV loop. False until first
+        # optimization (safe default: no battery drain).
+        self._battery_full_with_ev: bool = False
         # Log dedup: one INFO line per state/power change; DEBUG between,
         # with an INFO heartbeat every 60 s so the log stays alive while idle.
         self._ev_log_signature: tuple | None = None
@@ -773,6 +778,43 @@ class EnergyManager:
         total_surplus_wh = float(today["net_energy_wh"].clip(lower=0).sum())
         return total_surplus_wh >= headroom_wh * self.charge_shaving_fill_margin
 
+    def _will_battery_fill_today_with_ev(self, current_soc: float, forecast, now) -> bool:
+        """Return whether the home battery still reaches full today with the EV.
+
+        Gate for the EV solar snap-up step (Section 4.3.6). The home-battery
+        load forecast excludes the wallbox (house load ≈ 240 W even while the
+        car draws 7 kW), so the plain SOC forecast is blind to the EV. Here we
+        subtract the *actual current* wallbox draw from each remaining 15-min
+        interval's net energy and re-simulate, so the answer reflects reality.
+
+        - True  → battery reaches ≥99% by tonight despite the EV → snap-up OK.
+        - False → battery would not fill → don't drain it further (snap down).
+
+        Uses the live wallbox power as the EV estimate and re-runs every 15 min;
+        that cadence is itself the hysteresis (the decision is latched between
+        cycles, so the 10-s EV loop cannot oscillate within a window).
+        """
+        if forecast is None or forecast.empty:
+            return False
+        ev_w = self.ha_client.get_sensor_value(self.wallbox_power_entity) or 0.0
+        eod = (
+            datetime.now(SWISS_TZ)
+            .replace(hour=23, minute=59, second=59, microsecond=0)
+            .astimezone(UTC)
+        )
+        start_aligned = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+        mask = [
+            start_aligned <= (t if t.tzinfo else t.replace(tzinfo=UTC)) <= eod
+            for t in forecast.index
+        ]
+        today = forecast[mask].copy()
+        if today.empty:
+            return False
+        # Subtract the EV load the home-battery forecast doesn't see.
+        today["net_energy_wh"] = today["net_energy_wh"] - float(ev_w) * 0.25
+        sim = self.optimizer.simulate_soc(current_soc, today)
+        return bool((sim["soc_percent"] >= 99.0).any())
+
     def _apply_charge_control(
         self, charge_allowed: bool, reason: str, power_w: int | None = None
     ) -> None:
@@ -968,6 +1010,11 @@ class EnergyManager:
                 self._ev_safe, self._battery_min_soc_forecast = (
                     self.ev_battery_optimizer.check_ev_safe(ev_load_wh=0.0)
                 )
+            # Snap-up gate: will the home battery still fill today with the EV
+            # load subtracted? (Section 4.3.6 — the EV loop reads this cache.)
+            self._battery_full_with_ev = self._will_battery_fill_today_with_ev(
+                current_soc, forecast, now
+            )
             # Write energy balance + car SOC forecast for visualization
             self.write_energy_balance(forecast, house_soc=current_soc)
             self.write_decision(decision, current_soc)
@@ -1243,19 +1290,16 @@ class EnergyManager:
                 ev_min_power = POWER_STEPS_3P[0]
                 ev_max_power = POWER_STEPS_3P[-1]
                 candidate_power = snap_to_power_step(surplus_power, ev_min_power, ev_max_power)
-                # Forecast gate: only snap up (drain home battery to bridge
-                # the gap to the next amp step) if the EOD car SOC forecast
-                # won't reach the EV target by today 23:59. The forecast
-                # already assumes house battery fills first and only the
-                # overflow goes to the car — so if it predicts the target
-                # is reached, we know "charge ≤ surplus" suffices.
-                ev_target_max = self.ha_client.get_sensor_value(self.car_charging_max_entity)
-                forecast_eod = self.ev_soc_forecast_eod_today
+                # Snap-up gate (Section 4.3.6): only drain the home battery to
+                # bridge the gap to the next amp step if the home battery still
+                # reaches full today *with the EV load accounted for*. If it
+                # would not fill, stay at-or-below surplus (snap-down) so the
+                # EV does not drain a battery that cannot recover. Recomputed
+                # every 15 min in run_optimization (self._battery_full_with_ev).
                 candidates, snap_up_gate_reason = build_solar_candidates(
                     candidate_power=candidate_power,
                     threshold=threshold,
-                    forecast_eod=forecast_eod,
-                    ev_target_max=ev_target_max,
+                    battery_will_be_full=self._battery_full_with_ev,
                 )
 
                 ev_charging_power_w = 0.0

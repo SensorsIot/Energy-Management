@@ -104,43 +104,42 @@ def snap_to_power_step(
 def build_solar_candidates(
     candidate_power: int,
     threshold: float,
-    forecast_eod: float | None,
-    ev_target_max: float | None,
+    battery_will_be_full: bool,
 ) -> tuple[list[int], str]:
-    """Decide solar-mode power-step candidates with EOD forecast gate.
+    """Decide solar-mode power-step candidates, gated on the HOME battery.
 
-    The "snap-up" step (one level above candidate_power) drains the home
-    battery to bridge the gap to the next amp step. Only include it when
-    the EV's end-of-today SOC forecast does NOT reach the user-configured
-    target (sensor.smart_charging_max_last_known). Otherwise stay
-    at-or-below surplus so the home battery is not drained.
+    The "snap-up" step (one level above candidate_power) draws the gap to the
+    next amp step from the home battery. Whether that drain is acceptable
+    depends on the home battery, not the car:
+
+    - **Version 1 — snap up** (`battery_will_be_full=True`): the home battery
+      is still forecast to reach full by this evening *even with the EV load
+      accounted for*, so bridging the gap from the battery is fine — it
+      recovers. Include the snap-up step.
+    - **Version 2 — snap down** (`battery_will_be_full=False`): the home
+      battery would NOT reach full today, so do not drain it further. Stay
+      at-or-below surplus (snap-down only).
+
+    This replaces the older gate keyed to the *car's* EOD SOC forecast, which
+    ignored whether the home battery could recover and so let the EV drain the
+    battery all day on a low-car day (the battery never refilled). The
+    `battery_will_be_full` signal must already account for the EV load — the
+    home-battery load forecast excludes the wallbox (see
+    `EnergyManager._will_battery_fill_today_with_ev`).
 
     Returns (candidates, gate_reason) where candidates is the ordered
     list passed to the home-battery safety loop.
     """
-    if (
-        forecast_eod is not None
-        and ev_target_max is not None
-        and forecast_eod >= float(ev_target_max)
-    ):
-        snap_up_step: list[int] = []
-        gate_reason = (
-            f"forecast EOD {forecast_eod:.0f}% ≥ "
-            f"target {float(ev_target_max):.0f}% — no battery drain"
-        )
-    else:
+    if battery_will_be_full:
         snap_up = [
             s for s in POWER_STEPS_3P
             if s > candidate_power and s >= threshold
         ]
         snap_up_step = [snap_up[0]] if snap_up else []
-        if forecast_eod is None or ev_target_max is None:
-            gate_reason = "no forecast — snap-up allowed"
-        else:
-            gate_reason = (
-                f"forecast EOD {forecast_eod:.0f}% < "
-                f"target {float(ev_target_max):.0f}% — snap-up allowed"
-            )
+        gate_reason = "home battery still reaches full today → snap-up allowed"
+    else:
+        snap_up_step = []
+        gate_reason = "home battery would not fill today → snap-down only (preserve battery)"
     snap_down = [
         s for s in reversed(POWER_STEPS_3P)
         if s <= candidate_power and s >= threshold
