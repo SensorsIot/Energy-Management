@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.23"
+__version__ = "1.8.24"
 
 import json
 import logging
@@ -198,12 +198,10 @@ class EnergyManager:
         self.charge_target_full_interval_days = float(
             battery_opts.get("charge_target_full_interval_days", 7)
         )
-        self.charge_end_soc_entity = battery_opts.get(
-            "charge_end_soc_entity", "number.battery_end_of_charge_soc"
-        )
         # Current dynamic ceiling (%); 100 until first optimization (safe default).
+        # Enforced in software (charge limit 0 at/above target) because the
+        # inverter's native max-SOC entity only accepts 90-100%.
         self._battery_target_soc: float = 100.0
-        self._last_charge_end_soc: float | None = None
 
         # Sensor entities for appliance signal calculation
         sensors_opts = options.get("sensors", {})
@@ -670,6 +668,21 @@ class EnergyManager:
         Records the decision (use case / action / reason) on self for
         publication to sensor.battery_decision (FSD 4.6.4).
         """
+        # Dynamic charge target (FSD 4.2.4): never charge above the target SOC.
+        # The inverter's native max-SOC entity only accepts 90-100%, so the
+        # sub-90% ceiling is enforced here in software — hold by setting the
+        # charge limit to 0 (discharge is unaffected). Applies to both use
+        # cases. When target = 100% (calibration / fail-safe) this never fires.
+        if self.charge_target_enabled and current_soc >= self._battery_target_soc:
+            self._charge_use_case = "B"
+            self._charge_action = "deferred"
+            self._charge_reason = (
+                f"at charge target {self._battery_target_soc:.0f}% — holding "
+                f"(battery longevity, surplus exported)"
+            )
+            self._apply_charge_control(False, self._charge_reason)
+            return
+
         if not self._charge_gate_active():
             # Use case A: car needs energy → it is the peak-shaving load;
             # the battery charges greedily to capture the rest.
@@ -870,24 +883,6 @@ class EnergyManager:
         except Exception as e:
             logger.debug(f"Calibration-due query failed: {e}")
             return False
-
-    def _apply_charge_end_soc(self, target_soc: float, reason: str) -> None:
-        """Set the inverter's native max-charge SOC ceiling, on change only."""
-        target = int(round(target_soc))
-        if target == self._last_charge_end_soc:
-            return
-        logger.info(
-            f"Battery charge ceiling → {self.charge_end_soc_entity}={target}% ({reason})"
-        )
-        success, error_msg = self.ha_client.set_number(
-            self.charge_end_soc_entity, target, max_retries=5
-        )
-        if success:
-            self._last_charge_end_soc = target
-        else:
-            logger.warning(
-                f"Failed to set {self.charge_end_soc_entity} to {target}%: {error_msg}"
-            )
 
     def _apply_charge_control(
         self, charge_allowed: bool, reason: str, power_w: int | None = None
@@ -1097,18 +1092,22 @@ class EnergyManager:
             self._discharge_blocked_by_protection = not decision.discharge_allowed
             self._update_discharge_control()
 
-            # Dynamic charge target (FSD 4.2.4): set the inverter's max-SOC
-            # ceiling to the level needed to survive the next days under
-            # worst-case PV (p10) — not 100% — to reduce LFP high-SOC dwell.
-            # Computed before shaving so the water-fill targets it. Uses the
-            # worst-case gate_forecast (p10 PV / p50 load).
+            # Dynamic charge target (FSD 4.2.4): the SOC level needed to survive
+            # the next days under worst-case PV (p10) — not 100% — to reduce LFP
+            # high-SOC dwell. Computed before shaving (which fills to it) and
+            # enforced by control_battery_charge (charge limit 0 at/above target).
+            # Uses the worst-case gate_forecast (p10 PV / p50 load).
             if self.charge_target_enabled:
                 calibration_due = self._calibration_charge_due(now)
                 target_soc, target_reason = self.optimizer.compute_charge_target(
                     current_soc,
                     gate_forecast,
                     now,
-                    reserve=self.reserve_percent,
+                    # Survival floor = charge_target_min, NOT battery.reserve_percent:
+                    # simulate_soc clamps SOC at 0, so a 0 floor makes the check
+                    # trivially true. charge_target_min is both the floor and the
+                    # min target.
+                    reserve=self.charge_target_min,
                     margin_pct=self.charge_target_margin,
                     min_target=self.charge_target_min,
                     horizon_h=self.charge_target_horizon_h,
@@ -1117,7 +1116,6 @@ class EnergyManager:
                 )
                 self._battery_target_soc = target_soc
                 logger.info(f"Battery charge target: {target_soc:.0f}% ({target_reason})")
-                self._apply_charge_end_soc(target_soc, target_reason)
             else:
                 self._battery_target_soc = 100.0
 

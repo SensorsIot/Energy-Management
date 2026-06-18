@@ -171,6 +171,36 @@ class TestMarginalDayGate:
         fc = _forecast(now, [1300.0] * 8 + [0.0] * 8)  # ~10.4 kWh >> 6 kWh margin
         assert manager._will_fill_today(50.0, fc, now) is True
 
+    def test_at_charge_target_holds(self, manager) -> None:
+        """SOC at/above the dynamic charge target → hold (limit 0), longevity."""
+        self._real_optimizer(manager)
+        _wire(manager, car_ready="off")
+        manager.ha_client.set_number.return_value = (True, None)
+        manager._battery_target_soc = 50.0
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+        fc = _forecast(now, [3000.0] * 40)  # abundant, but already at target
+
+        manager.control_battery_charge(60.0, fc, fc, now)  # 60% >= 50% target
+
+        assert manager._charge_action == "deferred"
+        assert "charge target" in manager._charge_reason
+        manager.ha_client.set_number.assert_called_once_with(
+            manager.charge_control_entity, 0, max_retries=5
+        )
+
+    def test_below_charge_target_does_not_hold(self, manager) -> None:
+        """SOC below the target → normal logic runs (not a target-hold)."""
+        self._real_optimizer(manager)
+        _wire(manager, car_ready="off")
+        manager.ha_client.set_number.return_value = (True, None)
+        manager._battery_target_soc = 90.0
+        now = datetime(2026, 6, 7, 16, 0, tzinfo=UTC)
+        fc = _forecast(now, [50.0] * 24)  # marginal → greedy, not a target-hold
+
+        manager.control_battery_charge(50.0, fc, fc, now)  # 50% < 90% target
+
+        assert "charge target" not in manager._charge_reason
+
     def test_stale_forecast_routes_to_greedy(self, manager) -> None:
         """Fail-safe: a stale PV forecast → greedy charging, never shave."""
         self._real_optimizer(manager)
