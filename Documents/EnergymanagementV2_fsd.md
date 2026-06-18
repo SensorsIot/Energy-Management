@@ -1607,6 +1607,7 @@ is optimized, *for which entity*, on *what criteria*, with *what output*.
 |--------|--------------|------|---------|----------------|---------|---------|
 | **Home battery** | Discharge blocking (battery protection) | Keep enough SOC to cover the expensive tariff window (and the EV) instead of dumping it early | Allow / block discharge | `number.battery_maximum_discharging_power` (`max`/`0`) | 15 min | 4.2.2 |
 | **Home battery** | Export-peak-shaving charge control | Defer PV charging so the battery's headroom absorbs the midday **export** peak at a gentle, capped rate (less clipping, longer battery life) | Allow / defer charging | `number.battery_maximum_charging_power` (`charge_shaving_power_w`/`0`) | 15 min | 4.2.3 |
+| **Home battery** | Dynamic charge target (longevity) | Charge only to the SOC needed to survive the next days (worst-case PV), not 100% — less LFP dwell at high SOC; weekly full charge for BMS calibration | Max charge SOC ceiling | `number.battery_end_of_charge_soc` | 15 min | 4.2.4 |
 | **EV (car)** | Solar-surplus charging | Maximize solar self-consumption into the car without draining the home battery | Wallbox charge power (amp step) | `number.wallbox_power_limit` (via REST `set_sensor_state`) | 10 s | 4.3.6 |
 | **EV (car)** | Cheap / immediate charging (manual modes) | Reach the user's target SOC by a kWh budget + SOC stop | Wallbox power + discharge block | `number.wallbox_power_limit` & `_discharge_blocked_by_ev` | 10 s | 4.3.4–4.3.6 |
 | **Appliance (washer)** | Run-now signal | Advise when a high-power appliance can run on solar without forcing grid import | green / orange / red | `sensor.appliance_signal` (**advisory — no actuation**) | 15 min | 4.4 |
@@ -2175,6 +2176,124 @@ Test files: `energymanager/tests/test_battery_optimizer.py`
 cap; `energymanager/tests/test_charge_gate.py` (`TestMarginalDayGate`) — the
 B0 marginal-day gate (fills-today, never-fills, empty-forecast-is-marginal,
 and end-to-end greedy-vs-shaving routing).
+
+---
+
+### 4.2.4 Dynamic Charge Target (Battery Longevity)
+
+This sets **how high the home battery is allowed to charge** — a dynamic SOC
+ceiling instead of a fixed 100%. It runs in `run_optimization()` (every 15 min)
+and produces a single value, **`battery_target_soc`**, that every charge path
+consumes (export-peak-shaving 4.2.3 fills to it; the EV snap-up gate 4.3.6 treats
+"battery full" as "reaches it").
+
+> The home battery is a Huawei LUNA2000 (**LFP**). The ceiling is enforced via
+> the inverter's native `number.battery_end_of_charge_soc` ("Max SOC limit"),
+> set to `battery_target_soc` each cycle — the inverter natively stops charging
+> there and exports the rest, with no race against the shaving control.
+
+#### Problem
+
+Holding an LFP cell at high SOC accelerates calendar aging. On most days the
+household does not need a *full* battery to bridge to the next PV recharge — the
+excess simply **dwells** near 100%, ageing the pack for no benefit. The harm is
+*dwell time* at high SOC, not the act of reaching it: energy that is charged and
+then promptly discharged (because it is genuinely needed that night) causes
+little ageing. So the rule is **charge only to the level needed to ride through
+the upcoming low-PV / high-load period**, and export the rest.
+
+There is **no fixed cap** (e.g. 85 %). A hard cap would give no health benefit on
+high-demand days (that energy is used, not held) while forcing **grid import**
+(the battery is PV-only — under-charging during the day means importing in the
+expensive evening). The ceiling is allowed all the way to 100 % when the forecast
+genuinely needs it; it simply lands well below 100 % on most days, which is where
+the longevity benefit comes from — for free.
+
+#### Computation
+
+Worst-case survival check, re-evaluated every 15 min:
+
+```
+INPUTS
+  current_soc      = battery SOC now (%)
+  reserve          = battery.reserve_percent (discharge floor, Section 4.2.2)
+  margin           = battery.charge_target_margin (default 10% of capacity)
+  horizon          = battery.charge_target_horizon_h (default 48 h)
+  worst_forecast   = p10 PV (low production, exceeded ~90% of the time)
+                     vs p50 load (median consumption)       # conservative on PV
+
+target_soc = the LOWEST ceiling C in [min_target, 100] such that, simulating the
+             SOC forward over `horizon` under worst_forecast with the charge
+             ceiling set to C, SOC never drops below `reserve`.
+           = clamped to [min_target, 100], then + `margin`, re-clamped to ≤ 100.
+```
+
+Found with `BatteryOptimizer.simulate_soc()` (the same machinery as 4.2.1/4.2.2):
+because min-SOC is monotonic in the ceiling, a few simulations bracket the lowest
+safe `C`. Intuition: if even an **uncapped** (charge-to-100 %) worst-case
+trajectory never has spare headroom above `reserve+margin`, the day genuinely
+needs a full battery → `target_soc = 100`. If it has spare `S` at its lowest
+point, the peak was `S` too high → lower the ceiling by `S`.
+
+**Why p10 PV / p50 load (worst case).** Sizing the target on a pessimistic
+outcome guarantees the battery survives the next days *even if* the sun
+under-performs — preventing the grid import the battery exists to avoid. The
+health benefit is unaffected: even the worst-case need is usually < 100 %.
+"Health-first" enters only as a **small** `margin` (don't over-provision beyond
+the worst-case need), not a fat safety buffer.
+
+#### Weekly calibration full charge
+
+LFP SOC readings drift without periodic full charges (the BMS re-calibrates at
+the top). So **if more than 7 days have passed since the battery last reached
+≥ 99 % SOC, `target_soc` is forced to 100 %** until achieved, overriding the
+worst-case computation. The "last full" timestamp is read from the SOC history
+(InfluxDB: most recent point with `soc ≥ 99`), so no separate persisted state is
+needed and it survives restarts. This is the main occasion the battery reaches
+100 % during a low-demand week, and it lands on whatever sunny window comes
+first so the calibration charge is PV, not grid.
+
+#### Bounds and fail-safes
+
+- **`min_target` is a sanity floor, not a tuning knob.** Structurally the ceiling
+  can never sit below `reserve` (charging below the discharge floor is
+  self-contradictory), so `min_target` defaults to `max(reserve, 20 %)` and
+  almost never binds. It only guards against a pathologically optimistic forecast
+  computing a near-zero target.
+- **Missing / stale forecast → fail UP to 100 %.** If the worst-case forecast is
+  unavailable or the heartbeat is stale (the same `forecast_max_age_minutes`
+  guard as 4.2.3), the target defaults to **100 %**, never to a low cap — a bad
+  forecast must never starve the battery into evening grid import. (This is why a
+  low `min_target` is safe: the dangerous case fails *up*, not down.)
+
+#### Interactions
+
+| Consumer | Before | After |
+|----------|--------|-------|
+| Export-peak-shaving (4.2.3) | fills headroom to 100 % | fills to `battery_target_soc`; `headroom = (target − soc)` |
+| EV snap-up gate (4.3.6) | "will battery reach full (≥99 %)" | "will battery reach `battery_target_soc`" |
+| Discharge protection (4.2.2) | unchanged | unchanged — defends the `reserve` floor; this rule defends the ceiling |
+
+Both the shaving water-fill and the EV gate must read the **same**
+`battery_target_soc` so the three rules never disagree about what "full" means.
+
+#### Configuration
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `battery.charge_target_enabled` | `true` | Master switch for the dynamic ceiling |
+| `battery.charge_target_margin` | `10` | Extra % of capacity above the worst-case need |
+| `battery.charge_target_horizon_h` | `48` | Survival look-ahead (worst-case PV/load) |
+| `battery.charge_target_min` | `20` | Sanity floor on the ceiling (also ≥ `reserve`) |
+| `battery.charge_target_full_interval_days` | `7` | Force a 100 % calibration charge this long after the last ≥99 % |
+| `battery.charge_end_soc_entity` | `number.battery_end_of_charge_soc` | Inverter Max-SOC control |
+
+#### Test Cases
+
+Test file: `energymanager/tests/test_charge_target.py` — abundant day caps below
+100 %; multi-day-deficit day reaches 100 %; never below `reserve`; margin applied;
+weekly calibration override fires after 7 days and is suppressed within 7;
+missing/stale forecast fails up to 100 %.
 
 ---
 
@@ -4219,6 +4338,7 @@ See Section 4.3.7 for adaptive polling logic.
 
 **Changelog:**
 
+- v2.52: New **dynamic charge target** for the home battery (Section 4.2.4). Instead of charging the LFP pack to 100%, a single `battery_target_soc` is computed every 15 min as the lowest SOC ceiling that still keeps the battery above the discharge `reserve` over a worst-case (p10 PV / p50 load) `charge_target_horizon_h` (default 48 h) survival simulation, plus a small `charge_target_margin` (default 10%). No fixed cap — it reaches 100% when the forecast genuinely needs it; it just lands below 100% on most days (less high-SOC dwell → longer LFP life). Enforced via the inverter's native `number.battery_end_of_charge_soc`. A calibration override forces 100% if >7 days (`charge_target_full_interval_days`) since the battery last hit ≥99% (LFP BMS SOC drift). Fail-safes: missing/stale forecast fails **up** to 100% (never starves the battery into evening grid import); `min_target` (default 20%, ≥ reserve) is a sanity floor only. `battery_target_soc` is consumed by export-peak-shaving (4.2.3, fills to it not 100%) and the EV snap-up gate (4.3.6, "full" = reaches it). New tests `test_charge_target.py`. (v1.8.22 → v1.8.23)
 - v2.51: EV solar snap-up gate re-keyed from the car's EOD SOC to the **home battery's** fills-today forecast (Section 4.3.6). The snap-up step (drain the home battery to reach the next amp level) is now allowed only when the home battery is still forecast to reach full today *with the EV load subtracted* (`EnergyManager._will_battery_fill_today_with_ev`, cached as `_battery_full_with_ev`, recomputed every 15 min); otherwise the EV stays at-or-below surplus (snap-down only) so it cannot drain a battery that won't recover. Root cause (observed 2026-06-17): the old car-target gate let a low car (18%→49% at 4–7 kW) drain the home battery all day under full sun (bottomed 32%, ended ~43%, never full) because the car-target condition stayed true and the flat 48-h ≥20% floor never tripped. The home-battery load forecast excludes the wallbox, so the new check subtracts the live wallbox draw before re-simulating. `build_solar_candidates` signature changed (`forecast_eod`/`ev_target_max` → `battery_will_be_full`); `TestBuildSolarCandidates` updated. (v1.8.21 → v1.8.22)
 - v2.50: Dropped the +10 SOC safety buffer in the manual-charge stop (Section 4.3.5.1). Stop is now symmetric: `car_soc >= target_soc` regardless of freshness. Rationale: if we stop too early the user re-presses the button and a fresh budget is computed from the new lower `start_soc`; if too late no buffer would have helped. Added `car_soc_age_s` input (computed in `run.py` from `sensor.smart_battery.last_updated`) — logged in the stop reason for diagnosis only, not used as a threshold. Test 47 → 60 (`test_target_reached_stops_charging`, `test_target_reached_logs_freshness`). **Validated live 2026-05-18 21:41**: 26%→30%, 3680 Wh delivered, age=1 s, mode auto-reverted to solar. (v1.8.7 → v1.8.8)
 - v2.49: Phase 3 — manual-charge kWh budget and SOC stop (new Section 4.3.5.1). CHEAP and IMMEDIATE modes now stop automatically at a user-set target SOC instead of running until the car reaches its own max. On entry the state machine snapshots `start_soc` (`sensor.smart_battery_last_known`) and `start_session_wh` (`sensor.wallbox_energy`); each tick checks `car_soc >= target_soc` (SOC stop) and `delivered_wh >= (target - start) × capacity / η` (kWh budget). Session-energy regression (OCPP transaction restart on unplug/replug) triggers a re-snapshot. `run.py` auto-reverts `input_select.ev_charging_mode` to `solar` on any IMMEDIATE/CHEAP → IDLE transition. New EVInputs fields: `target_soc`, `car_soc`, `session_energy_wh`, `capacity_kwh`, `efficiency`. `smart_car.charge_efficiency` default bumped 0.9 → 0.88. 12 new tests in `test_ev_state_machine.py`. (v1.8.6 → v1.8.7)

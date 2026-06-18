@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.22"
+__version__ = "1.8.23"
 
 import json
 import logging
@@ -187,6 +187,23 @@ class EnergyManager:
         # Battery parameters for appliance signal
         self.capacity_wh = battery_opts.get("capacity_kwh", 10.0) * 1000
         self.reserve_percent = battery_opts.get("reserve_percent", 10)
+
+        # Dynamic charge target (FSD 4.2.4) — charge the LFP battery only to the
+        # SOC needed to survive the next days (worst-case PV), not 100%, to
+        # reduce high-SOC dwell. Enforced via the inverter's native max-SOC.
+        self.charge_target_enabled = battery_opts.get("charge_target_enabled", True)
+        self.charge_target_margin = float(battery_opts.get("charge_target_margin", 10.0))
+        self.charge_target_horizon_h = int(battery_opts.get("charge_target_horizon_h", 48))
+        self.charge_target_min = float(battery_opts.get("charge_target_min", 20.0))
+        self.charge_target_full_interval_days = float(
+            battery_opts.get("charge_target_full_interval_days", 7)
+        )
+        self.charge_end_soc_entity = battery_opts.get(
+            "charge_end_soc_entity", "number.battery_end_of_charge_soc"
+        )
+        # Current dynamic ceiling (%); 100 until first optimization (safe default).
+        self._battery_target_soc: float = 100.0
+        self._last_charge_end_soc: float | None = None
 
         # Sensor entities for appliance signal calculation
         sensors_opts = options.get("sensors", {})
@@ -666,8 +683,12 @@ class EnergyManager:
             return
 
         # Use case B: no car load → defer to shave the export peak.
+        # Headroom is to the dynamic charge target (FSD 4.2.4), not 100% — the
+        # battery is only filled to what the next days need.
         self._charge_use_case = "B"
-        headroom_wh = max(0.0, (100.0 - current_soc) / 100.0 * self.capacity_wh)
+        headroom_wh = max(
+            0.0, (self._battery_target_soc - current_soc) / 100.0 * self.capacity_wh
+        )
 
         # Fail-safe: a stale forecast (upstream guard keeping last-good because
         # the weather input went bad) must not drive shaving. Charge greedily —
@@ -768,13 +789,15 @@ class EnergyManager:
         if today.empty:
             return False
 
+        # "Fill" means reach the dynamic charge target (FSD 4.2.4), not 100%.
+        target = self._battery_target_soc
         sim = self.optimizer.simulate_soc(current_soc, today)
-        if not bool((sim["soc_percent"] >= 99.0).any()):
-            return False  # would not fill today → marginal
+        if not bool((sim["soc_percent"] >= target).any()):
+            return False  # would not reach target today → marginal
 
         # Fill-margin: the rest-of-today surplus must comfortably exceed the
-        # headroom, else it's a marginal day with no real peak to shave.
-        headroom_wh = max(0.0, (100.0 - current_soc) / 100.0 * self.capacity_wh)
+        # headroom (to target), else it's a marginal day with no real peak.
+        headroom_wh = max(0.0, (target - current_soc) / 100.0 * self.capacity_wh)
         total_surplus_wh = float(today["net_energy_wh"].clip(lower=0).sum())
         return total_surplus_wh >= headroom_wh * self.charge_shaving_fill_margin
 
@@ -813,7 +836,58 @@ class EnergyManager:
         # Subtract the EV load the home-battery forecast doesn't see.
         today["net_energy_wh"] = today["net_energy_wh"] - float(ev_w) * 0.25
         sim = self.optimizer.simulate_soc(current_soc, today)
-        return bool((sim["soc_percent"] >= 99.0).any())
+        # "Full" = reaches the dynamic charge target (FSD 4.2.4), not 100%.
+        return bool((sim["soc_percent"] >= self._battery_target_soc).any())
+
+    def _calibration_charge_due(self, now: datetime) -> bool:
+        """Whether a weekly LFP calibration full charge is due (FSD 4.2.4).
+
+        Due when the battery has not reached ≥99% SOC within the last
+        `charge_target_full_interval_days`. Reads the most recent ≥99% point
+        from SOC history (no separate persisted state). On query error or no
+        client, returns False (don't force a full charge on a transient error;
+        the worst-case survival logic still protects against import).
+        """
+        if self.influx_client is None:
+            return False
+        short_id = self.soc_entity.split(".", 1)[-1]
+        interval = self.charge_target_full_interval_days
+        try:
+            query = f'''
+            from(bucket: "HomeAssistant")
+              |> range(start: -{int(interval) + 1}d)
+              |> filter(fn: (r) => r.entity_id == "{short_id}" and r._field == "value")
+              |> filter(fn: (r) => r._value >= 99.0)
+              |> last()
+            '''
+            result = self.influx_client.query_api().query(query, org=self.influx_org)
+            if result and result[0].records:
+                last_full = result[0].records[0].get_time()
+                age_days = (now - last_full).total_seconds() / 86400.0
+                return age_days >= interval
+            # No ≥99% reading within the window → calibration overdue.
+            return True
+        except Exception as e:
+            logger.debug(f"Calibration-due query failed: {e}")
+            return False
+
+    def _apply_charge_end_soc(self, target_soc: float, reason: str) -> None:
+        """Set the inverter's native max-charge SOC ceiling, on change only."""
+        target = int(round(target_soc))
+        if target == self._last_charge_end_soc:
+            return
+        logger.info(
+            f"Battery charge ceiling → {self.charge_end_soc_entity}={target}% ({reason})"
+        )
+        success, error_msg = self.ha_client.set_number(
+            self.charge_end_soc_entity, target, max_retries=5
+        )
+        if success:
+            self._last_charge_end_soc = target
+        else:
+            logger.warning(
+                f"Failed to set {self.charge_end_soc_entity} to {target}%: {error_msg}"
+            )
 
     def _apply_charge_control(
         self, charge_allowed: bool, reason: str, power_w: int | None = None
@@ -1022,6 +1096,30 @@ class EnergyManager:
             # Control battery (protection flag — combined with EV flag)
             self._discharge_blocked_by_protection = not decision.discharge_allowed
             self._update_discharge_control()
+
+            # Dynamic charge target (FSD 4.2.4): set the inverter's max-SOC
+            # ceiling to the level needed to survive the next days under
+            # worst-case PV (p10) — not 100% — to reduce LFP high-SOC dwell.
+            # Computed before shaving so the water-fill targets it. Uses the
+            # worst-case gate_forecast (p10 PV / p50 load).
+            if self.charge_target_enabled:
+                calibration_due = self._calibration_charge_due(now)
+                target_soc, target_reason = self.optimizer.compute_charge_target(
+                    current_soc,
+                    gate_forecast,
+                    now,
+                    reserve=self.reserve_percent,
+                    margin_pct=self.charge_target_margin,
+                    min_target=self.charge_target_min,
+                    horizon_h=self.charge_target_horizon_h,
+                    calibration_due=calibration_due,
+                    forecast_fresh=self._forecast_fresh,
+                )
+                self._battery_target_soc = target_soc
+                logger.info(f"Battery charge target: {target_soc:.0f}% ({target_reason})")
+                self._apply_charge_end_soc(target_soc, target_reason)
+            else:
+                self._battery_target_soc = 100.0
 
             # Export-peak-shaving charge control
             self.control_battery_charge(current_soc, forecast, gate_forecast, now)
@@ -1547,6 +1645,7 @@ class EnergyManager:
                     "battery_min_soc_floor": self.ev_reserve_percent,
                     "battery_will_be_full": battery_will_be_full,
                     "battery_full_time": battery_full_time,
+                    "battery_target_soc": self._battery_target_soc,
                     "car_target_time": self.ev_soc_forecast_full_time,
                     "car_target_soc": self.ev_soc_forecast_target_soc,
                     "ev_safe": self._ev_safe,

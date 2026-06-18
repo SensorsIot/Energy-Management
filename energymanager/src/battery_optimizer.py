@@ -229,6 +229,7 @@ class BatteryOptimizer:
         forecast: pd.DataFrame,
         block_from: datetime | None = None,
         block_until: datetime | None = None,
+        max_soc_percent: float = 100.0,
     ) -> pd.DataFrame:
         """Simulate SOC trajectory with optional discharge blocking.
 
@@ -237,6 +238,10 @@ class BatteryOptimizer:
             forecast: DataFrame with net_energy_wh column
             block_from: Start blocking from this time (None = from start)
             block_until: Block discharge until this time (None = no blocking)
+            max_soc_percent: Charge ceiling (0-100). Charging stops here and the
+                surplus is treated as exported; discharge is unaffected. Default
+                100 = no ceiling (backward compatible). Used by the dynamic
+                charge-target search (Section 4.2.4).
 
         Returns:
             DataFrame with soc_percent, soc_wh, soc_wh_unclamped, net_wh, discharge_wh columns
@@ -244,6 +249,7 @@ class BatteryOptimizer:
         """
         e_bat = soc_percent / 100 * self.capacity_wh
         e_bat_unclamped = e_bat
+        ceil_wh = max_soc_percent / 100 * self.capacity_wh
         results = []
 
         for t, row in forecast.iterrows():
@@ -267,11 +273,12 @@ class BatteryOptimizer:
             discharge_blocked = in_block_window
 
             if net_wh > 0:
-                # Surplus: charge battery
+                # Surplus: charge battery (up to the charge ceiling; surplus
+                # above the ceiling is exported, not stored)
                 charge = min(
                     net_wh * self.charge_efficiency,
                     self.max_charge_wh_per_15min,
-                    self.capacity_wh - e_bat,
+                    max(0.0, ceil_wh - e_bat),
                 )
                 e_bat += charge
                 e_bat_unclamped = min(
@@ -300,6 +307,82 @@ class BatteryOptimizer:
             results[-1]["discharge_wh"] = discharge_wh
 
         return pd.DataFrame(results).set_index("time")
+
+    def compute_charge_target(
+        self,
+        current_soc: float,
+        forecast: pd.DataFrame,
+        now: datetime,
+        *,
+        reserve: float,
+        margin_pct: float,
+        min_target: float,
+        horizon_h: int,
+        calibration_due: bool,
+        forecast_fresh: bool,
+    ) -> tuple[float, str]:
+        """Dynamic home-battery charge ceiling (Section 4.2.4).
+
+        Returns (target_soc_percent, reason). The target is the lowest SOC
+        ceiling that still keeps the battery above `reserve` over a worst-case
+        (p10 PV / p50 load) survival simulation of `horizon_h` hours, plus
+        `margin_pct`. Charges to less than 100% on most days (less LFP dwell at
+        high SOC) while never risking the grid import the battery exists to
+        avoid.
+
+        Fail-safes return 100% (never a low cap): a due weekly calibration
+        charge, or a stale/missing forecast. `min_target` is a sanity floor.
+
+        Args:
+            current_soc: Battery SOC now (%).
+            forecast: Worst-case combined forecast (net_energy_wh, p10 PV/p50 load).
+            now: Current time (UTC).
+            reserve: Discharge floor the survival sim must stay above (%).
+            margin_pct: Extra % of capacity above the worst-case need.
+            min_target: Sanity floor on the ceiling (%).
+            horizon_h: Survival look-ahead (hours).
+            calibration_due: True if a weekly full charge is due (LFP BMS).
+            forecast_fresh: False if the PV forecast heartbeat is stale.
+
+        """
+        if calibration_due:
+            return 100.0, "weekly LFP calibration charge → 100%"
+        if not forecast_fresh or forecast is None or forecast.empty:
+            return 100.0, "forecast stale/missing → fail-safe full charge"
+
+        horizon_end = now + timedelta(hours=horizon_h)
+        mask = [
+            (t if t.tzinfo else t.replace(tzinfo=UTC)) <= horizon_end
+            for t in forecast.index
+        ]
+        today = forecast[mask]
+        if today.empty:
+            return 100.0, "no forecast within horizon → full charge"
+
+        def min_soc(ceiling: float) -> float:
+            sim = self.simulate_soc(current_soc, today, max_soc_percent=ceiling)
+            return float(sim["soc_percent"].min())
+
+        # If even an uncapped (charge-to-100%) worst case dips below the floor,
+        # the day genuinely needs a full battery → charge as much as possible.
+        if min_soc(100.0) < reserve:
+            return 100.0, f"worst-case {horizon_h}h deficit needs full battery"
+
+        # Lowest ceiling that keeps the worst-case trough at/above the floor.
+        lo, hi = reserve, 100.0
+        for _ in range(8):
+            mid = (lo + hi) / 2
+            if min_soc(mid) >= reserve:
+                hi = mid
+            else:
+                lo = mid
+
+        target = min(100.0, hi + margin_pct)
+        target = max(target, min_target, reserve)
+        target = round(target)
+        return float(target), (
+            f"survives {horizon_h}h worst-case at {hi:.0f}% +{margin_pct:.0f}% margin"
+        )
 
     def calculate_decision(
         self,

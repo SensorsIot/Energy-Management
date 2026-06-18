@@ -55,6 +55,16 @@ battery:
   # charge greedily (the safe default that never under-fills the battery).
   forecast_max_age_minutes: 120
   charge_control_entity: "number.battery_maximum_charging_power"
+  # Dynamic charge target (FSD 4.2.4): charge the LFP battery only to the SOC
+  # needed to survive the next days under worst-case PV (p10), not 100% — less
+  # high-SOC dwell, longer life. Enforced via the inverter's native max-SOC.
+  # No fixed cap: reaches 100% when genuinely needed; lands below 100% most days.
+  charge_target_enabled: true
+  charge_target_margin: 10            # extra % of capacity above the worst-case need
+  charge_target_horizon_h: 48         # survival look-ahead (worst-case p10 PV / p50 load)
+  charge_target_min: 20               # sanity floor on the ceiling (also >= reserve_percent)
+  charge_target_full_interval_days: 7 # force a 100% calibration charge this long after the last >=99% (LFP BMS)
+  charge_end_soc_entity: "number.battery_end_of_charge_soc"
   # Dashboard sensor that surfaces the combined battery reasoning
   # (discharge + charge-shaving). Advisory only. See FSD 4.6.4.
   battery_decision_entity: "sensor.battery_decision"
