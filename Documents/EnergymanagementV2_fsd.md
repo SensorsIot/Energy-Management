@@ -2275,14 +2275,26 @@ first so the calibration charge is PV, not grid.
 
 #### Interactions
 
-| Consumer | Before | After |
-|----------|--------|-------|
-| Export-peak-shaving (4.2.3) | fills headroom to 100 % | fills to `battery_target_soc`; `headroom = (target − soc)`; holds at target (limit 0) |
-| EV snap-up gate (4.3.6) | "will battery reach full (≥99 %)" | "will battery reach `battery_target_soc`" |
-| Discharge protection (4.2.2) | unchanged | unchanged — defends the `reserve` floor; this rule defends the ceiling |
+`battery_target_soc` is computed **first** in `run_optimization()` — before the
+discharge decision and before any SOC forecast is written — so every downstream
+calculation simulates the battery charging only to the target, not 100 %.
+`simulate_soc()` takes a `max_soc_percent` ceiling; `calculate_decision()` and
+the car-SOC forecast pass the target through. Otherwise those would be optimistic
+about stored energy (e.g. EV safety would think the battery has more buffer than
+it will).
 
-Both the shaving water-fill and the EV gate must read the **same**
-`battery_target_soc` so the three rules never disagree about what "full" means.
+| Consumer | Before | After (capped at `battery_target_soc`) |
+|----------|--------|-------|
+| Discharge decision + published SOC forecast (4.2.1/4.2.2) | sim to 100 % | sim capped at target — decision and the `with_strategy`/`without_strategy` forecasts reflect the real cap |
+| EV safety `check_ev_safe` (4.3.6) | read 100 %-forecast | reads the capped forecast (transitively consistent — no code change) |
+| `will_battery_hit_full` dashboard (4.3.6) | "≥ 99 %" | "≥ `battery_target_soc`" → "Full by" means *reaches target* |
+| Car-SOC forecast (4.3.8) | house fills to 100 %, then car | house fills to target, then overflow to car/export |
+| Export-peak-shaving (4.2.3) | fills headroom to 100 % | fills to target; `headroom = (target − soc)`; holds at target (limit 0) |
+| EV snap-up gate (4.3.6) | "will battery reach 99 %" | "will battery reach `battery_target_soc`" |
+| Discharge protection floor (4.2.2) | unchanged | unchanged — defends the `reserve` floor; this rule defends the ceiling |
+
+All consumers read the **same** early-computed `battery_target_soc`, so no two
+rules disagree about how high the battery charges.
 
 #### Configuration
 
@@ -4348,6 +4360,7 @@ See Section 4.3.7 for adaptive polling logic.
 
 **Changelog:**
 
+- v2.53: Make `battery_target_soc` consistent across **all** calculations (Section 4.2.4 Interactions). It is now computed **first** in `run_optimization` (before the discharge decision and any forecast write) and threaded as a `max_soc_percent` ceiling through `simulate_soc` → `calculate_decision` (discharge decision + the published `with_strategy`/`without_strategy` SOC forecasts) and the car-SOC forecast (house fills to target, then overflow to car). EV safety (`check_ev_safe`) and the dashboard read the now-capped forecast and so become consistent automatically; `will_battery_hit_full` gained a `full_threshold` arg set to the target so "Full by HH:MM" means *reaches target* (a fixed 99% would never be hit against a capped forecast). Previously the target was computed late, so those consumers were optimistic about stored energy. (v1.8.24 → v1.8.25)
 - v2.52: New **dynamic charge target** for the home battery (Section 4.2.4). Instead of charging the LFP pack to 100%, a single `battery_target_soc` is computed every 15 min as the lowest SOC ceiling that still keeps the battery above the discharge `reserve` over a worst-case (p10 PV / p50 load) `charge_target_horizon_h` (default 48 h) survival simulation, plus a small `charge_target_margin` (default 10%). No fixed cap — it reaches 100% when the forecast genuinely needs it; it just lands below 100% on most days (less high-SOC dwell → longer LFP life). Enforced **in software** (`number.battery_maximum_charging_power` = 0 at/above the target) — the inverter's native `battery_end_of_charge_soc` accepts only 90–100% and cannot enforce a lower ceiling. The survival floor is a dedicated `charge_target_min` (default 20%), **not** `battery.reserve_percent` (which is 0 and, with `simulate_soc` clamping SOC at 0, would make the check trivial). A calibration override forces 100% if >7 days (`charge_target_full_interval_days`) since the battery last hit ≥99% (LFP BMS SOC drift). Fail-safe: missing/stale forecast fails **up** to 100% (never starves the battery into evening grid import). `battery_target_soc` is consumed by export-peak-shaving (4.2.3, fills to it not 100%) and the EV snap-up gate (4.3.6, "full" = reaches it). New tests `test_charge_target.py`. Enforced in software (charge limit 0 at target) — the native inverter max-SOC accepts only 90–100%; survival floor is a dedicated charge_target_min, not the (zero) discharge reserve. (v1.8.22 → v1.8.24)
 - v2.51: EV solar snap-up gate re-keyed from the car's EOD SOC to the **home battery's** fills-today forecast (Section 4.3.6). The snap-up step (drain the home battery to reach the next amp level) is now allowed only when the home battery is still forecast to reach full today *with the EV load subtracted* (`EnergyManager._will_battery_fill_today_with_ev`, cached as `_battery_full_with_ev`, recomputed every 15 min); otherwise the EV stays at-or-below surplus (snap-down only) so it cannot drain a battery that won't recover. Root cause (observed 2026-06-17): the old car-target gate let a low car (18%→49% at 4–7 kW) drain the home battery all day under full sun (bottomed 32%, ended ~43%, never full) because the car-target condition stayed true and the flat 48-h ≥20% floor never tripped. The home-battery load forecast excludes the wallbox, so the new check subtracts the live wallbox draw before re-simulating. `build_solar_candidates` signature changed (`forecast_eod`/`ev_target_max` → `battery_will_be_full`); `TestBuildSolarCandidates` updated. (v1.8.21 → v1.8.22)
 - v2.50: Dropped the +10 SOC safety buffer in the manual-charge stop (Section 4.3.5.1). Stop is now symmetric: `car_soc >= target_soc` regardless of freshness. Rationale: if we stop too early the user re-presses the button and a fresh budget is computed from the new lower `start_soc`; if too late no buffer would have helped. Added `car_soc_age_s` input (computed in `run.py` from `sensor.smart_battery.last_updated`) — logged in the stop reason for diagnosis only, not used as a threshold. Test 47 → 60 (`test_target_reached_stops_charging`, `test_target_reached_logs_freshness`). **Validated live 2026-05-18 21:41**: 26%→30%, 3680 Wh delivered, age=1 s, mode auto-reverted to solar. (v1.8.7 → v1.8.8)

@@ -390,6 +390,7 @@ class BatteryOptimizer:
         forecast: pd.DataFrame,
         now: datetime,
         previously_blocked: bool = False,
+        max_soc_percent: float = 100.0,
     ) -> tuple[DischargeDecision, pd.DataFrame, pd.DataFrame]:
         """Calculate battery discharge decision.
 
@@ -408,6 +409,10 @@ class BatteryOptimizer:
             forecast: DataFrame with pv_energy_wh, load_energy_wh, net_energy_wh
             now: Current time
             previously_blocked: Whether discharge was blocked in the last cycle
+            max_soc_percent: Charge ceiling (dynamic charge target, Section 4.2.4)
+                applied to every SOC trajectory so the decision and the published
+                forecast reflect that the battery only charges to the target, not
+                100%. Default 100 = no ceiling.
 
         Returns:
             (decision, sim_no_strategy, sim_with_strategy)
@@ -433,13 +438,15 @@ class BatteryOptimizer:
             )
 
         # Step 1: Always simulate full trajectory for visualization
-        sim_full = self.simulate_soc(soc_percent, forecast)
+        sim_full = self.simulate_soc(soc_percent, forecast, max_soc_percent=max_soc_percent)
 
         # Step 2: Decision simulation — limited to tariff.target
         # The full sim may extend 5 days for charts, but the discharge decision
         # must only consider the NEXT target period (e.g. Monday 21:00).
         decision_forecast = forecast[forecast.index <= tariff.target]
-        sim_decision = self.simulate_soc(soc_percent, decision_forecast)
+        sim_decision = self.simulate_soc(
+            soc_percent, decision_forecast, max_soc_percent=max_soc_percent
+        )
 
         # Step 2b: Find minimum SOC during expensive hours only
         # Cheap-hour dips are fine (electricity is cheap).
@@ -536,7 +543,11 @@ class BatteryOptimizer:
         if not discharge_allowed:
             # Blocking from now — show that trajectory
             sim_with_strategy = self.simulate_soc(
-                soc_percent, forecast, block_from=now, block_until=tariff.cheap_end
+                soc_percent,
+                forecast,
+                block_from=now,
+                block_until=tariff.cheap_end,
+                max_soc_percent=max_soc_percent,
             )
         elif not soc_ok and tariff.is_cheap_now:
             # Above floor but will need to block later — show deferred block
@@ -550,6 +561,7 @@ class BatteryOptimizer:
                 forecast,
                 block_from=block_from_time,
                 block_until=tariff.cheap_end,
+                max_soc_percent=max_soc_percent,
             )
         else:
             sim_with_strategy = sim_full

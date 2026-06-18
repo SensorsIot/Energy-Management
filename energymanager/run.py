@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.24"
+__version__ = "1.8.25"
 
 import json
 import logging
@@ -442,6 +442,9 @@ class EnergyManager:
         if sim_car:
             house_cap_kwh = self.capacity_wh / 1000
             house_kwh = max(0.0, min(house_cap_kwh, house_soc / 100 * house_cap_kwh))
+            # The house battery fills only to its dynamic charge target (FSD
+            # 4.2.4); surplus past the target overflows to the car (or exports).
+            house_ceil_kwh = self._battery_target_soc / 100.0 * house_cap_kwh
             car_kwh_added = 0.0
             raw_target = self.ha_client.get_sensor_value(self.car_charging_max_entity)
             try:
@@ -482,7 +485,7 @@ class EnergyManager:
             if sim_car:
                 net_kwh = net_wh / 1000
                 if net_kwh >= 0:
-                    headroom = house_cap_kwh - house_kwh
+                    headroom = max(0.0, house_ceil_kwh - house_kwh)
                     to_house = min(net_kwh, headroom)
                     house_kwh += to_house
                     overflow = net_kwh - to_house
@@ -937,7 +940,9 @@ class EnergyManager:
         if self.ev_battery_optimizer is not None:
             try:
                 battery_will_be_full, peak_soc, battery_full_time, _ = (
-                    self.ev_battery_optimizer.will_battery_hit_full()
+                    self.ev_battery_optimizer.will_battery_hit_full(
+                        full_threshold=self._battery_target_soc
+                    )
                 )
                 if peak_soc is not None:
                     battery_peak_soc = round(peak_soc)
@@ -1039,12 +1044,42 @@ class EnergyManager:
                 f"{swiss_datetime(forecast.index[-1])}"
             )
 
-            # Calculate discharge decision
+            # Dynamic charge target (FSD 4.2.4) — computed FIRST so every
+            # downstream calculation (discharge decision, the published SOC
+            # forecast, EV safety, car-SOC forecast, shaving) simulates the
+            # battery charging only to this ceiling, not 100%. Otherwise those
+            # would be optimistic about stored energy. The SOC level needed to
+            # survive the next days under worst-case PV (p10 / p50 load).
+            if self.charge_target_enabled:
+                calibration_due = self._calibration_charge_due(now)
+                target_soc, target_reason = self.optimizer.compute_charge_target(
+                    current_soc,
+                    gate_forecast,
+                    now,
+                    # Survival floor = charge_target_min, NOT battery.reserve_percent:
+                    # simulate_soc clamps SOC at 0, so a 0 floor makes the check
+                    # trivially true. charge_target_min is both the floor and the
+                    # min target.
+                    reserve=self.charge_target_min,
+                    margin_pct=self.charge_target_margin,
+                    min_target=self.charge_target_min,
+                    horizon_h=self.charge_target_horizon_h,
+                    calibration_due=calibration_due,
+                    forecast_fresh=self._forecast_fresh,
+                )
+                self._battery_target_soc = target_soc
+                logger.info(f"Battery charge target: {target_soc:.0f}% ({target_reason})")
+            else:
+                self._battery_target_soc = 100.0
+
+            # Calculate discharge decision (simulated with the charge ceiling so
+            # the decision and the published forecast reflect the real cap).
             decision, sim_no_strategy, sim_with_strategy = self.optimizer.calculate_decision(
                 soc_percent=current_soc,
                 forecast=forecast,
                 now=now,
                 previously_blocked=self._discharge_blocked_by_protection,
+                max_soc_percent=self._battery_target_soc,
             )
 
             if not sim_no_strategy.empty:
@@ -1092,34 +1127,8 @@ class EnergyManager:
             self._discharge_blocked_by_protection = not decision.discharge_allowed
             self._update_discharge_control()
 
-            # Dynamic charge target (FSD 4.2.4): the SOC level needed to survive
-            # the next days under worst-case PV (p10) — not 100% — to reduce LFP
-            # high-SOC dwell. Computed before shaving (which fills to it) and
-            # enforced by control_battery_charge (charge limit 0 at/above target).
-            # Uses the worst-case gate_forecast (p10 PV / p50 load).
-            if self.charge_target_enabled:
-                calibration_due = self._calibration_charge_due(now)
-                target_soc, target_reason = self.optimizer.compute_charge_target(
-                    current_soc,
-                    gate_forecast,
-                    now,
-                    # Survival floor = charge_target_min, NOT battery.reserve_percent:
-                    # simulate_soc clamps SOC at 0, so a 0 floor makes the check
-                    # trivially true. charge_target_min is both the floor and the
-                    # min target.
-                    reserve=self.charge_target_min,
-                    margin_pct=self.charge_target_margin,
-                    min_target=self.charge_target_min,
-                    horizon_h=self.charge_target_horizon_h,
-                    calibration_due=calibration_due,
-                    forecast_fresh=self._forecast_fresh,
-                )
-                self._battery_target_soc = target_soc
-                logger.info(f"Battery charge target: {target_soc:.0f}% ({target_reason})")
-            else:
-                self._battery_target_soc = 100.0
-
-            # Export-peak-shaving charge control
+            # Export-peak-shaving charge control (uses self._battery_target_soc,
+            # computed early above)
             self.control_battery_charge(current_soc, forecast, gate_forecast, now)
 
             # Publish combined battery reasoning for the dashboard
@@ -1381,7 +1390,9 @@ class EnergyManager:
                 battery_will_be_full = True
             elif ev_charging_source == "solar_surplus":
                 battery_will_be_full, _, battery_full_time, _ = (
-                    self.ev_battery_optimizer.will_battery_hit_full()
+                    self.ev_battery_optimizer.will_battery_hit_full(
+                        full_threshold=self._battery_target_soc
+                    )
                 )
                 ev_min_power = POWER_STEPS_3P[0]
                 ev_max_power = POWER_STEPS_3P[-1]

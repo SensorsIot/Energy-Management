@@ -98,12 +98,19 @@ class EVBatteryOptimizer:
 
     def will_battery_hit_full(
         self,
+        full_threshold: float = 99.0,
     ) -> tuple[bool, float | None, str | None, datetime]:
-        """Check if the home battery is forecast to reach 100% today.
+        """Check if the home battery is forecast to reach `full_threshold` today.
 
         Only looks at today's solar window (until midnight local time).
         Tomorrow's forecast is irrelevant — the battery being full tomorrow
         doesn't justify diverting today's solar to the EV.
+
+        Args:
+            full_threshold: SOC % counted as "full". Pass the dynamic charge
+                target (Section 4.2.4) so "full" means "reaches the target" —
+                the SOC forecast is itself capped at the target, so a fixed 99%
+                would otherwise never be reached. Default 99.
 
         Returns:
             (hits_full, peak_soc or None, full_time_local "HH:MM" or None, end_of_today)
@@ -129,7 +136,7 @@ class EVBatteryOptimizer:
             return False, None, None, end_of_today
 
         peak_soc = result[0].records[0].get_value()
-        hits_full = peak_soc >= 99
+        hits_full = peak_soc >= full_threshold
 
         full_time_local = None
         if hits_full:
@@ -139,7 +146,7 @@ class EVBatteryOptimizer:
               |> filter(fn: (r) => r._measurement == "soc_forecast")
               |> filter(fn: (r) => r.scenario == "with_strategy")
               |> filter(fn: (r) => r._field == "soc_percent")
-              |> filter(fn: (r) => r._value >= 99.0)
+              |> filter(fn: (r) => r._value >= {full_threshold})
               |> first()
             """
             time_result = self.influx_client.query_api().query(time_query)
