@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.25"
+__version__ = "1.8.26"
 
 import json
 import logging
@@ -1356,6 +1356,11 @@ class EnergyManager:
             ev_source_reason = "no solar mode"
             ev_threshold = 0.0
             battery_full_time = None
+            # Solar-mode step offset vs the surplus-snapped level (Section 4.3.6):
+            # +n = snapped up n steps (home battery bridges the gap), −n = stepped
+            # down (preserving the battery), 0 = matched surplus. None when not
+            # solar-surplus charging.
+            ev_step_offset: int | None = None
             if ev_mode == "solar":
                 threshold = (
                     self.ha_client.get_sensor_value(self.ev_min_solar_power_entity) or ev_min_power
@@ -1419,6 +1424,9 @@ class EnergyManager:
                     )
                     if ev_safe:
                         ev_charging_power_w = try_power
+                        ev_step_offset = POWER_STEPS_3P.index(try_power) - POWER_STEPS_3P.index(
+                            candidate_power
+                        )
                         if try_power > candidate_power:
                             detail = f", snap-up {candidate_power}→{try_power}W"
                         elif try_power < candidate_power:
@@ -1662,6 +1670,7 @@ class EnergyManager:
                     "surplus_power_w": surplus_power,
                     "grid_export_w": grid_export,
                     "snap_power_w": ev_charging_power_w,
+                    "ev_step_offset": ev_step_offset,
                     "icon": "mdi:ev-station",
                 },
             )
