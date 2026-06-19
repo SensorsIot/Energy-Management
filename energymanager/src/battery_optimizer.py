@@ -10,11 +10,12 @@ Simplified Algorithm (FSD v2.6):
 """
 
 import logging
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, date, UTC
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+from dateutil.easter import easter
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class DischargeDecision:
     discharge_allowed: bool
     reason: str
     min_soc_percent: float  # Minimum SOC during expensive hours (for logging)
+    expensive_import_wh: float = 0.0  # Expensive-hours grid import, winning strategy (FSD 4.2.2)
 
 
 class BatteryOptimizer:
@@ -79,18 +81,31 @@ class BatteryOptimizer:
         self.cheap_end_minute = int(weekday_cheap_end.split(":")[1])
         self.weekend_all_day_cheap = weekend_all_day_cheap
 
-        # Parse holidays
-        self.holidays = set()
-        if holidays:
-            for h in holidays:
-                try:
-                    self.holidays.add(datetime.strptime(h, "%Y-%m-%d").date())
-                except ValueError:
-                    logger.warning(f"Invalid holiday format: {h}")
+        # EBL low-tariff holidays are computed in-add-on (FSD 4.2.2); the
+        # `holidays` arg is accepted for backward compatibility but unused.
+        self._holiday_cache: dict[int, set] = {}
+
+    def _ebl_holidays(self, year: int) -> set:
+        """Return the 8 EBL low-tariff holidays for a year (FSD 4.2.2)."""
+        cached = self._holiday_cache.get(year)
+        if cached is None:
+            e = easter(year)
+            cached = {
+                date(year, 1, 1),  # Neujahr
+                date(year, 8, 1),  # 1. August
+                date(year, 12, 25),  # Weihnachten
+                date(year, 12, 26),  # Stephanstag
+                e - timedelta(days=2),  # Karfreitag
+                e + timedelta(days=1),  # Ostermontag
+                e + timedelta(days=39),  # Auffahrt
+                e + timedelta(days=50),  # Pfingstmontag
+            }
+            self._holiday_cache[year] = cached
+        return cached
 
     def is_holiday(self, dt: datetime) -> bool:
-        """Check if date is a holiday."""
-        return dt.date() in self.holidays
+        """Check if date is an EBL low-tariff holiday (computed, FSD 4.2.2)."""
+        return dt.date() in self._ebl_holidays(dt.year)
 
     def is_weekend(self, dt: datetime) -> bool:
         """Check if date is weekend (Saturday=5, Sunday=6)."""
@@ -109,18 +124,16 @@ class BatteryOptimizer:
             return float(sim["soc_percent"].iloc[0])
         return float(sim.loc[valid[-1], "soc_percent"])
 
-    def filter_expensive_periods(self, simulation: pd.DataFrame) -> pd.DataFrame:
-        """Filter simulation to only include expensive weekday periods (06:15-21:00).
+    def expensive_mask(self, index: pd.DatetimeIndex) -> pd.Series:
+        """Boolean Series (indexed by `index`): True for expensive Hochtarif slots.
 
-        Excludes weekend/holiday days entirely since they are all-day cheap.
+        Expensive = weekday 06:00-21:00 and not a cheap day. Cheap days
+        (weekend/holiday) and the weekday 21:00-06:00 window are all False.
+        See FSD 4.2.2 / 4.1.3.
         """
-        if simulation.empty:
-            return simulation
-
-        sim_swiss = simulation.index.tz_convert(SWISS_TZ)
-        hours = sim_swiss.hour
-        minutes = sim_swiss.minute
-
+        sim_swiss = index.tz_convert(SWISS_TZ)
+        hours = pd.Series(sim_swiss.hour, index=index)
+        minutes = pd.Series(sim_swiss.minute, index=index)
         after_cheap_end = (hours > self.cheap_end_hour) | (
             (hours == self.cheap_end_hour) & (minutes > 0)
         )
@@ -128,10 +141,15 @@ class BatteryOptimizer:
             (hours == self.cheap_start_hour) & (minutes == 0)
         )
         is_expensive_day = pd.Series(
-            [not self.is_cheap_day(t) for t in sim_swiss],
-            index=simulation.index,
+            [not self.is_cheap_day(ts) for ts in sim_swiss], index=index
         )
-        return simulation[after_cheap_end & at_or_before_cheap_start & is_expensive_day]
+        return after_cheap_end & at_or_before_cheap_start & is_expensive_day
+
+    def filter_expensive_periods(self, simulation: pd.DataFrame) -> pd.DataFrame:
+        """Filter simulation to only expensive weekday periods (06:15-21:00)."""
+        if simulation.empty:
+            return simulation
+        return simulation[self.expensive_mask(simulation.index)]
 
     def get_tariff_periods(self, now: datetime) -> TariffPeriod:
         """Calculate tariff periods based on current time.
@@ -230,22 +248,21 @@ class BatteryOptimizer:
         block_from: datetime | None = None,
         block_until: datetime | None = None,
         max_soc_percent: float = 100.0,
+        block_cheap: bool = False,
+        cheap_mask: pd.Series | None = None,
+        floor_wh: float = 0.0,
     ) -> pd.DataFrame:
-        """Simulate SOC trajectory with optional discharge blocking.
+        """Simulate the SOC trajectory with optional discharge blocking.
 
-        Args:
-            soc_percent: Starting SOC (0-100)
-            forecast: DataFrame with net_energy_wh column
-            block_from: Start blocking from this time (None = from start)
-            block_until: Block discharge until this time (None = no blocking)
-            max_soc_percent: Charge ceiling (0-100). Charging stops here and the
-                surplus is treated as exported; discharge is unaffected. Default
-                100 = no ceiling (backward compatible). Used by the dynamic
-                charge-target search (Section 4.2.4).
+        Discharge is blocked inside the [block_from, block_until) window and/or,
+        when block_cheap is set, on every slot flagged True in cheap_mask (the
+        with-strategy of FSD 4.2.2). The battery never discharges below floor_wh.
+        Charging stops at max_soc_percent (surplus above is exported; discharge
+        unaffected). Per slot it records grid_import_wh = the house load not
+        covered by PV or the battery (the energy bought from the grid).
 
-        Returns:
-            DataFrame with soc_percent, soc_wh, soc_wh_unclamped, net_wh, discharge_wh columns
-
+        Returns a DataFrame with soc_percent, soc_wh, soc_wh_unclamped, net_wh,
+        discharge_wh, grid_import_wh.
         """
         e_bat = soc_percent / 100 * self.capacity_wh
         e_bat_unclamped = e_bat
@@ -262,19 +279,27 @@ class BatteryOptimizer:
                     "soc_percent": e_bat / self.capacity_wh * 100,
                     "soc_wh": e_bat,
                     "soc_wh_unclamped": e_bat_unclamped,
-                    "net_wh": net_wh,  # For grid export calculation
-                    "discharge_wh": 0,  # Will be updated below
+                    "net_wh": net_wh,
+                    "discharge_wh": 0,
+                    "grid_import_wh": 0,
                 }
             )
-            # Block only in the specified time window
+
             in_block_window = (
-                block_until and (block_from is None or t >= block_from) and t < block_until
+                block_until is not None
+                and (block_from is None or t >= block_from)
+                and t < block_until
             )
-            discharge_blocked = in_block_window
+            cheap_here = (
+                block_cheap
+                and cheap_mask is not None
+                and t in cheap_mask.index
+                and bool(cheap_mask.loc[t])
+            )
+            discharge_blocked = in_block_window or cheap_here
 
             if net_wh > 0:
-                # Surplus: charge battery (up to the charge ceiling; surplus
-                # above the ceiling is exported, not stored)
+                # Surplus: charge up to the ceiling; surplus above is exported.
                 charge = min(
                     net_wh * self.charge_efficiency,
                     self.max_charge_wh_per_15min,
@@ -285,26 +310,28 @@ class BatteryOptimizer:
                     e_bat_unclamped + net_wh * self.charge_efficiency, self.capacity_wh
                 )
                 discharge_wh = 0
+                grid_import_wh = 0.0
             elif discharge_blocked:
-                # Deficit but blocked: don't discharge
+                # Deficit but blocked: hold; buy the whole deficit from the grid.
                 discharge_wh = 0
-                # Track what would have been discharged (unclamped)
                 discharge_needed = -net_wh / self.discharge_efficiency
                 e_bat_unclamped -= discharge_needed
+                grid_import_wh = -net_wh
             else:
-                # Deficit: discharge battery
+                # Deficit: discharge down to floor_wh; buy any shortfall.
                 discharge_needed = -net_wh / self.discharge_efficiency
                 discharge = min(
                     discharge_needed,
                     self.max_discharge_wh_per_15min,
-                    max(0, e_bat),
+                    max(0.0, e_bat - floor_wh),
                 )
-                e_bat = max(0, e_bat - discharge)
+                e_bat -= discharge
                 e_bat_unclamped -= discharge_needed
                 discharge_wh = discharge_needed
+                grid_import_wh = max(0.0, -net_wh - discharge * self.discharge_efficiency)
 
-            # Update the last result with discharge_wh for this period
             results[-1]["discharge_wh"] = discharge_wh
+            results[-1]["grid_import_wh"] = grid_import_wh
 
         return pd.DataFrame(results).set_index("time")
 
@@ -392,39 +419,17 @@ class BatteryOptimizer:
         previously_blocked: bool = False,
         max_soc_percent: float = 100.0,
     ) -> tuple[DischargeDecision, pd.DataFrame, pd.DataFrame]:
-        """Calculate battery discharge decision.
+        """Decide whether the home battery may discharge (FSD 4.2.2, Topic 4).
 
-        Simplified Algorithm (FSD v2.6):
-        1. Always simulate SOC trajectory for visualization
-        2. If expensive tariff: always allow discharge (we're in the protected period)
-        3. If cheap tariff: check if min SOC stays >= min_soc during expensive hours
-           - If yes: allow discharge
-           - If no: block discharge
-        4. Re-check every 15 minutes (self-correcting)
-        5. Hysteresis: once blocked, require projected min SOC >= threshold + 2%
-           to re-allow, preventing oscillation as the simulation window shrinks
+        Simulates the next 48 h **without_strategy** (free discharge) and
+        **with_strategy** (hold discharge during cheap slots), sums the
+        expensive-hours grid import (Wh) for each, and the lower wins -- ties go
+        to without_strategy. Emits `expensive_import_wh` (== 0 means the battery
+        covers every expensive hour without buying). `previously_blocked` is
+        accepted but unused -- the metric is a stable cost, so no hysteresis.
 
-        Args:
-            soc_percent: Current SOC (0-100)
-            forecast: DataFrame with pv_energy_wh, load_energy_wh, net_energy_wh
-            now: Current time
-            previously_blocked: Whether discharge was blocked in the last cycle
-            max_soc_percent: Charge ceiling (dynamic charge target, Section 4.2.4)
-                applied to every SOC trajectory so the decision and the published
-                forecast reflect that the battery only charges to the target, not
-                100%. Default 100 = no ceiling.
-
-        Returns:
-            (decision, sim_no_strategy, sim_with_strategy)
-
+        Returns (decision, sim_without_strategy, sim_winning_strategy).
         """
-        tariff = self.get_tariff_periods(now)
-
-        logger.debug(
-            f"Tariff: cheap={tariff.is_cheap_now}, "
-            f"cheap_end={tariff.cheap_end}, target={tariff.target}"
-        )
-
         if forecast.empty:
             logger.warning("No forecast data available")
             return (
@@ -432,150 +437,81 @@ class BatteryOptimizer:
                     discharge_allowed=True,
                     reason="No forecast data",
                     min_soc_percent=100.0,
+                    expensive_import_wh=0.0,
                 ),
                 pd.DataFrame(),
                 pd.DataFrame(),
             )
 
-        # Step 1: Always simulate full trajectory for visualization
-        sim_full = self.simulate_soc(soc_percent, forecast, max_soc_percent=max_soc_percent)
+        horizon = now + timedelta(hours=48)
+        fc = forecast[forecast.index <= horizon]
+        if fc.empty:
+            fc = forecast
 
-        # Step 2: Decision simulation — limited to tariff.target
-        # The full sim may extend 5 days for charts, but the discharge decision
-        # must only consider the NEXT target period (e.g. Monday 21:00).
-        decision_forecast = forecast[forecast.index <= tariff.target]
-        sim_decision = self.simulate_soc(
-            soc_percent, decision_forecast, max_soc_percent=max_soc_percent
+        expensive = self.expensive_mask(fc.index)
+        cheap = ~expensive
+        floor_wh = self.min_soc_wh
+
+        sim_without = self.simulate_soc(
+            soc_percent, fc, max_soc_percent=max_soc_percent, floor_wh=floor_wh
+        )
+        sim_with = self.simulate_soc(
+            soc_percent,
+            fc,
+            max_soc_percent=max_soc_percent,
+            floor_wh=floor_wh,
+            block_cheap=True,
+            cheap_mask=cheap,
         )
 
-        # Step 2b: Find minimum SOC during expensive hours only
-        # Cheap-hour dips are fine (electricity is cheap).
-        # On weekends there are no expensive hours until Monday → filter
-        # naturally returns only Monday 06:15-21:00.
-        expensive_periods = self.filter_expensive_periods(sim_decision)
+        imp_without = float(sim_without.loc[expensive, "grid_import_wh"].sum())
+        imp_with = float(sim_with.loc[expensive, "grid_import_wh"].sum())
 
-        if expensive_periods.empty:
-            min_soc_percent = 100.0
-            min_soc_time = sim_decision.index[0] if not sim_decision.empty else forecast.index[0]
-        else:
-            min_soc_wh = expensive_periods["soc_wh"].min()
-            min_soc_percent = min_soc_wh / self.capacity_wh * 100
-            min_soc_time = expensive_periods["soc_wh"].idxmin()
+        # Lower expensive import wins; tie -> without_strategy (free discharge).
+        use_with = imp_with < imp_without
+        expensive_import_wh = imp_with if use_with else imp_without
+        winning = sim_with if use_with else sim_without
 
-        logger.info(f"Checking expensive hours until {swiss_time(tariff.target)}")
+        exp_soc = winning.loc[expensive, "soc_percent"]
+        min_soc = float(exp_soc.min()) if not exp_soc.empty else 100.0
 
-        # Hysteresis: once blocked, require projected min SOC to clear
-        # threshold by a margin before re-allowing.  The simulation window
-        # shrinks by 15 min each cycle, causing the projection to wobble
-        # ~0.5% around the threshold — enough to flip the decision every
-        # cycle without a dead-band.
-        hysteresis = 2.0  # percent
-        threshold = (
-            self.min_soc_percent + hysteresis if previously_blocked else self.min_soc_percent
-        )
-        soc_ok = min_soc_percent >= threshold
-
-        logger.info(
-            f"Min SOC during expensive hours: {min_soc_percent:.0f}% "
-            f"at {swiss_time(min_soc_time)}, threshold: {threshold:.0f}%"
-            f"{' (incl. 2% hysteresis)' if previously_blocked else ''}, OK: {soc_ok}"
-        )
-
-        # Step 3: Decision logic - simple yes/no
-        if not tariff.is_cheap_now:
-            # EXPENSIVE TARIFF (06:00-21:00): Always allow discharge
-            # We're in the period we were protecting - use the battery now
-            discharge_allowed = True
-            reason = f"Expensive tariff - allow discharge (min SOC {min_soc_percent:.0f}%)"
-
-        elif soc_ok:
-            # CHEAP TARIFF + SOC OK: Allow discharge
+        now_cheap = bool(cheap.iloc[0]) if len(cheap) else False
+        if use_with and now_cheap:
+            discharge_allowed = False
+            reason = (
+                f"Hold (cheap slot) - with-strategy saves "
+                f"{imp_without - imp_with:.0f} Wh expensive import; "
+                f"exp_import={expensive_import_wh:.0f} Wh"
+            )
+        elif use_with:
             discharge_allowed = True
             reason = (
-                f"SOC stays >= {self.min_soc_percent:.0f}% "
-                f"(min: {min_soc_percent:.0f}% at {swiss_time(min_soc_time)})"
-            )
-
-        else:
-            # CHEAP TARIFF + SOC NOT OK: Calculate discharge floor
-            # Instead of blocking immediately, find the SOC level at which to block.
-            # The battery can discharge to the floor, then hold for expensive hours.
-            #
-            # Reference simulation from cheap_end at 100% measures the true
-            # morning drop — how much SOC falls before PV recovers it.
-            morning_forecast = decision_forecast[decision_forecast.index >= tariff.cheap_end]
-            if not morning_forecast.empty:
-                sim_ref = self.simulate_soc(100.0, morning_forecast)
-                exp_ref = self.filter_expensive_periods(sim_ref)
-                if not exp_ref.empty:
-                    ref_min = exp_ref["soc_percent"].min()
-                    morning_drop = 100.0 - ref_min
-                else:
-                    morning_drop = 0
-            else:
-                morning_drop = 0
-
-            soc_floor = min(self.min_soc_percent + morning_drop, 100.0)
-
-            logger.info(
-                f"SOC floor: {soc_floor:.0f}% (need {self.min_soc_percent:.0f}% + "
-                f"{morning_drop:.0f}% morning drop)"
-            )
-
-            if soc_percent > soc_floor:
-                # Above floor — allow discharge, re-check in 15 min
-                discharge_allowed = True
-                reason = (
-                    f"SOC {soc_percent:.0f}% above floor {soc_floor:.0f}% "
-                    f"(protect {self.min_soc_percent:.0f}% at {swiss_time(min_soc_time)})"
-                )
-            else:
-                # At or below floor — block to preserve for expensive hours
-                discharge_allowed = False
-                reason = (
-                    f"Block - SOC {soc_percent:.0f}% at floor {soc_floor:.0f}% "
-                    f"(protect {self.min_soc_percent:.0f}% at {swiss_time(min_soc_time)})"
-                )
-
-        logger.info(f"Decision: discharge_allowed={discharge_allowed}")
-
-        # For visualization: show strategy simulation
-        if not discharge_allowed:
-            # Blocking from now — show that trajectory
-            sim_with_strategy = self.simulate_soc(
-                soc_percent,
-                forecast,
-                block_from=now,
-                block_until=tariff.cheap_end,
-                max_soc_percent=max_soc_percent,
-            )
-        elif not soc_ok and tariff.is_cheap_now:
-            # Above floor but will need to block later — show deferred block
-            below_floor = sim_full[sim_full["soc_percent"] <= soc_floor]
-            if not below_floor.empty:
-                block_from_time = below_floor.index[0]
-            else:
-                block_from_time = tariff.cheap_end
-            sim_with_strategy = self.simulate_soc(
-                soc_percent,
-                forecast,
-                block_from=block_from_time,
-                block_until=tariff.cheap_end,
-                max_soc_percent=max_soc_percent,
+                f"Discharge (expensive slot; with-strategy active); "
+                f"exp_import={expensive_import_wh:.0f} Wh"
             )
         else:
-            sim_with_strategy = sim_full
+            discharge_allowed = True
+            reason = (
+                f"Discharge (free-discharge optimal); "
+                f"exp_import={expensive_import_wh:.0f} Wh"
+            )
+
+        logger.info(
+            f"Discharge: expensive import without={imp_without:.0f} Wh, "
+            f"with={imp_with:.0f} Wh -> {'with' if use_with else 'without'}_strategy; "
+            f"allowed={discharge_allowed}, exp_min_soc={min_soc:.0f}%"
+        )
 
         return (
             DischargeDecision(
                 discharge_allowed=discharge_allowed,
                 reason=reason,
-                min_soc_percent=min_soc_percent,
+                min_soc_percent=min_soc,
+                expensive_import_wh=expensive_import_wh,
             ),
-            sim_full,
-            sim_with_strategy,
+            sim_without,
+            winning,
         )
-
 
 def should_charge_now(
     remaining_surplus_wh: list[float],

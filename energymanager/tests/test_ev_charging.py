@@ -168,28 +168,28 @@ class TestBuildSolarCandidates:
         candidates, reason = build_solar_candidates(
             candidate_power=5117,
             threshold=3500,
-            battery_will_be_full=True,
+            step_up_allowed=True,
         )
         assert candidates == [5727, 5117, 4354, 3962]
-        assert "snap-up allowed" in reason
+        assert "step-up allowed" in reason
 
     def test_battery_not_full_drops_snap_up(self) -> None:
         """Home battery would NOT fill today → snap-down only (preserve battery)."""
         candidates, reason = build_solar_candidates(
             candidate_power=5117,
             threshold=3500,
-            battery_will_be_full=False,
+            step_up_allowed=False,
         )
         assert candidates == [5117, 4354, 3962]
         assert 5727 not in candidates
-        assert "snap-down only" in reason
+        assert "preserve battery" in reason
 
     def test_candidate_at_top_step_no_snap_up_exists(self) -> None:
         """candidate=7624 (max) → snap_up list is empty even when allowed."""
         candidates, _ = build_solar_candidates(
             candidate_power=7624,
             threshold=3500,
-            battery_will_be_full=True,
+            step_up_allowed=True,
         )
         # No step above 7624 exists; snap_down only.
         assert candidates == [7624, 7034, 6288, 5727, 5117, 4354, 3962]
@@ -199,7 +199,7 @@ class TestBuildSolarCandidates:
         candidates, _ = build_solar_candidates(
             candidate_power=5117,
             threshold=5000,
-            battery_will_be_full=True,
+            step_up_allowed=True,
         )
         assert candidates == [5727, 5117]
 
@@ -208,7 +208,7 @@ class TestBuildSolarCandidates:
         candidates, _ = build_solar_candidates(
             candidate_power=4354,
             threshold=3500,
-            battery_will_be_full=False,
+            step_up_allowed=False,
         )
         # snap-down from 7A: [4354, 3962], no 5117 snap-up
         assert candidates == [4354, 3962]

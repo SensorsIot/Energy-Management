@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.27"
+__version__ = "1.8.30"
 
 import json
 import logging
@@ -188,13 +188,11 @@ class EnergyManager:
         self.capacity_wh = battery_opts.get("capacity_kwh", 10.0) * 1000
         self.reserve_percent = battery_opts.get("reserve_percent", 10)
 
-        # Dynamic charge target (FSD 4.2.4) — charge the LFP battery only to the
-        # SOC needed to survive the next days, not 100%, to reduce high-SOC dwell.
-        # DISABLED by default: its cap modifies the home-SOC forecast that Rule 4
-        # (check_ev_safe, FSD 4.3.6) reads, conflicting with the natural
-        # solar−load protection forecast (caused the 2026-06-18/19 EV-cut and
-        # empty-battery). Protection first; re-enable only once the cap yields to
-        # protection.
+        # Topic 3 longevity (FSD 4.2.4): dynamic charge target — charge the LFP
+        # battery only to the lowest SOC that stays protected from buying over
+        # 48 h (worst-case p10 PV / p50 load) + margin, then hold; reduces
+        # high-SOC dwell. OFF by default pending live validation (Topics 1/2/4
+        # ship first). The target is NOT threaded into the EV/discharge forecast.
         self.charge_target_enabled = battery_opts.get("charge_target_enabled", False)
         self.charge_target_margin = float(battery_opts.get("charge_target_margin", 10.0))
         self.charge_target_horizon_h = int(battery_opts.get("charge_target_horizon_h", 48))
@@ -292,7 +290,13 @@ class EnergyManager:
         # to gate discharge during expensive hours; the EV safety rule uses
         # this higher floor to keep a buffer for house consumption before
         # it diverts surplus to the car. See FSD 4.3.6.
-        self.ev_reserve_percent = ev_opts.get("reserve_percent", 20)
+        # Buy-protection floor (FSD 4.2.2 / 4.3.6): the home-battery SOC the
+        # system keeps to avoid grid purchases. Shared by Topics 1, 2 and 3.
+        # Renamed from ev_charging.reserve_percent (kept as fallback).
+        self.no_buy_floor_percent = battery_opts.get(
+            "no_buy_floor_percent", ev_opts.get("reserve_percent", 20)
+        )
+        self.ev_reserve_percent = self.no_buy_floor_percent  # legacy alias
         self._ev_idle_since: datetime | None = None
         self._observer = IntegrationObserver() if self.ev_charging_enabled else None
         self._last_mode_error_notified: str | None = None
@@ -675,17 +679,17 @@ class EnergyManager:
         Records the decision (use case / action / reason) on self for
         publication to sensor.battery_decision (FSD 4.6.4).
         """
-        # Dynamic charge target (FSD 4.2.4): never charge above the target SOC.
-        # The inverter's native max-SOC entity only accepts 90-100%, so the
-        # sub-90% ceiling is enforced here in software — hold by setting the
-        # charge limit to 0 (discharge is unaffected). Applies to both use
-        # cases. When target = 100% (calibration / fail-safe) this never fires.
+        # Topic 3 longevity (FSD 4.2.4): hold once the battery has charged to the
+        # dynamic target (lowest SOC that stays protected over 48 h). Enforced in
+        # software (limit 0) because the inverter's native max-SOC accepts only
+        # 90-100%. When disabled or at the 100% calibration/fail-safe target this
+        # never fires. Re-evaluated every 15 min.
         if self.charge_target_enabled and current_soc >= self._battery_target_soc:
             self._charge_use_case = "B"
             self._charge_action = "deferred"
             self._charge_reason = (
                 f"at charge target {self._battery_target_soc:.0f}% — holding "
-                f"(battery longevity, surplus exported)"
+                f"(LFP longevity, surplus exported)"
             )
             self._apply_charge_control(False, self._charge_reason)
             return
@@ -965,6 +969,7 @@ class EnergyManager:
                 "discharge_blocked_by_protection": self._discharge_blocked_by_protection,
                 "discharge_blocked_by_ev": self._discharge_blocked_by_ev,
                 "discharge_min_soc_percent": round(decision.min_soc_percent, 1),
+                "expensive_import_wh": round(decision.expensive_import_wh, 0),
                 # Charge-shaving decision (FSD 4.2.3)
                 "charge_use_case": self._charge_use_case,
                 "charge_action": self._charge_action,
@@ -1048,25 +1053,22 @@ class EnergyManager:
                 f"{swiss_datetime(forecast.index[-1])}"
             )
 
-            # Dynamic charge target (FSD 4.2.4) — computed FIRST so every
-            # downstream calculation (discharge decision, the published SOC
-            # forecast, EV safety, car-SOC forecast, shaving) simulates the
-            # battery charging only to this ceiling, not 100%. Otherwise those
-            # would be optimistic about stored energy. The SOC level needed to
-            # survive the next days under worst-case PV (p10 / p50 load).
+            # Topic 3 longevity (FSD 4.2.4): charge only to the lowest SOC that
+            # keeps the home battery >= no_buy_floor over 48 h (worst-case p10 PV
+            # / p50 load) + margin; hold above it. Weekly 100% calibration and a
+            # stale/missing forecast fail UP to 100%. The target is enforced ONLY
+            # by control_battery_charge — it is deliberately NOT threaded into the
+            # discharge/EV SOC forecast (those read the natural charge-to-100
+            # trajectory; threading the cap in caused the 2026-06-18/19 incidents).
             if self.charge_target_enabled:
                 calibration_due = self._calibration_charge_due(now)
                 target_soc, target_reason = self.optimizer.compute_charge_target(
                     current_soc,
                     gate_forecast,
                     now,
-                    # Survival floor = charge_target_min, NOT battery.reserve_percent:
-                    # simulate_soc clamps SOC at 0, so a 0 floor makes the check
-                    # trivially true. charge_target_min is both the floor and the
-                    # min target.
-                    reserve=self.charge_target_min,
+                    reserve=self.no_buy_floor_percent,
                     margin_pct=self.charge_target_margin,
-                    min_target=self.charge_target_min,
+                    min_target=self.no_buy_floor_percent,
                     horizon_h=self.charge_target_horizon_h,
                     calibration_due=calibration_due,
                     forecast_fresh=self._forecast_fresh,
@@ -1076,14 +1078,16 @@ class EnergyManager:
             else:
                 self._battery_target_soc = 100.0
 
-            # Calculate discharge decision (simulated with the charge ceiling so
-            # the decision and the published forecast reflect the real cap).
+            # Discharge decision (Topic 4). The SOC forecast it produces
+            # (with_strategy) is the NATURAL charge-to-100 trajectory — the Topic
+            # 3 charge target is deliberately NOT threaded in, so the EV safety
+            # gate (Rule 4) and Topic 4 read the unpolluted forecast.
             decision, sim_no_strategy, sim_with_strategy = self.optimizer.calculate_decision(
                 soc_percent=current_soc,
                 forecast=forecast,
                 now=now,
                 previously_blocked=self._discharge_blocked_by_protection,
-                max_soc_percent=self._battery_target_soc,
+                max_soc_percent=100.0,
             )
 
             if not sim_no_strategy.empty:
@@ -1095,7 +1099,8 @@ class EnergyManager:
             # Log decision
             logger.info(
                 f"Decision: discharge_allowed={decision.discharge_allowed}, "
-                f"min_soc={decision.min_soc_percent:.0f}%"
+                f"min_soc={decision.min_soc_percent:.0f}%, "
+                f"expensive_import={decision.expensive_import_wh:.0f}Wh"
             )
             logger.info(f"Reason: {decision.reason}")
 
@@ -1116,13 +1121,8 @@ class EnergyManager:
             # data with a block-as-precaution default.
             if self.ev_battery_optimizer is not None:
                 self._ev_safe, self._battery_min_soc_forecast = (
-                    self.ev_battery_optimizer.check_ev_safe(ev_load_wh=0.0)
+                    self.ev_battery_optimizer.check_ev_safe()
                 )
-            # Snap-up gate: will the home battery still fill today with the EV
-            # load subtracted? (Section 4.3.6 — the EV loop reads this cache.)
-            self._battery_full_with_ev = self._will_battery_fill_today_with_ev(
-                current_soc, forecast, now
-            )
             # Write energy balance + car SOC forecast for visualization
             self.write_energy_balance(forecast, house_soc=current_soc)
             self.write_decision(decision, current_soc)
@@ -1371,8 +1371,25 @@ class EnergyManager:
                 )
                 ev_threshold = threshold
 
-                # Rule 1: Battery Full — surplus capture (no battery check)
-                if battery_soc >= 100 and surplus_power >= threshold and pv_power > 0:
+                # Rule 2 (Topic 1, FSD 4.3.6): the car must still need charge —
+                # its SOC below its own charging limit. Missing SOC → allow (the
+                # car BMS stops at its limit anyway).
+                car_soc_solar = self.ha_client.get_sensor_value(self.smart_car_soc_entity)
+                car_target_solar = self.ha_client.get_sensor_value(self.car_charging_max_entity)
+                car_at_target = (
+                    car_soc_solar is not None
+                    and car_target_solar is not None
+                    and car_soc_solar >= car_target_solar
+                )
+
+                if car_at_target:
+                    ev_charging_source = "none"
+                    ev_source_reason = (
+                        f"car at target ({car_soc_solar:.0f}% ≥ {car_target_solar:.0f}%)"
+                    )
+                # Rule 4 full-battery exception: home battery full → capture the
+                # otherwise-curtailed surplus, no safety check needed.
+                elif battery_soc >= 100 and surplus_power >= threshold and pv_power > 0:
                     ev_charging_power_w = snap_to_power_step(
                         surplus_power,
                         POWER_STEPS_3P[0],
@@ -1382,7 +1399,7 @@ class EnergyManager:
                     ev_source_reason = (
                         f"Surplus {surplus_power:.0f}W → snap {ev_charging_power_w:.0f}W"
                     )
-                # Rule 2 candidate: snap surplus to amp step (needs battery check)
+                # Solar-surplus candidate (needs the Rule 4 battery check)
                 elif surplus_power >= threshold:
                     ev_charging_source = "solar_surplus"
 
@@ -1406,16 +1423,14 @@ class EnergyManager:
                 ev_min_power = POWER_STEPS_3P[0]
                 ev_max_power = POWER_STEPS_3P[-1]
                 candidate_power = snap_to_power_step(surplus_power, ev_min_power, ev_max_power)
-                # Snap-up gate (Section 4.3.6): only drain the home battery to
-                # bridge the gap to the next amp step if the home battery still
-                # reaches full today *with the EV load accounted for*. If it
-                # would not fill, stay at-or-below surplus (snap-down) so the
-                # EV does not drain a battery that cannot recover. Recomputed
-                # every 15 min in run_optimization (self._battery_full_with_ev).
+                # Step-up gate (Topic 2, FSD 4.3.7): step one amp level above
+                # surplus (draining the gap from the home battery) only while the
+                # battery is still protected from buying over 48 h
+                # (battery_min_soc_48h >= floor); otherwise stay at/below surplus.
                 candidates, snap_up_gate_reason = build_solar_candidates(
                     candidate_power=candidate_power,
                     threshold=threshold,
-                    battery_will_be_full=self._battery_full_with_ev,
+                    step_up_allowed=self._battery_min_soc_forecast >= self.no_buy_floor_percent,
                 )
 
                 ev_charging_power_w = 0.0

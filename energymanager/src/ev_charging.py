@@ -104,42 +104,32 @@ def snap_to_power_step(
 def build_solar_candidates(
     candidate_power: int,
     threshold: float,
-    battery_will_be_full: bool,
+    step_up_allowed: bool,
 ) -> tuple[list[int], str]:
-    """Decide solar-mode power-step candidates, gated on the HOME battery.
+    """Decide solar-mode power-step candidates (Topic 2, FSD 4.3.7).
 
-    The "snap-up" step (one level above candidate_power) draws the gap to the
-    next amp step from the home battery. Whether that drain is acceptable
-    depends on the home battery, not the car:
+    The "step-up" step (one level above candidate_power) draws the gap to the
+    next amp step from the home battery:
 
-    - **Version 1 — snap up** (`battery_will_be_full=True`): the home battery
-      is still forecast to reach full by this evening *even with the EV load
-      accounted for*, so bridging the gap from the battery is fine — it
-      recovers. Include the snap-up step.
-    - **Version 2 — snap down** (`battery_will_be_full=False`): the home
-      battery would NOT reach full today, so do not drain it further. Stay
-      at-or-below surplus (snap-down only).
+    - **step_up_allowed=True**: the battery is still protected from buying over
+      the next 48 h (`battery_min_soc_48h >= no_buy_floor_percent`), so bridging
+      the gap from the battery is fine. Include the step-up step.
+    - **step_up_allowed=False**: stay at-or-below surplus (snap-down only) so the
+      EV never pulls the home battery below the protection floor.
 
-    This replaces the older gate keyed to the *car's* EOD SOC forecast, which
-    ignored whether the home battery could recover and so let the EV drain the
-    battery all day on a low-car day (the battery never refilled). The
-    `battery_will_be_full` signal must already account for the EV load — the
-    home-battery load forecast excludes the wallbox (see
-    `EnergyManager._will_battery_fill_today_with_ev`).
-
-    Returns (candidates, gate_reason) where candidates is the ordered
-    list passed to the home-battery safety loop.
+    Returns (candidates, gate_reason) where candidates is the ordered list
+    passed to the home-battery safety loop.
     """
-    if battery_will_be_full:
+    if step_up_allowed:
         snap_up = [
             s for s in POWER_STEPS_3P
             if s > candidate_power and s >= threshold
         ]
         snap_up_step = [snap_up[0]] if snap_up else []
-        gate_reason = "home battery still reaches full today → snap-up allowed"
+        gate_reason = "protected (min48h >= floor) → step-up allowed"
     else:
         snap_up_step = []
-        gate_reason = "home battery would not fill today → snap-down only (preserve battery)"
+        gate_reason = "not protected → stay at/below surplus (preserve battery)"
     snap_down = [
         s for s in reversed(POWER_STEPS_3P)
         if s <= candidate_power and s >= threshold

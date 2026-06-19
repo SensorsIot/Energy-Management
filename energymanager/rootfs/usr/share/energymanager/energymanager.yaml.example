@@ -25,6 +25,9 @@ influxdb:
 battery:
   capacity_kwh: 10.0
   reserve_percent: 10
+  # Buy-protection floor: home-battery SOC kept to avoid grid purchases
+  # (shared by Topics 1/2/3; FSD 4.2.2/4.3.6).
+  no_buy_floor_percent: 20
   charge_efficiency: 0.95
   discharge_efficiency: 0.95
   max_charge_w: 5000
@@ -61,7 +64,7 @@ battery:
   # needed; lands below 100% most days. Enforced in software via
   # charge_control_entity (limit 0 at/above target) — the inverter's native
   # max-SOC accepts only 90-100% and cannot enforce a lower ceiling.
-  charge_target_enabled: false   # off by default — see FSD 4.2.4 (conflicts with EV protection forecast)
+  charge_target_enabled: false   # Topic 3 dynamic charge target — off pending validation (FSD 4.2.4)
   charge_target_margin: 10            # extra % of capacity above the worst-case need
   charge_target_horizon_h: 48         # survival look-ahead (worst-case p10 PV / p50 load)
   charge_target_min: 20               # survival floor AND min ceiling (the worst-case sim keeps SOC above this)

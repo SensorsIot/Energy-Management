@@ -755,7 +755,7 @@ def load_config(config_path: str) -> dict:
 | `tariff.weekday_cheap_start` | 21:00 | Low tariff start (HH:MM) |
 | `tariff.weekday_cheap_end` | 06:00 | Low tariff end (HH:MM) |
 | `tariff.weekend_all_day_cheap` | true | Weekend uses low tariff |
-| `tariff.holidays` | [] | Holiday dates (low tariff) |
+| _(holidays)_ | computed | The 8 EBL cheap holidays computed in-add-on (Section 4.1.3); no config key |
 | `appliances.power_w` | 2500 | Deferrable appliance power |
 | `appliances.energy_wh` | 1500 | Appliance energy per cycle |
 | `ev_charging.min_power_w` | 4100 | Min EV charging power |
@@ -1608,7 +1608,7 @@ is optimized, *for which entity*, on *what criteria*, with *what output*.
 | **Home battery** | Discharge blocking (battery protection) | Keep enough SOC to cover the expensive tariff window (and the EV) instead of dumping it early | Allow / block discharge | `number.battery_maximum_discharging_power` (`max`/`0`) | 15 min | 4.2.2 |
 | **Home battery** | Export-peak-shaving charge control | Defer PV charging so the battery's headroom absorbs the midday **export** peak at a gentle, capped rate (less clipping, longer battery life) | Allow / defer charging | `number.battery_maximum_charging_power` (`charge_shaving_power_w`/`0`) | 15 min | 4.2.3 |
 | **Home battery** | Dynamic charge target (longevity) | Charge only to the SOC needed to survive the next days (worst-case PV), not 100% — less LFP dwell at high SOC; weekly full charge for BMS calibration | Hold at target SOC | `number.battery_maximum_charging_power` (`0` at/above target) | 15 min | 4.2.4 |
-| **EV (car)** | Solar-surplus charging | Maximize solar self-consumption into the car without draining the home battery | Wallbox charge power (amp step) | `number.wallbox_power_limit` (via REST `set_sensor_state`) | 10 s | 4.3.6 |
+| **EV (car)** | Solar-surplus charging | Maximize solar self-consumption into the car without draining the home battery | Wallbox charge power (amp step) | `number.wallbox_power_limit` (via REST `set_sensor_state`) | 10 s | 4.3.6-4.3.7 |
 | **EV (car)** | Cheap / immediate charging (manual modes) | Reach the user's target SOC by a kWh budget + SOC stop | Wallbox power + discharge block | `number.wallbox_power_limit` & `_discharge_blocked_by_ev` | 10 s | 4.3.4–4.3.6 |
 | **Appliance (washer)** | Run-now signal | Advise when a high-power appliance can run on solar without forcing grid import | green / orange / red | `sensor.appliance_signal` (**advisory — no actuation**) | 15 min | 4.4 |
 
@@ -1681,7 +1681,7 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | **Cheap** | 21:00 → 06:00 | All day |
 | **Expensive** | 06:00 → 21:00 | — |
 
-`BatteryOptimizer.get_tariff_periods(now)` returns `(cheap_start, cheap_end, target, is_cheap_now)`. `target` is used only by the home-battery discharge rule; EV and washer rules do not consult it. Holidays come from a calendar integration (future: HA calendar entity).
+`BatteryOptimizer.get_tariff_periods(now)` returns `(cheap_start, cheap_end, target, is_cheap_now)`. `target` is used only by the home-battery discharge rule; EV and washer rules do not consult it. The exact cheap/expensive slot labeling, including the EBL holiday calendar, is defined in Section 4.2.2 (Topic 4) — its only consumer.
 
 ### 4.1.4 Battery configuration
 
@@ -1690,7 +1690,7 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | Key | Default | Used by |
 |---|---|---|
 | `capacity_kwh` | 10.0 | Simulator (Wh conversions), EV safety (load → SOC % conversion) |
-| `reserve_percent` | 0 | Home-battery discharge floor during expensive hours (Section 4.2.2) |
+| `reserve_percent` | 0 | Optional safety margin for the discharge protection (Section 4.2.2); 0 = pure SOC=0 must-buy trigger |
 | `charge_efficiency` | 0.95 | Simulator (charge branch) |
 | `discharge_efficiency` | 0.95 | Simulator (discharge branch) |
 | `soc_entity` | `sensor.battery_state_of_capacity` | Current SOC readback |
@@ -1790,212 +1790,72 @@ from(bucket: "energy_manager")
   |> filter(fn: (r) => r._measurement == "soc_forecast")
 ```
 
-### 4.2.2 Discharge Decision
+### 4.2.2 Discharge Strategy and Protection Signal (Topic 4)
 
-#### Problem
+Decides whether the home battery may discharge. Acts on `number.battery_maximum_discharging_power`. Re-evaluated every 15 min over a 48 h horizon.
 
-The battery must maintain a minimum State of Charge (min_soc, default 0%) during expensive tariff hours (06:00-21:00). A higher reserve (e.g. 10%) can be configured via `reserve_percent` to provide a buffer for forecast errors and unexpected consumption spikes, but the default is 0% to allow maximum discharge flexibility.
+#### Principle
 
-During cheap tariff (night), SOC can drop to any level since grid electricity is inexpensive.
+Only **expensive**-tariff purchases cost real money; cheap-hour purchases are acceptable. Discharge the battery unless doing so increases expensive-hours grid import.
 
-#### Algorithm
+#### Cheap/expensive labeling (EBL calendar)
 
-The discharge decision is driven by **two independent block flags** combined with OR logic:
+EBL (Elektra Baselland) double-tariff. A 15-min slot is **cheap (Niedertarif)** if it is a weekday 21:00-06:00 window, a Saturday/Sunday, or one of the 8 holidays below; otherwise **expensive (Hochtarif** -- weekday 06:00-21:00).
 
-| Flag | Set by | Meaning |
-|------|--------|---------|
-| `_discharge_blocked_by_protection` | `run_optimization()` (every 15 min) | SOC forecast too low to safely discharge |
-| `_discharge_blocked_by_ev` | `control_ev_charging_mode()` (every 10 s) | EV actively charging in immediate/cheap mode |
+**Cheap holidays -- exactly these 8**, computed in-add-on per year (4 fixed + 4 from Gregorian Easter `E`, via `dateutil.easter`):
 
-**Combined decision:**
-```
-discharge_allowed = NOT (blocked_by_protection OR blocked_by_ev)
-```
+| Holiday | Date | | Holiday | Date |
+|---------|------|-|---------|------|
+| Neujahr | 1 Jan | | Karfreitag | `E - 2` |
+| 1. August | 1 Aug | | Ostermontag | `E + 1` |
+| Weihnachten | 25 Dec | | Auffahrt | `E + 39` |
+| Stephanstag | 26 Dec | | Pfingstmontag | `E + 50` |
 
-Each mechanism only touches its own flag. `control_battery()` is called with the combined result whenever either flag changes.
+This is the **complete** EBL low-tariff holiday list; other canton-BL holidays (Berchtoldstag 2 Jan, Tag der Arbeit 1 May, Fronleichnam, Maria Himmelfahrt, Allerheiligen) stay Hochtarif. Computed in the add-on -- no external list or calendar; this replaces the removed `tariff.holidays` config key.
 
-**Truth table:**
+#### Process
 
-| Protection | EV Charging | Result |
-|-----------|-------------|--------|
-| off | off | discharge allowed |
-| **on** | off | discharge blocked |
-| off | **on** | discharge blocked |
-| **on** | **on** | discharge blocked |
+1. **Simulate SOC twice** (`simulate_soc`, from current SOC, on `solar - house_load`):
+   - **without_strategy** -- discharge on every deficit.
+   - **with_strategy** -- skip discharge during **cheap** slots (that load is bought from the grid); discharge normally during **expensive** slots.
+2. **Label** every 15-min slot cheap/expensive (*Cheap/expensive labeling* above).
+3. **Sum expensive-hours import** for each strategy: total unserved load **energy (Wh)** over all **expensive** slots where the battery is empty (SOC = 0) -- the energy bought at the high price.
+4. **Compare** the two sums.
+5. **Lower wins. On a tie, without_strategy wins** (don't buy cheap energy or hold SOC for no expensive-hours benefit -- the Topic 3 longevity win).
 
-#### Protection flag — set every 15 minutes by `run_optimization()`
+#### Outputs
 
-The algorithm handles 4 time-of-day cases. All times are local (Europe/Zurich).
+- **Discharge actuation:**
+  - without_strategy wins -> discharge allowed (5000 W).
+  - with_strategy wins -> discharge blocked (0 W) during cheap slots, allowed during expensive slots.
+- **`expensive_import_wh`** = the winning sum: `== 0` means the battery covers every expensive hour without buying; `> 0` means an expensive purchase is unavoidable.
 
-| Case | Time window | Target | What is checked |
-|------|-------------|--------|-----------------|
-| 1. Weekday daytime | 06:00-21:00 | — | Nothing — always allow discharge |
-| 2. Weekday evening | 21:00-23:59 | Next day 21:00 | Expensive hours only (next day 06:15-21:00) |
-| 3. Weekday night | 00:00-06:00 | Today 21:00 | Expensive hours only (today 06:15-21:00) |
-| 4. Weekend/holiday | Fri 21:00 → Mon 06:00 | Mon 21:00 | Expensive hours only (Mon 06:15-21:00) |
+#### EV-charging override
 
-The same logic applies to cases 2, 3, and 4 — only the target time differs.
-On weekends, `filter_expensive_periods()` naturally returns only Monday's
-expensive hours since Saturday and Sunday are all-day cheap.
+Discharge is additionally blocked while the EV charges in immediate/cheap mode:
 
 ```
-1. CHECK CURRENT TARIFF
-   IF expensive tariff (06:00-21:00 on a weekday):
-      → blocked_by_protection = False
-      → Skip to step 4
-
-2. SIMULATE SOC (cheap tariff — cases 2, 3, 4)
-   - Determine target: next weekday 21:00 (see table above)
-   - Simulate from NOW until target
-   - Assume free discharge (no blocking)
-   - Use current SOC as starting point
-   - Apply PV and load forecasts
-
-   IMPORTANT: The simulation is limited to the target time. A separate
-   5-day simulation is used for Grafana visualization only — it must NOT
-   feed into the discharge decision (the `discharge_allowed` boolean).
-   The 5-day sim may be used to estimate the deferred-block start time
-   for the Grafana chart, but this is purely visual.
-
-   CHECK: Does SOC stay >= min_soc during expensive hours?
-   - Extract minimum SOC from weekday 06:15-21:00 periods in simulation
-   - Ignore SOC values during cheap hours (21:00-06:00)
-   - Ignore weekend/holiday days entirely (all-day cheap → no expensive hours)
-   - SOC dips during cheap hours (including entire weekends) are acceptable
-
-   IF previously_blocked:
-      threshold = min_soc + 2%   (hysteresis — require clear margin to re-allow)
-   ELSE:
-      threshold = min_soc
-
-   IF min_soc_in_expensive_hours >= threshold:
-      → blocked_by_protection = False
-      → Skip to step 4
-
-3. CALCULATE DISCHARGE FLOOR (cheap tariff, SOC would drop below min)
-   Instead of blocking immediately, calculate a SOC floor — the level at
-   which to stop discharging — so the battery can serve the house during
-   the evening and only hold once it reaches the minimum needed for
-   the next morning's expensive hours.
-
-   a) Run a REFERENCE simulation from cheap_end (06:00) starting at 100%
-      using the morning/daytime forecast up to the target. This measures
-      the true "morning drop" — how much SOC falls from cheap_end to the
-      expensive-hours minimum before PV production recovers it.
-
-   b) soc_floor = min(min_soc + morning_drop, 100%)
-
-      Example: min_soc=10%, morning drop=21% → floor=31%
-      The battery must hold 31% at 06:00 so it doesn't go below 10%
-      at the morning minimum (~08:00).
-
-   c) Compare current SOC against floor:
-      IF current_soc > soc_floor:
-         → blocked_by_protection = False   (above floor, allow discharge)
-      ELSE:
-         → blocked_by_protection = True    (at/below floor, hold for morning)
-
-   The 15-minute re-evaluation loop naturally catches the SOC-to-floor
-   transition: discharge is allowed until SOC drops to the floor, then
-   blocked for the remainder of the cheap period.
-
-4. APPLY combined decision (see above)
+blocked_by_ev = charging_mode in {immediate, cheap} AND target_power > 0
+discharge_allowed = (winning strategy allows this slot) AND NOT blocked_by_ev
 ```
 
-#### EV flag — set every 10 seconds by `control_ev_charging_mode()`
+When the wallbox draws power, the Modbus proxy raises the household load the inverter sees, which would otherwise discharge the home battery into the car. The control signal is sent only when the combined decision changes.
 
-```
-IF charging_mode in ("immediate", "cheap") AND target_power > 0:
-   → blocked_by_ev = True
-ELSE:
-   → blocked_by_ev = False
+#### Safety margin
 
-APPLY combined decision (see above)
-```
+The empty trigger is SOC = 0. An optional `battery.reserve_percent` (default 0) raises it -- count import when SOC <= reserve -- as a forecast-error buffer. At the default it is the pure must-buy point.
 
-**Why block discharge during immediate/cheap EV charging:** When the wallbox draws significant power (e.g. 5 kW), the OCPP server publishes this to the Modbus Proxy, which corrects the DTSU reading so SUN2000 sees high household load and discharges the battery to cover it — wasting stored energy that should be preserved.
+#### Self-correction
 
-#### Key Design Decisions
+Re-run every 15 min from the live SOC; binary strategy, no hysteresis -- the metric is a stable energy cost, not an SOC-vs-threshold comparison.
 
-**Why always allow during expensive hours:**
-- During expensive tariff (06:00-21:00), we're in the period we were protecting
-- Battery should discharge to avoid expensive grid import
-- No reason to block—this is exactly when we want battery power
+#### Output entity
 
-**Why use a discharge floor instead of immediate blocking:**
-- The old binary approach blocked ALL discharge from the moment the free-discharge simulation showed the SOC dipping below the threshold during future expensive hours — even hours before it was necessary
-- Example: at 71% SOC on Sunday evening, the battery was blocked for 12 hours to prevent a brief 6% dip at 08:00 Monday, forcing unnecessary grid import all evening
-- The floor approach allows the battery to serve the house until it reaches the minimum SOC needed for morning protection, then holds
-- This is both economically better (less cheap-rate grid import) and user-expected behavior (battery powers the house when it has charge)
-
-**Why re-check every 15 minutes during cheap hours:**
-- Forecasts may have errors; actual conditions may differ
-- If load was lower than forecast, SOC will be higher than predicted
-- If PV was higher than forecast, battery may have extra charge
-- Re-simulation with current SOC naturally adapts to reality
-- The floor comparison (`current_soc > soc_floor?`) naturally transitions from "allow" to "block" as the battery discharges through the evening
-
-**Why only check expensive hours (uniform rule for weekday and weekend):**
-- During cheap tariff (21:00-06:00), low SOC is acceptable — grid electricity is inexpensive
-- On weekends/holidays, the entire day is cheap — no expensive hours exist
-- Weekend SOC dips are irrelevant: only the next weekday's expensive hours matter
-- The same `filter_expensive_periods()` call works for all cases: on weekday nights it returns tomorrow's 06:15-21:00; on weekends it returns Monday's 06:15-21:00
-- The battery can freely discharge on weekends; PV recharges it before Monday morning
-
-**Why limit the decision simulation to `tariff.target`:**
-- A separate 5-day simulation is used for Grafana chart visualization
-- If this 5-day simulation also fed the decision logic, it would check Mon+Tue+Wed+Thu expensive hours — a 10 kWh battery cannot sustain 4 days of weekday consumption, so it would always block on weekends
-- The decision must only consider the NEXT target (e.g. Monday 21:00)
-
-**Threshold hysteresis (2% dead-band):**
-- When the projected min SOC hovers near the threshold, the simulation window shrinks by 15 min each cycle, causing the projection to wobble ~0.5% — enough to flip the decision every cycle
-- Once blocked (`previously_blocked=True`), the threshold rises by 2% — the projection must clearly exceed the margin before re-allowing discharge
-- Without this, the discharge limit oscillates between 0W and 5000W every 15 minutes, and the battery drains all night through the "allowed" windows
-
-**Signal hysteresis:**
-- Control signal only sent when the combined decision changes (not every cycle)
-- Reduces unnecessary Modbus communication with inverter
-- Prevents rapid on/off cycling
-- Each flag setter only calls `_update_discharge_control()` when its own flag actually changes
-
-#### Self-Correcting Behavior
-
-The rolling 15-minute check makes the system self-correcting:
-
-| Scenario | Effect |
-|----------|--------|
-| Load lower than forecast | SOC stays higher → floor reached later or never |
-| PV higher than forecast | More energy available → morning drop smaller → lower floor |
-| Unexpected high load | SOC drops faster → reaches floor sooner → blocks earlier |
-| Battery started fuller | More headroom above floor → serves house longer |
-| SOC reaches floor | Blocks discharge, battery holds for morning expensive hours |
-
-This eliminates the complexity of pre-calculating switch-on times while naturally adapting to real-world conditions.
-
-#### Output: number.battery_maximum_discharging_power
-
-Controls the battery discharge power in Home Assistant:
-
-| Value | Meaning |
-|-------|---------|
-| `5000` | Discharge allowed (max power) |
-| `0` | Discharge blocked |
-
-```yaml
-service: number.set_value
-target:
-  entity_id: number.battery_maximum_discharging_power
-data:
-  value: "{{ 5000 if discharge_allowed else 0 }}"
-```
+`number.battery_maximum_discharging_power`: 5000 = discharge allowed, 0 = blocked.
 
 #### Test Cases
 
-See [Appendix D.1 — Battery Discharge Optimizer Tests](#d1-battery-discharge-optimizer-tests). Test file: `energymanager/tests/test_battery_optimizer.py` (14 tests passing as of v1.5.0).
-
-See [Appendix D.4 — Discharge Blocking Tests](#d4-discharge-blocking-tests). Test file: `energymanager/tests/test_discharge_blocking.py` (17 tests passing as of v1.6.19).
-
----
+Test files: `energymanager/tests/test_battery_optimizer.py`, `energymanager/tests/test_discharge_blocking.py`.
 
 ### 4.2.3 Export-Peak-Shaving Charge Control
 
@@ -2179,150 +2039,36 @@ and end-to-end greedy-vs-shaving routing).
 
 ---
 
-### 4.2.4 Dynamic Charge Target (Battery Longevity)
+### 4.2.4 Charge Ceiling -- Longevity (Topic 3)
 
-> **Status: DISABLED by default (`charge_target_enabled: false`).** The cap
-> modifies the home-SOC forecast that the EV safety gate (Rule 4, §4.3.6) reads,
-> conflicting with the natural `solar − load` protection forecast — it caused an
-> EV cut (2026-06-18) and an empty battery (2026-06-19). Protection comes first.
-> Re-enable only once the cap *yields to protection* (battery charges fully when
-> the protection forecast is at risk, capped for longevity only when it is safe).
+Limits how high the home battery charges, sparing the LFP from high-SOC dwell. Acts on `battery.charge_control_entity` (`number.battery_maximum_charging_power`). Re-evaluated every 15 min. Off by default (`charge_target_enabled`).
 
-This sets **how high the home battery is allowed to charge** — a dynamic SOC
-ceiling instead of a fixed 100%. It runs in `run_optimization()` (every 15 min)
-and produces a single value, **`battery_target_soc`**, that every charge path
-consumes (export-peak-shaving 4.2.3 fills to it; the EV snap-up gate 4.3.6 treats
-"battery full" as "reaches it").
+| # | Rule | Condition | Action |
+|---|------|-----------|--------|
+| **1** | **Charge to target, then hold** | current SOC >= `battery_target_soc` | set charge power to 0 -- hold (surplus exports; discharge unaffected) |
+| **2** | **Weekly calibration** | > `charge_target_full_interval_days` (7) since SOC last reached >= 99 % | `battery_target_soc` = 100 % |
+| **3** | **Fail-safe** | forecast missing / stale | `battery_target_soc` = 100 % |
 
-> The home battery is a Huawei LUNA2000 (**LFP**). The ceiling is enforced **in
-> software**: when SOC ≥ `battery_target_soc`, `control_battery_charge()` sets
-> `number.battery_maximum_charging_power` to 0 (surplus exports; discharge is
-> unaffected). The inverter's native `number.battery_end_of_charge_soc` ("Max
-> SOC limit") **only accepts 90–100 %**, so it cannot enforce a sub-90 % ceiling
-> and is not used. Re-evaluated every 15 min, so the battery can overshoot the
-> target by up to one cycle's charge (≤ ~6 % at the 2500 W shaving power, ≤ ~12 %
-> if use case A released it to 5 kW) before the next cycle holds it — acceptable
-> for a longevity feature.
+**`battery_target_soc`** = the lowest SOC ceiling C in [`no_buy_floor_percent`, 100] such that simulating the next `charge_target_horizon_h` (48 h) at worst-case PV (p10) / load (p50), capped at C, keeps the home-battery minimum >= `no_buy_floor_percent`, plus `charge_target_margin` (`BatteryOptimizer.compute_charge_target`).
 
-#### Problem
+`battery_target_soc` is enforced **only** by the charge control. It is **not** threaded into the discharge/EV SOC forecast -- those read the natural charge-to-100 trajectory (the EV's wallbox-off question, Section 4.3.6). Because the target is sized on worst-case p10 PV, the held battery still stays >= `no_buy_floor_percent` (above the EV floor and the discharge reserve), so the natural forecast the other topics read remains safe.
 
-Holding an LFP cell at high SOC accelerates calendar aging. On most days the
-household does not need a *full* battery to bridge to the next PV recharge — the
-excess simply **dwells** near 100%, ageing the pack for no benefit. The harm is
-*dwell time* at high SOC, not the act of reaching it: energy that is charged and
-then promptly discharged (because it is genuinely needed that night) causes
-little ageing. So the rule is **charge only to the level needed to ride through
-the upcoming low-PV / high-load period**, and export the rest.
-
-There is **no fixed cap** (e.g. 85 %). A hard cap would give no health benefit on
-high-demand days (that energy is used, not held) while forcing **grid import**
-(the battery is PV-only — under-charging during the day means importing in the
-expensive evening). The ceiling is allowed all the way to 100 % when the forecast
-genuinely needs it; it simply lands well below 100 % on most days, which is where
-the longevity benefit comes from — for free.
-
-#### Computation
-
-Worst-case survival check, re-evaluated every 15 min:
-
-```
-INPUTS
-  current_soc      = battery SOC now (%)
-  floor            = battery.charge_target_min (survival floor, default 20%)
-                     NOT battery.reserve_percent — simulate_soc clamps SOC at 0,
-                     so a 0 floor makes the survival check trivially always-true.
-  margin           = battery.charge_target_margin (default 10% of capacity)
-  horizon          = battery.charge_target_horizon_h (default 48 h)
-  worst_forecast   = p10 PV (low production, exceeded ~90% of the time)
-                     vs p50 load (median consumption)       # conservative on PV
-
-target_soc = the LOWEST ceiling C in [floor, 100] such that, simulating the
-             SOC forward over `horizon` under worst_forecast with the charge
-             ceiling set to C, SOC never drops below `floor`.
-           = then + `margin`, clamped to [floor, 100].
-```
-
-Found with `BatteryOptimizer.simulate_soc()` (the same machinery as 4.2.1/4.2.2):
-because min-SOC is monotonic in the ceiling, a few simulations bracket the lowest
-safe `C`. Intuition: if even an **uncapped** (charge-to-100 %) worst-case
-trajectory never has spare headroom above `reserve+margin`, the day genuinely
-needs a full battery → `target_soc = 100`. If it has spare `S` at its lowest
-point, the peak was `S` too high → lower the ceiling by `S`.
-
-**Why p10 PV / p50 load (worst case).** Sizing the target on a pessimistic
-outcome guarantees the battery survives the next days *even if* the sun
-under-performs — preventing the grid import the battery exists to avoid. The
-health benefit is unaffected: even the worst-case need is usually < 100 %.
-"Health-first" enters only as a **small** `margin` (don't over-provision beyond
-the worst-case need), not a fat safety buffer.
-
-#### Weekly calibration full charge
-
-LFP SOC readings drift without periodic full charges (the BMS re-calibrates at
-the top). So **if more than 7 days have passed since the battery last reached
-≥ 99 % SOC, `target_soc` is forced to 100 %** until achieved, overriding the
-worst-case computation. The "last full" timestamp is read from the SOC history
-(InfluxDB: most recent point with `soc ≥ 99`), so no separate persisted state is
-needed and it survives restarts. This is the main occasion the battery reaches
-100 % during a low-demand week, and it lands on whatever sunny window comes
-first so the calibration charge is PV, not grid.
-
-#### Bounds and fail-safes
-
-- **`charge_target_min` is the survival floor *and* the min ceiling.** It is a
-  **dedicated** value (default 20 %), **not** `battery.reserve_percent`: the
-  discharge reserve defaults to 0, and because `simulate_soc` clamps SOC at 0,
-  a 0 floor would make "stay ≥ floor" trivially always-true → the target would
-  collapse to the floor every day. Using a real floor (20 %) makes the survival
-  check meaningful and is also the lowest the ceiling may compute.
-- **Missing / stale forecast → fail UP to 100 %.** If the worst-case forecast is
-  unavailable or the heartbeat is stale (the same `forecast_max_age_minutes`
-  guard as 4.2.3), the target defaults to **100 %**, never to a low cap — a bad
-  forecast must never starve the battery into evening grid import.
-
-#### Interactions
-
-`battery_target_soc` is computed **first** in `run_optimization()` — before the
-discharge decision and before any SOC forecast is written — so every downstream
-calculation simulates the battery charging only to the target, not 100 %.
-`simulate_soc()` takes a `max_soc_percent` ceiling; `calculate_decision()` and
-the car-SOC forecast pass the target through. Otherwise those would be optimistic
-about stored energy (e.g. EV safety would think the battery has more buffer than
-it will).
-
-| Consumer | Before | After (capped at `battery_target_soc`) |
-|----------|--------|-------|
-| Discharge decision + published SOC forecast (4.2.1/4.2.2) | sim to 100 % | sim capped at target — decision and the `with_strategy`/`without_strategy` forecasts reflect the real cap |
-| EV safety `check_ev_safe` (4.3.6) | read 100 %-forecast | reads the capped forecast (transitively consistent — no code change) |
-| `will_battery_hit_full` dashboard (4.3.6) | "≥ 99 %" | "≥ `battery_target_soc`" → "Full by" means *reaches target* |
-| Car-SOC forecast (4.3.8) | house fills to 100 %, then car | house fills to target, then overflow to car/export |
-| Export-peak-shaving (4.2.3) | fills headroom to 100 % | fills to target; `headroom = (target − soc)`; holds at target (limit 0) |
-| EV snap-up gate (4.3.6) | "will battery reach 99 %" | "will battery reach `battery_target_soc`" |
-| Discharge protection floor (4.2.2) | unchanged | unchanged — defends the `reserve` floor; this rule defends the ceiling |
-
-All consumers read the **same** early-computed `battery_target_soc`, so no two
-rules disagree about how high the battery charges.
+The "last full" timestamp is read from SOC history (InfluxDB: most recent point with SOC >= 99) -- no persisted state. The inverter's native `number.battery_end_of_charge_soc` is not used (accepts only 90-100 %); the ceiling is enforced in software via the charge-power entity.
 
 #### Configuration
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `battery.charge_target_enabled` | `true` | Master switch for the dynamic ceiling |
+| `battery.charge_target_enabled` | `false` | Master switch (off pending live validation) |
 | `battery.charge_target_margin` | `10` | Extra % of capacity above the worst-case need |
-| `battery.charge_target_horizon_h` | `48` | Survival look-ahead (worst-case PV/load) |
-| `battery.charge_target_min` | `20` | Survival floor **and** min ceiling (dedicated — not `reserve_percent`) |
-| `battery.charge_target_full_interval_days` | `7` | Force a 100 % calibration charge this long after the last ≥99 % |
+| `battery.charge_target_horizon_h` | `48` | Survival look-ahead |
+| `battery.charge_target_full_interval_days` | `7` | Days after the last >= 99 % SOC to force a 100 % calibration charge |
 
-Enforced via `battery.charge_control_entity` (`number.battery_maximum_charging_power`)
-— set to 0 at/above the target. The inverter's native `battery_end_of_charge_soc`
-is **not** used (it accepts only 90–100 %).
+Survival floor = `battery.no_buy_floor_percent` (shared, 20 %).
 
 #### Test Cases
 
-Test file: `energymanager/tests/test_charge_target.py` — abundant day caps below
-100 %; multi-day-deficit day reaches 100 %; never below `reserve`; margin applied;
-weekly calibration override fires after 7 days and is suppressed within 7;
-missing/stale forecast fails up to 100 %.
+Test file: `energymanager/tests/test_charge_target.py`.
 
 ---
 
@@ -2489,7 +2235,7 @@ Freshness of `car_soc` (age of `sensor.smart_battery.last_updated`) is logged in
 | `wallbox_idle` | Computed in `run.py` | All states → IDLE exit |
 | `charging_mode` | `input_select.ev_charging_mode` | State routing |
 | `is_cheap_tariff` | Tariff schedule (Section 4.1.3) | CHEAP power toggle |
-| `ev_charging_power_w` | EV Charging Power Calculation (Section 4.3.6) | SOLAR entry + power |
+| `ev_charging_power_w` | EV Charge Power (Section 4.3.7) | SOLAR entry + power |
 | `manual_power_w` | `input_number.ev_manual_power` | CHEAP/IMMEDIATE power |
 | `target_soc` | `input_number.ev_target_soc` | CHEAP/IMMEDIATE budget |
 | `car_soc` | `sensor.smart_battery_last_known` | CHEAP/IMMEDIATE SOC stop |
@@ -2506,155 +2252,70 @@ Freshness of `car_soc` (age of `sensor.smart_battery.last_updated`) is logged in
 | `state` | `sensor.ev_charge_status` | Current state for dashboard/logging |
 | `reason` | Attribute on `sensor.ev_target_power` | Human-readable reason for current decision |
 
-### 4.3.6 EV Charging Power Calculation
+### 4.3.6 EV Charge Decision (Topic 1)
 
-When the state machine is in SOLAR mode, this calculation determines the wallbox power setpoint. It runs every 10 seconds and selects from two power sources.
+> **Question answered:** *may the wallbox charge at all?* — a power-independent yes/no, re-evaluated every 15 min. *How much* to charge is Topic 2 (Section 4.3.7).
 
-#### Goals
+#### The shared protection check -- `battery_min_soc_48h`
 
-1. **Maximize solar self-consumption** — use PV surplus for EV instead of exporting to grid
-2. **Capture wasted energy** — Enphase AC-coupled production that the DC-coupled battery cannot absorb
-3. **Protect home battery** — keep the forecast home-battery SOC above `reserve_percent` at all times across the next 48 h
-4. **Single threshold** — `ev_min_solar_power` gates all solar charging in one place
+A single home-battery signal consumed by Topics 1, 2 and 3:
 
-#### Input Parameters
+> `battery_min_soc_48h` = the **minimum** of the home-battery SOC simulation across the next **48 h**, starting from the current SOC, driven by **solar forecast - load forecast only** -- **the wallbox is excluded**.
 
-| Parameter | HA Entity / Source | Default | Description |
-|-----------|-------------------|---------|-------------|
-| `ev_min_solar_power` | `input_number.ev_min_solar_power` | 1380 W | Minimum power to start solar EV charging. Gate for both sources. |
-| `surplus_power` | `sensor.surplus_power` | — | Live surplus (solar − house load, rolling 30s average). Input for both Rule 1 and Rule 2. |
+The wallbox is excluded -- the load forecast is the Shelly-3EM house load, which already excludes the wallbox draw. Re-computed every 15 min from the live SOC. **Power-independent**: no EV load is subtracted and no charge-target cap is applied.
 
-**Output:** `ev_charging_power_w` — the wallbox power setpoint in watts (0 = don't charge).
+The floor it is compared against is **`battery.no_buy_floor_percent`** (default **20 %**), separate from `battery.reserve_percent` (the Section 4.2.2 discharge floor, default 10 %).
 
-#### Shared Mechanism: Amp-Step Conversion
+- Horizon: 48 h.
+- No hysteresis -- the same bar for every consumer.
 
-The wallbox charges at discrete amp levels (6A–12A), each delivering a fixed power. `snap_to_power_step(available_power_w)` takes a continuous power value and returns the highest discrete amp step that fits. It is used by both rules — the function does not care where the input comes from.
+#### Rules
 
-Both rules are gated by `ev_min_solar_power` (threshold) — below this level, there isn't enough power to justify starting the wallbox.
+The wallbox may charge **iff all four hold**; the first that fails stops it.
 
-#### Selection Rules
+| # | Rule | Condition |
+|---|------|-----------|
+| **1** | **Mode & connection** | EV charging enabled **and** mode = `solar` **and** `binary_sensor.car_ready` = on |
+| **2** | **Car needs charge** | `sensor.smart_battery` < `sensor.smart_charging_max_last_known` (car SOC below its target) |
+| **3** | **Surplus present** | `(PV - house_load)` >= `input_number.ev_min_solar_power` (the single manual start threshold) |
+| **4** | **Home battery safe** | `battery_min_soc_48h` >= `battery.no_buy_floor_percent` **OR** home battery already full (SOC = 100 %) |
 
-The deciding factor is **battery state**: is the battery full, or is it still charging? Both rules use the same input signal: `surplus_power` (PV − house load, rolling 30s average). This avoids the feedback loop where grid export drops when the wallbox is already consuming solar.
+**Notes**
 
-```
-                      INPUTS
-  surplus          = rolling 30s avg of (PV - load)
-  threshold        = ev_min_solar_power (e.g. 3400W)
-  battery_soc      = current battery %
-  pv_forecast      = forecasted PV production (Section 4.1.1)
-  load_forecast    = forecasted household load (Section 4.1.1)
-  min_soc_floor    = ev_charging.reserve_percent (default 20%)
-  horizon          = 48 hours
+- Rule 3's threshold is the manual `input_number.ev_min_solar_power`. 1-phase / 3-phase does not appear in this gate; phases define the *available steps* for Topic 2.
+- Rule 4 is computed wallbox-off. Full-battery exception: at 100 % SOC the check is skipped.
 
-                      OUTPUTS
-  ev_charging_power_w  = wallbox power setpoint (W), 0 = don't charge
-  ev_charging_rule     = "battery_full" | "solar_surplus" | "none"
+### 4.3.7 EV Charge Power (Topic 2)
 
-                        │
-                        ▼
-              ┌────────────────────┐
-              │  Battery full?     │
-              │  (SOC ≥ 100%)      │
-              │  AND surplus ≥     │
-              │  threshold?        │
-              └──┬──────────────┬──┘
-              YES│              │NO
-                 ▼              ▼
-  ┌──────────────────────┐  ┌──────────────────────────┐
-  │ Rule 1: BATTERY FULL │  │ surplus ≥ threshold?     │
-  │                      │  └────┬────────────────┬────┘
-  │ snap_to_power_step(  │    YES│                │NO
-  │   surplus)           │       ▼                ▼
-  │                      │  ┌────────────────┐  power = 0
-  │ No battery check.    │  │ Rule 2: SOLAR  │
-  └──────────┬───────────┘  │ SURPLUS        │
-             │              │                │
-             │              │ SNAP-UP then   │
-             │              │ STEP-DOWN with │
-             │              │ 48-h safety    │
-             │              │ check per step │
-             │              └──┬─────────────┘
-             │                 │
-             │                 ▼
-             │         pass → use that step
-             │         none → 0 W
-             │                 │
-             └─────────────────┘
-                         │
-                         ▼
-                ev_charging_power_w
-                → state machine
-                → wallbox
-```
+> **Question answered:** *how much?* -- runs only after Topic 1 (Section 4.3.6) returned yes. Output: the wallbox amp step. Re-evaluated on the 10-s live loop.
 
-##### Rule 1: Battery Full
+The EV can sit either side of the live surplus:
 
-The battery is full — energy has nowhere to go and would be curtailed.
+- a step **below** surplus -> the EV draws less than surplus -> the leftover **charges the home battery** (battery-positive, always safe);
+- a step **above** surplus -> the EV draws more than surplus -> the gap is **pulled from the home battery** (battery-negative, needs permission).
 
-- **Input**: surplus power (PV − house load)
-- **Condition**: `battery_soc >= 100 AND surplus >= threshold AND pv_power > 0`
-- **Power**: `snap_to_power_step(surplus)` → charging power
-- **Battery check**: none — energy would be wasted
+#### Rules
 
-##### `will_battery_hit_full()` — dashboard diagnostic
+| # | Rule | Condition | Result |
+|---|------|-----------|--------|
+| **1** | **Available steps** | phase config (1-phase / 3-phase) | the discrete amp ladder; the 3680-4140 W phase gap is a dead zone. *Plumbing -- not a decision.* |
+| **2** | **Default: step at/below surplus** | always | the **highest step <= surplus** (`PV - house_load`). Remainder charges the home battery or is exported. Never pulls from the battery. |
+| **3** | **Step up** | home battery **full** **OR** `battery_min_soc_48h` >= `battery.no_buy_floor_percent` | use the **next step above surplus**; the home battery covers the small gap. |
 
-Lives on `EVBatteryOptimizer`. Returns whether the **peak home-battery SOC** reaches 100 % between now and end of today (midnight local), plus the **time** it first reaches 100 %.
+Power = Rule 2's step, bumped one step by Rule 3 when allowed. We never match surplus exactly -- Rule 2 always lands on a discrete step *under* surplus; Rule 3 optionally bumps to the one *over*.
 
-- Queries `max(soc_percent)` from now until end of today against the `with_strategy` forecast
-- If peak ≥ 99 % → battery will be full; queries `first()` where `soc_percent >= 99` to find the time
-- Returns `(hits_full, peak_soc, full_time_local "HH:MM" or None, end_of_today)`
+**Notes**
 
-**Used by:** `full_time_local` is published as the `battery_full_time` attribute on both `sensor.ev_target_power` (only while the car solar-charges) and `sensor.battery_decision` (every 15-min cycle, independent of EV state — see Section 4.6.4) for dashboard display. This `will_battery_hit_full()` boolean is informational only (dashboard) — it reads the EV-blind `with_strategy` forecast and does **not** gate charging. The separate, EV-aware fills-today check (`_will_battery_fill_today_with_ev`) gates the snap-up step (see "Step iteration" below); the 48-h `check_ev_safe` rule remains the allow/block gate for each candidate step.
+- Rule 3 uses the same shared check and bar as Topic 1 Rule 4 (`no_buy_floor_percent`).
+- The chosen step's offset from the surplus-snapped level is published as the `ev_step_offset` attribute on `sensor.ev_target_power` (+n stepped up / -n stepped down / null when not solar-charging).
 
-##### Rule 2: Solar Surplus Charging
+#### `will_battery_hit_full()` -- dashboard diagnostic
 
-The battery is still charging — surplus exists (PV > house load) but the battery needs the energy too. A single safety rule decides whether the EV may draw from that surplus.
+Lives on `EVBatteryOptimizer`. Returns whether the **peak** home-battery SOC reaches 100 % between now and end of today (midnight local), plus the time it first does. Published as the `battery_full_time` attribute on `sensor.ev_target_power` and `sensor.battery_decision` for the dashboard. **Informational only -- it does not gate charging** (Rules 1-3 above are the only gates).
 
-- **Input**: surplus power (PV − house load, rolling 30s average)
-- **Safety rule** (Layer 2, `EVBatteryOptimizer.check_ev_safe`):
+#### Amp-step conversion (plumbing)
 
-> Allow EV charging only if the home-battery SOC forecast — `solar forecast −
-> load forecast`, the natural trajectory, **without the wallbox** — stays
-> **≥ `ev_charging.reserve_percent` (default 20 %) at every point across the
-> next 48 hours**.
-
-The forecast deliberately excludes the wallbox: switching the wallbox **off** is
-exactly what this rule does when the floor is missed, and an off wallbox has no
-influence on the future — so the wallbox-off forecast is the scenario that
-matters. Re-evaluated every 15 min from the current SOC, so it self-corrects:
-while the wallbox charges, the actual SOC lags the wallbox-off projection, and
-once the projection can no longer clear the floor the EV is switched off and the
-battery (now wallbox-free) rides the forecast back up. The gate is
-**power-independent** (yes/no); how much to charge is decided separately. No EV
-load is subtracted and **no charge-target cap is applied** to this forecast — it
-is the battery's true natural trajectory.
-
-- **Horizon**: 48 hours — covers two full daily cycles (tonight's drain → tomorrow morning's low → tomorrow's recharge → second morning's low). Forecast noise beyond ~48 h would dominate and produce false blocks.
-- **Self-correcting**: the rule re-runs every 15 minutes. If the forecast drops below the floor, EV charging stops immediately and the battery (now EV-free) rides the remaining forecast back up. No separate "will reach X%" target is required.
-
-**Step iteration (snap-up then step-down):**
-
-| Outcome | Condition | Action |
-|---------|-----------|--------|
-| **Allow** | A candidate step passes `check_ev_safe` | Use the first passing step |
-| **Block** | No step passes | 0W — battery forecast would drop below `min_soc_percent` |
-
-The candidate list has two forms, decided by `build_solar_candidates()` on a single gate — **will the home battery still reach full today, with the EV load accounted for?** (`EnergyManager._will_battery_fill_today_with_ev`, cached as `_battery_full_with_ev`, recomputed every 15 min):
-
-| Gate | Candidate list | Rationale |
-|------|----------------|-----------|
-| **Battery still fills today** | **snap-up** (one step above surplus) then step-down | The battery bridges the small gap for maximum solar utilisation; it still recovers to full by evening, so the drain is harmless. |
-| **Battery would NOT fill today** | step-down only (≤ surplus) | Do **not** drain a battery that cannot recover — stay at-or-below surplus so the EV never pulls the home battery down. |
-
-The iteration then walks that list from the top, using the first step that passes `check_ev_safe`. The chosen step's offset from the surplus-snapped level is published as the `ev_step_offset` attribute on `sensor.ev_target_power` (+n = snapped up n steps, home battery bridges the gap; −n = stepped down, preserving the battery; 0 = matched surplus; null when not solar-surplus charging) for dashboard display.
-
-> **Why the gate is the home battery, not the car.** The snap-up gate was previously keyed to the *car's* end-of-day SOC forecast vs the car target. That ignored whether the home battery could recover: on a low-car day (e.g. car at 18 %, target 100 %) the gate allowed snap-up all day, so the EV drained the home battery every cycle and it never refilled (observed 2026-06-17 — battery bottomed at 32 % under full sun, ended the day at ~43 %, while the EV charged 18 % → 49 % at 4–7 kW). The flat 48-h ≥ 20 % `check_ev_safe` floor did not catch it because SOC stayed above 20 %. The gate now asks the home-battery question directly. **The home-battery load forecast excludes the wallbox** (house load ≈ 240 W even while the car draws 7 kW), so `_will_battery_fill_today_with_ev` subtracts the live wallbox draw from each remaining interval's net energy before re-simulating — otherwise the SOC forecast would be blind to the EV and predict "full" all day. Hysteresis is automatic: the gate is recomputed only every 15 min and latched between cycles, so the 10-s EV loop cannot oscillate within a window.
-
-**Independence from nightly battery protection.** The nightly battery-discharge block (Section 4.2.2) uses `battery.reserve_percent`; this EV safety gate uses `ev_charging.reserve_percent`. They are **separate config values**: the discharge gate defends the last sliver of battery during expensive hours; the EV gate keeps a larger buffer for house consumption before diverting surplus to the car (default **20 %** vs typically 5–10 % for the discharge floor). The two rules evolve independently.
-
-#### Snap-to-Power Step
-
-The wallbox only charges at integer amp levels. The energymanager picks from a discrete set of **M-Bus calibrated power steps** — the actual power delivered at each amp level, measured via M-Bus ground truth (2026-03-04 calibration sweep):
+The wallbox only charges at integer amp levels. The energymanager picks from a discrete set of **M-Bus calibrated power steps** -- the actual power delivered at each amp level, measured via M-Bus ground truth (2026-03-04 calibration sweep):
 
 | Amps | Delivered power (M-Bus W) |
 |-----:|--------------------------:|
@@ -2666,39 +2327,20 @@ The wallbox only charges at integer amp levels. The energymanager picks from a d
 | 11 | 7034 |
 | 12 | 7624 |
 
-These values differ from the nominal `amps × 230V × 3` because real grid voltage is ~220V, not 230V. Using M-Bus values ensures the energymanager's energy accounting (battery protection, surplus calculation) matches what the wallbox actually delivers.
+These differ from the nominal `amps x 230 V x 3` because real grid voltage is ~220 V. Using M-Bus values keeps the energymanager's energy accounting (battery protection, surplus) aligned with what the wallbox actually delivers. `snap_to_power_step(surplus)` returns the highest step <= surplus (Rule 2); Rule 3's step-up tries the next step above. The OCPP server converts watts -> integer amps with a calibrated divisor `round(power_w / 637)` (safe range [612, 662]).
 
-**Inputs:** `surplus_power` (live measurement from `sensor.surplus_power`).
+#### Self-correction and rate limiting (plumbing)
 
-**Calculation:** `snap_to_power_step(surplus_power)` returns the highest M-Bus step ≤ surplus. If surplus is below all steps but above `ev_min_solar_power`, the minimum step (3962W) is returned — the battery covers the difference. In the step-down loop (Rule 2, battery won't be full), the loop first tries the **next step above** the snap-down result (snap-up) — if battery protection passes at the higher load, the battery covers the small gap, maximising solar utilisation.
-
-The OCPP server converts M-Bus watts to integer amps using a calibrated divisor: `round(power_w / 637)`. The divisor 637 (safe range [612, 662]) ensures each M-Bus value maps to the correct amp level.
-
-**Safety gating (snap-up then step-down loop):** The loop first tries the **next step above** the snap-down candidate (snap-up — battery bridges the small gap between surplus and the higher amp step). If that step fails `check_ev_safe` (48-h min-SOC rule), it steps down through lower amp levels until either: (a) a step passes the safety check, or (b) no more steps above `ev_min_solar_power` remain. Rule 1 (battery already at 100%) uses the snapped level directly — no safety check needed because SOC can only decrease from 100%.
-
-Because `control_ev_charging()` runs every 10 seconds with live surplus, the system is self-correcting:
+`control_ev_charging()` runs every 10 s with live surplus, so the step tracks conditions automatically:
 
 | Condition change | Effect |
 |------------------|--------|
-| PV drops (clouds) | Surplus drops → next cycle picks lower amp level |
-| PV rises | Surplus rises → next cycle picks higher amp level |
-| Load increases | Surplus drops → next cycle adapts down |
-| Load decreases | Surplus rises → next cycle may increase power |
+| PV drops (clouds) / load rises | surplus drops -> next cycle picks a lower amp level |
+| PV rises / load drops | surplus rises -> next cycle may pick a higher level |
 
-**Rate limiting:** The wallbox power limit (`number.wallbox_power_limit`) is only sent when it differs from the last-sent value **and** at least 30 seconds have passed since the last change. This prevents oscillation at power-step boundaries (e.g. surplus hovering near 3962/4354W causing the wallbox to flip between 6A and 7A every 10 seconds). 0W (pause) bypasses the rate limit for safety. The dashboard sensor `sensor.ev_target_power` still updates every 10 seconds to show the desired power.
+**Rate limit:** `number.wallbox_power_limit` is sent only when it differs from the last-sent value **and** >= 30 s have passed since the last change -- preventing oscillation at step boundaries (e.g. surplus hovering near 3962/4354 W flipping 6 A <-> 7 A). 0 W (pause) bypasses the rate limit for safety. `sensor.ev_target_power` still updates every 10 s for the dashboard.
 
-#### Scenarios
-
-| Scenario | Rule | What happens |
-|----------|------|-------------|
-| **Battery full, sunny** | 1 | Surplus → `snap_to_power_step(surplus)` → wallbox charges, no battery check |
-| **Good morning** | 2 | Surplus rises above threshold → snap-up tries next step above surplus (battery covers gap); safety gate checks 48-h min SOC |
-| **Afternoon decline** | 2 | Surplus drops each cycle → lower power step. Below threshold → 0W |
-| **Bad/cloudy day** | 2 | 48-h safety rule blocks EV early if forecast SOC would dip below `reserve_percent` anywhere in the horizon |
-| **Peak solar** | 1 or 2 | High surplus → higher power step. Battery charges the excess between steps |
-| **Low surplus (e.g. 1000W)** | — | Below `ev_min_solar_power` → no charging. Not enough to justify starting the wallbox |
-
-### 4.3.7 Smart Car SOC Polling
+### 4.3.8 Smart Car SOC Polling
 
 The EV battery SOC is read from the Hello Smart API and published as `sensor.smart_battery`. Polling frequency adapts to wallbox state to balance freshness against API rate limits.
 
@@ -2735,7 +2377,7 @@ The Hello Smart integration drops to `unavailable` when the car goes to sleep (m
 
 This is independent of — and complementary to — the HA-side `sensor.smart_battery_last_known` trigger template (used by dashboards), which is defined in `Home-Installation-fsd.md §7.8`.
 
-### 4.3.8 Car SOC Forecast
+### 4.3.9 Car SOC Forecast
 
 A 15-min time-series forecast of the EV battery SOC over the next 5 days, written to InfluxDB and displayed in Grafana.
 
@@ -2757,7 +2399,7 @@ A 15-min time-series forecast of the EV battery SOC over the next 5 days, writte
 
 **Efficiency (0.9 default):** lumps three real losses — AC→DC at the wallbox (~3 %), house-battery round-trip for the fraction of surplus that cycles through it (~5 %), and standby/phantom loads during the day (~2 %).
 
-**What the forecast intentionally omits:** the strict `ev_min_solar_power` threshold, amp-step snapping, and the 48-h safety rule from the live EV charging logic (Section 4.3.6). Those rules operate on the 10-second decision loop; the forecast is a best-case multi-day outlook and would become overly pessimistic (≈40 % final SOC in a typical 2-day window) if it copied them.
+**What the forecast intentionally omits:** the strict `ev_min_solar_power` threshold, amp-step snapping, and the 48-h safety rule from the live EV charging logic (Sections 4.3.6-4.3.7). Those rules operate on the 10-second decision loop; the forecast is a best-case multi-day outlook and would become overly pessimistic (≈40 % final SOC in a typical 2-day window) if it copied them.
 
 ---
 
@@ -3938,7 +3580,7 @@ cd energymanager && python -m pytest tests/test_discharge_blocking.py -v
 
 Test file: `energymanager/tests/test_ev_charging.py`
 
-Tests the `snap_to_power_step()`, `calculate_ev_power()`, and `resolve_phase_gap()` logic (Section 4.3.6).
+Tests the `snap_to_power_step()`, `calculate_ev_power()`, and `resolve_phase_gap()` logic (Sections 4.3.6-4.3.7).
 
 #### `snap_to_power_step()` — Discrete M-Bus Power Steps
 
@@ -4146,7 +3788,7 @@ ev_charging:
 smart_car:
   enabled: true
   soc_entity: "sensor.smart_battery"              # EV SOC sensor (with InfluxDB fallback when unavailable)
-  capacity_kwh: 100.0                             # EV usable battery capacity, used by Car SOC Forecast (Section 4.3.8)
+  capacity_kwh: 100.0                             # EV usable battery capacity, used by Car SOC Forecast (Section 4.3.9)
   charge_efficiency: 0.9                          # End-to-end surplus → car efficiency (wallbox + house-battery cycle + standby)
 
 schedule:
@@ -4368,7 +4010,7 @@ These sections are **not currently used** by the energy manager but are availabl
 | Car just connected (wallbox `Preparing`) | Immediate | Show SOC on dashboard quickly |
 | Baseline (idle / disconnected) | 60 min | Avoid unnecessary API calls |
 
-See Section 4.3.7 for adaptive polling logic.
+See Section 4.3.8 for adaptive polling logic.
 
 ---
 
@@ -4377,6 +4019,14 @@ See Section 4.3.7 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.59: **Topic 3 corrected to the dynamic charge-target hold (4.2.4); shipped off.** The v2.58 "stop when `battery_min_soc_48h >= floor`" hold under-charged: it read the charge-to-100 forecast, so on a sunny day it deferred all day expecting future charging that the hold itself prevented, then could not cover the evening. Replaced with the dynamic `battery_target_soc` (lowest SOC keeping the worst-case p10/p50 48 h sim >= `no_buy_floor_percent` + margin, via `compute_charge_target`); charge to it, then hold. The target is enforced only by `control_battery_charge` and is **not** threaded into the discharge/EV forecast (`calculate_decision` uses `max_soc_percent=100`), so the EV gate reads the natural trajectory. `charge_target_enabled` default **false** -- Topics 1/2/4 ship live in 1.8.30, Topic 3 enabled after validation. (1.8.29 -> 1.8.30)
+
+- v2.58: **Topics 1, 2, 3 implemented** (energymanager 1.8.29). Topic 1 (4.3.6): added the **Rule 2** car-needs-charge hard gate (skip solar when `sensor.smart_battery` >= `sensor.smart_charging_max_last_known`); the Rule 4 full-battery exception was already the `battery_full` capture path. Topic 2 (4.3.7): the step-up gate now keys off `battery_min_soc_48h >= no_buy_floor_percent` (replacing the v2.51 `_will_battery_fill_today_with_ev` fills-today gate); `build_solar_candidates(... step_up_allowed=)`. Topic 3 (4.2.4): re-enabled (`charge_target_enabled` default true) as the simple longevity **hold** — stop charging when `battery_min_soc_48h >= no_buy_floor_percent`, weekly 100% calibration overrides; the old `compute_charge_target` worst-case machinery is no longer called (`_battery_target_soc` fixed at 100%). Config: `ev_charging.reserve_percent` -> **`battery.no_buy_floor_percent`** (20%, fallback to the old key). Tests updated; 226 pass. (1.8.28 -> 1.8.29)
+
+- v2.57: **Topic 4 (home-battery discharge) re-based on an expensive-import comparison (Section 4.2.2); EBL tariff calendar pinned in Section 4.2.2.** The discharge decision simulates SOC over 48 h **with_strategy** (hold discharge during cheap slots) and **without_strategy** (free discharge), sums the **expensive-hours grid import (Wh, at SOC=0)** for each, lower wins (tie -> without_strategy). Cheap/expensive labeling = EBL double-tariff: weekday 06:00-21:00 expensive, Sat/Sun + 8 specific EBL holidays cheap, holidays computed in-add-on via `dateutil.easter` (`tariff.holidays` key removed). `battery.reserve_percent` becomes an optional safety margin (default 0). Topics 1-3 unchanged. (FSD-only; code follows)
+
+- v2.56: **EV charging restructured into two numbered rule-topics (Sections 4.3.6, 4.3.7).** The old monolithic 4.3.6 "EV Charging Power Calculation" splits into **4.3.6 EV Charge Decision** (Topic 1 -- four yes/no rules) and **4.3.7 EV Charge Power** (Topic 2 -- step at/below surplus, step-up gated). Both consume one shared, power-independent home-battery check, **`battery_min_soc_48h`** (min of the wallbox-off solar-load SOC sim over 48 h), at a single bar **`battery.no_buy_floor_percent`** (renamed from `ev_charging.reserve_percent`, 20 %, no hysteresis). Three behavioural changes specced here, implemented per-topic in follow-ups: explicit **Rule 2** car-needs-charge gate; **full-battery exception** on Rule 4 (skip the check at 100 % SOC -- blocking would only export curtailed surplus); step-up (4.3.7 Rule 3) now keys off the shared check, replacing the v2.51 EV-aware `_will_battery_fill_today_with_ev` snap-up gate. Smart Car SOC Polling 4.3.7->4.3.8 and Car SOC Forecast 4.3.8->4.3.9; cross-refs updated. Plan cleanups recorded for implementation: C1 delete dead `self.reserve_percent`; C2 make the discharge-floor default explicit (10). (FSD-only; code follows)
 
 - v2.54: Publish `ev_step_offset` on `sensor.ev_target_power` (Section 4.3.6) — the solar-charging step offset vs the surplus-snapped level (+n snap-up / −n stepped down / 0 matched / null), for the EV dashboard card to show whether the home battery is bridging the gap (+) or being preserved (−). (v1.8.25 → v1.8.26)
 - v2.55: **Rule 4 (EV charge gate) reimplemented as the natural protection forecast; charge-target disabled.** `check_ev_safe` now gates purely on the home-battery SOC forecast (`solar forecast − load forecast`, wallbox excluded) min ≥ `ev_charging.reserve_percent` over 48 h — no EV-load subtraction (gate is power-independent), no charge-target cap. The wallbox is excluded by design: switching it off is the rule's action and an off wallbox doesn't affect the future; self-corrects every 15 min from the current SOC. The dynamic charge target (§4.2.4) is **disabled by default** because its cap polluted this forecast — root cause of the 2026-06-18 EV cut (forecast capped low → over-blocked) and 2026-06-19 empty battery (forecast stale-high → under-blocked). `EVBatteryOptimizer._extra_load_percent` removed; `test_ev_battery.py` updated. (v1.8.26 → v1.8.27)
