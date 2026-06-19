@@ -2181,6 +2181,13 @@ and end-to-end greedy-vs-shaving routing).
 
 ### 4.2.4 Dynamic Charge Target (Battery Longevity)
 
+> **Status: DISABLED by default (`charge_target_enabled: false`).** The cap
+> modifies the home-SOC forecast that the EV safety gate (Rule 4, §4.3.6) reads,
+> conflicting with the natural `solar − load` protection forecast — it caused an
+> EV cut (2026-06-18) and an empty battery (2026-06-19). Protection comes first.
+> Re-enable only once the cap *yields to protection* (battery charges fully when
+> the protection forecast is at risk, capped for longevity only when it is safe).
+
 This sets **how high the home battery is allowed to charge** — a dynamic SOC
 ceiling instead of a fixed 100%. It runs in `run_optimization()` (every 15 min)
 and produces a single value, **`battery_target_soc`**, that every charge path
@@ -2606,10 +2613,21 @@ The battery is still charging — surplus exists (PV > house load) but the batte
 - **Input**: surplus power (PV − house load, rolling 30s average)
 - **Safety rule** (Layer 2, `EVBatteryOptimizer.check_ev_safe`):
 
-> Allow EV charging only if the forecast home-battery SOC stays
-> **≥ `ev_charging.reserve_percent` (default 20 %) at every point across
-> the next 48 hours**, with the candidate EV load (power × 0.25h) subtracted
-> from the forecast as worst-case.
+> Allow EV charging only if the home-battery SOC forecast — `solar forecast −
+> load forecast`, the natural trajectory, **without the wallbox** — stays
+> **≥ `ev_charging.reserve_percent` (default 20 %) at every point across the
+> next 48 hours**.
+
+The forecast deliberately excludes the wallbox: switching the wallbox **off** is
+exactly what this rule does when the floor is missed, and an off wallbox has no
+influence on the future — so the wallbox-off forecast is the scenario that
+matters. Re-evaluated every 15 min from the current SOC, so it self-corrects:
+while the wallbox charges, the actual SOC lags the wallbox-off projection, and
+once the projection can no longer clear the floor the EV is switched off and the
+battery (now wallbox-free) rides the forecast back up. The gate is
+**power-independent** (yes/no); how much to charge is decided separately. No EV
+load is subtracted and **no charge-target cap is applied** to this forecast — it
+is the battery's true natural trajectory.
 
 - **Horizon**: 48 hours — covers two full daily cycles (tonight's drain → tomorrow morning's low → tomorrow's recharge → second morning's low). Forecast noise beyond ~48 h would dominate and produce false blocks.
 - **Self-correcting**: the rule re-runs every 15 minutes. If the forecast drops below the floor, EV charging stops immediately and the battery (now EV-free) rides the remaining forecast back up. No separate "will reach X%" target is required.
@@ -4361,6 +4379,7 @@ See Section 4.3.7 for adaptive polling logic.
 **Changelog:**
 
 - v2.54: Publish `ev_step_offset` on `sensor.ev_target_power` (Section 4.3.6) — the solar-charging step offset vs the surplus-snapped level (+n snap-up / −n stepped down / 0 matched / null), for the EV dashboard card to show whether the home battery is bridging the gap (+) or being preserved (−). (v1.8.25 → v1.8.26)
+- v2.55: **Rule 4 (EV charge gate) reimplemented as the natural protection forecast; charge-target disabled.** `check_ev_safe` now gates purely on the home-battery SOC forecast (`solar forecast − load forecast`, wallbox excluded) min ≥ `ev_charging.reserve_percent` over 48 h — no EV-load subtraction (gate is power-independent), no charge-target cap. The wallbox is excluded by design: switching it off is the rule's action and an off wallbox doesn't affect the future; self-corrects every 15 min from the current SOC. The dynamic charge target (§4.2.4) is **disabled by default** because its cap polluted this forecast — root cause of the 2026-06-18 EV cut (forecast capped low → over-blocked) and 2026-06-19 empty battery (forecast stale-high → under-blocked). `EVBatteryOptimizer._extra_load_percent` removed; `test_ev_battery.py` updated. (v1.8.26 → v1.8.27)
 - v2.53: Make `battery_target_soc` consistent across **all** calculations (Section 4.2.4 Interactions). It is now computed **first** in `run_optimization` (before the discharge decision and any forecast write) and threaded as a `max_soc_percent` ceiling through `simulate_soc` → `calculate_decision` (discharge decision + the published `with_strategy`/`without_strategy` SOC forecasts) and the car-SOC forecast (house fills to target, then overflow to car). EV safety (`check_ev_safe`) and the dashboard read the now-capped forecast and so become consistent automatically; `will_battery_hit_full` gained a `full_threshold` arg set to the target so "Full by HH:MM" means *reaches target* (a fixed 99% would never be hit against a capped forecast). Previously the target was computed late, so those consumers were optimistic about stored energy. (v1.8.24 → v1.8.25)
 - v2.52: New **dynamic charge target** for the home battery (Section 4.2.4). Instead of charging the LFP pack to 100%, a single `battery_target_soc` is computed every 15 min as the lowest SOC ceiling that still keeps the battery above the discharge `reserve` over a worst-case (p10 PV / p50 load) `charge_target_horizon_h` (default 48 h) survival simulation, plus a small `charge_target_margin` (default 10%). No fixed cap — it reaches 100% when the forecast genuinely needs it; it just lands below 100% on most days (less high-SOC dwell → longer LFP life). Enforced **in software** (`number.battery_maximum_charging_power` = 0 at/above the target) — the inverter's native `battery_end_of_charge_soc` accepts only 90–100% and cannot enforce a lower ceiling. The survival floor is a dedicated `charge_target_min` (default 20%), **not** `battery.reserve_percent` (which is 0 and, with `simulate_soc` clamping SOC at 0, would make the check trivial). A calibration override forces 100% if >7 days (`charge_target_full_interval_days`) since the battery last hit ≥99% (LFP BMS SOC drift). Fail-safe: missing/stale forecast fails **up** to 100% (never starves the battery into evening grid import). `battery_target_soc` is consumed by export-peak-shaving (4.2.3, fills to it not 100%) and the EV snap-up gate (4.3.6, "full" = reaches it). New tests `test_charge_target.py`. Enforced in software (charge limit 0 at target) — the native inverter max-SOC accepts only 90–100%; survival floor is a dedicated charge_target_min, not the (zero) discharge reserve. (v1.8.22 → v1.8.24)
 - v2.51: EV solar snap-up gate re-keyed from the car's EOD SOC to the **home battery's** fills-today forecast (Section 4.3.6). The snap-up step (drain the home battery to reach the next amp level) is now allowed only when the home battery is still forecast to reach full today *with the EV load subtracted* (`EnergyManager._will_battery_fill_today_with_ev`, cached as `_battery_full_with_ev`, recomputed every 15 min); otherwise the EV stays at-or-below surplus (snap-down only) so it cannot drain a battery that won't recover. Root cause (observed 2026-06-17): the old car-target gate let a low car (18%→49% at 4–7 kW) drain the home battery all day under full sun (bottomed 32%, ended ~43%, never full) because the car-target condition stayed true and the flat 48-h ≥20% floor never tripped. The home-battery load forecast excludes the wallbox, so the new check subtracts the live wallbox draw before re-simulating. `build_solar_candidates` signature changed (`forecast_eod`/`ev_target_max` → `battery_will_be_full`); `TestBuildSolarCandidates` updated. (v1.8.21 → v1.8.22)

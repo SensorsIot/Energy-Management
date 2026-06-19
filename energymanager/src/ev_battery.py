@@ -49,11 +49,22 @@ class EVBatteryOptimizer:
         self.horizon = horizon
 
     def check_ev_safe(self, ev_load_wh: float = 0.0) -> tuple[bool, float]:
-        """Return (safe, min_soc_in_horizon_percent).
+        """Return (safe, min_soc_in_horizon_percent) — EV charge gate (Rule 4).
 
-        Queries the `with_strategy` SOC forecast from `now` to `now + horizon`,
-        takes the minimum, subtracts the worst-case EV load, and compares to
-        `min_soc_percent`.
+        Reads the home-battery SOC forecast (`solar forecast − load forecast`,
+        which excludes the wallbox) over the horizon and compares its minimum to
+        the 20% floor:
+
+            safe  ⇔  min(home SOC forecast) ≥ min_soc_percent
+
+        The forecast deliberately does **not** include the wallbox: switching
+        the wallbox off is exactly what Rule 4 does when this returns unsafe, and
+        an off wallbox has no influence on the future. Re-evaluated every 15 min
+        from the current SOC, so it is self-correcting.
+
+        `ev_load_wh` is accepted for call-site compatibility but ignored — the
+        gate is power-independent (yes/no); how much to charge is decided
+        elsewhere.
 
         On error or missing data, returns (False, 0.0) — blocking EV is the
         safe default.
@@ -74,27 +85,20 @@ class EVBatteryOptimizer:
                 logger.warning("No SOC forecast available — blocking EV as precaution")
                 return False, 0.0
 
-            raw_min = result[0].records[0].get_value()
-            min_soc = max(0.0, raw_min - self._extra_load_percent(ev_load_wh))
+            min_soc = result[0].records[0].get_value()
             safe = min_soc >= self.min_soc_percent
 
             hours = self.horizon.total_seconds() / 3600
-            load_note = f" (with EV {ev_load_wh:.0f}Wh)" if ev_load_wh > 0 else ""
             logger.debug(
-                f"EV safety: min SOC over next {hours:.0f}h={min_soc:.0f}%"
-                f"{load_note} (floor={self.min_soc_percent:.0f}%) → "
-                f"{'EV allowed' if safe else 'EV blocked'}"
+                f"EV safety (Rule 4): min home SOC over next {hours:.0f}h="
+                f"{min_soc:.0f}% (floor={self.min_soc_percent:.0f}%) → "
+                f"{'EV allowed' if safe else 'EV OFF'}"
             )
             return safe, min_soc
 
         except Exception as e:
             logger.error(f"EV safety check failed: {e}")
             return False, 0.0
-
-    def _extra_load_percent(self, extra_load_wh: float) -> float:
-        if extra_load_wh <= 0 or self.capacity_wh <= 0:
-            return 0.0
-        return extra_load_wh / self.capacity_wh * 100
 
     def will_battery_hit_full(
         self,

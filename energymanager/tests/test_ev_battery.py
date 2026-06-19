@@ -46,27 +46,21 @@ class TestSafetyGate:
         assert safe is False
         assert min_soc == 8.0
 
-    def test_ev_load_subtracts_from_min(self) -> None:
-        """EV load is subtracted as worst case (one 15-min slot)."""
-        # 1000 Wh on a 20 kWh battery = 5%. Min 14% - 5% = 9% < 10% floor.
+    def test_ev_load_is_ignored_gate_is_power_independent(self) -> None:
+        """ev_load_wh is ignored — Rule 4 is yes/no on the home SOC forecast."""
         opt = _make_optimizer(min_soc_in_window=14.0, min_soc_percent=10.0)
-        safe, min_soc = opt.check_ev_safe(ev_load_wh=1000.0)
-        assert safe is False
-        assert min_soc == 9.0
+        # Same min returned regardless of the (ignored) ev_load_wh.
+        safe0, m0 = opt.check_ev_safe(ev_load_wh=0.0)
+        safe1, m1 = opt.check_ev_safe(ev_load_wh=2000.0)
+        assert (safe0, m0) == (True, 14.0)
+        assert (safe1, m1) == (True, 14.0)
 
-    def test_ev_load_keeps_it_safe_if_margin_is_enough(self) -> None:
-        # 1000 Wh on 20 kWh = 5%. Min 20% - 5% = 15% ≥ 10% floor.
-        opt = _make_optimizer(min_soc_in_window=20.0, min_soc_percent=10.0)
-        safe, min_soc = opt.check_ev_safe(ev_load_wh=1000.0)
-        assert safe is True
-        assert min_soc == 15.0
-
-    def test_min_clamped_at_zero(self) -> None:
-        """Negative projected min after subtraction is clamped to 0."""
-        opt = _make_optimizer(min_soc_in_window=3.0, min_soc_percent=10.0)
-        safe, min_soc = opt.check_ev_safe(ev_load_wh=2000.0)  # subtracts 10%
+    def test_unsafe_uses_raw_forecast_min(self) -> None:
+        """Below-floor forecast min → unsafe, reported as-is (no subtraction)."""
+        opt = _make_optimizer(min_soc_in_window=8.0, min_soc_percent=10.0)
+        safe, min_soc = opt.check_ev_safe(ev_load_wh=2000.0)
         assert safe is False
-        assert min_soc == 0.0
+        assert min_soc == 8.0
 
     def test_blocks_when_no_forecast_data(self) -> None:
         """Missing forecast → block EV as precaution."""

@@ -172,10 +172,14 @@ class TestMarginalDayGate:
         assert manager._will_fill_today(50.0, fc, now) is True
 
     def test_at_charge_target_holds(self, manager) -> None:
-        """SOC at/above the dynamic charge target → hold (limit 0), longevity."""
+        """SOC at/above the dynamic charge target → hold (limit 0), longevity.
+
+        Charge-target is off by default now, so enable it for this gate test.
+        """
         self._real_optimizer(manager)
         _wire(manager, car_ready="off")
         manager.ha_client.set_number.return_value = (True, None)
+        manager.charge_target_enabled = True
         manager._battery_target_soc = 50.0
         now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
         fc = _forecast(now, [3000.0] * 40)  # abundant, but already at target
@@ -193,6 +197,7 @@ class TestMarginalDayGate:
         self._real_optimizer(manager)
         _wire(manager, car_ready="off")
         manager.ha_client.set_number.return_value = (True, None)
+        manager.charge_target_enabled = True
         manager._battery_target_soc = 90.0
         now = datetime(2026, 6, 7, 16, 0, tzinfo=UTC)
         fc = _forecast(now, [50.0] * 24)  # marginal → greedy, not a target-hold

@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.26"
+__version__ = "1.8.27"
 
 import json
 import logging
@@ -189,9 +189,13 @@ class EnergyManager:
         self.reserve_percent = battery_opts.get("reserve_percent", 10)
 
         # Dynamic charge target (FSD 4.2.4) — charge the LFP battery only to the
-        # SOC needed to survive the next days (worst-case PV), not 100%, to
-        # reduce high-SOC dwell. Enforced via the inverter's native max-SOC.
-        self.charge_target_enabled = battery_opts.get("charge_target_enabled", True)
+        # SOC needed to survive the next days, not 100%, to reduce high-SOC dwell.
+        # DISABLED by default: its cap modifies the home-SOC forecast that Rule 4
+        # (check_ev_safe, FSD 4.3.6) reads, conflicting with the natural
+        # solar−load protection forecast (caused the 2026-06-18/19 EV-cut and
+        # empty-battery). Protection first; re-enable only once the cap yields to
+        # protection.
+        self.charge_target_enabled = battery_opts.get("charge_target_enabled", False)
         self.charge_target_margin = float(battery_opts.get("charge_target_margin", 10.0))
         self.charge_target_horizon_h = int(battery_opts.get("charge_target_horizon_h", 48))
         self.charge_target_min = float(battery_opts.get("charge_target_min", 20.0))
