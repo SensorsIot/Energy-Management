@@ -1607,7 +1607,7 @@ is optimized, *for which entity*, on *what criteria*, with *what output*.
 |--------|--------------|------|---------|----------------|---------|---------|
 | **Home battery** | Discharge blocking (battery protection) | Keep enough SOC to cover the expensive tariff window (and the EV) instead of dumping it early | Allow / block discharge | `number.battery_maximum_discharging_power` (`max`/`0`) | 15 min | 4.2.2 |
 | **Home battery** | Export-peak-shaving charge control | Defer PV charging so the battery's headroom absorbs the midday **export** peak at a gentle, capped rate (less clipping, longer battery life) | Allow / defer charging | `number.battery_maximum_charging_power` (`charge_shaving_power_w`/`0`) | 15 min | 4.2.3 |
-| **Home battery** | Dynamic charge target (longevity) | Charge only to the SOC needed to survive the next days (worst-case PV), not 100% — less LFP dwell at high SOC; weekly full charge for BMS calibration | Hold at target SOC | `number.battery_maximum_charging_power` (`0` at/above target) | 15 min | 4.2.4 |
+| **Home battery** | Dynamic charge target (longevity) | Charge only to the SOC needed to survive the next days (worst-case PV), not 100% — less LFP dwell at high SOC; full charge for BMS calibration 7 days after the last >= 99% (rolling) | Hold at target SOC | `number.battery_maximum_charging_power` (`0` at/above target) | 15 min | 4.2.4 |
 | **EV (car)** | Solar-surplus charging | Maximize solar self-consumption into the car without draining the home battery | Wallbox charge power (amp step) | `number.wallbox_power_limit` (via REST `set_sensor_state`) | 10 s | 4.3.6-4.3.7 |
 | **EV (car)** | Cheap / immediate charging (manual modes) | Reach the user's target SOC by a kWh budget + SOC stop | Wallbox power + discharge block | `number.wallbox_power_limit` & `_discharge_blocked_by_ev` | 10 s | 4.3.4–4.3.6 |
 | **Appliance (washer)** | Run-now signal | Advise when a high-power appliance can run on solar without forcing grid import | green / orange / red | `sensor.appliance_signal` (**advisory — no actuation**) | 15 min | 4.4 |
@@ -2091,7 +2091,7 @@ Limits how high the home battery charges, sparing the LFP from high-SOC dwell. A
 | # | Rule | Condition | Action |
 |---|------|-----------|--------|
 | **1** | **Charge to target, then hold** | current SOC >= `battery_target_soc` | set charge power to 0 -- hold (surplus exports; discharge unaffected) |
-| **2** | **Weekly calibration** | > `charge_target_full_interval_days` (7) since SOC last reached >= 99 % | `battery_target_soc` = 100 % |
+| **2** | **Calibration charge** | > `charge_target_full_interval_days` (7) since SOC last reached >= 99 % (rolling — restarts at each >= 99 %) | `battery_target_soc` = 100 % |
 | **3** | **Fail-safe** | forecast missing / stale | `battery_target_soc` = 100 % |
 
 **`battery_target_soc`** = the lowest SOC ceiling C in [`no_buy_floor_percent`, 100] such that simulating the next `charge_target_horizon_h` (48 h) at worst-case PV (p10) / load (p50), capped at C, keeps the home-battery minimum >= `no_buy_floor_percent`, plus `charge_target_margin`, then **floored to `charge_target_min`** (`BatteryOptimizer.compute_charge_target`). The floor means the battery always charges to at least `charge_target_min` (default 80 %) even when the survival need is lower — LFP-safe and keeping headroom available for shaving. The survival math itself still uses `no_buy_floor_percent`; the floor only raises the final target.
@@ -4065,6 +4065,8 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.63: **Wording: T3 calibration is rolling, not calendar-weekly (Sections 4.0, 4.2.4; docstrings).** No behaviour change — `_calibration_charge_due` already fires when >`charge_target_full_interval_days` (7) have passed since the SOC last reached >=99% (the clock restarts at each >=99%, by sun or prior calibration). Replaced misleading "weekly" labels; also corrected `_will_fill_today`'s stale "~100%/>=99%" docstring to "reaches the dynamic charge target". (1.8.32 -> 1.8.33)
 
 - v2.62: **Topic 3 charge target floored at 80% (Section 4.2.4).** Even when the 48 h worst-case survival need is lower, the dynamic target is floored to `battery.charge_target_min` (default raised 20 → **80**), so the battery always charges to at least 80% — within the LFP-friendly band (no longevity cost) and keeping headroom available for shaving. The survival math still uses `no_buy_floor_percent` (20%); `charge_target_min` only raises the final target (passed as `compute_charge_target`'s `min_target`, previously fed `no_buy_floor_percent` — the dead `charge_target_min` config is now wired in). Reason string reports `floored to N%` when the floor binds. (1.8.31 -> 1.8.32)
 

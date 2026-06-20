@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.32"
+__version__ = "1.8.33"
 
 import json
 import logging
@@ -826,11 +826,12 @@ class EnergyManager:
         self._apply_charge_control(charge, reason, self.charge_shaving_power_w)
 
     def _will_fill_today(self, current_soc: float, gate_forecast, now) -> bool:
-        """Check whether the battery is forecast to reach full (~100%) today.
+        """Check whether the battery is forecast to reach its target today.
 
         Runs a greedy SOC simulation (charge at max_charge_w, no deferral) over
         today's *conservative* forecast (p10 PV, p50 load) and asks whether any
-        interval reaches ≥99% SOC. If the battery fills even under that
+        interval reaches the dynamic charge target (`_battery_target_soc`, FSD
+        4.2.4 — not a fixed 100%). If the battery fills even under that
         pessimistic production estimate, the day is abundant enough to shave the
         export peak; otherwise it is marginal and we charge greedily.
 
@@ -842,10 +843,10 @@ class EnergyManager:
         or fills near sunset, has no real export peak worth deferring for.
 
         Returns:
-            True if the battery reaches full today under the conservative
+            True if the battery reaches its target today under the conservative
             forecast AND the day's surplus exceeds headroom × fill_margin (a
-            battery already full now counts), else False. An empty forecast is
-            treated as marginal (charge greedily — never defer blindly).
+            battery already at target now counts), else False. An empty forecast
+            is treated as marginal (charge greedily — never defer blindly).
 
         """
         if gate_forecast is None or gate_forecast.empty:
@@ -915,10 +916,12 @@ class EnergyManager:
         return bool((sim["soc_percent"] >= self._battery_target_soc).any())
 
     def _calibration_charge_due(self, now: datetime) -> bool:
-        """Whether a weekly LFP calibration full charge is due (FSD 4.2.4).
+        """Whether an LFP calibration full charge is due (FSD 4.2.4).
 
         Due when the battery has not reached ≥99% SOC within the last
-        `charge_target_full_interval_days`. Reads the most recent ≥99% point
+        `charge_target_full_interval_days` (rolling — the clock restarts each
+        time SOC reaches ≥99%, by sun or by a prior calibration). Reads the
+        most recent ≥99% point
         from SOC history (no separate persisted state). On query error or no
         client, returns False (don't force a full charge on a transient error;
         the worst-case survival logic still protects against import).
@@ -1106,7 +1109,8 @@ class EnergyManager:
 
             # Topic 3 longevity (FSD 4.2.4): charge only to the lowest SOC that
             # keeps the home battery >= no_buy_floor over 48 h (worst-case p10 PV
-            # / p50 load) + margin; hold above it. Weekly 100% calibration and a
+            # / p50 load) + margin, floored at charge_target_min; hold above it.
+            # A due calibration charge (rolling 7 d since the last >= 99%) and a
             # stale/missing forecast fail UP to 100%. The target is enforced ONLY
             # by control_battery_charge — it is deliberately NOT threaded into the
             # discharge/EV SOC forecast (those read the natural charge-to-100

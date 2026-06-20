@@ -357,8 +357,8 @@ class BatteryOptimizer:
         high SOC) while never risking the grid import the battery exists to
         avoid.
 
-        Fail-safes return 100% (never a low cap): a due weekly calibration
-        charge, or a stale/missing forecast. `min_target` is a sanity floor.
+        Fail-safes return 100% (never a low cap): a due calibration charge, or a
+        stale/missing forecast. `min_target` is a sanity floor on the target.
 
         Args:
             current_soc: Battery SOC now (%).
@@ -368,12 +368,13 @@ class BatteryOptimizer:
             margin_pct: Extra % of capacity above the worst-case need.
             min_target: Sanity floor on the ceiling (%).
             horizon_h: Survival look-ahead (hours).
-            calibration_due: True if a weekly full charge is due (LFP BMS).
+            calibration_due: True if a calibration full charge is due
+                (rolling 7 d since the last >= 99% SOC, LFP BMS).
             forecast_fresh: False if the PV forecast heartbeat is stale.
 
         """
         if calibration_due:
-            return 100.0, "weekly LFP calibration charge → 100%"
+            return 100.0, "LFP calibration charge → 100%"
         if not forecast_fresh or forecast is None or forecast.empty:
             return 100.0, "forecast stale/missing → fail-safe full charge"
 
