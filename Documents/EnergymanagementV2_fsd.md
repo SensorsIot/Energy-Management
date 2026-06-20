@@ -1059,16 +1059,6 @@ plants:
             count: 2
 ```
 
-**Calibration note (2026-03-20):** The Pdc0 values and inverter efficiencies are **model calibration parameters**, not physical panel specifications. The actual panels are unchanged (AE Solar AC-455MH nameplate 455W, Generic 400W). The calibrated values were derived by comparing per-string actual production against the pvlib clear-sky model on sunny days (Mar 17-20, 2026) at noon when no physical shading is present:
-
-| String | Nameplate | Calibrated Pdc0 | Reason |
-|--------|-----------|----------------|--------|
-| East (PV1) | 455W | 445W | Model slightly over-predicts at noon; accounts for wiring/mismatch losses |
-| West (PV2) | 455W | 490W | Panels consistently produce 19% above model with nameplate value; positive power tolerance or panel count uncertainty |
-| South | 400W | 425W | Panels produce 15% above model with nameplate value |
-
-Inverter efficiency raised from 0.95/0.96 to 0.98 for both inverters, matching Huawei SUN2000 and Enphase IQ7 datasheet peak efficiency. The previous values (0.95/0.96) were conservative estimates that compounded with Pdc0 errors.
-
 ## 2.7 Configuration
 
 ### Secrets (Configuration UI)
@@ -1363,22 +1353,6 @@ The stored observations enable retrospective analysis:
 - **Seasonal drift**: compare factors month-over-month
 - **Model quality**: compare forecast (with shading) against actual — residual error shows non-shading model issues
 - **Sunny hour detection quality**: check `ghi_ratio` distribution to validate the 0.85 threshold
-
-### 2.13.11 Calibration History
-
-| Date | Version | Change | Reason |
-|------|---------|--------|--------|
-| 2025-02-09 | v1.3.3 | Initial shading factors from 1 sunny winter day | Baseline |
-| 2026-03-20 | v1.3.4 | Panel params calibrated (E:445W, W:490W, S:425W, eff 0.98) + new shading factors | Forecast under-predicted sunny day peaks by ~35%; per-string analysis showed model error, not weather error |
-
-**Data boundary:** Forecast data in InfluxDB before 2026-03-20 was computed with the old parameters (E:455W, W:455W, S:400W, eff 0.95/0.96, Feb 2025 shading). After 2026-03-20, new parameters apply. Accuracy metrics show a step change at this boundary.
-
-**Retrofitted data:** An approximate retrofit of the Mar 13–20 forecast is stored as `pv_forecast_retrofitted` (model=`hybrid_v1.3.4`) in the `pv_forecast` bucket. This was computed by applying a per-point correction factor (new model / old model at the stored P50 GHI). The retrofit is approximate because:
-- Only the P50 GHI is stored, not per-ensemble-member GHI
-- The old shading factors were baked into the P50 before percentile calculation
-- Correction accuracy: ~28% error on sunny days (vs ~40% old, ~12% expected from full recalculation)
-
-The retrofit is useful for directional comparison but not a substitute for the real new forecast starting 2026-03-21.
 
 ---
 
@@ -1840,7 +1814,7 @@ EBL (Elektra Baselland) double-tariff. A 15-min slot is **cheap (Niedertarif)** 
 | Weihnachten | 25 Dec | | Auffahrt | `E + 39` |
 | Stephanstag | 26 Dec | | Pfingstmontag | `E + 50` |
 
-This is the **complete** EBL low-tariff holiday list; other canton-BL holidays (Berchtoldstag 2 Jan, Tag der Arbeit 1 May, Fronleichnam, Maria Himmelfahrt, Allerheiligen) stay Hochtarif. Computed in the add-on -- no external list or calendar; this replaces the removed `tariff.holidays` config key.
+This is the **complete** EBL low-tariff holiday list; other canton-BL holidays (Berchtoldstag 2 Jan, Tag der Arbeit 1 May, Fronleichnam, Maria Himmelfahrt, Allerheiligen) stay Hochtarif. Computed in the add-on -- no external list or calendar.
 
 #### Process
 
@@ -2361,7 +2335,7 @@ Lives on `EVBatteryOptimizer`. Returns whether the **peak** home-battery SOC rea
 
 #### Amp-step conversion (plumbing)
 
-The wallbox only charges at integer amp levels. The energymanager picks from a discrete set of **M-Bus calibrated power steps** -- the actual power delivered at each amp level, measured via M-Bus ground truth (2026-03-04 calibration sweep):
+The wallbox only charges at integer amp levels. The energymanager picks from a discrete set of **M-Bus calibrated power steps** -- the actual power delivered at each amp level, measured via M-Bus ground truth:
 
 | Amps | Delivered power (M-Bus W) |
 |-----:|--------------------------:|
@@ -2560,7 +2534,7 @@ from(bucket: "energy_manager")
   |> filter(fn: (r) => r._measurement == "energy_balance")
   |> filter(fn: (r) => r._field == "cumulative_wh")
 
-# Car SOC Forecast (replaces the old Cumulative Energy Balance Grafana panel)
+# Car SOC Forecast
 from(bucket: "energy_manager")
   |> range(start: -1h, stop: 120h)
   |> filter(fn: (r) => r._measurement == "energy_balance")
@@ -2740,7 +2714,7 @@ styles:
 ```
 
 **Attributes published on `sensor.ev_target_power`** (run.py). The card uses
-the structured fields below; `reason` is no longer rendered (kept for logs):
+the structured fields below; `reason` is kept for logs, not rendered:
 
 | Attribute | Purpose |
 |-----------|---------|
@@ -4065,6 +4039,8 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.64: **Removed all history/rationale from the FSD body (docs hold current functionality only; history lives in this changelog).** Deleted §2.13.11 "Calibration History" (dated change table, 2026-03-20 data boundary, `pv_forecast_retrofitted` retrofit notes), the §2.6 "Calibration note (2026-03-20)" derivation rationale, and assorted historical clauses ("replaces the old/removed…", "no longer rendered", "(2026-03-04 calibration sweep)" provenance). No behaviour change; FSD-only.
 
 - v2.63: **Wording: T3 calibration is rolling, not calendar-weekly (Sections 4.0, 4.2.4; docstrings).** No behaviour change — `_calibration_charge_due` already fires when >`charge_target_full_interval_days` (7) have passed since the SOC last reached >=99% (the clock restarts at each >=99%, by sun or prior calibration). Replaced misleading "weekly" labels; also corrected `_will_fill_today`'s stale "~100%/>=99%" docstring to "reaches the dynamic charge target". (1.8.32 -> 1.8.33)
 
