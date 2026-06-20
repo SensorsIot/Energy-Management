@@ -1,10 +1,11 @@
-"""Tests for _charge_gate_active() — the export-peak-shaving gate (FSD 4.2.3).
+"""Tests for the export-peak-shaving day mode + gate (FSD 4.2.3).
 
-Regression guard: the gate must key off actual car presence
+The shave-vs-car-day choice is decided once per day at shaving_decision_hour
+and latched (`_update_shaving_day_mode`); `_charge_gate_active()` is true only
+on a shaving day. The decision keys off actual car presence
 (binary_sensor.car_ready), NOT the wallbox↔server WebSocket link
-(binary_sensor.wallbox_connected). The latter is ~always "on" whenever the
-wallbox is powered, so gating on it would keep the system permanently in
-use case A and shaving (use case B) would never run.
+(binary_sensor.wallbox_connected, ~always "on" whenever the wallbox is
+powered).
 """
 
 from __future__ import annotations
@@ -69,20 +70,61 @@ def _wire(
     manager.ha_client.get_sensor_value.side_effect = _sensor
 
 
-def test_no_car_shaving_runs_even_when_wallbox_link_up(manager) -> None:
-    # The exact production bug: WS link "on" but no car plugged in.
-    _wire(manager, car_ready="off", wallbox_connected="on")
-    assert manager._charge_gate_active() is True  # free to shave
+# Decision-hour times (Europe/Zurich = UTC+2 in June).
+_AT_DECISION = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)      # 12:00 local ≥ 8
+_BEFORE_DECISION = datetime(2026, 6, 7, 4, 0, tzinfo=UTC)   # 06:00 local < 8
 
 
-def test_car_present_not_full_blocks_shaving(manager) -> None:
-    _wire(manager, car_ready="on", car_soc=50.0, target=80.0)
-    assert manager._charge_gate_active() is False  # use case A — EV owns surplus
+class TestDayModeDecision:
+    """The shave-vs-car-day choice is decided once per day at
+    shaving_decision_hour and latched (FSD 4.2.3)."""
 
+    def test_car_absent_at_decision_is_car_day(self, manager) -> None:
+        # WS link up but no car plugged in → car day (battery charges greedily).
+        _wire(manager, car_ready="off", wallbox_connected="on")
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "car_day"
+        assert manager._charge_gate_active() is False
 
-def test_car_present_but_full_allows_shaving(manager) -> None:
-    _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
-    assert manager._charge_gate_active() is True  # car full → free to shave
+    def test_car_below_target_at_decision_is_car_day(self, manager) -> None:
+        _wire(manager, car_ready="on", car_soc=50.0, target=80.0)
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "car_day"
+        assert manager._charge_gate_active() is False
+
+    def test_car_connected_and_full_at_decision_is_shaving_day(self, manager) -> None:
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "shaving_day"
+        assert manager._charge_gate_active() is True
+
+    def test_before_decision_hour_defaults_car_day(self, manager) -> None:
+        # Even a full car: before the decision hour nothing is committed yet.
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        manager._update_shaving_day_mode(_BEFORE_DECISION)
+        assert manager._shaving_day_mode == "car_day"
+        assert manager._shaving_decision_date is None
+
+    def test_latch_holds_when_car_fills_later_same_day(self, manager) -> None:
+        # At the decision hour the car still needs energy → car day …
+        _wire(manager, car_ready="on", car_soc=50.0, target=80.0)
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "car_day"
+        # … later the car reaches its target, but the latch does NOT re-flip.
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        later = datetime(2026, 6, 7, 15, 0, tzinfo=UTC)  # 17:00 local
+        manager._update_shaving_day_mode(later)
+        assert manager._shaving_day_mode == "car_day"
+
+    def test_decision_recomputed_next_day(self, manager) -> None:
+        _wire(manager, car_ready="off")
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "car_day"
+        # Next day the car is full at the decision hour → shaving day.
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        next_day = datetime(2026, 6, 8, 10, 0, tzinfo=UTC)
+        manager._update_shaving_day_mode(next_day)
+        assert manager._shaving_day_mode == "shaving_day"
 
 
 def _forecast(now_utc: datetime, nets: list[float]) -> pd.DataFrame:
@@ -125,7 +167,7 @@ class TestMarginalDayGate:
     def test_marginal_day_routes_to_greedy_charge(self, manager) -> None:
         """End-to-end: no car + marginal day → charge greedily at full power."""
         self._real_optimizer(manager)
-        _wire(manager, car_ready="off")  # no car → use case B
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)  # full → shaving day
         manager.ha_client.set_number.return_value = (True, None)
         now = datetime(2026, 6, 7, 16, 0, tzinfo=UTC)
         fc = _forecast(now, [50.0] * 24)  # marginal → never fills today
@@ -144,7 +186,7 @@ class TestMarginalDayGate:
         """End-to-end: no car + abundant day → gate passes to the water-fill
         (not the greedy 'marginal' path)."""
         self._real_optimizer(manager)
-        _wire(manager, car_ready="off")
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)  # full → shaving day
         manager.ha_client.set_number.return_value = (True, None)
         now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
         # Low surplus now, big peak later → fills today, water-fill defers now.
@@ -192,7 +234,7 @@ class TestMarginalDayGate:
     def test_below_charge_target_does_not_hold(self, manager) -> None:
         """SOC below the charge target → normal logic runs (not a hold)."""
         self._real_optimizer(manager)
-        _wire(manager, car_ready="off")
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)  # shaving day
         manager.ha_client.set_number.return_value = (True, None)
         manager.charge_target_enabled = True
         manager._battery_target_soc = 90.0
@@ -206,7 +248,7 @@ class TestMarginalDayGate:
     def test_stale_forecast_routes_to_greedy(self, manager) -> None:
         """Fail-safe: a stale PV forecast → greedy charging, never shave."""
         self._real_optimizer(manager)
-        _wire(manager, car_ready="off")
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)  # shaving day
         manager.ha_client.set_number.return_value = (True, None)
         manager._forecast_fresh = False
         now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)

@@ -4,14 +4,14 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.30"
+__version__ = "1.8.32"
 
 import json
 import logging
 import signal
 import sys
 import time
-from datetime import datetime, timedelta, UTC
+from datetime import date, datetime, timedelta, UTC
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -143,10 +143,10 @@ class EnergyManager:
             "discharge_control_entity", "number.battery_maximum_discharging_power"
         )
         # Export-peak-shaving charge control: defer battery charging so its
-        # headroom absorbs the midday export peak. Only active when the car
-        # is disconnected or full. Always on (no enable/disable switch — the
-        # gate logic already releases to full power when shaving doesn't
-        # apply). See FSD 4.2.3.
+        # headroom absorbs the midday export peak. Runs only on a "shaving
+        # day" — a once-daily mode decided at shaving_decision_hour (car
+        # connected & full). Otherwise it is a "car day" (EV owns the surplus,
+        # battery charges greedily). See FSD 4.2.3.
         self.charge_control_entity = battery_opts.get(
             "charge_control_entity", "number.battery_maximum_charging_power"
         )
@@ -161,6 +161,14 @@ class EnergyManager:
         # just fills (or fills near sunset) has no real export peak to clip, so
         # deferring just risks under-filling → route it to greedy charging.
         self.charge_shaving_fill_margin = battery_opts.get("charge_shaving_fill_margin", 1.2)
+        # Day-mode latch (FSD 4.2.3): the shave-vs-car-day choice is made ONCE
+        # per day, at this local hour, then frozen until the next midnight. A
+        # car that needs energy (or is absent) at the decision hour makes it a
+        # car day → shaving off all day; only a connected-and-full car makes it
+        # a shaving day. Before the decision hour the safe default is car day.
+        self.shaving_decision_hour = int(battery_opts.get("shaving_decision_hour", 8))
+        self._shaving_day_mode: str = "car_day"
+        self._shaving_decision_date: date | None = None
         # Fail-safe: if the PV forecast heartbeat is older than this, the
         # forecast is stale/untrusted (upstream guard keeping last-good on bad
         # weather) → don't shave, charge greedily. Set on each tick by the loop.
@@ -196,7 +204,12 @@ class EnergyManager:
         self.charge_target_enabled = battery_opts.get("charge_target_enabled", False)
         self.charge_target_margin = float(battery_opts.get("charge_target_margin", 10.0))
         self.charge_target_horizon_h = int(battery_opts.get("charge_target_horizon_h", 48))
-        self.charge_target_min = float(battery_opts.get("charge_target_min", 20.0))
+        # Floor on the dynamic target: even when the 48 h survival need is lower,
+        # always charge to at least this SOC. 80% is well within the LFP-friendly
+        # band (no longevity cost) and keeps headroom available for shaving. The
+        # survival math still uses no_buy_floor_percent; this only raises the
+        # final target.
+        self.charge_target_min = float(battery_opts.get("charge_target_min", 80.0))
         self.charge_target_full_interval_days = float(
             battery_opts.get("charge_target_full_interval_days", 7)
         )
@@ -645,25 +658,57 @@ class EnergyManager:
             )
             self.control_battery(discharge_allowed)
 
-    def _charge_gate_active(self) -> bool:
-        """Return True when export-peak-shaving may manage charging.
+    def _update_shaving_day_mode(self, now) -> None:
+        """Decide the day's shaving mode once, at the configured local hour.
 
-        Active only when the car is disconnected or already full — so the
-        feature never competes with EV solar charging for the surplus.
+        The shave-vs-car-day choice is a single daily snapshot, not a per-tick
+        flip (FSD 4.2.3). At shaving_decision_hour (Europe/Zurich) the car is
+        read once: connected AND at/above target → shaving day; below target,
+        absent, or unknown → car day. The result is latched until the next
+        local midnight. Before the decision hour the safe default is car day.
+
+        Only ever taken once per day: the first tick at/after the decision
+        hour commits the mode; later ticks keep the latch even as the car
+        state changes (e.g. the car reaching its target mid-afternoon).
         """
-        # Gate on actual car presence (car_ready), NOT wallbox_connected —
-        # the latter is the wallbox↔server WebSocket link (~always on), so
-        # gating on it would keep us permanently in use case A and shaving
-        # would never run. car_ready is off for Available/SuspendedEV (no car).
+        local_now = now.astimezone(SWISS_TZ)
+        today = local_now.date()
+        if self._shaving_decision_date == today:
+            return  # already committed today — latch holds
+        if local_now.hour < self.shaving_decision_hour:
+            self._shaving_day_mode = "car_day"  # before the decision → safe default
+            return
+        # First tick at/after the decision hour today → take the one-shot snapshot.
+        self._shaving_decision_date = today
         car_state = self.ha_client.get_state(self.car_ready_entity)
         car_present = car_state is not None and car_state.get("state") == "on"
-        if not car_present:
-            return True  # no car plugged in (or OCPP down) → free to shave
         car_soc = self.ha_client.get_sensor_value(self.smart_car_soc_entity)
         target = self.ha_client.get_sensor_value(self.car_charging_max_entity)
-        if car_soc is not None and target is not None and car_soc >= float(target):
-            return True  # car full → free to shave
-        return False
+        car_full = (
+            car_present
+            and car_soc is not None
+            and target is not None
+            and car_soc >= float(target)
+        )
+        self._shaving_day_mode = "shaving_day" if car_full else "car_day"
+        logger.info(
+            "Shaving day-mode decided at %02d:00 → %s "
+            "(car_present=%s soc=%s target=%s)",
+            self.shaving_decision_hour,
+            self._shaving_day_mode,
+            car_present,
+            car_soc,
+            target,
+        )
+
+    def _charge_gate_active(self) -> bool:
+        """Return True when export-peak-shaving may manage charging today.
+
+        True only on a shaving day — the once-daily mode decided at
+        shaving_decision_hour (car connected & full). On a car day the EV
+        owns the surplus and the battery charges greedily. See FSD 4.2.3.
+        """
+        return self._shaving_day_mode == "shaving_day"
 
     def control_battery_charge(self, current_soc: float, forecast, gate_forecast, now) -> None:
         """Defer battery charging to shave the export peak (FSD 4.2.3).
@@ -694,19 +739,25 @@ class EnergyManager:
             self._apply_charge_control(False, self._charge_reason)
             return
 
+        # Decide the day's shaving mode once, at the configured local hour
+        # (FSD 4.2.3). A car day → the EV owns the surplus and the battery
+        # charges greedily; a shaving day → the battery holds headroom for the
+        # peak. Latched until the next local midnight.
+        self._update_shaving_day_mode(now)
+
         if not self._charge_gate_active():
-            # Use case A: car needs energy → it is the peak-shaving load;
-            # the battery charges greedily to capture the rest.
+            # Use case A — car day: the EV owns the surplus (now or later);
+            # the battery charges greedily so a late top-up never starves it.
             self._charge_use_case = "A"
             self._charge_action = "released"
             self._charge_reason = (
-                "car connected & not full — battery charges greedily "
-                "(the car shaves the export peak)"
+                "car day — EV owns the surplus, battery charges greedily"
             )
-            self._apply_charge_control(True, "car charging — charge released")
+            self._apply_charge_control(True, "car day — charge released")
             return
 
-        # Use case B: no car load → defer to shave the export peak.
+        # Use case B — shaving day: no EV load expected today → defer to shave
+        # the export peak.
         # Headroom is to the dynamic charge target (FSD 4.2.4), not 100% — the
         # battery is only filled to what the next days need.
         self._charge_use_case = "B"
@@ -1068,7 +1119,7 @@ class EnergyManager:
                     now,
                     reserve=self.no_buy_floor_percent,
                     margin_pct=self.charge_target_margin,
-                    min_target=self.no_buy_floor_percent,
+                    min_target=self.charge_target_min,
                     horizon_h=self.charge_target_horizon_h,
                     calibration_due=calibration_due,
                     forecast_fresh=self._forecast_fresh,

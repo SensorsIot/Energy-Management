@@ -404,12 +404,16 @@ class BatteryOptimizer:
             else:
                 lo = mid
 
-        target = min(100.0, hi + margin_pct)
-        target = max(target, min_target, reserve)
-        target = round(target)
-        return float(target), (
-            f"survives {horizon_h}h worst-case at {hi:.0f}% +{margin_pct:.0f}% margin"
-        )
+        survival = round(min(100.0, hi + margin_pct))
+        target = round(max(survival, min_target, reserve))
+        if target > survival:
+            reason = (
+                f"floored to {target:.0f}% "
+                f"(survival need only {survival:.0f}%)"
+            )
+        else:
+            reason = f"survives {horizon_h}h worst-case at {hi:.0f}% +{margin_pct:.0f}% margin"
+        return float(target), reason
 
     def calculate_decision(
         self,

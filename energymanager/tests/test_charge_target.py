@@ -73,6 +73,15 @@ class TestComputeChargeTarget:
         target, _ = _opt().compute_charge_target(90, f, NOW, **common)
         assert target == 40.0
 
+    def test_floor_80_keeps_headroom(self) -> None:
+        """Production floor (80%): an abundant day whose survival need is low
+        still charges to 80% — keeps shaving headroom, LFP-safe."""
+        f = _fc(192, [4000], [300])  # survival need ~reserve
+        common = {**COMMON, "min_target": 80.0}
+        target, reason = _opt().compute_charge_target(90, f, NOW, **common)
+        assert target == 80.0
+        assert "floored to 80%" in reason
+
     def test_intermediate_night_drain(self) -> None:
         """12h day + 12h night (60% drain) → ceiling lands ~80% (need 70 + margin 10)."""
         pv = [3000] * 48 + [0] * 48  # one day: 12h sun, 12h dark

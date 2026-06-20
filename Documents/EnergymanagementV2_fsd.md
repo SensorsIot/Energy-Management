@@ -1629,7 +1629,7 @@ Key cross-entity interactions (criteria that make one optimization yield to
 another):
 
 - **EV solar charging is gated by home-battery safety** — it stops if the
-  home-battery SOC forecast would fall below `ev_charging.reserve_percent`
+  home-battery SOC forecast would fall below `battery.no_buy_floor_percent`
   over the next 48 h (4.3.6).
 - **Charge shaving yields to the EV** — when the car is connected and not
   full, charge shaving releases the battery charge limit so the EV owns the
@@ -1639,6 +1639,35 @@ another):
   into the car (4.2.2 truth table).
 - **Washer is advisory only** — it never actuates; it informs the user (or
   an HA automation) whether to start the appliance (4.4).
+
+### Topics and priority tiers
+
+The optimizations are grouped into three topic groups, by the resource they manage:
+
+| Group | Topics |
+|-------|--------|
+| **EV Charging** | T1 — EV Charge Decision (4.3.6); T2 — EV Charge Power (4.3.7) |
+| **Battery Management** | T3 — Charge Ceiling / Longevity (4.2.4); T4 — Discharge Strategy and Protection (4.2.2); T5 — Export-Peak-Shaving Charge Control (4.2.3) |
+| **Appliances** | T6 — Appliance Signal (4.4) |
+
+Priority between topics matters only when two of them act on the same control entity at the same time. Organized by tier:
+
+**Tier 0 — Invariant (not a topic).** The no-buy floor: the home battery stays `>= battery.no_buy_floor_percent` over the next 48 h. It underlies T1 Rule 4, T2 Rule 3, and T3's target, and is never overridden.
+
+**Tier 1 — Independent topics.** Each owns a distinct control entity (or is advisory), so they never contend and always execute, in any order:
+
+| Topic | Control entity | Action |
+|-------|----------------|--------|
+| **T3** — Charge Ceiling | `number.battery_maximum_charging_power` | charge power 0 when SOC >= `battery_target_soc` |
+| **T4** — Discharge | `number.battery_maximum_discharging_power` | block discharge during cheap hours when it cuts expensive-hours import |
+| **T6** — Appliance Signal | `sensor.appliance_signal` | advisory only |
+
+**Tier 2 — Battery charge-timing vs EV (mutually exclusive, day mode).** EV charging and shaving both want the PV surplus, so the choice is made **once per day** — a snapshot of the car at a fixed local hour (`shaving_decision_hour`, default 08:00), latched until the next midnight (FSD 4.2.3):
+
+- **Car day** — car below target, absent, or unknown at the decision hour: the EV owns the surplus, the home battery charges greedily, **T5 does not run**.
+- **Shaving day** — car connected and at/above target at the decision hour: **T5 runs**, holding the battery's headroom to shave the midday export peak.
+
+The mode does not flip when the car later reaches its target in the afternoon (the peak is past by then). When it is a shaving day, T5 still applies its own B0 abundant-day gate per cycle.
 
 ### Control vs. advisory
 
@@ -1888,15 +1917,30 @@ in one short burst — a flatter, gentler feed-in profile. Surplus above the
 shaving power in any interval is still exported (the cap is deliberate, not
 a regulation failure).
 
-#### Two distinct use cases
+#### Day mode — decided once per day
 
-The charge limit is set every 15 min by `control_battery_charge()`. There
-are two top-level use cases, selected by `_charge_gate_active()`:
+The shave-vs-charge choice is a **whole-day mode**, not a per-tick flip: it is
+decided **once**, at a fixed local hour (`shaving_decision_hour`, default
+08:00, Europe/Zurich), and latched until the next local midnight
+(`_update_shaving_day_mode()`). The decision is a single snapshot of the car:
 
-| # | Use case | Criteria (gate) | Behaviour | Charge limit |
-|---|----------|-----------------|-----------|-------------|
-| **A** | **EV owns the surplus** | car connected **AND** car not full (`binary_sensor.car_ready = on` **AND** `smart_battery_last_known < smart_charging_max_last_known`) | Charge **released** — EV solar charging (4.3) takes the surplus; the battery acts only as the gap buffer per Rule 2. Shaving stays out of the way. | `max_charge_w` |
-| **B** | **Export-peak shaving** | car disconnected (or OCPP down) **OR** car full | Defer/allow charging per the water-fill below, so the battery's headroom absorbs the export peak at a gentle, capped rate. | `0` or `charge_shaving_power_w` |
+| Car at the decision hour | Day mode |
+|--------------------------|----------|
+| connected **AND** at/above target (`car_ready = on` **AND** `smart_battery_last_known >= smart_charging_max_last_known`) | **shaving day** |
+| below target, absent (or OCPP down), or car data unavailable | **car day** |
+
+Before the decision hour the mode defaults to **car day**. The snapshot is
+taken once (the first 15-min tick at/after the decision hour) and then frozen
+— it does **not** re-flip if the car later reaches its target in the
+afternoon (by then the midday peak is past, so shaving would only cost fill).
+
+The two top-level use cases follow from the day mode (`_charge_gate_active()`
+returns true only on a shaving day):
+
+| # | Use case | Day mode | Behaviour | Charge limit |
+|---|----------|----------|-----------|-------------|
+| **A** | **EV owns the surplus** | car day | Charge **released** — the EV claims the surplus (now or on a later top-up); the battery charges greedily so a late charge never starves it. Shaving stays out of the way. | `max_charge_w` |
+| **B** | **Export-peak shaving** | shaving day | Defer/allow charging per the water-fill below, so the battery's headroom absorbs the export peak at a gentle, capped rate. | `0` or `charge_shaving_power_w` |
 
 The feature is **always on** — there is no enable/disable switch. The gate
 logic itself guarantees charging is never left stuck off: use case A and the
@@ -2011,6 +2055,7 @@ shaving power) is still detected even though charging stays on.
 | `battery.charge_shaving_power_w` | `2500` | Charge limit while shaving the peak (use case B) — gentle C-rate |
 | `battery.max_charge_w` | `5000` | Charge limit when use case A releases, or on a marginal day (B0) |
 | `battery.charge_shaving_fill_margin` | `1.2` | B0 fill-margin: shave only if the day's surplus exceeds headroom by this factor |
+| `battery.shaving_decision_hour` | `8` | Local hour (Europe/Zurich) at which the day mode (car day vs shaving day) is decided and latched |
 | `battery.forecast_max_age_minutes` | `120` | Fail-safe: shave only if the PV forecast heartbeat is fresher than this |
 
 The marginal-day gate (B0) gates on whether the battery fills today under the
@@ -2049,7 +2094,7 @@ Limits how high the home battery charges, sparing the LFP from high-SOC dwell. A
 | **2** | **Weekly calibration** | > `charge_target_full_interval_days` (7) since SOC last reached >= 99 % | `battery_target_soc` = 100 % |
 | **3** | **Fail-safe** | forecast missing / stale | `battery_target_soc` = 100 % |
 
-**`battery_target_soc`** = the lowest SOC ceiling C in [`no_buy_floor_percent`, 100] such that simulating the next `charge_target_horizon_h` (48 h) at worst-case PV (p10) / load (p50), capped at C, keeps the home-battery minimum >= `no_buy_floor_percent`, plus `charge_target_margin` (`BatteryOptimizer.compute_charge_target`).
+**`battery_target_soc`** = the lowest SOC ceiling C in [`no_buy_floor_percent`, 100] such that simulating the next `charge_target_horizon_h` (48 h) at worst-case PV (p10) / load (p50), capped at C, keeps the home-battery minimum >= `no_buy_floor_percent`, plus `charge_target_margin`, then **floored to `charge_target_min`** (`BatteryOptimizer.compute_charge_target`). The floor means the battery always charges to at least `charge_target_min` (default 80 %) even when the survival need is lower — LFP-safe and keeping headroom available for shaving. The survival math itself still uses `no_buy_floor_percent`; the floor only raises the final target.
 
 `battery_target_soc` is enforced **only** by the charge control. It is **not** threaded into the discharge/EV SOC forecast -- those read the natural charge-to-100 trajectory (the EV's wallbox-off question, Section 4.3.6). Because the target is sized on worst-case p10 PV, the held battery still stays >= `no_buy_floor_percent` (above the EV floor and the discharge reserve), so the natural forecast the other topics read remains safe.
 
@@ -2063,8 +2108,9 @@ The "last full" timestamp is read from SOC history (InfluxDB: most recent point 
 | `battery.charge_target_margin` | `10` | Extra % of capacity above the worst-case need |
 | `battery.charge_target_horizon_h` | `48` | Survival look-ahead |
 | `battery.charge_target_full_interval_days` | `7` | Days after the last >= 99 % SOC to force a 100 % calibration charge |
+| `battery.charge_target_min` | `80` | Floor on the target — always charge to at least this SOC, even when the survival need is lower |
 
-Survival floor = `battery.no_buy_floor_percent` (shared, 20 %).
+Survival floor = `battery.no_buy_floor_percent` (shared, 20 %); target floor = `battery.charge_target_min` (80 %).
 
 #### Test Cases
 
@@ -4019,6 +4065,12 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.62: **Topic 3 charge target floored at 80% (Section 4.2.4).** Even when the 48 h worst-case survival need is lower, the dynamic target is floored to `battery.charge_target_min` (default raised 20 → **80**), so the battery always charges to at least 80% — within the LFP-friendly band (no longevity cost) and keeping headroom available for shaving. The survival math still uses `no_buy_floor_percent` (20%); `charge_target_min` only raises the final target (passed as `compute_charge_target`'s `min_target`, previously fed `no_buy_floor_percent` — the dead `charge_target_min` config is now wired in). Reason string reports `floored to N%` when the floor binds. (1.8.31 -> 1.8.32)
+
+- v2.61: **Topic 5 shave-vs-car-day choice made once per day at a fixed hour (Sections 4.0, 4.2.3).** Previously `_charge_gate_active()` re-evaluated the car state every tick, so shaving engaged the instant the car reached its target (e.g. 15:21 on 2026-06-20) — long after the midday peak, capping the battery at 87% and exporting ~1.7 kWh. Replaced with a daily latch (`_update_shaving_day_mode`): at `shaving_decision_hour` (local, default 08:00) the car is read once — connected & at/above target → shaving day; below target / absent / unknown → car day (battery charges greedily all day). Latched until the next local midnight; does not re-flip when the car fills mid-afternoon. Before the decision hour the default is car day. New config `battery.shaving_decision_hour` (8). (1.8.30 -> 1.8.31)
+
+- v2.60: **Topics grouped and priority tiers documented (Section 4.0).** Three topic groups by managed resource — EV Charging (T1, T2), Battery Management (T3, T4, T5), Appliances (T6). Priority organized in tiers: Tier 0 invariant (no-buy floor); Tier 1 independent topics that each own a distinct control entity and always execute (T3 charge-off, T4 discharge, T6 advisory); Tier 2 the one contended decision — battery charge-timing, where EV (T1/T2) has priority and suppresses T5 shaving when the car is connected and needs energy. (FSD-only; matches deployed 1.8.30)
 
 - v2.59: **Topic 3 corrected to the dynamic charge-target hold (4.2.4); shipped off.** The v2.58 "stop when `battery_min_soc_48h >= floor`" hold under-charged: it read the charge-to-100 forecast, so on a sunny day it deferred all day expecting future charging that the hold itself prevented, then could not cover the evening. Replaced with the dynamic `battery_target_soc` (lowest SOC keeping the worst-case p10/p50 48 h sim >= `no_buy_floor_percent` + margin, via `compute_charge_target`); charge to it, then hold. The target is enforced only by `control_battery_charge` and is **not** threaded into the discharge/EV forecast (`calculate_decision` uses `max_soc_percent=100`), so the EV gate reads the natural trajectory. `charge_target_enabled` default **false** -- Topics 1/2/4 ship live in 1.8.30, Topic 3 enabled after validation. (1.8.29 -> 1.8.30)
 
