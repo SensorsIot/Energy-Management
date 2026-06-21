@@ -82,6 +82,28 @@ class TestComputeChargeTarget:
         assert target == 80.0
         assert "floored to 80%" in reason
 
+    def test_low_current_soc_does_not_force_full(self) -> None:
+        """A battery currently below reserve (drained overnight) must NOT force a
+        100% target on a sunny day. The survival trough is measured from the end
+        of today's charging, so the transient pre-charge low is excluded."""
+        pv = [3000] * 48 + [0] * 48  # sunny day then night
+        load = [500] * 96
+        f = _fc(192, pv, load)
+        target, reason = _opt().compute_charge_target(8, f, NOW, **COMMON)  # SOC 8% < reserve
+        assert target != 100.0
+        assert 75.0 <= target <= 85.0  # same as the normal post-charge night-drain target
+        assert "deficit" not in reason
+
+    def test_genuine_forward_deficit_returns_full(self) -> None:
+        """A real deficit (even charged to 100%, the post-charge overnight trough
+        dips below reserve) still returns 100%."""
+        pv = [800] * 48 + [0] * 48      # weak day surplus
+        load = [500] * 48 + [1500] * 48  # heavy overnight load
+        f = _fc(192, pv, load)
+        target, reason = _opt().compute_charge_target(50, f, NOW, **COMMON)
+        assert target == 100.0
+        assert "deficit" in reason
+
     def test_intermediate_night_drain(self) -> None:
         """12h day + 12h night (60% drain) → ceiling lands ~80% (need 70 + margin 10)."""
         pv = [3000] * 48 + [0] * 48  # one day: 12h sun, 12h dark

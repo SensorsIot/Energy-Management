@@ -353,9 +353,11 @@ class BatteryOptimizer:
         Returns (target_soc_percent, reason). The target is the lowest SOC
         ceiling that still keeps the battery above `reserve` over a worst-case
         (p10 PV / p50 load) survival simulation of `horizon_h` hours, plus
-        `margin_pct`. Charges to less than 100% on most days (less LFP dwell at
-        high SOC) while never risking the grid import the battery exists to
-        avoid.
+        `margin_pct`. The survival trough is measured only from the end of
+        today's charging window onward (the last interval today where PV exceeds
+        load), so today's transient pre-charge low SOC never forces a full
+        charge. Charges to less than 100% on most days (less LFP dwell at high
+        SOC) while never risking the grid import the battery exists to avoid.
 
         Fail-safes return 100% (never a low cap): a due calibration charge, or a
         stale/missing forecast. `min_target` is a sanity floor on the target.
@@ -387,9 +389,34 @@ class BatteryOptimizer:
         if today.empty:
             return 100.0, "no forecast within horizon → full charge"
 
+        # Anchor the survival trough at the end of today's charging — the last
+        # interval today (searched back from local 23:59) where PV still exceeds
+        # load, i.e. the battery's daily peak / start of overnight discharge.
+        # Measuring the trough only from here forward excludes today's transient
+        # pre-charge low: a battery currently below the reserve (e.g. drained
+        # overnight) must not by itself force a full charge — the ceiling only
+        # affects SOC after the battery is charged. Searched backward so a
+        # morning deficit (PV < load now) or a midday cloud dip can't be mistaken
+        # for the end of the surplus. No surplus left today → anchor at now.
+        today_end = (
+            now.astimezone(SWISS_TZ)
+            .replace(hour=23, minute=59, second=59, microsecond=0)
+            .astimezone(UTC)
+        )
+        t_start = now
+        for t in reversed(today.index):
+            tt = t if t.tzinfo else t.replace(tzinfo=UTC)
+            if tt < now or tt > today_end:
+                continue
+            if float(today.loc[t]["net_energy_wh"]) > 0:
+                t_start = tt
+                break
+
         def min_soc(ceiling: float) -> float:
             sim = self.simulate_soc(current_soc, today, max_soc_percent=ceiling)
-            return float(sim["soc_percent"].min())
+            soc = sim["soc_percent"]
+            soc = soc[soc.index >= t_start]
+            return float(soc.min()) if not soc.empty else float(sim["soc_percent"].iloc[-1])
 
         # If even an uncapped (charge-to-100%) worst case dips below the floor,
         # the day genuinely needs a full battery → charge as much as possible.
