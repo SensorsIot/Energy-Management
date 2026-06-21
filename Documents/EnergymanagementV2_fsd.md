@@ -2617,16 +2617,20 @@ plain supporting lines.
 🚗  Charging the car
     4.8 kW from solar surplus
     Home battery 82%, adding 0.5 kW
-    Reaches 100% at 17:42 (in 2h 30m)
+    Step +1 · home battery covers the gap to a higher amp
+    Car reaches 100% at 17:42 (in 2h 30m)
+    Car day · car has first call on the solar surplus
 ```
 ```
 🚗  Car on hold
     Protecting the home battery
     It would drop to 11% (keeps at least 20%)
+    Shaving day · battery prioritises peak-clipping
 ```
 ```
 🚗  Waiting for sun
     Solar surplus 0.8 kW — needs 3.0 kW
+    Car reaches 80% tomorrow at 11:15
 ```
 ```
 🚗  No car connected
@@ -2637,10 +2641,11 @@ plain supporting lines.
 | Condition | Headline | Supporting lines |
 |-----------|----------|------------------|
 | `car_ready` ≠ on | No car connected | — |
-| `snap_power_w` > 0 | Charging the car | power + source; home battery SOC + live contribution (`sensor.battery_charge_discharge_power`); ETA to car target (`sensor.smart_charging_time_remaining` / `sensor.smart_charging_target`) |
-| `surplus_power_w` < `threshold_w` | Waiting for sun | surplus vs needed |
+| `snap_power_w` > 0 | Charging the car | power + source; home battery SOC + live contribution (`sensor.battery_charge_discharge_power`); step line (`ev_step_offset`); ETA to car target (forecast `car_target_time` / `sensor.smart_charging_max_last_known`) |
+| `surplus_power_w` < `threshold_w` | Waiting for sun | surplus vs needed; ETA to car target |
 | `ev_safe` = false | Car on hold | protecting battery; forecast dip vs floor |
 | otherwise | Not charging | — |
+| any (car connected) | — | day-mode context line (`shaving_day_mode`, 4.2.3) appended |
 
 **Card YAML** (`custom:button-card`, `entity: sensor.ev_target_power`):
 
@@ -2656,6 +2661,54 @@ label: >-
   const a = entity.attributes;
   const kw = (w) => (w == null ? '?' : (Math.abs(w) >= 1000 ? (w / 1000).toFixed(1) + ' kW' : Math.round(w) + ' W'));
   const num = (id) => { const s = states[id]; return s && !isNaN(parseFloat(s.state)) ? parseFloat(s.state) : null; };
+  // Forecast-based ETA line (solar-aware, from energymanager's car SOC forecast).
+  // Target SOC is sensor.smart_charging_max_last_known. Returns null when the
+  // forecast does not reach target within the horizon. Day-aware because
+  // solar-only ETAs are often several days out.
+  const etaLine = () => {
+    const targetTime = a.car_target_time;
+    if (!targetTime) return null;
+    const tgt = num('sensor.smart_charging_max_last_known');
+    const label = tgt != null ? Math.round(tgt) + '%' : 'target';
+    const eta = new Date(targetTime);
+    const now = new Date();
+    const trMin = (eta.getTime() - now.getTime()) / 60000;
+    if (trMin <= 0) return null;
+    const hh = ('0' + eta.getHours()).slice(-2);
+    const mm = ('0' + eta.getMinutes()).slice(-2);
+    const d0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const d1 = new Date(eta.getFullYear(), eta.getMonth(), eta.getDate());
+    const dayDiff = Math.round((d1.getTime() - d0.getTime()) / 86400000);
+    if (dayDiff === 0) {
+      const h = Math.floor(trMin / 60);
+      const m = Math.round(trMin % 60);
+      const dur = (h > 0 ? h + 'h ' : '') + m + 'm';
+      return 'Car reaches ' + label + ' at ' + hh + ':' + mm + ' (in ' + dur + ')';
+    } else if (dayDiff === 1) {
+      return 'Car reaches ' + label + ' tomorrow at ' + hh + ':' + mm;
+    }
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    return 'Car reaches ' + label + ' ' + days[eta.getDay()] + ' at ' + hh + ':' + mm + ' (in ' + dayDiff + ' days)';
+  };
+  // Which amp step relative to the bare solar surplus (ev_step_offset): +n =
+  // snapped up (home battery bridges the gap), -n = stepped down (preserving
+  // the battery), 0 = matched surplus.
+  const stepLine = () => {
+    const so = a.ev_step_offset;
+    if (so == null) return null;
+    if (so > 0) return 'Step +' + so + ' · home battery covers the gap to a higher amp';
+    if (so < 0) return 'Step ' + so + ' · held below surplus to protect the battery';
+    return 'At the highest amp under the surplus · remainder exported';
+  };
+  // Tier-2 contention (Topic 5 day-mode latch, decided once at 08:00): on a
+  // shaving day the home battery clips the midday export peak and the car shares
+  // the surplus; on a car day the car has first call on the solar surplus.
+  const dayLine = () => {
+    const dm = a.shaving_day_mode;
+    if (!dm) return null;
+    if (dm === 'shaving_day') return 'Shaving day · battery prioritises peak-clipping';
+    return 'Car day · car has first call on the solar surplus';
+  };
   const rule = a.ev_charging_rule || 'none';
   const power = a.snap_power_w || 0;
   const surplus = a.surplus_power_w;
@@ -2666,36 +2719,35 @@ label: >-
   const evSafe = a.ev_safe;
   const wc = states['binary_sensor.car_ready'];
   const connected = wc ? wc.state === 'on' : true;
-  let title; let lines = [];
-  if (!connected) { title = '🚗  No car connected'; }
-  else if (power > 0) {
+  let title;
+  let lines = [];
+  if (!connected) {
+    title = '🚗  No car connected';
+  } else if (power > 0) {
     title = '🚗  Charging the car';
     lines.push(kw(power) + (rule === 'battery_full' ? ' (home battery full)' : ' from solar surplus'));
-    // Live home-battery contribution (Huawei sign: <0 = discharging into the load)
     const bp = num('sensor.battery_charge_discharge_power');
     let battLine = 'Home battery ' + soc + '%, protected';
     if (bp != null && bp < -50) { battLine = 'Home battery ' + soc + '%, adding ' + kw(-bp); }
     else if (bp != null && bp > 50) { battLine = 'Home battery ' + soc + '%, charging ' + kw(bp); }
     lines.push(battLine);
-    // ETA to the car's own target SOC (car's estimate — accounts for taper)
-    const tr = num('sensor.smart_charging_time_remaining');
-    const tgt = num('sensor.smart_charging_target');
-    if (tr != null && tr > 0) {
-      const eta = new Date(Date.now() + tr * 60000);
-      const hh = ('0' + eta.getHours()).slice(-2);
-      const mm = ('0' + eta.getMinutes()).slice(-2);
-      const h = Math.floor(tr / 60); const m = Math.round(tr % 60);
-      const dur = (h > 0 ? h + 'h ' : '') + m + 'm';
-      lines.push('Reaches ' + (tgt != null ? Math.round(tgt) + '%' : 'target') + ' at ' + hh + ':' + mm + ' (in ' + dur + ')');
-    }
+    const st = stepLine();
+    if (st) lines.push(st);
+    const e = etaLine();
+    if (e) lines.push(e);
   } else if (surplus != null && threshold != null && surplus < threshold) {
     title = '🚗  Waiting for sun';
     lines.push('Solar surplus ' + kw(surplus) + ' — needs ' + kw(threshold));
+    const e = etaLine();
+    if (e) lines.push(e);
   } else if (evSafe === false) {
     title = '🚗  Car on hold';
     lines.push('Protecting the home battery');
     lines.push('It would drop to ' + min48 + '% (keeps at least ' + floor + '%)');
-  } else { title = '🚗  Not charging'; }
+  } else {
+    title = '🚗  Not charging';
+  }
+  if (connected) { const d = dayLine(); if (d) lines.push(d); }
   let out = '<b>' + title + '</b>';
   for (const l of lines) { out += '<br><span style="opacity:0.75">' + l + '</span>'; }
   return out;
@@ -2724,9 +2776,14 @@ the structured fields below; `reason` is kept for logs, not rendered:
 | `surplus_power_w` | Solar surplus = PV − house load (W) |
 | `grid_export_w` | Current grid export (W) |
 | `snap_power_w` | Winning charging power from `snap_to_power_step()` (W); 0 = no charging |
+| `ev_step_offset` | Chosen amp step's offset from the surplus-snapped level: `+n` snapped up (home battery bridges the gap), `-n` stepped down (battery preserved), `0` matched, `null` not solar-charging — drives the step line |
 | `battery_soc` | Current home-battery SOC (%) |
 | `battery_will_be_full` | Informational: does peak SOC today reach 100%? |
 | `battery_full_time` | Forecast time the home battery reaches 100% (if any) |
+| `battery_target_soc` | Topic 3 dynamic charge ceiling (%) — see 4.2.4 |
+| `shaving_day_mode` | Topic 5 day-mode latch: `shaving_day` or `car_day` (4.2.3) — drives the day-mode context line |
+| `car_target_time` | Forecast time the car reaches its target SOC (ISO-UTC, else `null`) — drives the ETA line |
+| `car_target_soc` | Car's target SOC from `sensor.smart_charging_max_last_known` (%) |
 | `ev_safe` | `check_ev_safe` passed — EV allowed this cycle |
 | `battery_min_soc_forecast_48h` | Min forecast home-battery SOC over next 48 h, EV load subtracted (%) |
 | `battery_min_soc_floor` | Floor used by the safety rule (= `ev_charging.reserve_percent`) |
@@ -2735,10 +2792,11 @@ the structured fields below; `reason` is kept for logs, not rendered:
 
 ### 4.6.4 Battery Decision Card
 
-Companion to 4.6.3 for the **home battery**. Surfaces both home-battery
-decisions — the discharge decision (4.2.2) and the charge-shaving decision
-(4.2.3) — that otherwise live only in the logs. Advisory display only; the
-card never actuates.
+Companion to 4.6.3 for the **home battery**. Surfaces the home-battery
+decisions that otherwise live only in the logs — the discharge decision
+(4.2.2), the charge-shaving decision and its once-daily day-mode latch (4.2.3),
+and the dynamic charge ceiling (4.2.4). Advisory display only; the card never
+actuates.
 
 `publish_battery_decision()` writes `sensor.battery_decision` every 15-min
 cycle. State string: `discharge=on|off charge=<action>`.
@@ -2757,30 +2815,37 @@ cycle. State string: `discharge=on|off charge=<action>`.
 | `charge_action` | `charging`, `deferred`, or `released` |
 | `charge_reason` | Human-readable charge-shaving reason |
 | `charge_limit_w` | Charge limit being applied (W); `0` = deferred, `null` = not managed |
-| `battery_will_be_full` | Forecast: does peak SOC reach 100% today? (`null` if forecast unavailable) |
-| `battery_full_time` | Forecast time the home battery first reaches 100% today (`HH:MM` local, else `null`) |
+| `battery_target_soc` | Topic 3 dynamic charge ceiling (%) — see 4.2.4; drives the ceiling line |
+| `charge_target_enabled` | Whether Topic 3 charge-target control is active (gates the ceiling line) |
+| `battery_target_reason` | Human-readable target explanation (e.g. `floored to 80% (survival need only 59%)`; logs/debug, not rendered) |
+| `shaving_day_mode` | Topic 5 day-mode latch: `shaving_day` or `car_day` (4.2.3) |
+| `shaving_decision_hour` | Local hour the day-mode latch is decided (default 8) |
+| `battery_will_be_full` | Forecast: does peak SOC reach the target today? (`null` if forecast unavailable) |
+| `battery_full_time` | Forecast time the home battery first reaches the target today (`HH:MM` local, else `null`) |
 | `battery_peak_soc` | Forecast peak home-battery SOC today (%) |
 
 The card builds plain sentences from the structured attributes (it does
 **not** print the raw `*_reason` strings — those stay in the logs). It also
 reads `sensor.surplus_power` so it can say "idle" when there is no sun. The
-last three attributes come from `will_battery_hit_full()` (today's
-`with_strategy` SOC forecast) and are published independently of EV state, so
-the card can show "Full by HH:MM" even with no car plugged in.
+`battery_will_be_full` / `battery_full_time` / `battery_peak_soc` attributes
+come from `will_battery_hit_full()` (today's `with_strategy` SOC forecast,
+against the dynamic target) and are published independently of EV state, so the
+card can show "Reaches N% by HH:MM" even with no car plugged in.
 
 **Card layout — live examples (Balanced, English):**
 
-Use case B, deferring to shave the peak:
+Shaving day, deferring to clip the midday export peak:
 ```
 🔋  Home battery 55%
-    Saving room for the midday peak
+    Shaving day · holding capacity for the midday export peak
+    Ceiling 80% · longevity + shaving headroom
     Powers the house when needed
 ```
-Use case A, car charging (battery charges greedily, discharge reserved for car):
+Car day, car charging (battery charges greedily, discharge reserved for car):
 ```
 🔋  Home battery 82%
     Charging from solar
-    Full by 12:30
+    Reaches 80% by 12:30
     Reserved for the car
 ```
 Evening, holding for the expensive hours:
@@ -2795,10 +2860,13 @@ Evening, holding for the expensive hours:
 | Field | Value | Phrase |
 |-------|-------|--------|
 | `battery_soc` | ≥ 100 + surplus | Full — surplus exported (else line omitted) |
-| `charge_action` | `deferred` | Saving room for the midday peak |
-| `charge_action` | `charging`/`released` + surplus | Charging from solar (+ "(peak)" if charging) |
+| `charge_action` | `deferred` + `shaving_day` | Shaving day · holding capacity for the midday export peak |
+| `charge_action` | `deferred` + `car_day` | Saving room for the midday peak |
+| `charge_action` | `charging` + `shaving_day` | Shaving day · charging from the export peak |
+| `charge_action` | `charging`/`released` + surplus (car day) | Charging from solar |
 | `charge_action` | released + no surplus | Idle — no solar surplus |
-| `battery_will_be_full` | true (+ SOC < 100) | Full by `battery_full_time` |
+| `charge_target_enabled` | true (+ SOC < 100) | Ceiling `battery_target_soc`% · longevity + shaving headroom (or `Ceiling 100% · calibration charge`) |
+| `battery_will_be_full` | true (+ SOC < 100) | Reaches `battery_target_soc`% by `battery_full_time` (or `Full by …` when target = 100) |
 | `battery_will_be_full` | false (+ peak > SOC, surplus) | Peaks at ~`battery_peak_soc`% today |
 | `discharge_blocked_by_ev` | true | Reserved for the car |
 | `discharge_blocked_by_protection` | true | Holding charge for tonight |
@@ -2818,6 +2886,14 @@ label: >-
   const a = entity.attributes;
   const soc = a.battery_soc != null ? Math.round(a.battery_soc) : '?';
   const action = a.charge_action || '';
+  // Topic 5 day-mode latch (decided once at 08:00). Falls back to the use-case
+  // flag (A = car day, B = shaving day) when the attribute is absent.
+  const useCase = a.charge_use_case || '';
+  const dayMode = a.shaving_day_mode || (useCase === 'B' ? 'shaving_day' : 'car_day');
+  const shaveDay = dayMode === 'shaving_day';
+  // Topic 3 dynamic charge ceiling (longevity target; 100 = calibration).
+  const target = a.battery_target_soc != null ? Math.round(a.battery_target_soc) : null;
+  const tEnabled = a.charge_target_enabled;
   const byEv = a.discharge_blocked_by_ev;
   const byProt = a.discharge_blocked_by_protection;
   const disAllowed = a.discharge_allowed;
@@ -2829,15 +2905,33 @@ label: >-
   if (sp && sp.state && !isNaN(parseFloat(sp.state))) { surplus = parseFloat(sp.state); }
   const hasSun = surplus != null && surplus >= 100;
   let lines = [];
-  if (soc !== '?' && soc >= 100) { if (hasSun) { lines.push('Full — surplus exported'); } }
-  else if (action === 'deferred') { lines.push('Saving room for the midday peak'); }
-  else if (!hasSun) { lines.push('Idle — no solar surplus'); }
-  else if (action === 'charging') { lines.push('Charging from solar (peak)'); }
-  else { lines.push('Charging from solar'); }
-  if (soc !== '?' && soc < 100) {
-    if (willFull === true && fullTime) { lines.push('Full by ' + fullTime); }
-    else if (willFull === false && peak != null && peak >= soc + 1 && hasSun) { lines.push('Peaks at ~' + peak + '% today'); }
+  // Topics 5 + 3 — why the battery is (not) charging right now
+  if (soc !== '?' && soc >= 100) {
+    if (hasSun) { lines.push('Full — surplus exported'); }
+  } else if (action === 'deferred') {
+    if (shaveDay) { lines.push('Shaving day · holding capacity for the midday export peak'); }
+    else { lines.push('Saving room for the midday peak'); }
+  } else if (!hasSun) {
+    lines.push('Idle — no solar surplus');
+  } else if (action === 'charging') {
+    lines.push(shaveDay ? 'Shaving day · charging from the export peak' : 'Charging from solar');
+  } else {
+    lines.push('Charging from solar');
   }
+  // Topic 3 — dynamic charge ceiling
+  if (tEnabled && target != null && soc !== '?' && soc < 100) {
+    if (target >= 100) { lines.push('Ceiling 100% · calibration charge'); }
+    else { lines.push('Ceiling ' + target + '% · longevity + shaving headroom'); }
+  }
+  // Fill / peak forecast
+  if (soc !== '?' && soc < 100) {
+    if (willFull === true && fullTime) {
+      lines.push((target != null && target < 100 ? 'Reaches ' + target + '% by ' : 'Full by ') + fullTime);
+    } else if (willFull === false && peak != null && peak >= soc + 1 && hasSun) {
+      lines.push('Peaks at ~' + peak + '% today');
+    }
+  }
+  // Topic 4 — discharge strategy
   if (byEv) { lines.push('Reserved for the car'); }
   else if (byProt) { lines.push('Holding charge for tonight'); }
   else if (disAllowed) { lines.push('Powers the house when needed'); }
@@ -4040,7 +4134,7 @@ See Section 4.3.8 for adaptive polling logic.
 
 **Changelog:**
 
-- v2.66: **Exposed Topic 3/5 state as HA sensor attributes for the dashboard (no behaviour change).** `sensor.battery_decision` now publishes `battery_target_soc`, `charge_target_enabled`, `battery_target_reason` (Topic 3 charge ceiling, §4.2.4) and `shaving_day_mode` + `shaving_decision_hour` (Topic 5 day-mode latch, §4.2.3); `sensor.ev_target_power` also gains `shaving_day_mode`. These surface the once-daily car-day/shaving-day decision and the dynamic charge target on the Lovelace energy-manager cards. (1.8.34 -> 1.8.35)
+- v2.66: **Exposed Topic 3/5 state as HA sensor attributes for the dashboard, and synced the card docs (Sections 4.6.3, 4.6.4).** `sensor.battery_decision` now publishes `battery_target_soc`, `charge_target_enabled`, `battery_target_reason` (Topic 3 charge ceiling, §4.2.4) and `shaving_day_mode` + `shaving_decision_hour` (Topic 5 day-mode latch, §4.2.3); `sensor.ev_target_power` also gains `shaving_day_mode`. The Lovelace cards now show the once-daily car-day/shaving-day context line and the dynamic charge ceiling. The FSD card YAML, attribute tables, examples, and status mappings were brought in sync with the deployed cards — including the EV card's forecast-based ETA line (`car_target_time` / `sensor.smart_charging_max_last_known`) and step line (`ev_step_offset`), which the doc had not previously reflected. No control-behaviour change (advisory display only). (1.8.34 -> 1.8.35)
 
 - v2.65: **Topic 3 charge target — survival trough is now forward-looking (Section 4.2.4).** `compute_charge_target` measured `min_soc` over the whole trajectory including the current SOC, so a battery currently below `no_buy_floor_percent` (normal after the overnight discharge) made `min_soc(100) < reserve` trivially true → spurious "deficit needs full battery" → 100 % target every low-SOC morning, defeating the longevity target/80 % floor. Fixed: the trough is measured only from **today's charging-window end** — the last interval today (searched back from local 23:59) where PV > load (the daily peak / start of overnight discharge); if no surplus remains today, the anchor is now. The deficit-→100 % result now reflects a genuine forward shortfall. New tests: low-current-SOC sunny day (no longer 100 %), genuine forward deficit (still 100 %). (1.8.33 -> 1.8.34)
 
