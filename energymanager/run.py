@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.34"
+__version__ = "1.8.35"
 
 import json
 import logging
@@ -217,6 +217,8 @@ class EnergyManager:
         # Enforced in software (charge limit 0 at/above target) because the
         # inverter's native max-SOC entity only accepts 90-100%.
         self._battery_target_soc: float = 100.0
+        # Human-readable explanation of the current target (published to HA).
+        self._charge_target_reason: str = ""
 
         # Sensor entities for appliance signal calculation
         sensors_opts = options.get("sensors", {})
@@ -1029,6 +1031,12 @@ class EnergyManager:
                 "charge_action": self._charge_action,
                 "charge_reason": self._charge_reason,
                 "charge_limit_w": charge_limit_w,
+                # Charge ceiling (Topic 3, FSD 4.2.4) + day-mode latch (Topic 5, FSD 4.2.3)
+                "battery_target_soc": round(self._battery_target_soc),
+                "charge_target_enabled": self.charge_target_enabled,
+                "battery_target_reason": self._charge_target_reason,
+                "shaving_day_mode": self._shaving_day_mode,
+                "shaving_decision_hour": self.shaving_decision_hour,
                 # Forecast — when does the home battery reach 100% today
                 "battery_will_be_full": battery_will_be_full,
                 "battery_full_time": battery_full_time,
@@ -1129,9 +1137,11 @@ class EnergyManager:
                     forecast_fresh=self._forecast_fresh,
                 )
                 self._battery_target_soc = target_soc
+                self._charge_target_reason = target_reason
                 logger.info(f"Battery charge target: {target_soc:.0f}% ({target_reason})")
             else:
                 self._battery_target_soc = 100.0
+                self._charge_target_reason = "charge target disabled"
 
             # Discharge decision (Topic 4). The SOC forecast it produces
             # (with_strategy) is the NATURAL charge-to-100 trajectory — the Topic
@@ -1737,6 +1747,7 @@ class EnergyManager:
                     "battery_will_be_full": battery_will_be_full,
                     "battery_full_time": battery_full_time,
                     "battery_target_soc": self._battery_target_soc,
+                    "shaving_day_mode": self._shaving_day_mode,
                     "car_target_time": self.ev_soc_forecast_full_time,
                     "car_target_soc": self.ev_soc_forecast_target_soc,
                     "ev_safe": self._ev_safe,
