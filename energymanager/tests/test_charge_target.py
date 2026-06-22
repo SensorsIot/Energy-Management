@@ -73,14 +73,14 @@ class TestComputeChargeTarget:
         target, _ = _opt().compute_charge_target(90, f, NOW, **common)
         assert target == 40.0
 
-    def test_floor_80_keeps_headroom(self) -> None:
-        """Production floor (80%): an abundant day whose survival need is low
-        still charges to 80% — keeps shaving headroom, LFP-safe."""
+    def test_floor_90_keeps_headroom(self) -> None:
+        """Production floor (90%): an abundant day whose survival need is low
+        still charges to 90% — banks more for the car/house, LFP-safe."""
         f = _fc(192, [4000], [300])  # survival need ~reserve
-        common = {**COMMON, "min_target": 80.0}
-        target, reason = _opt().compute_charge_target(90, f, NOW, **common)
-        assert target == 80.0
-        assert "floored to 80%" in reason
+        common = {**COMMON, "min_target": 90.0}
+        target, reason = _opt().compute_charge_target(70, f, NOW, **common)
+        assert target == 90.0
+        assert "floored to 90%" in reason
 
     def test_low_current_soc_does_not_force_full(self) -> None:
         """A battery currently below reserve (drained overnight) must NOT force a

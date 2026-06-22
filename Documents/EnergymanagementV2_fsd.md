@@ -1641,7 +1641,7 @@ Priority between topics matters only when two of them act on the same control en
 - **Car day** — car below target, absent, or unknown at the decision hour: the EV owns the surplus, the home battery charges greedily, **T5 does not run**.
 - **Shaving day** — car connected and at/above target at the decision hour: **T5 runs**, holding the battery's headroom to shave the midday export peak.
 
-The mode does not flip when the car later reaches its target in the afternoon (the peak is past by then). When it is a shaving day, T5 still applies its own B0 abundant-day gate per cycle.
+**Departure trigger:** a shaving day downgrades to a car day (one-way) the moment the car disconnects or drops below target — see §4.2.3. The mode does **not** flip *into* shaving if the car merely reaches its target later in the afternoon (the peak is past by then). When it is a shaving day, T5 still applies its own B0 abundant-day gate per cycle.
 
 ### Control vs. advisory
 
@@ -1904,9 +1904,20 @@ decided **once**, at a fixed local hour (`shaving_decision_hour`, default
 | below target, absent (or OCPP down), or car data unavailable | **car day** |
 
 Before the decision hour the mode defaults to **car day**. The snapshot is
-taken once (the first 15-min tick at/after the decision hour) and then frozen
-— it does **not** re-flip if the car later reaches its target in the
-afternoon (by then the midday peak is past, so shaving would only cost fill).
+taken once (the first 15-min tick at/after the decision hour) and then held,
+with **one one-way downgrade — the departure trigger** (`_car_departed()`): a
+shaving day reverts to a **car day** the moment its premise breaks — the car
+**disconnects** (`car_ready = off`) **or drops below target** ("no longer
+full", `smart_battery_last_known < smart_charging_max_last_known`). It then
+stays a car day for the rest of the day and never re-arms shaving (a later
+full reconnect does not restore it). Rationale: a car that was full at 08:00
+but then leaves will almost always return needing energy, so the battery
+should stop holding headroom for an export peak whose surplus the returning
+car will want — it charges greedily instead. A connected car with unknown
+SOC/target is **not** treated as departed (the cached last-known SOC is held,
+§7.7, so a stale read keeps the shaving day rather than cancelling on missing
+data). The mode does **not** re-flip *into* shaving if the car merely reaches
+its target later in the afternoon (the midday peak is past by then).
 
 The two top-level use cases follow from the day mode (`_charge_gate_active()`
 returns true only on a shaving day):
@@ -2068,7 +2079,7 @@ Limits how high the home battery charges, sparing the LFP from high-SOC dwell. A
 | **2** | **Calibration charge** | > `charge_target_full_interval_days` (7) since SOC last reached >= 99 % (rolling — restarts at each >= 99 %) | `battery_target_soc` = 100 % |
 | **3** | **Fail-safe** | forecast missing / stale | `battery_target_soc` = 100 % |
 
-**`battery_target_soc`** = the lowest SOC ceiling C in [`no_buy_floor_percent`, 100] such that simulating the next `charge_target_horizon_h` (48 h) at worst-case PV (p10) / load (p50), capped at C, keeps the home-battery minimum >= `no_buy_floor_percent`, plus `charge_target_margin`, then **floored to `charge_target_min`** (`BatteryOptimizer.compute_charge_target`). The minimum is taken only from the end of today's charging window onward — the **last interval today (searched back from local 23:59) where PV exceeds load**, i.e. the battery's daily peak / start of overnight discharge. This excludes today's transient pre-charge low SOC, so a battery currently below the floor (e.g. drained overnight) does not by itself force a 100 % target; the deficit-→100 % result reflects a genuine forward shortfall. If no surplus remains today, the anchor is now. The floor means the battery always charges to at least `charge_target_min` (default 80 %) even when the survival need is lower — LFP-safe and keeping headroom available for shaving. The survival math itself still uses `no_buy_floor_percent`; the floor only raises the final target.
+**`battery_target_soc`** = the lowest SOC ceiling C in [`no_buy_floor_percent`, 100] such that simulating the next `charge_target_horizon_h` (48 h) at worst-case PV (p10) / load (p50), capped at C, keeps the home-battery minimum >= `no_buy_floor_percent`, plus `charge_target_margin`, then **floored to `charge_target_min`** (`BatteryOptimizer.compute_charge_target`). The minimum is taken only from the end of today's charging window onward — the **last interval today (searched back from local 23:59) where PV exceeds load**, i.e. the battery's daily peak / start of overnight discharge. This excludes today's transient pre-charge low SOC, so a battery currently below the floor (e.g. drained overnight) does not by itself force a 100 % target; the deficit-→100 % result reflects a genuine forward shortfall. If no surplus remains today, the anchor is now. The floor means the battery always charges to at least `charge_target_min` (default 90 %) even when the survival need is lower — LFP-safe and banking more headroom for the car/house instead of exporting it. The survival math itself still uses `no_buy_floor_percent`; the floor only raises the final target.
 
 `battery_target_soc` is enforced **only** by the charge control. It is **not** threaded into the discharge/EV SOC forecast -- those read the natural charge-to-100 trajectory (the EV's wallbox-off question, Section 4.3.6). Because the target is sized on worst-case p10 PV, the held battery still stays >= `no_buy_floor_percent` (above the EV floor and the discharge reserve), so the natural forecast the other topics read remains safe.
 
@@ -2082,9 +2093,9 @@ The "last full" timestamp is read from SOC history (InfluxDB: most recent point 
 | `battery.charge_target_margin` | `10` | Extra % of capacity above the worst-case need |
 | `battery.charge_target_horizon_h` | `48` | Survival look-ahead |
 | `battery.charge_target_full_interval_days` | `7` | Days after the last >= 99 % SOC to force a 100 % calibration charge |
-| `battery.charge_target_min` | `80` | Floor on the target — always charge to at least this SOC, even when the survival need is lower |
+| `battery.charge_target_min` | `90` | Floor on the target — always charge to at least this SOC, even when the survival need is lower |
 
-Survival floor = `battery.no_buy_floor_percent` (shared, 20 %); target floor = `battery.charge_target_min` (80 %).
+Survival floor = `battery.no_buy_floor_percent` (shared, 20 %); target floor = `battery.charge_target_min` (90 %).
 
 #### Test Cases
 
@@ -4133,6 +4144,8 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.67: **Topic 5 departure trigger + 90 % charge floor (Sections 4.0, 4.2.3, 4.2.4).** A shaving day now downgrades **one-way to a car day** the moment its premise breaks — the car disconnects (`car_ready = off`) **or** drops below target ("no longer full") — via `_car_departed()` checked every tick after the 08:00 latch. Rationale: a car that was full at 08:00 but then leaves almost always returns needing energy, so the battery should stop *deferring* its fill for an export peak (a bet the midday peak materialises) and instead charge **greedily and immediately**, banking the morning surplus with certainty rather than selling it. One-way: a later full reconnect does not re-arm shaving; an unknown SOC while still connected is not treated as departed (the cached last-known SOC is held). Separately, the general `charge_target_min` floor is raised **80 → 90 %** so the home battery banks more headroom for the car/house before exporting (modest LFP cost). New tests: 5 departure-trigger cases in `test_charge_gate.py`; `test_floor_90_keeps_headroom`. (1.8.35 -> 1.8.36)
 
 - v2.66: **Exposed Topic 3/5 state as HA sensor attributes for the dashboard, and synced the card docs (Sections 4.6.3, 4.6.4).** `sensor.battery_decision` now publishes `battery_target_soc`, `charge_target_enabled`, `battery_target_reason` (Topic 3 charge ceiling, §4.2.4) and `shaving_day_mode` + `shaving_decision_hour` (Topic 5 day-mode latch, §4.2.3); `sensor.ev_target_power` also gains `shaving_day_mode`. The Lovelace cards now show the once-daily car-day/shaving-day context line and the dynamic charge ceiling. The FSD card YAML, attribute tables, examples, and status mappings were brought in sync with the deployed cards — including the EV card's forecast-based ETA line (`car_target_time` / `sensor.smart_charging_max_last_known`) and step line (`ev_step_offset`), which the doc had not previously reflected. No control-behaviour change (advisory display only). (1.8.34 -> 1.8.35)
 

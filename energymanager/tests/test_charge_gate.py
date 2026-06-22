@@ -126,6 +126,56 @@ class TestDayModeDecision:
         manager._update_shaving_day_mode(next_day)
         assert manager._shaving_day_mode == "shaving_day"
 
+    # --- Departure trigger (FSD 4.2.3): a shaving day downgrades to a car day
+    # the moment the car disconnects or drops below target; one-way. ---
+
+    _LATER = datetime(2026, 6, 7, 13, 0, tzinfo=UTC)  # 15:00 local, same day
+    _LATER2 = datetime(2026, 6, 7, 16, 0, tzinfo=UTC)  # 18:00 local, same day
+
+    def test_departure_disconnect_flips_to_car_day(self, manager) -> None:
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "shaving_day"
+        # Car drives off → revert to car day for the rest of the day.
+        _wire(manager, car_ready="off")
+        manager._update_shaving_day_mode(self._LATER)
+        assert manager._shaving_day_mode == "car_day"
+        assert manager._charge_gate_active() is False
+
+    def test_departure_below_target_flips_to_car_day(self, manager) -> None:
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        manager._update_shaving_day_mode(_AT_DECISION)
+        # Still plugged but no longer full (preconditioning / returned depleted).
+        _wire(manager, car_ready="on", car_soc=55.0, target=80.0)
+        manager._update_shaving_day_mode(self._LATER)
+        assert manager._shaving_day_mode == "car_day"
+
+    def test_departure_is_one_way(self, manager) -> None:
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        manager._update_shaving_day_mode(_AT_DECISION)
+        _wire(manager, car_ready="off")
+        manager._update_shaving_day_mode(self._LATER)
+        assert manager._shaving_day_mode == "car_day"
+        # Car returns full later → does NOT re-arm shaving.
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        manager._update_shaving_day_mode(self._LATER2)
+        assert manager._shaving_day_mode == "car_day"
+
+    def test_shaving_day_holds_while_car_stays_full(self, manager) -> None:
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        manager._update_shaving_day_mode(_AT_DECISION)
+        manager._update_shaving_day_mode(self._LATER)
+        assert manager._shaving_day_mode == "shaving_day"
+
+    def test_stale_car_soc_is_not_a_departure(self, manager) -> None:
+        # Connected & full at decision → shaving day.
+        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        manager._update_shaving_day_mode(_AT_DECISION)
+        # Smart integration goes stale: still connected but SOC unknown.
+        _wire(manager, car_ready="on", car_soc=None, target=80.0)
+        manager._update_shaving_day_mode(self._LATER)
+        assert manager._shaving_day_mode == "shaving_day"  # stale ≠ departed
+
 
 def _forecast(now_utc: datetime, nets: list[float]) -> pd.DataFrame:
     """Build a 15-min net_energy_wh forecast starting at now_utc (UTC)."""

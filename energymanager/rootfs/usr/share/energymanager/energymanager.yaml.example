@@ -73,7 +73,7 @@ battery:
   charge_target_enabled: false   # Topic 3 dynamic charge target — off pending validation (FSD 4.2.4)
   charge_target_margin: 10            # extra % of capacity above the worst-case need
   charge_target_horizon_h: 48         # survival look-ahead (worst-case p10 PV / p50 load)
-  charge_target_min: 80               # floor on the target — always charge to >= this SOC (LFP-safe, keeps shaving headroom)
+  charge_target_min: 90               # floor on the target — always charge to >= this SOC (LFP-safe; banks more for the car/house)
   charge_target_full_interval_days: 7 # force a 100% calibration charge this long after the last >=99% (LFP BMS)
   # Dashboard sensor that surfaces the combined battery reasoning
   # (discharge + charge-shaving). Advisory only. See FSD 4.6.4.
