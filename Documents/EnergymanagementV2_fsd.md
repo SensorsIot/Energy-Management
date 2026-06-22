@@ -1911,9 +1911,14 @@ shaving day reverts to a **car day** the moment its premise breaks — the car
 full", `smart_battery_last_known < smart_charging_max_last_known`). It then
 stays a car day for the rest of the day and never re-arms shaving (a later
 full reconnect does not restore it). Rationale: a car that was full at 08:00
-but then leaves will almost always return needing energy, so the battery
-should stop holding headroom for an export peak whose surplus the returning
-car will want — it charges greedily instead. A connected car with unknown
+but then leaves will almost always return needing energy. Continuing to shave
+**exports the morning surplus** (sold) and bets on refilling the battery from
+the midday peak — but a returning depleted car then **competes for that same
+peak surplus**, so whenever the combined demand (battery headroom + the car's
+deficit) exceeds the post-morning surplus, the exported morning energy is lost
+to the car for good. Charging greedily banks that surplus into the battery
+while the car is away and nothing competes, so it is available on the car's
+return (a real energy loss, not only a forecast bet). A connected car with unknown
 SOC/target is **not** treated as departed (the cached last-known SOC is held,
 §7.7, so a stale read keeps the shaving day rather than cancelling on missing
 data). The mode does **not** re-flip *into* shaving if the car merely reaches
