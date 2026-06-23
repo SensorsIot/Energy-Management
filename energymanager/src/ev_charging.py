@@ -111,11 +111,13 @@ def build_solar_candidates(
     The "step-up" step (one level above candidate_power) draws the gap to the
     next amp step from the home battery:
 
-    - **step_up_allowed=True**: the battery is still protected from buying over
-      the next 48 h (`battery_min_soc_48h >= no_buy_floor_percent`), so bridging
-      the gap from the battery is fine. Include the step-up step.
+    - **step_up_allowed=True**: the battery is still protected — both the 48 h
+      forecast min **and** the current SOC are `>= no_buy_floor_percent` — so
+      bridging the gap from the battery is fine. Include the step-up step.
     - **step_up_allowed=False**: stay at-or-below surplus (snap-down only) so the
-      EV never pulls the home battery below the protection floor.
+      EV never pulls the home battery below the protection floor. (The current-SOC
+      condition matters because the 48 h forecast excludes the wallbox load and so
+      reads optimistically high while the car is draining the real battery.)
 
     Returns (candidates, gate_reason) where candidates is the ordered list
     passed to the home-battery safety loop.
@@ -126,7 +128,7 @@ def build_solar_candidates(
             if s > candidate_power and s >= threshold
         ]
         snap_up_step = [snap_up[0]] if snap_up else []
-        gate_reason = "protected (min48h >= floor) → step-up allowed"
+        gate_reason = "protected (SOC & min48h >= floor) → step-up allowed"
     else:
         snap_up_step = []
         gate_reason = "not protected → stay at/below surplus (preserve battery)"

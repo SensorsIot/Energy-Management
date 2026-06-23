@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.36"
+__version__ = "1.8.37"
 
 import json
 import logging
@@ -1522,11 +1522,19 @@ class EnergyManager:
                 # Step-up gate (Topic 2, FSD 4.3.7): step one amp level above
                 # surplus (draining the gap from the home battery) only while the
                 # battery is still protected from buying over 48 h
-                # (battery_min_soc_48h >= floor); otherwise stay at/below surplus.
+                # (battery_min_soc_48h >= floor) AND the *current* SOC is at/above
+                # the floor — the 48 h forecast excludes the wallbox load, so it
+                # reads optimistically high while the car drains the real battery;
+                # the instantaneous-SOC condition stops step-up from draining the
+                # home battery below the no-buy floor. Otherwise stay at/below
+                # surplus.
                 candidates, snap_up_gate_reason = build_solar_candidates(
                     candidate_power=candidate_power,
                     threshold=threshold,
-                    step_up_allowed=self._battery_min_soc_forecast >= self.no_buy_floor_percent,
+                    step_up_allowed=(
+                        self._battery_min_soc_forecast >= self.no_buy_floor_percent
+                        and battery_soc >= self.no_buy_floor_percent
+                    ),
                 )
 
                 ev_charging_power_w = 0.0

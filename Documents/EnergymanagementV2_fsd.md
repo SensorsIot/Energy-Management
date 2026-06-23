@@ -2336,13 +2336,13 @@ The EV can sit either side of the live surplus:
 |---|------|-----------|--------|
 | **1** | **Available steps** | phase config (1-phase / 3-phase) | the discrete amp ladder; the 3680-4140 W phase gap is a dead zone. *Plumbing -- not a decision.* |
 | **2** | **Default: step at/below surplus** | always | the **highest step <= surplus** (`PV - house_load`). Remainder charges the home battery or is exported. Never pulls from the battery. |
-| **3** | **Step up** | home battery **full** **OR** `battery_min_soc_48h` >= `battery.no_buy_floor_percent` | use the **next step above surplus**; the home battery covers the small gap. |
+| **3** | **Step up** | home battery **full** **OR** (`battery_min_soc_48h` >= `battery.no_buy_floor_percent` **AND** current SOC >= `battery.no_buy_floor_percent`) | use the **next step above surplus**; the home battery covers the small gap. |
 
 Power = Rule 2's step, bumped one step by Rule 3 when allowed. We never match surplus exactly -- Rule 2 always lands on a discrete step *under* surplus; Rule 3 optionally bumps to the one *over*.
 
 **Notes**
 
-- Rule 3 uses the same shared check and bar as Topic 1 Rule 4 (`no_buy_floor_percent`).
+- Rule 3 uses the same shared check and bar as Topic 1 Rule 4 (`no_buy_floor_percent`), **plus** a current-SOC guard at the same bar. The `battery_min_soc_48h` forecast excludes the wallbox load, so it reads optimistically high while the car is actively draining the real battery (observed 2026-06-23: SOC 12 %, forecast 29 %, step-up still firing). Requiring the **instantaneous** SOC >= `no_buy_floor_percent` stops step-up from deliberately draining the home battery below the floor. (Topic 1 Rule 4 — whether the car may charge *at all*, at/below surplus — is unchanged and stays forecast-based.)
 - The chosen step's offset from the surplus-snapped level is published as the `ev_step_offset` attribute on `sensor.ev_target_power` (+n stepped up / -n stepped down / null when not solar-charging).
 
 #### `will_battery_hit_full()` -- dashboard diagnostic
@@ -4199,6 +4199,8 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.69: **Step-up (Topic 2, Section 4.3.7) now also requires the *current* SOC >= no-buy floor.** The step-up gate keyed only off `battery_min_soc_48h`, which excludes the wallbox load and so reads optimistically high while the car drains the real battery — observed live 2026-06-23 with SOC at 12 % but the forecast at 29 %, still firing "snap-up 4354→5117W" and draining the home battery toward ~9 %. Added an instantaneous-SOC condition (`battery_soc >= no_buy_floor_percent`) so step-up no longer deliberately drains the battery below the floor. Topic 1 Rule 4 (may the car charge at all, at/below surplus) is unchanged — by decision it stays forecast-based. New tests: step-up suppressed below floor / allowed at floor. (1.8.36 -> 1.8.37)
 
 - v2.68: **Fixed `battery_charge_discharge_power` sign convention + dashboard card flow display (Sections 1.9, 4.6.3, 4.6.4).** The canonical §1.9 table (and two other spots) had the battery sign **inverted** — verified live by energy balance (deficit day, low SOC, `bp = −724 W` while the car drew 4.3 kW → battery discharging): the true convention is **`+` = charge (from PV), `−` = discharge (to house/car)**. No control impact (the raw sensor is used by nothing in code — display only). Card fixes: the EV card's home-battery line now labels `−` as "adding" (discharging to help the car) and `+` as "charging"; the battery card's **line 1 now reflects the live flow** (`bp`) instead of `charge_action` — "released" means charging is *allowed*, not that it is happening, so on a car day with the car drawing surplus it correctly shows "Powering the house · N kW" rather than the old wrong "Charging from solar"; and the charge-ceiling line drops "shaving headroom" on a car day. Display refinements: the EV card's home-battery flow + amp-step are now **one combined line** ("Home battery 16% · adding 707 W (step +1, covers the gap)"); the battery card says "**Helping charge the car**" instead of "Powering the house" when discharging while the car draws (`wallbox_power` > 100); the ceiling line reads "**Longevity cap N%**" (was "Ceiling N% · longevity cap"). Layout pass: cards are left-aligned blocks (`text-align: left`); the EV card shows the **day-mode line first** (most important context), and the power is a **single line** showing two components that sum to the total — "5.1 kW (4.8 kW surplus + 305 W battery)": battery = live contribution-to-car, surplus = remainder. Grid is never shown (a brief cloud-transient import is folded into surplus). Replaces the separate SOC/step home-battery line. The battery card's "Helping charge the car · N kW" now uses the **same battery-to-car value** as the EV card (was the total discharge), so the two cards agree. Dashboard/docs only; no version bump. (deployed live via lovelace/config/save)
 

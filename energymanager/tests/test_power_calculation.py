@@ -21,6 +21,7 @@ def compute_ev_charging_power(
     min_power_w: float = 3962,
     max_power_w: float = 7624,
     battery_soc: float = 50.0,
+    no_buy_floor: float = 20.0,
     battery_check_fn: Callable[[float], bool] | None = None,
 ) -> tuple[float, str]:
     """Replicate the FSD 4.6 power calculation from run.py.
@@ -59,10 +60,13 @@ def compute_ev_charging_power(
             candidate_power = snap_to_power_step(
                 surplus_power_w, min_power_w, max_power_w
             )
+            # Step-up (draining the gap from the home battery) only when the
+            # current SOC is at/above the no-buy floor (FSD 4.3.7).
+            step_up_allowed = battery_soc >= no_buy_floor
             snap_up = [
                 s for s in POWER_STEPS_3P
                 if s > candidate_power and s >= threshold
-            ]
+            ] if step_up_allowed else []
             snap_up_step = [snap_up[0]] if snap_up else []
             snap_down = [
                 s for s in reversed(POWER_STEPS_3P)
@@ -302,6 +306,30 @@ class TestSnapUp:
         )
         assert power == 7624  # already at max, no higher step
         assert source == "solar_surplus"
+
+    def test_no_step_up_below_floor(self) -> None:
+        """SOC below the no-buy floor → step-up suppressed (don't drain the
+        battery to push the car up), even if the per-step safety gate passes."""
+        power, source = compute_ev_charging_power(
+            ev_mode="solar",
+            surplus_power_w=5200,
+            battery_soc=15.0,            # below the 20% floor
+            battery_check_fn=lambda _: True,
+            threshold=1400,
+        )
+        assert power == 5117  # snap-down only — no snap-up to 5727
+        assert source == "solar_surplus"
+
+    def test_step_up_at_floor(self) -> None:
+        """SOC exactly at the floor → step-up still allowed."""
+        power, source = compute_ev_charging_power(
+            ev_mode="solar",
+            surplus_power_w=5200,
+            battery_soc=20.0,            # at the floor
+            battery_check_fn=lambda _: True,
+            threshold=1400,
+        )
+        assert power == 5727  # snap-up allowed
 
 
 class TestBatteryFullSurplusPath:
