@@ -202,7 +202,7 @@ Without correction: -4300 W  (SUN2000 would think grid is exporting)
 
 | Entity ID | Description | Controller Use |
 |-----------|-------------|---------|
-| `sensor.battery_charge_discharge_power` | Charge/discharge power (+/-) | **Battery flow** |
+| `sensor.battery_charge_discharge_power` | Charge/discharge power (+ charge / − discharge) | **Battery flow** |
 
 **Grid:**
 
@@ -333,7 +333,7 @@ Grid Power = PV Production - Load + Battery Discharge - Battery Charge
 Where:
   PV Production = sensor.inverter_active_power + sensor.enphase_energy_power
   Load = sensor.house_load_power (Shelly 3EM 3-phase sum)
-  Battery = sensor.battery_charge_discharge_power (+ = discharge, - = charge)
+  Battery = sensor.battery_charge_discharge_power (+ = charge, - = discharge)
 ```
 
 ### 1.8.6 HA Energy Dashboard Configuration
@@ -393,7 +393,7 @@ All power values follow a consistent sign convention. The canonical reference ta
 | Quantity | Entity | Positive (+) | Negative (−) | Typical range |
 |----------|--------|-------------|--------------|---------------|
 | Grid power | `sensor.power_meter_active_power` | Export (to grid) | Import (from grid) | −11 000 … +11 000 W |
-| Battery power | `sensor.battery_charge_discharge_power` | Discharge (to house) | Charge (from PV/grid) | −5 000 … +5 000 W |
+| Battery power | `sensor.battery_charge_discharge_power` | Charge (from PV/grid) | Discharge (to house) | −5 000 … +5 000 W |
 | PV production | `sensor.solar_pv_total_ac_power` | Generation | *(never negative)* | 0 … 12 000 W |
 | House load | `sensor.house_load_power` | Consumption | *(never negative)* | 0 … 10 000 W |
 | Wallbox power | `sensor.wallbox_power` | Consumption | *(never negative)* | 0 … 11 000 W |
@@ -2742,11 +2742,11 @@ label: >-
   } else if (power > 0) {
     title = '🚗  Charging the car';
     lines.push(kw(power) + (rule === 'battery_full' ? ' (home battery full)' : ' from solar surplus'));
-    // Home-battery flow sign (FSD §1.9): +discharge (to house) / -charge (from PV).
+    // Home-battery flow sign (verified live): + = charge (from PV), - = discharge (to house/car).
     const bp = num('sensor.battery_charge_discharge_power');
     let battLine = 'Home battery ' + soc + '%, protected';
-    if (bp != null && bp > 50) { battLine = 'Home battery ' + soc + '%, adding ' + kw(bp); }
-    else if (bp != null && bp < -50) { battLine = 'Home battery ' + soc + '%, charging ' + kw(-bp); }
+    if (bp != null && bp > 50) { battLine = 'Home battery ' + soc + '%, charging ' + kw(bp); }
+    else if (bp != null && bp < -50) { battLine = 'Home battery ' + soc + '%, adding ' + kw(-bp); }
     lines.push(battLine);
     const st = stepLine();
     if (st) lines.push(st);
@@ -2843,7 +2843,11 @@ cycle. State string: `discharge=on|off charge=<action>`.
 
 The card builds plain sentences from the structured attributes (it does
 **not** print the raw `*_reason` strings — those stay in the logs). It also
-reads `sensor.surplus_power` so it can say "idle" when there is no sun. The
+reads `sensor.surplus_power` (to say "idle" when there is no sun) and
+`sensor.battery_charge_discharge_power` (+ charge / − discharge) for the **live
+flow** — line 1 shows what the battery is actually doing, because `charge_action`
+= `released` only means charging is *allowed*, not that it is happening (on a
+car day the battery often discharges to support the car). The
 `battery_will_be_full` / `battery_full_time` / `battery_peak_soc` attributes
 come from `will_battery_hit_full()` (today's `with_strategy` SOC forecast,
 against the dynamic target) and are published independently of EV state, so the
@@ -2851,19 +2855,19 @@ card can show "Reaches N% by HH:MM" even with no car plugged in.
 
 **Card layout — live examples (Balanced, English):**
 
+Car day, battery discharging to help the car (low SOC, step-up):
+```
+🔋  Home battery 19%
+    Powering the house · 724 W
+    Ceiling 90% · longevity cap
+    Reaches 90% by 13:30
+```
 Shaving day, deferring to clip the midday export peak:
 ```
 🔋  Home battery 55%
-    Shaving day · holding capacity for the midday export peak
-    Ceiling 80% · longevity + shaving headroom
+    Shaving day · holding for the midday peak
+    Ceiling 90% · longevity cap + shaving headroom
     Powers the house when needed
-```
-Car day, car charging (battery charges greedily, discharge reserved for car):
-```
-🔋  Home battery 82%
-    Charging from solar
-    Reaches 80% by 12:30
-    Reserved for the car
 ```
 Evening, holding for the expensive hours:
 ```
@@ -2872,22 +2876,26 @@ Evening, holding for the expensive hours:
     Holding charge for tonight
 ```
 
-**Status mapping** (technical → human):
+**Status mapping** (technical → human). **Line 1 reflects the *live* battery
+flow** (`sensor.battery_charge_discharge_power`, + charge / − discharge),
+**not** `charge_action` — "released" means charging is *allowed*, not that the
+battery is charging (on a car day it often discharges to support the car):
 
 | Field | Value | Phrase |
 |-------|-------|--------|
-| `battery_soc` | ≥ 100 + surplus | Full — surplus exported (else line omitted) |
-| `charge_action` | `deferred` + `shaving_day` | Shaving day · holding capacity for the midday export peak |
-| `charge_action` | `deferred` + `car_day` | Saving room for the midday peak |
-| `charge_action` | `charging` + `shaving_day` | Shaving day · charging from the export peak |
-| `charge_action` | `charging`/`released` + surplus (car day) | Charging from solar |
-| `charge_action` | released + no surplus | Idle — no solar surplus |
-| `charge_target_enabled` | true (+ SOC < 100) | Ceiling `battery_target_soc`% · longevity + shaving headroom (or `Ceiling 100% · calibration charge`) |
+| `bp` (flow) | discharging (< −50 W) | Powering the house · `\|bp\|` |
+| `bp` (flow) | charging (> 50 W), car day | Charging from solar · `bp` |
+| `bp` (flow) | charging (> 50 W), shaving day | Shaving the peak · charging `bp` |
+| `battery_soc` ≥ 100 | charging + surplus | Full — surplus exported |
+| `charge_action` | `deferred` + `shaving_day`, idle | Shaving day · holding for the midday peak |
+| `charge_action` | `deferred` + `car_day`, idle | Saving room for the midday peak |
+| flow idle | no surplus | Idle — no solar surplus |
+| `charge_target_enabled` | true (+ SOC < 100) | Ceiling `battery_target_soc`% · longevity cap (`+ shaving headroom` only on a shaving day; `Ceiling 100% · calibration charge` at 100) |
 | `battery_will_be_full` | true (+ SOC < 100) | Reaches `battery_target_soc`% by `battery_full_time` (or `Full by …` when target = 100) |
 | `battery_will_be_full` | false (+ peak > SOC, surplus) | Peaks at ~`battery_peak_soc`% today |
 | `discharge_blocked_by_ev` | true | Reserved for the car |
 | `discharge_blocked_by_protection` | true | Holding charge for tonight |
-| `discharge_allowed` | true | Powers the house when needed |
+| `discharge_allowed` | true (and not already discharging) | Powers the house when needed |
 
 **Card YAML** (`custom:button-card`, `entity: sensor.battery_decision`):
 
@@ -2901,6 +2909,8 @@ show_icon: false
 label: >-
   [[[
   const a = entity.attributes;
+  const kw = (w) => (w == null ? '?' : (Math.abs(w) >= 1000 ? (w / 1000).toFixed(1) + ' kW' : Math.round(w) + ' W'));
+  const num = (id) => { const s = states[id]; return s && !isNaN(parseFloat(s.state)) ? parseFloat(s.state) : null; };
   const soc = a.battery_soc != null ? Math.round(a.battery_soc) : '?';
   const action = a.charge_action || '';
   // Topic 5 day-mode latch (decided once at 08:00). Falls back to the use-case
@@ -2917,30 +2927,38 @@ label: >-
   const willFull = a.battery_will_be_full;
   const fullTime = a.battery_full_time;
   const peak = a.battery_peak_soc;
+  // Live battery flow sign (verified): + = charge (from PV), - = discharge (to house/car).
+  const bp = num('sensor.battery_charge_discharge_power');
+  const charging = bp != null && bp > 50;
+  const discharging = bp != null && bp < -50;
   let surplus = null;
   const sp = states['sensor.surplus_power'];
   if (sp && sp.state && !isNaN(parseFloat(sp.state))) { surplus = parseFloat(sp.state); }
   const hasSun = surplus != null && surplus >= 100;
   let lines = [];
-  // Topics 5 + 3 — why the battery is (not) charging right now
+  // Line 1 — what the battery is ACTUALLY doing now (live flow beats charge_action,
+  // which only says charging is "released"/allowed, not that it is happening).
   if (soc !== '?' && soc >= 100) {
-    if (hasSun) { lines.push('Full — surplus exported'); }
+    if (charging) lines.push('Full — surplus exported');
+    else if (discharging) lines.push('Powering the house · ' + kw(-bp));
+    else lines.push('Full');
+  } else if (discharging) {
+    lines.push('Powering the house · ' + kw(-bp));
+  } else if (charging) {
+    lines.push((shaveDay ? 'Shaving the peak · charging ' : 'Charging from solar · ') + kw(bp));
   } else if (action === 'deferred') {
-    if (shaveDay) { lines.push('Shaving day · holding capacity for the midday export peak'); }
-    else { lines.push('Saving room for the midday peak'); }
+    lines.push(shaveDay ? 'Shaving day · holding for the midday peak' : 'Saving room for the midday peak');
   } else if (!hasSun) {
     lines.push('Idle — no solar surplus');
-  } else if (action === 'charging') {
-    lines.push(shaveDay ? 'Shaving day · charging from the export peak' : 'Charging from solar');
   } else {
-    lines.push('Charging from solar');
+    lines.push('Idle');
   }
-  // Topic 3 — dynamic charge ceiling
+  // Line 2 — Topic 3 charge ceiling (longevity). "Shaving headroom" only on a shaving day.
   if (tEnabled && target != null && soc !== '?' && soc < 100) {
     if (target >= 100) { lines.push('Ceiling 100% · calibration charge'); }
-    else { lines.push('Ceiling ' + target + '% · longevity + shaving headroom'); }
+    else { lines.push('Ceiling ' + target + '% · longevity cap' + (shaveDay ? ' + shaving headroom' : '')); }
   }
-  // Fill / peak forecast
+  // Line 3 — fill / peak forecast.
   if (soc !== '?' && soc < 100) {
     if (willFull === true && fullTime) {
       lines.push((target != null && target < 100 ? 'Reaches ' + target + '% by ' : 'Full by ') + fullTime);
@@ -2948,10 +2966,11 @@ label: >-
       lines.push('Peaks at ~' + peak + '% today');
     }
   }
-  // Topic 4 — discharge strategy
+  // Line 4 — Topic 4 discharge policy. Block reasons always; the generic
+  // "powers the house" only when not already shown as discharging above.
   if (byEv) { lines.push('Reserved for the car'); }
   else if (byProt) { lines.push('Holding charge for tonight'); }
-  else if (disAllowed) { lines.push('Powers the house when needed'); }
+  else if (disAllowed && !discharging) { lines.push('Powers the house when needed'); }
   let out = '<b>🔋  Home battery ' + soc + '%</b>';
   for (const l of lines) { out += '<br><span style="opacity:0.75">' + l + '</span>'; }
   return out;
@@ -4150,6 +4169,8 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.68: **Fixed `battery_charge_discharge_power` sign convention + dashboard card flow display (Sections 1.9, 4.6.3, 4.6.4).** The canonical §1.9 table (and two other spots) had the battery sign **inverted** — verified live by energy balance (deficit day, low SOC, `bp = −724 W` while the car drew 4.3 kW → battery discharging): the true convention is **`+` = charge (from PV), `−` = discharge (to house/car)**. No control impact (the raw sensor is used by nothing in code — display only). Card fixes: the EV card's home-battery line now labels `−` as "adding" (discharging to help the car) and `+` as "charging"; the battery card's **line 1 now reflects the live flow** (`bp`) instead of `charge_action` — "released" means charging is *allowed*, not that it is happening, so on a car day with the car drawing surplus it correctly shows "Powering the house · N kW" rather than the old wrong "Charging from solar"; and the charge-ceiling line drops "shaving headroom" on a car day ("Ceiling N% · longevity cap"). Dashboard/docs only; no version bump. (deployed live via lovelace/config/save)
 
 - v2.67: **Topic 5 departure trigger + 90 % charge floor (Sections 4.0, 4.2.3, 4.2.4).** A shaving day now downgrades **one-way to a car day** the moment its premise breaks — the car disconnects (`car_ready = off`) **or** drops below target ("no longer full") — via `_car_departed()` checked every tick after the 08:00 latch. Rationale: a car that was full at 08:00 but then leaves almost always returns needing energy, so the battery should stop *deferring* its fill for an export peak (a bet the midday peak materialises) and instead charge **greedily and immediately**, banking the morning surplus with certainty rather than selling it. One-way: a later full reconnect does not re-arm shaving; an unknown SOC while still connected is not treated as departed (the cached last-known SOC is held). Separately, the general `charge_target_min` floor is raised **80 → 90 %** so the home battery banks more headroom for the car/house before exporting (modest LFP cost). New tests: 5 departure-trigger cases in `test_charge_gate.py`; `test_floor_90_keeps_headroom`. (1.8.35 -> 1.8.36)
 
