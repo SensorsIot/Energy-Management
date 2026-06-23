@@ -2629,21 +2629,26 @@ plain supporting lines.
 
 **Card layout — live examples (Balanced, English):**
 
+The day-mode line is shown **first** (most important context); the home-battery
+line is just the contribution (no SOC — that is on the battery card below — and
+no amp-step detail). Lines are left-aligned blocks.
+
 ```
 🚗  Charging the car
-    4.8 kW from solar surplus
-    Home battery 82% · adding 0.5 kW (step +1, covers the gap)
-    Car reaches 100% at 17:42 (in 2h 30m)
     Car day · car has first call on the solar surplus
+    4.8 kW from solar surplus
+    Home battery adds 0.5 kW
+    Car reaches 100% at 17:42 (in 2h 30m)
 ```
 ```
 🚗  Car on hold
+    Shaving day · battery prioritises peak-clipping
     Protecting the home battery
     It would drop to 11% (keeps at least 20%)
-    Shaving day · battery prioritises peak-clipping
 ```
 ```
 🚗  Waiting for sun
+    Car day · car has first call on the solar surplus
     Solar surplus 0.8 kW — needs 3.0 kW
     Car reaches 80% tomorrow at 11:15
 ```
@@ -2653,14 +2658,14 @@ plain supporting lines.
 
 **Status mapping** (technical → human):
 
-| Condition | Headline | Supporting lines |
+| Condition | Headline | Supporting lines (day-mode line first) |
 |-----------|----------|------------------|
 | `car_ready` ≠ on | No car connected | — |
-| `snap_power_w` > 0 | Charging the car | power + source; one combined home-battery line — SOC + live flow (`sensor.battery_charge_discharge_power`, + charge / − discharge → "charging"/"adding") + amp-step context (`ev_step_offset`); ETA to car target (forecast `car_target_time` / `sensor.smart_charging_max_last_known`) |
-| `surplus_power_w` < `threshold_w` | Waiting for sun | surplus vs needed; ETA to car target |
-| `ev_safe` = false | Car on hold | protecting battery; forecast dip vs floor |
-| otherwise | Not charging | — |
-| any (car connected) | — | day-mode context line (`shaving_day_mode`, 4.2.3) appended |
+| `snap_power_w` > 0 | Charging the car | day mode (`shaving_day_mode`); power + source; home-battery contribution only — live flow (`sensor.battery_charge_discharge_power`, + charge → "charging" / − discharge → "adds"); ETA to car target (forecast `car_target_time` / `sensor.smart_charging_max_last_known`) |
+| `surplus_power_w` < `threshold_w` | Waiting for sun | day mode; surplus vs needed; ETA to car target |
+| `ev_safe` = false | Car on hold | day mode; protecting battery; forecast dip vs floor |
+| otherwise | Not charging | day mode |
+| (car connected) | — | the day-mode line is **prepended** as the first supporting line |
 
 **Card YAML** (`custom:button-card`, `entity: sensor.ev_target_power`):
 
@@ -2705,9 +2710,7 @@ label: >-
     const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     return 'Car reaches ' + label + ' ' + days[eta.getDay()] + ' at ' + hh + ':' + mm + ' (in ' + dayDiff + ' days)';
   };
-  // Tier-2 contention (Topic 5 day-mode latch, decided once at 08:00): on a
-  // shaving day the home battery clips the midday export peak and the car shares
-  // the surplus; on a car day the car has first call on the solar surplus.
+  // Tier-2 day mode (Topic 5 latch, FSD 4.2.3) — shown first as the day's context.
   const dayLine = () => {
     const dm = a.shaving_day_mode;
     if (!dm) return null;
@@ -2718,7 +2721,6 @@ label: >-
   const power = a.snap_power_w || 0;
   const surplus = a.surplus_power_w;
   const threshold = a.threshold_w;
-  const soc = a.battery_soc != null ? Math.round(a.battery_soc) : '?';
   const min48 = a.battery_min_soc_forecast_48h != null ? Math.round(a.battery_min_soc_forecast_48h) : '?';
   const floor = a.battery_min_soc_floor != null ? Math.round(a.battery_min_soc_floor) : '?';
   const evSafe = a.ev_safe;
@@ -2731,14 +2733,11 @@ label: >-
   } else if (power > 0) {
     title = '🚗  Charging the car';
     lines.push(kw(power) + (rule === 'battery_full' ? ' (home battery full)' : ' from solar surplus'));
-    // Combined home-battery line: SOC + live flow (+ charge / - discharge) + amp-step context.
+    // Home-battery contribution only (SOC lives on the battery card below; sign
+    // verified: + = charge / - = discharge).
     const bp = num('sensor.battery_charge_discharge_power');
-    const so = a.ev_step_offset;
-    let battLine = 'Home battery ' + soc + '%';
-    if (bp != null && bp > 50) { battLine += ' · charging ' + kw(bp); }
-    else if (bp != null && bp < -50) { battLine += ' · adding ' + kw(-bp) + (so > 0 ? ' (step +' + so + ', covers the gap)' : ''); }
-    else { battLine += ' · protected' + (so < 0 ? ' (step ' + so + ', car held below surplus)' : ''); }
-    lines.push(battLine);
+    if (bp != null && bp > 50) { lines.push('Home battery charging ' + kw(bp)); }
+    else if (bp != null && bp < -50) { lines.push('Home battery adds ' + kw(-bp)); }
     const e = etaLine();
     if (e) lines.push(e);
   } else if (surplus != null && threshold != null && surplus < threshold) {
@@ -2753,9 +2752,10 @@ label: >-
   } else {
     title = '🚗  Not charging';
   }
-  if (connected) { const d = dayLine(); if (d) lines.push(d); }
-  let out = '<b>' + title + '</b>';
-  for (const l of lines) { out += '<br><span style="opacity:0.75">' + l + '</span>'; }
+  // Day mode is the most important context → first supporting line.
+  if (connected) { const d = dayLine(); if (d) lines.unshift(d); }
+  let out = '<div style="font-weight:600">' + title + '</div>';
+  for (const l of lines) { out += '<div style="opacity:0.75">' + l + '</div>'; }
   return out;
   ]]]
 tap_action:
@@ -2769,6 +2769,7 @@ styles:
     - justify-self: start
     - white-space: normal
     - line-height: "1.6"
+    - text-align: left
 ```
 
 **Attributes published on `sensor.ev_target_power`** (run.py). The card uses
@@ -2782,7 +2783,7 @@ the structured fields below; `reason` is kept for logs, not rendered:
 | `surplus_power_w` | Solar surplus = PV − house load (W) |
 | `grid_export_w` | Current grid export (W) |
 | `snap_power_w` | Winning charging power from `snap_to_power_step()` (W); 0 = no charging |
-| `ev_step_offset` | Chosen amp step's offset from the surplus-snapped level: `+n` snapped up (home battery bridges the gap), `-n` stepped down (battery preserved), `0` matched, `null` not solar-charging — folded into the combined home-battery line |
+| `ev_step_offset` | Chosen amp step's offset from the surplus-snapped level: `+n` snapped up (home battery bridges the gap), `-n` stepped down (battery preserved), `0` matched, `null` not solar-charging — published for diagnostics; not shown on the card (the home-battery line shows only the contribution) |
 | `battery_soc` | Current home-battery SOC (%) |
 | `battery_will_be_full` | Informational: does peak SOC today reach 100%? |
 | `battery_full_time` | Forecast time the home battery reaches 100% (if any) |
@@ -2967,8 +2968,8 @@ label: >-
   if (byEv) { lines.push('Reserved for the car'); }
   else if (byProt) { lines.push('Holding charge for tonight'); }
   else if (disAllowed && !discharging) { lines.push('Powers the house when needed'); }
-  let out = '<b>🔋  Home battery ' + soc + '%</b>';
-  for (const l of lines) { out += '<br><span style="opacity:0.75">' + l + '</span>'; }
+  let out = '<div style="font-weight:600">🔋  Home battery ' + soc + '%</div>';
+  for (const l of lines) { out += '<div style="opacity:0.75">' + l + '</div>'; }
   return out;
   ]]]
 tap_action:
@@ -2982,6 +2983,7 @@ styles:
     - justify-self: start
     - white-space: normal
     - line-height: "1.6"
+    - text-align: left
 ```
 
 ## 4.7 Error Handling and Notifications
@@ -4166,7 +4168,7 @@ See Section 4.3.8 for adaptive polling logic.
 
 **Changelog:**
 
-- v2.68: **Fixed `battery_charge_discharge_power` sign convention + dashboard card flow display (Sections 1.9, 4.6.3, 4.6.4).** The canonical §1.9 table (and two other spots) had the battery sign **inverted** — verified live by energy balance (deficit day, low SOC, `bp = −724 W` while the car drew 4.3 kW → battery discharging): the true convention is **`+` = charge (from PV), `−` = discharge (to house/car)**. No control impact (the raw sensor is used by nothing in code — display only). Card fixes: the EV card's home-battery line now labels `−` as "adding" (discharging to help the car) and `+` as "charging"; the battery card's **line 1 now reflects the live flow** (`bp`) instead of `charge_action` — "released" means charging is *allowed*, not that it is happening, so on a car day with the car drawing surplus it correctly shows "Powering the house · N kW" rather than the old wrong "Charging from solar"; and the charge-ceiling line drops "shaving headroom" on a car day. Display refinements: the EV card's home-battery flow + amp-step are now **one combined line** ("Home battery 16% · adding 707 W (step +1, covers the gap)"); the battery card says "**Helping charge the car**" instead of "Powering the house" when discharging while the car draws (`wallbox_power` > 100); the ceiling line reads "**Longevity cap N%**" (was "Ceiling N% · longevity cap"). Dashboard/docs only; no version bump. (deployed live via lovelace/config/save)
+- v2.68: **Fixed `battery_charge_discharge_power` sign convention + dashboard card flow display (Sections 1.9, 4.6.3, 4.6.4).** The canonical §1.9 table (and two other spots) had the battery sign **inverted** — verified live by energy balance (deficit day, low SOC, `bp = −724 W` while the car drew 4.3 kW → battery discharging): the true convention is **`+` = charge (from PV), `−` = discharge (to house/car)**. No control impact (the raw sensor is used by nothing in code — display only). Card fixes: the EV card's home-battery line now labels `−` as "adding" (discharging to help the car) and `+` as "charging"; the battery card's **line 1 now reflects the live flow** (`bp`) instead of `charge_action` — "released" means charging is *allowed*, not that it is happening, so on a car day with the car drawing surplus it correctly shows "Powering the house · N kW" rather than the old wrong "Charging from solar"; and the charge-ceiling line drops "shaving headroom" on a car day. Display refinements: the EV card's home-battery flow + amp-step are now **one combined line** ("Home battery 16% · adding 707 W (step +1, covers the gap)"); the battery card says "**Helping charge the car**" instead of "Powering the house" when discharging while the car draws (`wallbox_power` > 100); the ceiling line reads "**Longevity cap N%**" (was "Ceiling N% · longevity cap"). Layout pass: cards are left-aligned blocks (`text-align: left`); the EV card shows the **day-mode line first** (most important context), and its home-battery line is just the contribution ("Home battery adds 0.5 kW") — no SOC (shown on the battery card) and no amp-step detail. Dashboard/docs only; no version bump. (deployed live via lovelace/config/save)
 
 - v2.67: **Topic 5 departure trigger + 90 % charge floor (Sections 4.0, 4.2.3, 4.2.4).** A shaving day now downgrades **one-way to a car day** the moment its premise breaks — the car disconnects (`car_ready = off`) **or** drops below target ("no longer full") — via `_car_departed()` checked every tick after the 08:00 latch. Rationale: a car that was full at 08:00 but then leaves almost always returns needing energy, so the battery should stop *deferring* its fill for an export peak (a bet the midday peak materialises) and instead charge **greedily and immediately**, banking the morning surplus with certainty rather than selling it. One-way: a later full reconnect does not re-arm shaving; an unknown SOC while still connected is not treated as departed (the cached last-known SOC is held). Separately, the general `charge_target_min` floor is raised **80 → 90 %** so the home battery banks more headroom for the car/house before exporting (modest LFP cost). New tests: 5 departure-trigger cases in `test_charge_gate.py`; `test_floor_90_keeps_headroom`. (1.8.35 -> 1.8.36)
 
