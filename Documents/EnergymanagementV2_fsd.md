@@ -2742,10 +2742,11 @@ label: >-
   } else if (power > 0) {
     title = '🚗  Charging the car';
     lines.push(kw(power) + (rule === 'battery_full' ? ' (home battery full)' : ' from solar surplus'));
+    // Home-battery flow sign (FSD §1.9): +discharge (to house) / -charge (from PV).
     const bp = num('sensor.battery_charge_discharge_power');
     let battLine = 'Home battery ' + soc + '%, protected';
-    if (bp != null && bp < -50) { battLine = 'Home battery ' + soc + '%, adding ' + kw(-bp); }
-    else if (bp != null && bp > 50) { battLine = 'Home battery ' + soc + '%, charging ' + kw(bp); }
+    if (bp != null && bp > 50) { battLine = 'Home battery ' + soc + '%, adding ' + kw(bp); }
+    else if (bp != null && bp < -50) { battLine = 'Home battery ' + soc + '%, charging ' + kw(-bp); }
     lines.push(battLine);
     const st = stepLine();
     if (st) lines.push(st);
