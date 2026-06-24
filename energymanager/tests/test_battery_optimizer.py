@@ -134,6 +134,33 @@ class TestReserveMargin:
         # A higher floor stops the battery earlier -> at least as much expensive import.
         assert d20.expensive_import_wh >= d0.expensive_import_wh
 
+    def test_floor_10_holds_overnight_when_floor_0_discharges(self) -> None:
+        """The production 10% floor (FSD 4.2.2): free-discharge can use its bottom
+        slice to cover a small morning expensive deficit at floor 0 (tie -> allow),
+        but not at floor 10 -> hold wins, keeping a buffer for the morning."""
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)  # Mon, cheap
+        pv, load = [], []
+        for i in range(192):  # 48 h of 15-min slots from 22:00
+            h = (22 + i * 0.25) % 24
+            if 6 <= h < 9:      # early morning: weak PV during the expensive window
+                pv.append(150.0)
+            elif 9 <= h < 16:   # midday: strong PV recovers the battery
+                pv.append(1800.0)
+            elif 16 <= h < 18:
+                pv.append(400.0)
+            else:               # night
+                pv.append(0.0)
+            load.append(400.0)
+        fc = make_forecast(now, 48, pv, load)
+        d0, _, _ = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0).calculate_decision(
+            soc_percent=42, forecast=fc, now=now
+        )
+        d10, _, _ = BatteryOptimizer(capacity_wh=10000, min_soc_percent=10).calculate_decision(
+            soc_percent=42, forecast=fc, now=now
+        )
+        assert d0.discharge_allowed is True       # bottom slice covers the morning
+        assert d10.discharge_allowed is False     # holds to keep the morning buffer
+
 
 class TestWeekend:
     def test_weekend_is_cheap_now(self) -> None:

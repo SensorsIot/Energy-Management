@@ -1693,7 +1693,7 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | Key | Default | Used by |
 |---|---|---|
 | `capacity_kwh` | 10.0 | Simulator (Wh conversions), EV safety (load → SOC % conversion) |
-| `reserve_percent` | 0 | Optional safety margin for the discharge protection (Section 4.2.2); 0 = pure SOC=0 must-buy trigger |
+| `reserve_percent` | 10 | Discharge-sim floor / forecast-error buffer for the protection (Section 4.2.2); 0 = pure SOC=0 must-buy trigger |
 | `charge_efficiency` | 0.95 | Simulator (charge branch) |
 | `discharge_efficiency` | 0.95 | Simulator (discharge branch) |
 | `soc_entity` | `sensor.battery_state_of_capacity` | Current SOC readback |
@@ -1846,7 +1846,7 @@ When the wallbox draws power, the Modbus proxy raises the household load the inv
 
 #### Safety margin
 
-The empty trigger is SOC = 0. An optional `battery.reserve_percent` (default 0) raises it -- count import when SOC <= reserve -- as a forecast-error buffer. At the default it is the pure must-buy point.
+The "empty" trigger in the simulation is `battery.reserve_percent` (**default 10 %**) — the `floor_wh` the discharge sim never drains below. Raising it from 0 is a deliberate **forecast-error buffer**: with floor 0 the free-discharge sim can spend the battery's last few % to cover a small *forecast* morning deficit (so it ties and discharges overnight); with floor 10 that bottom slice is treated as unavailable, so free-discharge shows the morning as unserved → **hold wins → the battery is kept high overnight**, leaving a real ~10 % buffer for the expensive morning even when the load/PV forecast is optimistic (observed 2026-06-24: median load forecast ~280 W vs ~750 W actual → battery drained to ~1 % → expensive morning import; a 10 % floor would have held it). Set to 0 for pure SOC=0 must-buy economics.
 
 #### Self-correction
 
@@ -4199,6 +4199,8 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.70: **Topic 4 discharge protection: floor the sim at `reserve_percent` = 10 % (was 0), a forecast-error buffer (Section 4.2.2).** With the floor at 0 the free-discharge sim spends the battery's last few % to cover a small *forecast* morning deficit → ties → discharges overnight; on 2026-06-24 the median load forecast (~280 W) badly undershot the actual (~750 W), so the tiny forecast deficit was "covered" and the battery drained to ~1 %, then the house bought at the expensive morning rate with weak sun. Flooring the discharge sim at 10 % makes free-discharge unable to bank on the bottom slice → hold wins → the battery is kept high overnight, leaving a real buffer for the expensive morning even when the forecast is optimistic. Code default raised 0 → 10 (run.py:130, matching the example config); the **live host config** also moved 0 → 10. Topic 3's charge-target sim is unaffected (it passes `floor_wh=0`). New test: floor 10 holds overnight where floor 0 discharges. (1.8.37 -> 1.8.38)
 
 - v2.69: **Step-up (Topic 2, Section 4.3.7) now also requires the *current* SOC >= no-buy floor.** The step-up gate keyed only off `battery_min_soc_48h`, which excludes the wallbox load and so reads optimistically high while the car drains the real battery — observed live 2026-06-23 with SOC at 12 % but the forecast at 29 %, still firing "snap-up 4354→5117W" and draining the home battery toward ~9 %. Added an instantaneous-SOC condition (`battery_soc >= no_buy_floor_percent`) so step-up no longer deliberately drains the battery below the floor. Topic 1 Rule 4 (may the car charge at all, at/below surplus) is unchanged — by decision it stays forecast-based. New tests: step-up suppressed below floor / allowed at floor. (1.8.36 -> 1.8.37)
 
