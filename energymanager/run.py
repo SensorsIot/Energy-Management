@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.38"
+__version__ = "1.8.39"
 
 import json
 import logging
@@ -285,7 +285,6 @@ class EnergyManager:
         self.ev_phases = ev_opts.get("phases", 3)
         self.ev_min_amps = ev_opts.get("min_current_a", 6)
         self.ev_max_amps = ev_opts.get("max_current_a", 16)
-        self.ev_protection_soc = ev_opts.get("protection_soc_percent", 80)
 
         # Charging mode config (FSD 4.5.4)
         self.manual_power_entity = ev_opts.get(

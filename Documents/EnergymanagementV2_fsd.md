@@ -3963,7 +3963,6 @@ ev_charging:
   min_current_a: 6                                # Wallbox hardware minimum (amps)
   max_current_a: 16                               # Wallbox hardware maximum (amps)
   max_power_w: 11000
-  protection_soc_percent: 80                      # Target SOC at 21:00 on good days
 
 smart_car:
   enabled: true
@@ -4199,6 +4198,8 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.71: **Removed dead `ev_charging.protection_soc_percent` constant.** `self.ev_protection_soc` (default 80) was assigned in `run.py.__init__` but never read anywhere — a leftover from the pre-v2.44 per-EV battery-protection target. Deleted the assignment and the stale line from the example config block. No behaviour change. (1.8.38 -> 1.8.39)
 
 - v2.70: **Topic 4 discharge protection: floor the sim at `reserve_percent` = 10 % (was 0), a forecast-error buffer (Section 4.2.2).** With the floor at 0 the free-discharge sim spends the battery's last few % to cover a small *forecast* morning deficit → ties → discharges overnight; on 2026-06-24 the median load forecast (~280 W) badly undershot the actual (~750 W), so the tiny forecast deficit was "covered" and the battery drained to ~1 %, then the house bought at the expensive morning rate with weak sun. Flooring the discharge sim at 10 % makes free-discharge unable to bank on the bottom slice → hold wins → the battery is kept high overnight, leaving a real buffer for the expensive morning even when the forecast is optimistic. Code default raised 0 → 10 (run.py:130, matching the example config); the **live host config** also moved 0 → 10. Topic 3's charge-target sim is unaffected (it passes `floor_wh=0`). New test: floor 10 holds overnight where floor 0 discharges. (1.8.37 -> 1.8.38)
 
