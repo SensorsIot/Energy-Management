@@ -301,6 +301,33 @@ class HAClient:
             logger.error(f"Failed to set {entity_id}: {e}")
             return False
 
+    def create_notification(
+        self, message: str, title: str, notification_id: str
+    ) -> bool:
+        """Create/replace a Home Assistant persistent notification (UI feedback).
+
+        A fixed ``notification_id`` means repeated calls replace the same
+        notification instead of stacking.
+        """
+        if not self.token:
+            logger.warning("No token available for create_notification")
+            return False
+        try:
+            url = self._api_url("/services/persistent_notification/create")
+            data = {
+                "message": message,
+                "title": title,
+                "notification_id": notification_id,
+            }
+            response = requests.post(
+                url, headers=self._headers(), json=data, timeout=30
+            )
+            response.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create notification: {e}")
+            return False
+
     def set_sensor_state(
         self,
         entity_id: str,

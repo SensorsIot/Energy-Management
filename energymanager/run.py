@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.42"
+__version__ = "1.8.43"
 
 import json
 import logging
@@ -1731,6 +1731,19 @@ class EnergyManager:
                 and (prev_ev_state in (EVState.IMMEDIATE, EVState.CHEAP) or wallbox_available)
             ):
                 logger.info(f"Reverting mode to solar — {output.reason}")
+                # Button-press bounce: the user just selected immediate/cheap and
+                # the state machine returned to IDLE the *same* tick (target/budget
+                # already met on entry). Surface it so the silent mode-revert isn't
+                # confusing — otherwise the mode just flips back with no explanation.
+                if prev_ev_state not in (EVState.IMMEDIATE, EVState.CHEAP):
+                    self.ha_client.create_notification(
+                        message=(
+                            f"{ev_mode.capitalize()} charge not started — "
+                            f"{output.reason}. Raise the EV target SOC to charge."
+                        ),
+                        title="EV charge: target already reached",
+                        notification_id="ev_charge_target_reached",
+                    )
                 self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
                 self._ev_idle_since = None
 
