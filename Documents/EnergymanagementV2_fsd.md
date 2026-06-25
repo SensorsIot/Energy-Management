@@ -1626,7 +1626,7 @@ The optimizations are grouped into three topic groups, by the resource they mana
 
 Priority between topics matters only when two of them act on the same control entity at the same time. Organized by tier:
 
-**Tier 0 — Invariant (not a topic).** The no-buy floor: the home battery stays `>= battery.no_buy_floor_percent` over the next 48 h. It underlies T1 Rule 4, T2 Rule 3, and T3's target, and is never overridden.
+**Tier 0 — Invariant (not a topic).** The no-buy floor: the home battery stays `>= battery.no_buy_floor_percent`. It underlies the T2 Rule 3 step-up gate (instantaneous SOC) and T3's charge target (sized so the 48 h worst case stays above it), and is never overridden.
 
 **Tier 1 — Independent topics.** Each owns a distinct control entity (or is advisory), so they never contend and always execute, in any order:
 
@@ -2294,7 +2294,7 @@ Freshness of `car_soc` (age of `sensor.smart_battery.last_updated`) is logged in
 
 #### The shared protection check -- `battery_min_soc_48h`
 
-A single home-battery signal consumed by Topics 1, 2 and 3:
+A single home-battery signal consumed by **Topic 2** (step-up gate) and **Topic 3** (charge target), plus the dashboard:
 
 > `battery_min_soc_48h` = the **minimum** of the home-battery SOC simulation across the next **48 h**, starting from the current SOC, driven by **solar forecast - load forecast only** -- **the wallbox is excluded**.
 
@@ -2304,24 +2304,24 @@ The floor it is compared against is **`battery.no_buy_floor_percent`** (default 
 
 - Horizon: 48 h.
 - No hysteresis -- the same bar for every consumer.
+- **Not a Topic 1 gate.** It is no longer a may-charge veto (the former 48 h "home battery safe" rule was superseded by Rule 4 below); Topic 1 still publishes it for the dashboard.
 
 #### Rules
 
-The wallbox may charge **iff all five hold**; the first that fails stops it.
+The wallbox may charge **iff all four hold**; the first that fails stops it.
 
 | # | Rule | Condition |
 |---|------|-----------|
 | **1** | **Mode & connection** | EV charging enabled **and** mode = `solar` **and** `binary_sensor.car_ready` = on |
 | **2** | **Car needs charge** | `sensor.smart_battery` < `sensor.smart_charging_max_last_known` (car SOC below its target) |
 | **3** | **Surplus present** | `(PV - house_load)` >= `input_number.ev_min_solar_power` (the single manual start threshold) |
-| **4** | **Home battery safe** | `battery_min_soc_48h` >= `battery.no_buy_floor_percent` **OR** home battery already full (SOC = 100 %) |
-| **5** | **Home battery reaches its target** | `will_battery_hit_full(battery_target_soc)` — the car-excluded SOC forecast still peaks at/above the charge target (Section 4.2.4) today **OR** home battery already full (SOC = 100 %) |
+| **4** | **Home battery reaches its target** | `will_battery_hit_full(battery_target_soc)` — the car-excluded SOC forecast still peaks at/above the charge target (Section 4.2.4) today **OR** home battery already full (SOC = 100 %) |
 
 **Notes**
 
 - Rule 3's threshold is the manual `input_number.ev_min_solar_power`. 1-phase / 3-phase does not appear in this gate; phases define the *available steps* for Topic 2.
-- Rule 4 is computed wallbox-off. Full-battery exception: at 100 % SOC the check is skipped.
-- Rule 5 gives the **home battery priority** over the car: the same `compute_charge_target` survival model (Section 4.2.4) drives both the battery's target *and* the car's permission. The `will_battery_hit_full` forecast is **car-excluded**, so it reads as *"if the car stops now and the battery gets all the surplus from here on, does it still reach the target today?"* When that turns false, the car yields all surplus to the battery. It is **self-correcting**: while the car charges it steals surplus, so each cycle the forecast is recomputed from a lower (car-suppressed) current SOC; the moment the battery can no longer reach the target, the car stops, the battery then receives 100 % of the surplus and lands at (nearly) the target. Full-battery exception: at 100 % SOC the battery has already reached the target, so the check is skipped (the Rule-1 grid-export-capture path applies).
+- Rule 4 gives the **home battery priority** over the car: the same `compute_charge_target` survival model (Section 4.2.4) drives both the battery's target *and* the car's permission. The `will_battery_hit_full` forecast is **car-excluded**, so it reads as *"if the car stops now and the battery gets all the surplus from here on, does it still reach the target today?"* When that turns false, the car yields all surplus to the battery. It is **self-correcting**: while the car charges it steals surplus, so each cycle the forecast is recomputed from a lower (car-suppressed) current SOC; the moment the battery can no longer reach the target, the car stops, the battery then receives 100 % of the surplus and lands at (nearly) the target. Full-battery exception: at 100 % SOC the battery has already reached the target, so the check is skipped (the Rule-1 grid-export-capture path applies).
+- **Why no 48 h no-buy-floor veto?** A previous rule also blocked charging when `battery_min_soc_48h` fell below `no_buy_floor_percent`. Rule 4 supersedes it: charging *at or below* surplus never drains the battery (the remainder still charges it), the *only* draining step (Topic 2 step-up) is already gated by the instantaneous SOC floor (Section 4.3.7), and any multi-day trough is driven by future PV/load — not by the car spending *today's* surplus, which Rule 4 already protects. So the 48 h veto only ever produced false positives (when Rule 4 passed) or fired redundantly (when Rule 4 had already stopped the car).
 
 ### 4.3.7 EV Charge Power (Topic 2)
 
@@ -2344,12 +2344,12 @@ Power = Rule 2's step, bumped one step by Rule 3 when allowed. We never match su
 
 **Notes**
 
-- Rule 3 uses the same shared check and bar as Topic 1 Rule 4 (`no_buy_floor_percent`), **plus** a current-SOC guard at the same bar. The `battery_min_soc_48h` forecast excludes the wallbox load, so it reads optimistically high while the car is actively draining the real battery (observed 2026-06-23: SOC 12 %, forecast 29 %, step-up still firing). Requiring the **instantaneous** SOC >= `no_buy_floor_percent` stops step-up from deliberately draining the home battery below the floor. (Topic 1 Rule 4 — whether the car may charge *at all*, at/below surplus — is unchanged and stays forecast-based.)
+- Rule 3 gates the **only** step that drains the home battery (one amp level above surplus). It requires `battery_min_soc_48h` >= `no_buy_floor_percent` **and** the **instantaneous** SOC >= `no_buy_floor_percent`. The 48 h forecast alone reads optimistically high while the car is actively draining the real battery (observed 2026-06-23: SOC 12 %, forecast 29 %, step-up still firing), so the instantaneous condition is what actually stops step-up from draining the battery below the floor. Steps *at or below* surplus never drain the battery and need no such guard.
 - The chosen step's offset from the surplus-snapped level is published as the `ev_step_offset` attribute on `sensor.ev_target_power` (+n stepped up / -n stepped down / null when not solar-charging).
 
-#### `will_battery_hit_full()` -- Topic 1 Rule 5 gate + dashboard
+#### `will_battery_hit_full()` -- Topic 1 Rule 4 gate + dashboard
 
-Lives on `EVBatteryOptimizer`. Returns whether the **peak** home-battery SOC reaches its `full_threshold` (passed as `battery_target_soc`, Section 4.2.4) between now and end of today (midnight local), plus the time it first does. The result (`battery_will_be_full` / `battery_full_time`) is published on `sensor.ev_target_power` and `sensor.battery_decision` for the dashboard **and** gates the car as **Topic 1 Rule 5** (Section 4.3.6): when the battery can no longer reach its target today, the car yields all surplus to the battery.
+Lives on `EVBatteryOptimizer`. Returns whether the **peak** home-battery SOC reaches its `full_threshold` (passed as `battery_target_soc`, Section 4.2.4) between now and end of today (midnight local), plus the time it first does. The result (`battery_will_be_full` / `battery_full_time`) is published on `sensor.ev_target_power` and `sensor.battery_decision` for the dashboard **and** gates the car as **Topic 1 Rule 4** (Section 4.3.6): when the battery can no longer reach its target today, the car yields all surplus to the battery.
 
 #### Amp-step conversion (plumbing)
 
@@ -4200,6 +4200,8 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.73: **Removed the 48 h no-buy-floor veto from the EV charge decision — Rule 4 (target gate) supersedes it (Section 4.3.6).** Topic 1 previously had two home-battery gates: the old "home battery safe" rule (`battery_min_soc_48h >= no_buy_floor`, the 48 h trough) and the v2.72 target gate (`will_battery_hit_full`, today's peak vs target). They protect the same thing, and the target gate is strictly the better one: charging *at/below* surplus never drains the battery (the remainder charges it), the only draining step (Topic 2 step-up) is already gated by the **instantaneous** SOC floor (§4.3.7), and a multi-day 48 h trough is driven by future PV/load — not by the car spending *today's* surplus, which the target gate already protects. So the 48 h veto only ever produced false positives (when the target gate passed) or fired redundantly (when the target gate had already stopped the car). Dropped it: the may-charge rules are now 1–3 + Rule 4 (was Rule 5). The candidate loop no longer calls `check_ev_safe` per power step (it was power-independent anyway, so it never actually stepped down by power) — it takes the highest Topic 2 candidate, which is already safety-filtered by the step-up floor. `battery_min_soc_48h` is still computed for the dashboard and the Topic 2 step-up gate. `check_ev_safe` itself is unchanged (still primes the dashboard cache). Rewrote `test_power_calculation.py` to model the real selection (the old replica tested a power-dependent step-down that production never did). (1.8.40 -> 1.8.41)
 
 - v2.72: **Topic 1 Rule 5 — the home battery's charge target now gates the car (Section 4.3.6).** Previously the only battery protection on the wallbox was the 48 h no-buy floor (20 %, Rule 4); the car could keep eating surplus on a marginal-sun day while the home battery never reached its agreed `battery_target_soc` (e.g. SOC 26 %, target 90 %, car at 4.3 kW). Both gates protect against *the very same situation* — the battery ending the day too low — so they now share the **same `compute_charge_target` survival model** (Section 4.2.4): the car may charge only while `will_battery_hit_full(battery_target_soc)` is true. That forecast is **car-excluded**, so it answers *"if the car stops now, does the battery still reach its target today?"* — and it self-corrects, because while the car charges it suppresses the real SOC, so each 15-min cycle the forecast is recomputed from a lower SOC and the moment the target becomes unreachable the car stops, handing 100 % of the surplus to the battery (which then lands at nearly the target). `will_battery_hit_full` was already computed every cycle for the dashboard — promoted from informational to a gate. The 20 % no-buy floor (Rule 4) is **kept** as a strictly-lower hard backstop. Implemented in the shared `build_solar_candidates` helper (new `target_reachable` arg → no candidates when false), so the gate is unit-tested. Full-battery exception (SOC = 100 %) bypasses it. New tests: target unreachable blocks all charging / overrides step-down / default unchanged. (1.8.39 -> 1.8.40)
 

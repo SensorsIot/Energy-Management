@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.40"
+__version__ = "1.8.41"
 
 import json
 import logging
@@ -1498,11 +1498,10 @@ class EnergyManager:
                 elif surplus_power >= threshold:
                     ev_charging_source = "solar_surplus"
 
-            # Step 2: Battery safety check WITH the candidate EV load.
-            # Rule: EV is allowed only if the home-battery SOC forecast
-            # stays >= min_soc_percent across the next 48 h with the EV
-            # load subtracted. Re-evaluated every 15 min (self-correcting).
-            min_soc_floor = self.ev_reserve_percent
+            # Step 2: Home-battery gate (Rule 5, FSD 4.3.6) + Topic 2 power steps.
+            # The car may charge only while the battery is still forecast to reach
+            # its target today (will_battery_hit_full); the chosen amp step comes
+            # from the Topic 2 candidate list. Re-evaluated each cycle.
             if battery_soc >= 100:
                 # Battery already full (Rule 1 set power above). No safety
                 # check needed — SOC can only go down from here.
@@ -1543,37 +1542,36 @@ class EnergyManager:
                     target_reachable=battery_will_be_full,
                 )
 
-                ev_charging_power_w = 0.0
-                ev_safe = False
-                # When the target gate blocked (no candidates), keep the cached
-                # 48 h forecast so the dashboard / step-up gate don't see a 0%.
-                min_soc_forecast = (
-                    0.0 if battery_will_be_full else self._battery_min_soc_forecast
-                )
-                for try_power in candidates:
-                    ev_load_wh = try_power * 0.25
-                    ev_safe, min_soc_forecast = self.ev_battery_optimizer.check_ev_safe(
-                        ev_load_wh=ev_load_wh
+                # Rule 5 (FSD 4.3.6) is the home-battery gate: it decides whether
+                # any candidates exist at all — none means the battery can no
+                # longer reach its target today, so the car yields all surplus to
+                # the battery. The Topic 2 step-up floor (FSD 4.3.7) has already
+                # removed the only candidate that drains the battery (the step-up
+                # step) when the instantaneous SOC is below the floor, so the
+                # highest remaining candidate is safe to take directly — there is
+                # no separate 48 h-forecast veto (the former Rule 4 was superseded
+                # by Rule 5). min48h stays computed (cached, for the dashboard and
+                # the step-up gate) but is no longer an EV-charge veto.
+                min_soc_forecast = self._battery_min_soc_forecast
+                ev_safe = bool(candidates)
+                if candidates:
+                    ev_charging_power_w = candidates[0]
+                    ev_step_offset = POWER_STEPS_3P.index(
+                        ev_charging_power_w
+                    ) - POWER_STEPS_3P.index(candidate_power)
+                    if ev_charging_power_w > candidate_power:
+                        detail = f", snap-up {candidate_power}→{ev_charging_power_w}W"
+                    elif ev_charging_power_w < candidate_power:
+                        detail = f", stepped {candidate_power}→{ev_charging_power_w}W"
+                    else:
+                        detail = ""
+                    ev_source_reason = (
+                        f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
+                        f"forecast → {ev_charging_power_w:.0f}W{detail} "
+                        f"({snap_up_gate_reason})"
                     )
-                    if ev_safe:
-                        ev_charging_power_w = try_power
-                        ev_step_offset = POWER_STEPS_3P.index(try_power) - POWER_STEPS_3P.index(
-                            candidate_power
-                        )
-                        if try_power > candidate_power:
-                            detail = f", snap-up {candidate_power}→{try_power}W"
-                        elif try_power < candidate_power:
-                            detail = f", stepped {candidate_power}→{try_power}W"
-                        else:
-                            detail = ""
-                        ev_source_reason = (
-                            f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
-                            f"forecast → {ev_charging_power_w:.0f}W{detail} "
-                            f"({snap_up_gate_reason})"
-                        )
-                        break
-
-                if ev_charging_power_w == 0.0:
+                else:
+                    ev_charging_power_w = 0.0
                     if not battery_will_be_full:
                         ev_source_reason = (
                             f"battery won't reach target "
@@ -1582,8 +1580,8 @@ class EnergyManager:
                         )
                     else:
                         ev_source_reason = (
-                            f"No charging — min SOC forecast "
-                            f"{min_soc_forecast:.0f}% < floor {min_soc_floor:.0f}%"
+                            f"No charging — surplus {surplus_power:.0f}W below "
+                            f"available power steps"
                         )
                     ev_charging_source = "none"
             else:
