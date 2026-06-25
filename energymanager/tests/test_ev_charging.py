@@ -212,3 +212,39 @@ class TestBuildSolarCandidates:
         )
         # snap-down from 7A: [4354, 3962], no 5117 snap-up
         assert candidates == [4354, 3962]
+
+
+class TestTargetGate:
+    """Topic 1 target gate (FSD 4.3.6): the car yields all surplus to the home
+    battery once the battery can no longer reach its charge target today."""
+
+    def test_target_unreachable_blocks_all_charging(self) -> None:
+        """target_reachable=False → no candidates at all (car stops)."""
+        candidates, reason = build_solar_candidates(
+            candidate_power=5117,
+            threshold=3500,
+            step_up_allowed=True,
+            target_reachable=False,
+        )
+        assert candidates == []
+        assert "charge target" in reason
+
+    def test_target_unreachable_overrides_step_down_too(self) -> None:
+        """Even snap-down is suppressed — the battery owns the surplus."""
+        candidates, _ = build_solar_candidates(
+            candidate_power=4354,
+            threshold=3500,
+            step_up_allowed=False,
+            target_reachable=False,
+        )
+        assert candidates == []
+
+    def test_target_reachable_default_is_unchanged(self) -> None:
+        """Omitting target_reachable defaults to True → existing behaviour."""
+        candidates, reason = build_solar_candidates(
+            candidate_power=5117,
+            threshold=3500,
+            step_up_allowed=True,
+        )
+        assert candidates == [5727, 5117, 4354, 3962]
+        assert "step-up allowed" in reason

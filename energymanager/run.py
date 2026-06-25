@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.39"
+__version__ = "1.8.40"
 
 import json
 import logging
@@ -1527,6 +1527,12 @@ class EnergyManager:
                 # the instantaneous-SOC condition stops step-up from draining the
                 # home battery below the no-buy floor. Otherwise stay at/below
                 # surplus.
+                # Topic 1 target gate (FSD 4.3.6): the home battery has priority.
+                # When the car-excluded SOC forecast (battery_will_be_full) can
+                # no longer reach the charge target today, the car yields all
+                # surplus to the battery (no candidates). Re-evaluated each cycle
+                # from the car-suppressed current SOC → self-correcting: once the
+                # car stops, the battery climbs and reaches (nearly) the target.
                 candidates, snap_up_gate_reason = build_solar_candidates(
                     candidate_power=candidate_power,
                     threshold=threshold,
@@ -1534,11 +1540,16 @@ class EnergyManager:
                         self._battery_min_soc_forecast >= self.no_buy_floor_percent
                         and battery_soc >= self.no_buy_floor_percent
                     ),
+                    target_reachable=battery_will_be_full,
                 )
 
                 ev_charging_power_w = 0.0
                 ev_safe = False
-                min_soc_forecast = 0.0
+                # When the target gate blocked (no candidates), keep the cached
+                # 48 h forecast so the dashboard / step-up gate don't see a 0%.
+                min_soc_forecast = (
+                    0.0 if battery_will_be_full else self._battery_min_soc_forecast
+                )
                 for try_power in candidates:
                     ev_load_wh = try_power * 0.25
                     ev_safe, min_soc_forecast = self.ev_battery_optimizer.check_ev_safe(
@@ -1563,10 +1574,17 @@ class EnergyManager:
                         break
 
                 if ev_charging_power_w == 0.0:
-                    ev_source_reason = (
-                        f"No charging — min SOC forecast "
-                        f"{min_soc_forecast:.0f}% < floor {min_soc_floor:.0f}%"
-                    )
+                    if not battery_will_be_full:
+                        ev_source_reason = (
+                            f"battery won't reach target "
+                            f"{self._battery_target_soc:.0f}% today → "
+                            f"car yields surplus to home battery"
+                        )
+                    else:
+                        ev_source_reason = (
+                            f"No charging — min SOC forecast "
+                            f"{min_soc_forecast:.0f}% < floor {min_soc_floor:.0f}%"
+                        )
                     ev_charging_source = "none"
             else:
                 # No EV candidate (surplus below threshold, mode not solar,

@@ -105,11 +105,23 @@ def build_solar_candidates(
     candidate_power: int,
     threshold: float,
     step_up_allowed: bool,
+    target_reachable: bool = True,
 ) -> tuple[list[int], str]:
-    """Decide solar-mode power-step candidates (Topic 2, FSD 4.3.7).
+    """Decide solar-mode power-step candidates (Topics 1 & 2).
 
-    The "step-up" step (one level above candidate_power) draws the gap to the
-    next amp step from the home battery:
+    Topic 1 target gate (FSD 4.3.6) — the home battery has priority over the
+    car. `target_reachable` is the car-excluded forecast of the battery reaching
+    its charge target today (`will_battery_hit_full`):
+
+    - **target_reachable=False**: the battery can no longer reach its charge
+      target today, so the car yields *all* surplus to the battery — no
+      candidates, no charging. Re-evaluated each cycle from the (car-suppressed)
+      current SOC, so it self-corrects: once the car stops, the battery climbs
+      and reaches (nearly) the target.
+    - **target_reachable=True**: proceed to the Topic 2 step decision below.
+
+    Topic 2 step decision (FSD 4.3.7) — the "step-up" step (one level above
+    candidate_power) draws the gap to the next amp step from the home battery:
 
     - **step_up_allowed=True**: the battery is still protected — both the 48 h
       forecast min **and** the current SOC are `>= no_buy_floor_percent` — so
@@ -122,6 +134,8 @@ def build_solar_candidates(
     Returns (candidates, gate_reason) where candidates is the ordered list
     passed to the home-battery safety loop.
     """
+    if not target_reachable:
+        return [], "battery won't reach charge target → car yields surplus to battery"
     if step_up_allowed:
         snap_up = [
             s for s in POWER_STEPS_3P

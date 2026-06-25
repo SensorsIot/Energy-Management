@@ -2307,7 +2307,7 @@ The floor it is compared against is **`battery.no_buy_floor_percent`** (default 
 
 #### Rules
 
-The wallbox may charge **iff all four hold**; the first that fails stops it.
+The wallbox may charge **iff all five hold**; the first that fails stops it.
 
 | # | Rule | Condition |
 |---|------|-----------|
@@ -2315,11 +2315,13 @@ The wallbox may charge **iff all four hold**; the first that fails stops it.
 | **2** | **Car needs charge** | `sensor.smart_battery` < `sensor.smart_charging_max_last_known` (car SOC below its target) |
 | **3** | **Surplus present** | `(PV - house_load)` >= `input_number.ev_min_solar_power` (the single manual start threshold) |
 | **4** | **Home battery safe** | `battery_min_soc_48h` >= `battery.no_buy_floor_percent` **OR** home battery already full (SOC = 100 %) |
+| **5** | **Home battery reaches its target** | `will_battery_hit_full(battery_target_soc)` — the car-excluded SOC forecast still peaks at/above the charge target (Section 4.2.4) today **OR** home battery already full (SOC = 100 %) |
 
 **Notes**
 
 - Rule 3's threshold is the manual `input_number.ev_min_solar_power`. 1-phase / 3-phase does not appear in this gate; phases define the *available steps* for Topic 2.
 - Rule 4 is computed wallbox-off. Full-battery exception: at 100 % SOC the check is skipped.
+- Rule 5 gives the **home battery priority** over the car: the same `compute_charge_target` survival model (Section 4.2.4) drives both the battery's target *and* the car's permission. The `will_battery_hit_full` forecast is **car-excluded**, so it reads as *"if the car stops now and the battery gets all the surplus from here on, does it still reach the target today?"* When that turns false, the car yields all surplus to the battery. It is **self-correcting**: while the car charges it steals surplus, so each cycle the forecast is recomputed from a lower (car-suppressed) current SOC; the moment the battery can no longer reach the target, the car stops, the battery then receives 100 % of the surplus and lands at (nearly) the target. Full-battery exception: at 100 % SOC the battery has already reached the target, so the check is skipped (the Rule-1 grid-export-capture path applies).
 
 ### 4.3.7 EV Charge Power (Topic 2)
 
@@ -2345,9 +2347,9 @@ Power = Rule 2's step, bumped one step by Rule 3 when allowed. We never match su
 - Rule 3 uses the same shared check and bar as Topic 1 Rule 4 (`no_buy_floor_percent`), **plus** a current-SOC guard at the same bar. The `battery_min_soc_48h` forecast excludes the wallbox load, so it reads optimistically high while the car is actively draining the real battery (observed 2026-06-23: SOC 12 %, forecast 29 %, step-up still firing). Requiring the **instantaneous** SOC >= `no_buy_floor_percent` stops step-up from deliberately draining the home battery below the floor. (Topic 1 Rule 4 — whether the car may charge *at all*, at/below surplus — is unchanged and stays forecast-based.)
 - The chosen step's offset from the surplus-snapped level is published as the `ev_step_offset` attribute on `sensor.ev_target_power` (+n stepped up / -n stepped down / null when not solar-charging).
 
-#### `will_battery_hit_full()` -- dashboard diagnostic
+#### `will_battery_hit_full()` -- Topic 1 Rule 5 gate + dashboard
 
-Lives on `EVBatteryOptimizer`. Returns whether the **peak** home-battery SOC reaches 100 % between now and end of today (midnight local), plus the time it first does. Published as the `battery_full_time` attribute on `sensor.ev_target_power` and `sensor.battery_decision` for the dashboard. **Informational only -- it does not gate charging** (Rules 1-3 above are the only gates).
+Lives on `EVBatteryOptimizer`. Returns whether the **peak** home-battery SOC reaches its `full_threshold` (passed as `battery_target_soc`, Section 4.2.4) between now and end of today (midnight local), plus the time it first does. The result (`battery_will_be_full` / `battery_full_time`) is published on `sensor.ev_target_power` and `sensor.battery_decision` for the dashboard **and** gates the car as **Topic 1 Rule 5** (Section 4.3.6): when the battery can no longer reach its target today, the car yields all surplus to the battery.
 
 #### Amp-step conversion (plumbing)
 
@@ -4198,6 +4200,8 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.72: **Topic 1 Rule 5 — the home battery's charge target now gates the car (Section 4.3.6).** Previously the only battery protection on the wallbox was the 48 h no-buy floor (20 %, Rule 4); the car could keep eating surplus on a marginal-sun day while the home battery never reached its agreed `battery_target_soc` (e.g. SOC 26 %, target 90 %, car at 4.3 kW). Both gates protect against *the very same situation* — the battery ending the day too low — so they now share the **same `compute_charge_target` survival model** (Section 4.2.4): the car may charge only while `will_battery_hit_full(battery_target_soc)` is true. That forecast is **car-excluded**, so it answers *"if the car stops now, does the battery still reach its target today?"* — and it self-corrects, because while the car charges it suppresses the real SOC, so each 15-min cycle the forecast is recomputed from a lower SOC and the moment the target becomes unreachable the car stops, handing 100 % of the surplus to the battery (which then lands at nearly the target). `will_battery_hit_full` was already computed every cycle for the dashboard — promoted from informational to a gate. The 20 % no-buy floor (Rule 4) is **kept** as a strictly-lower hard backstop. Implemented in the shared `build_solar_candidates` helper (new `target_reachable` arg → no candidates when false), so the gate is unit-tested. Full-battery exception (SOC = 100 %) bypasses it. New tests: target unreachable blocks all charging / overrides step-down / default unchanged. (1.8.39 -> 1.8.40)
 
 - v2.71: **Removed dead `ev_charging.protection_soc_percent` constant.** `self.ev_protection_soc` (default 80) was assigned in `run.py.__init__` but never read anywhere — a leftover from the pre-v2.44 per-EV battery-protection target. Deleted the assignment and the stale line from the example config block. No behaviour change. (1.8.38 -> 1.8.39)
 
