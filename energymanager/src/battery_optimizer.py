@@ -443,6 +443,50 @@ class BatteryOptimizer:
             reason = f"survives {horizon_h}h worst-case at {hi:.0f}% +{margin_pct:.0f}% margin"
         return float(target), reason
 
+    def reaches_target_today(
+        self,
+        current_soc: float,
+        forecast: pd.DataFrame,
+        now: datetime,
+        target: float,
+    ) -> tuple[bool, float | None, str | None]:
+        """Report whether the battery reaches `target`% today, re-anchored to live SOC.
+
+        The 10-s-fresh version of the EV target gate (Section 4.3.6). Re-runs the
+        SOC simulation from the *current* SOC over the net-energy forecast and
+        takes the peak between now and local midnight. Unlike the `soc_forecast`
+        curve in InfluxDB — which is anchored to the 15-min cycle and so reads
+        optimistically while the car drains the real battery — this reflects the
+        live (car-suppressed) SOC, so the gate stops the car at the right moment
+        instead of ~one forecast period late.
+
+        Returns (reaches, peak_soc_today, full_time_local "HH:MM" or None). An
+        empty/missing forecast returns (False, None, None) — fail-closed, matching
+        the InfluxDB gate's precautionary default.
+        """
+        if forecast is None or forecast.empty:
+            return False, None, None
+        end_today = (
+            now.astimezone(SWISS_TZ)
+            .replace(hour=23, minute=59, second=59, microsecond=0)
+            .astimezone(UTC)
+        )
+        sim = self.simulate_soc(current_soc, forecast, max_soc_percent=100.0)
+        peak: float | None = None
+        full_time: str | None = None
+        for t, v in sim["soc_percent"].items():
+            tt = t if t.tzinfo else t.replace(tzinfo=UTC)
+            if tt < now or tt > end_today:
+                continue
+            fv = float(v)
+            if peak is None or fv > peak:
+                peak = fv
+            if full_time is None and fv >= target:
+                full_time = tt.astimezone(SWISS_TZ).strftime("%H:%M")
+        if peak is None:
+            return False, None, None
+        return peak >= target, peak, full_time
+
     def calculate_decision(
         self,
         soc_percent: float,

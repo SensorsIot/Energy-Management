@@ -353,5 +353,54 @@ class TestShouldChargeNow:
         )
 
 
+class TestReachesTargetToday:
+    """reaches_target_today: the 10-s-fresh EV target gate (FSD 4.3.6).
+
+    Re-anchors the SOC sim to the live SOC. Forecast: 4 h of +1000 W net
+    (250 Wh/15-min) then dark → total +4000 Wh = +40 % of a 10 kWh battery.
+    """
+
+    def _fc(self, now: datetime) -> pd.DataFrame:
+        return make_forecast(
+            now, hours=8, pv_pattern=[1500] * 16 + [0] * 16, load_pattern=[500]
+        )
+
+    def test_reaches_from_high_soc(self) -> None:
+        now = datetime(2026, 6, 25, 10, 0, tzinfo=UTC)
+        opt = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0)
+        reaches, peak, ft = opt.reaches_target_today(60.0, self._fc(now), now, 90.0)
+        assert reaches is True
+        assert peak >= 90
+        assert ft is not None
+
+    def test_not_reached_from_low_soc(self) -> None:
+        now = datetime(2026, 6, 25, 10, 0, tzinfo=UTC)
+        opt = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0)
+        reaches, peak, ft = opt.reaches_target_today(20.0, self._fc(now), now, 90.0)
+        assert reaches is False
+        assert peak < 90
+        assert ft is None
+
+    def test_reanchor_lower_live_soc_gives_lower_peak(self) -> None:
+        """The core property: same forecast, lower live SOC → lower peak.
+
+        This is exactly why the gate must re-anchor: as the car drains the
+        battery, the live SOC drops and the reachable peak drops with it.
+        """
+        now = datetime(2026, 6, 25, 10, 0, tzinfo=UTC)
+        opt = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0)
+        _, peak_hi, _ = opt.reaches_target_today(60.0, self._fc(now), now, 90.0)
+        _, peak_lo, _ = opt.reaches_target_today(20.0, self._fc(now), now, 90.0)
+        assert peak_hi > peak_lo
+
+    def test_empty_forecast_fails_closed(self) -> None:
+        now = datetime(2026, 6, 25, 10, 0, tzinfo=UTC)
+        opt = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0)
+        reaches, peak, ft = opt.reaches_target_today(50.0, pd.DataFrame(), now, 90.0)
+        assert reaches is False
+        assert peak is None
+        assert ft is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

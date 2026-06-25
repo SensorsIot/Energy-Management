@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.41"
+__version__ = "1.8.42"
 
 import json
 import logging
@@ -174,6 +174,10 @@ class EnergyManager:
         # weather) → don't shave, charge greedily. Set on each tick by the loop.
         self.forecast_max_age_minutes = battery_opts.get("forecast_max_age_minutes", 120)
         self._forecast_fresh: bool = True
+        # Latest combined net-energy forecast (p50), cached each 15-min cycle so
+        # the 10-s EV loop can re-anchor the SOC sim to the live SOC for the
+        # target gate (FSD 4.3.6) without re-fetching. None until the first cycle.
+        self._latest_forecast = None
         # Tracks last applied charge power (W) to only write/log on change.
         # Tracks power, not a bool, so a use-case A→B transition (max→shaving
         # power) is still detected even though "charging" stays true.
@@ -1113,6 +1117,9 @@ class EnergyManager:
                 logger.error("No forecast data available")
                 return
 
+            # Cache for the 10-s EV target gate's live SOC re-anchoring (FSD 4.3.6).
+            self._latest_forecast = forecast
+
             # Conservative forecast for the marginal-day fill check (B0): low
             # PV (p10) against median load (p50). Shaving only runs when the
             # battery fills today even under this pessimistic estimate, so a
@@ -1509,9 +1516,16 @@ class EnergyManager:
                 min_soc_forecast = 100.0
                 battery_will_be_full = True
             elif ev_charging_source == "solar_surplus":
-                battery_will_be_full, _, battery_full_time, _ = (
-                    self.ev_battery_optimizer.will_battery_hit_full(
-                        full_threshold=self._battery_target_soc
+                # Target gate (FSD 4.3.6): re-anchor the SOC sim to the LIVE SOC
+                # every 10-s cycle (not the 15-min-stale soc_forecast in InfluxDB),
+                # so the gate reflects how far the car has actually drained the
+                # battery and stops it at the right moment (no ~one-period overshoot).
+                battery_will_be_full, _, battery_full_time = (
+                    self.optimizer.reaches_target_today(
+                        battery_soc,
+                        self._latest_forecast,
+                        datetime.now(UTC),
+                        self._battery_target_soc,
                     )
                 )
                 ev_min_power = POWER_STEPS_3P[0]
