@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.58"
+__version__ = "0.9.59"
 
 import asyncio
 import json
@@ -523,6 +523,12 @@ class OCPPServer:
         Called after post-connect setup and after transaction stop to avoid
         waiting for a change event in _watch_controls. Resets _last_power_limit
         so the next _watch_controls cycle won't see a stale match.
+
+        A limit of **0 is applied too** (not skipped): 0 means "pause" (0 A
+        charging profile), and the Actec wallbox resumes at its 6 A minimum on
+        every reconnect, so the 0 A profile must be re-asserted — otherwise the
+        car keeps charging (draining the home battery) after a WS reconnect even
+        though the energymanager commanded stop.
         """
         power_state = await self.ha.get_state("number.wallbox_power_limit")
         if power_state is None:
@@ -531,9 +537,10 @@ class OCPPServer:
             power_w = float(power_state)
         except ValueError:
             return
-        if power_w > 0:
+        if power_w >= 0:
             logger.info(
                 f"Applying current HA power limit: {power_w}W"
+                f"{' (pause)' if power_w == 0 else ''}"
             )
             self._last_power_limit = power_state
             await self._send_power_to_wallbox(power_w)

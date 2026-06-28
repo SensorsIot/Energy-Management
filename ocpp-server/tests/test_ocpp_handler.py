@@ -1562,13 +1562,18 @@ class TestTransactionStopRestart:
         assert server._last_power_limit == "4354"
 
     @pytest.mark.asyncio
-    async def test_transaction_stop_zero_limit_does_nothing(self, server) -> None:
-        """If HA power limit is 0 after transaction stop, don't send."""
+    async def test_transaction_stop_zero_limit_reapplies_pause(self, server) -> None:
+        """If HA power limit is 0, re-apply it (0 A pause profile), not skip it.
+
+        The wallbox resumes at its 6 A minimum on reconnect, so a 0 (pause) limit
+        must be re-asserted — otherwise the car keeps charging after a reconnect.
+        """
         server.ha.get_state = AsyncMock(return_value="0")
 
         await server._apply_current_power_limit()
 
-        server.charge_point.set_charging_power.assert_not_called()
+        server.charge_point.set_charging_power.assert_called()
+        assert server._last_power_limit == "0"
 
     @pytest.mark.asyncio
     async def test_reconciliation_detects_mismatch_after_stop(self, server) -> None:
@@ -1633,13 +1638,18 @@ class TestPostConnectApplyLimit:
         assert server._last_power_limit == "5117"
 
     @pytest.mark.asyncio
-    async def test_apply_zero_limit_on_connect_does_nothing(self, server) -> None:
-        """After connect, if HA power limit is 0, don't send."""
+    async def test_apply_zero_limit_on_connect_reapplies_pause(self, server) -> None:
+        """After connect, a 0 limit must be re-applied (0 A pause profile).
+
+        On reconnect the wallbox resumes at its 6 A minimum, so re-asserting the
+        0 A profile is exactly what keeps the car paused.
+        """
         server.ha.get_state = AsyncMock(return_value="0")
 
         await server._apply_current_power_limit()
 
-        server.charge_point.set_charging_power.assert_not_called()
+        server.charge_point.set_charging_power.assert_called()
+        assert server._last_power_limit == "0"
 
     @pytest.mark.asyncio
     async def test_apply_limit_entity_missing(self, server) -> None:
