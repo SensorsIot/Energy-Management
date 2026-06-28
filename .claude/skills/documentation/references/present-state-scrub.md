@@ -14,14 +14,14 @@ current-state assertion about a date the system *uses*, not a historical timesta
 
 | Pattern | Why it goes |
 |---|---|
-| `previously …`, `formerly …`, `used to …` | Historical |
+| `previously …`, `formerly …`, `used to …`, `it used to be that …` | Historical |
 | `retired`, `deprecated`, `superseded`, `replaced by` | Historical |
 | `legacy`, `predecessor`, `pre-<X> refactor`, `old format`, `new format` | Historical / temporal-comparison |
 | `as of <date>`, `since <date>`, `landed <date>`, `migrated on <date>` | Historical timestamp |
 | `v1`, `v2`, `version 1`, `the old version`, `the new version` | Temporal progression |
-| `now reads from …`, `now does X` (implies it didn't before) | Historical |
+| `now reads from …`, `now writes to …`, `now does X` (implies it didn't before) | Historical |
 | `migrated from …`, `extracted from …`, `merged from former …` | Historical |
-| `intentionally simpler than X`, `the cost is`, `the trade-off is`, `worth it because` | Rationale |
+| `intentionally simpler than X`, `the cost is`, `the trade-off is`, `worth it because`, `… that's negligible` (cost-benefit aside) | Rationale |
 | `we chose / picked / went with …`, `we considered … but` | Rationale |
 
 ### Section / heading patterns

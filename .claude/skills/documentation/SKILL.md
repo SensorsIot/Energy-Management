@@ -55,6 +55,8 @@ A doc body describes the system **as it is now** — never how it got here, neve
 - **No separate "why" doc** — a still-binding decision is a **present-tense rule** (e.g. "all
   times are UTC internally, converted to Europe/Zurich only for display"), never a record of what
   was rejected or when. `git log` holds the history.
+- **Coexisting options, not versions** — if two implementations run side by side, describe each
+  as a current option, never as a temporal progression ("v1 vs v2", "old vs new").
 
 **This project's sanctioned history home** is the `## Changelog` section at the bottom of each FSD
 — one terse entry per add-on version bump (`vX.YY: … (1.8.x -> 1.8.y)`). History goes there or in
