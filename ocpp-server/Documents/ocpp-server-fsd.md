@@ -261,14 +261,14 @@ The current limit (including `0`) is **re-applied to the wallbox on every (re)co
 
 #### 3.6.3 Initialization Sequence
 
-`car_ready` stays off until wallbox state is confirmed. EnergyManager sees off and skips EV control.
+`car_ready` stays off until wallbox state is confirmed. EnergyManager sees off and skips EV control. Stages run top-to-bottom on every connect **and reconnect** (`_post_connect_setup`). ("Stage", not "phase", to avoid collision with the electrical 1φ/3φ *phases* in §3.6.4.)
 
-| Phase | What happens | `car_ready` |
+| Stage | What happens | `car_ready` |
 |-------|-------------|:-----------:|
-| **1. Init** | Read last-known state from HA entities | off |
-| **2a. State sync** | Wait for StatusNotification from wallbox | off |
-| **2b. Inner sync** | Only if Charging: wait for MeterValues to recover power/energy/transaction | off |
-| **3. Active** | Derive car_ready from status, accept power commands, re-apply the current `number.wallbox_power_limit` (including `0`/pause) | per table |
+| **Init** | Read last-known state from HA entities | off |
+| **State-sync** | Wait for StatusNotification from wallbox | off |
+| **Inner-sync** | Only if Charging: wait for MeterValues to recover power/energy/transaction | off |
+| **Active** | Derive car_ready from status, accept power commands, re-apply the current `number.wallbox_power_limit` (including `0`/pause) | per table |
 
 #### 3.6.4 Phase Switching
 
