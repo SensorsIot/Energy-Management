@@ -117,6 +117,7 @@ The wallbox reports its state via OCPP `StatusNotification`. These states drive 
 | Path | `/{chargePointId}` |
 | Subprotocol | `ocpp1.6` |
 | Max connections | 1 |
+| Keepalive | WebSocket-level ping disabled (`ping_interval=None`); link liveness is tracked via the OCPP `Heartbeat` instead. Avoids dropping wallboxes that don't answer WS pings. |
 
 ### 3.2 Configuration
 
@@ -252,9 +253,11 @@ Cloud lags 3–10 min behind OCPP — throttled retries bridge the gap.
 
 | Value | Action |
 |-------|--------------------|
-| `0` | Pause immediately (bypasses throttle) |
+| `0` | Pause immediately (bypasses throttle) — 0A `SetChargingProfile`, wallbox goes `SuspendedEVSE` |
 | `min–max` | Charge — server selects phases, converts to amps, manages transaction |
 | Gap (3681–4139W) | Stay on current phase, clamp to nearest boundary |
+
+The current limit (including `0`) is **re-applied to the wallbox on every (re)connect**, not only on change. A wallbox resumes at its minimum current after a WebSocket reconnect, so a `0` (pause) that is not re-asserted would silently become a minimum-current charge; re-applying it keeps the commanded state authoritative across reconnects.
 
 #### 3.6.3 Initialization Sequence
 
@@ -265,7 +268,7 @@ Cloud lags 3–10 min behind OCPP — throttled retries bridge the gap.
 | **1. Init** | Read last-known state from HA entities | off |
 | **2a. State sync** | Wait for StatusNotification from wallbox | off |
 | **2b. Inner sync** | Only if Charging: wait for MeterValues to recover power/energy/transaction | off |
-| **3. Active** | Derive car_ready from status, accept power commands | per table |
+| **3. Active** | Derive car_ready from status, accept power commands, re-apply the current `number.wallbox_power_limit` (including `0`/pause) | per table |
 
 #### 3.6.4 Phase Switching
 
@@ -394,6 +397,9 @@ AcTec always reports `SuspendedEVSE` regardless of whether the charger or car in
 | OCPP response | < 1s |
 | Entity update latency | < 500ms |
 | Memory | < 100MB RSS |
+| Log retention | Rotating file `/config/ocpp-server.log` (5 MB × 5 ≈ 25 MB), persists across restarts |
+
+Logging goes to both the console (s6/journal, wiped on restart) and a rotating file on the add-on's `addon_config` volume (`/config/ocpp-server.log`, host path `/addon_configs/<slug>/ocpp-server.log`) so connection events survive restarts for post-mortem. The directory is overridable via the `OCPP_LOG_DIR` env var; file logging is skipped gracefully if the path is unwritable.
 
 ## 7. Meter Power Correction
 
