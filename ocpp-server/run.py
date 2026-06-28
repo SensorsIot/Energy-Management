@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.59"
+__version__ = "0.9.60"
 
 import asyncio
 import json
@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import aiohttp
@@ -22,13 +23,34 @@ import websockets
 from src.ha_entities import ALL_DEFS, BINARY_SENSORS, CONTROLS, SENSORS
 from src.ocpp_handler import ChargePointHandler
 
-# Configure logging
+# Configure logging. Console (s6/journal) is ephemeral — lost on restart and
+# limited in length — which makes post-mortem of events like wallbox reconnects
+# impossible. Add a rotating file handler in the add-on's persistent config dir
+# (addon_config:rw → /config inside the container, /addon_configs/<slug>/ on the
+# host) so history survives restarts. Falls back gracefully if the dir is
+# unwritable (e.g. unit tests).
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format=_LOG_FORMAT,
+    datefmt=_LOG_DATEFMT,
 )
 logger = logging.getLogger("ocpp-server")
+
+_LOG_DIR = os.environ.get("OCPP_LOG_DIR", "/config")
+try:
+    Path(_LOG_DIR).mkdir(parents=True, exist_ok=True)
+    _file_handler = RotatingFileHandler(
+        os.path.join(_LOG_DIR, "ocpp-server.log"),
+        maxBytes=5 * 1024 * 1024,  # 5 MB per file
+        backupCount=5,             # ~25 MB of history across restarts
+    )
+    _file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+    logging.getLogger().addHandler(_file_handler)
+    logger.info(f"Persistent log: {_LOG_DIR}/ocpp-server.log (5 MB × 5)")
+except OSError as e:
+    logger.warning(f"Persistent file logging unavailable ({e}); console only")
 
 # Status change callback key → HA entity mapping
 STATUS_ENTITY_MAP = {
@@ -938,11 +960,18 @@ class OCPPServer:
 
         logger.info(f"Starting OCPP WebSocket server on ws://{host}:{port}")
 
+        # ping_interval=None: disable WebSocket-level keepalive pings. Many OCPP
+        # wallboxes (incl. the Actec) don't reliably answer WS PINGs, so the
+        # library's default 20s ping/20s pong-timeout drops the link on a missed
+        # pong → the wallbox reconnects, and on every reconnect it resumes at its
+        # 6A minimum. OCPP's own Heartbeat (~60s) is the application-level
+        # keepalive, so the WS ping is redundant here and only causes churn.
         self.ws_server = await websockets.serve(
             self.handle_websocket,
             host,
             port,
             subprotocols=["ocpp1.6"],
+            ping_interval=None,
         )
 
         self.running = True

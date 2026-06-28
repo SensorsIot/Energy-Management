@@ -782,6 +782,7 @@ class TestPostConnectSetup:
             "test", mock_connection, on_status_change=srv._on_status_change
         )
         cp.trigger_meter_values = AsyncMock()
+        cp.set_charging_power = AsyncMock()  # avoid real OCPP send (post-connect re-applies 0W)
         srv.charge_point = cp
 
         return srv
@@ -862,6 +863,7 @@ class TestCarReady:
             "test", mock_connection, on_status_change=srv._on_status_change
         )
         cp.trigger_meter_values = AsyncMock()
+        cp.set_charging_power = AsyncMock()  # avoid real OCPP send (post-connect re-applies 0W)
         srv.charge_point = cp
 
         return srv
@@ -1111,7 +1113,8 @@ class TestEscalatingResend:
         server._resend_retry_count = 10
         assert server._current_resend_interval == 60  # capped at last
 
-    def test_reset_on_status_change(self, server) -> None:
+    @pytest.mark.asyncio
+    async def test_reset_on_status_change(self, server) -> None:
         """Leaving SuspendedEVSE should reset retry count."""
         server._resend_retry_count = 5
 
@@ -1124,7 +1127,8 @@ class TestEscalatingResend:
         server._on_status_change("status", "Charging")
         assert server._resend_retry_count == 0
 
-    def test_no_reset_when_staying_suspended_evse(self, server) -> None:
+    @pytest.mark.asyncio
+    async def test_no_reset_when_staying_suspended_evse(self, server) -> None:
         """Staying in SuspendedEVSE should not reset retry count."""
         server._resend_retry_count = 3
 
@@ -1202,7 +1206,8 @@ class TestSuspendedEVCloudCorrection:
         assert server._synthesized_suspended_ev is False
         server.ha.set_state.assert_any_call("sensor.wallbox_status", "SuspendedEVSE")
 
-    def test_no_cloud_poll_when_last_sent_zero(self, server) -> None:
+    @pytest.mark.asyncio
+    async def test_no_cloud_poll_when_last_sent_zero(self, server) -> None:
         """Cloud poll should not start when _last_sent_power_w = 0."""
         server.charge_point = MagicMock()
         server.charge_point.current_status = "SuspendedEVSE"
@@ -1213,7 +1218,8 @@ class TestSuspendedEVCloudCorrection:
 
         assert server._cloud_poll_task is None
 
-    def test_cloud_poll_starts_when_suspended_evse_with_power(self, server) -> None:
+    @pytest.mark.asyncio
+    async def test_cloud_poll_starts_when_suspended_evse_with_power(self, server) -> None:
         """Cloud poll should start when SuspendedEVSE and last_sent > 0."""
         server.charge_point = MagicMock()
         server.charge_point.current_status = "SuspendedEVSE"
@@ -1268,6 +1274,7 @@ class TestInnerSync:
             "test", mock_connection, on_status_change=srv._on_status_change
         )
         cp.trigger_meter_values = AsyncMock()
+        cp.set_charging_power = AsyncMock()  # avoid real OCPP send (post-connect re-applies 0W)
         srv.charge_point = cp
 
         return srv
