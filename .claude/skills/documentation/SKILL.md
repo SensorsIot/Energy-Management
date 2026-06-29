@@ -1,6 +1,6 @@
 ---
 name: documentation
-description: Triage where a piece of documentation belongs (WHAT vs HOW vs operate) and write it to its one canonical home in the Energy-Management project — for BOTH authoring new docs AND updating existing ones after a change. Use whenever creating, updating, refreshing, cleaning up, scrubbing, or rewriting any project documentation — the FSDs, CLAUDE.md build rules, interface contracts, or skill SKILL.md files. Triggers on "write the docs", "update the docs", "document this change", "scrub history", "no-history pass", "current-state rewrite", "doc hygiene pass", "where does this belong", or when handed any .md to revise.
+description: Triage where a piece of documentation belongs (WHAT vs HOW vs operate) and write it to its one canonical home in the Energy-Management project — for BOTH authoring new docs AND updating existing ones, including reconciling a doc against the implementation (verifying the spec still matches the code). Use whenever creating, updating, refreshing, cleaning up, scrubbing, rewriting, or fact-checking any project documentation — the per-add-on FSDs, CLAUDE.md build rules, interface contracts, READMEs, or skill SKILL.md files. Triggers on "write the docs", "update the docs", "document this change", "scrub history", "no-history pass", "current-state rewrite", "doc hygiene pass", "does the spec still match the implementation", "the docs are out of sync with the code", "where does this belong", or when handed any .md to revise.
 ---
 
 # documentation — place it, write it, keep it present-state (Energy-Management)
@@ -16,7 +16,8 @@ the procedure (A vs B at the bottom).
 |---|---|---|
 | `[SPEC]` | **distributed** — each add-on ships its own self-contained FSD; route a change to the FSD of the add-on it touches: `swisssolarforecast/Documents/swisssolarforecast-fsd.md`, `loadforecast/Documents/loadforecast-fsd.md`, `energymanager/Documents/energymanager-fsd.md` (battery/EV/appliance control logic), `ocpp-server/Documents/ocpp-server-fsd.md`. Physical-install spec `Home-Installation-fsd.md` is maintained **outside the repo** (`/workspaces/HomeAssistant/Documents/`). | the **WHAT**; route by the owning add-on. An add-on FSD is self-contained — don't make it defer core spec to another doc |
 | `[INTERFACES]` | a **section of the owning `[SPEC]`** — e.g. ocpp-server FSD §3.6 (External Interface); the Smart-car API is `energymanager/Documents/Hello Smart API.md`. Each add-on documents its own inter-add-on data contracts (InfluxDB buckets it reads/writes) in its FSD. | route by section/add-on |
-| `[HARNESS]` | `CLAUDE.md` | the **HOW** — only how to *work on* the repo; references the FSD, never restates behaviour |
+| `[HARNESS]` | `CLAUDE.md` (workspace-level, `.gitignored` / local-only) | the **HOW** — only how to *work on* the repo; references the FSD, never restates behaviour |
+| `[OVERVIEW]` | `README.md` | suite-level overview — architecture, data flow, InfluxDB bucket map, FSD links |
 
 Roles with no file here — `[HANDBOOK]`, `[GLOSSARY]`, `[DOC-LINTER]` — do not exist; never invent them.
 
@@ -33,6 +34,7 @@ Ask: *is this WHAT the system is, or HOW it is built / operated?*
 | *why* a rule is what it is | — | **not recorded** — capture the live constraint as a present-tense rule; the running system is the decision |
 | a prescriptive rule for **how** to build / change / operate the repo correctly | **HOW** | `[HARNESS]` (`CLAUDE.md`) |
 | a step-by-step procedure for one operation (deploy, remote access, …) | **HOW (procedure)** | the relevant skill (e.g. `remote-connections`) |
+| the suite-level overview (architecture, data flow, bucket map) | **WHAT (overview)** | `[OVERVIEW]` (`README.md`) |
 | the definition of a domain term | **WHAT (vocabulary)** | `[SPEC]` |
 
 Within the HOW: cross-cutting rules → `CLAUDE.md`; **scoped to one operation → that operation's
@@ -89,23 +91,33 @@ First, scope and read: **confirm the target** if it's unclear (just this section
 chapter?), and **read each target end-to-end before editing** — note where the `## Changelog`
 section sits so the scrub doesn't strip it. Then apply these, in order:
 
-1. **WHAT absorbs the change.** New or changed functionality is described in `[SPEC]` (and the
-   ocpp-server FSD §3.6 interface section if a contract moved) — stated as the current behaviour,
-   as if it had always been so. This is the primary target of almost every update.
-2. **Operate, if operators are affected.** If the change alters how an operator does something
+1. **WHAT absorbs the change — verify, don't transcribe.** New or changed functionality is
+   described in the owning add-on FSD (and ocpp-server FSD §3.6 if an interface contract moved),
+   stated as the current behaviour, as if it had always been so. But first confirm it is the
+   *intended* behaviour: if the implementation **deviates** from what the FSD intends, flag the
+   **code** — don't enshrine a defect by quietly rewriting the FSD to match it. Cite evidence — the
+   FSD rule + the code/behaviour that realises it; never describe behaviour you haven't confirmed
+   in the system.
+2. **Reconcile the FSD against the implementation** for the area you touched. Classify each
+   affected requirement as **compliant / deviation / missing**, in *both* directions: behaviour now
+   in the code but absent from the FSD (over-implementation → document it), and FSD statements the
+   change has made false *elsewhere* (outdated → fix). **Escalate, don't guess** — contradictory
+   requirements, ambiguous specs, or implemented features with no FSD home get flagged for
+   clarification, not papered over.
+3. **Operate, if operators are affected.** If the change alters how an operator does something
    (deploy, remote access, …), update the relevant skill too. If it doesn't, leave them.
-3. **HOW stays put.** An update **does not** touch `CLAUDE.md` — *unless* the change taught a
+4. **HOW stays put.** An update **does not** touch `CLAUDE.md` — *unless* the change taught a
    **universally valid** rule (a durable convention for future work, not this one feature).
    Default: leave the harness unchanged.
-4. **Re-triage what's already there.** While in the file, check the surrounding content still sits
+5. **Re-triage what's already there.** While in the file, check the surrounding content still sits
    in the right plane and isn't duplicated elsewhere; move or delete drift you find.
-5. **Present-state scrub.** Rewrite to current state — "the system does X", never "changed from Y
+6. **Present-state scrub.** Rewrite to current state — "the system does X", never "changed from Y
    to X", "previously", "as of <date>". Sweep with the catalogue in
-   **`references/present-state-scrub.md`**; preserve only the `## Changelog` section (add one
-   terse dated bullet / version entry there for the change).
-6. **Show the diff**, flag any deletion > 5 lines, run the doc gate, repair, then commit.
+   **`references/present-state-scrub.md`**; preserve only the `## Changelog` section (add one terse
+   dated bullet / version entry there for the change).
+7. **Show the diff**, flag any deletion > 5 lines, run the doc gate, repair, then commit.
 
-The present-state rule is stated in step 5 specifically because an update is the only time it's
+The present-state rule is stated in step 6 specifically because an update is the only time it's
 *tempting* to break it — authoring from scratch has no history to carry forward.
 
 ---
