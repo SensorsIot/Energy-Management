@@ -173,7 +173,7 @@ MeteoSwiss STAC API                    InfluxDB (HomeAssistant bucket)
 └─────────────────┘    └─────────────────────┘
 ```
 
-**Modbus Proxy Power Correction:** The wallbox is wired between the grid and the DTSU meter, so the SUN2000 doesn't see wallbox consumption. Without correction, the SUN2000 would see grid export when the wallbox is actually importing from the grid. The ESP32 Modbus Proxy sits on the RS485 bus between the DTSU and SUN2000, intercepts meter responses, and adds the wallbox power: `corrected = dtsu_power + wallbox_power`. The wallbox power arrives via MQTT (topic `wallbox`) published by the OCPP Server add-on every 10 seconds. See [Modbus-Proxy-FSD.md](Modbus-Proxy-FSD.md) for the full ESP32 specification.
+**Modbus Proxy Power Correction:** The wallbox is wired between the grid and the DTSU meter, so the SUN2000 doesn't see wallbox consumption. Without correction, the SUN2000 would see grid export when the wallbox is actually importing from the grid. The ESP32 Modbus Proxy sits on the RS485 bus between the DTSU and SUN2000, intercepts meter responses, and adds the wallbox power: `corrected = dtsu_power + wallbox_power`. The wallbox power arrives via MQTT (topic `wallbox`) published by the OCPP Server add-on every 10 seconds. The Modbus Proxy itself is a separate ESP32 component (no in-repo FSD).
 
 **Example** (wallbox charging at 4343W, PV covering house load):
 ```
