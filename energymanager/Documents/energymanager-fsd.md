@@ -1036,8 +1036,8 @@ to the car for good. Charging greedily banks that surplus into the battery
 while the car is away and nothing competes, so it is available on the car's
 return (a real energy loss, not only a forecast bet). A connected car with unknown
 SOC/target is **not** treated as departed (the cached last-known SOC is held,
-§7.7, so a stale read keeps the shaving day rather than cancelling on missing
-data). The mode does **not** re-flip *into* shaving if the car merely reaches
+Home-Installation §7.7, so a stale read keeps the shaving day rather than
+cancelling on missing data). The mode does **not** re-flip *into* shaving if the car merely reaches
 its target later in the afternoon (the midday peak is past by then).
 
 The two top-level use cases follow from the day mode (`_charge_gate_active()`
