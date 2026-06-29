@@ -777,26 +777,8 @@ See the [SwissSolarForecast FSD](../swisssolarforecast/Documents/swisssolarforec
 
 ### 1.13.3 LoadForecast Parameters
 
-**Secrets (Configuration UI):**
-
-| Parameter | Schema Type | Description |
-|-----------|-------------|-------------|
-| `influxdb_token` | `password` | InfluxDB API token |
-
-**Non-Secrets (`/config/loadforecast.yaml`):**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `influxdb.host` | 192.168.0.203 | InfluxDB server IP/hostname |
-| `influxdb.port` | 8087 | InfluxDB HTTP port |
-| `influxdb.org` | energymanagement | InfluxDB organization |
-| `influxdb.source_bucket` | HomeAssistant | Bucket with historical load data |
-| `influxdb.target_bucket` | load_forecast | Output bucket name |
-| `load_sensor.entity_id` | sensor.house_load_power | HA entity ID for load power |
-| `forecast.history_days` | 90 | Days of history for profile |
-| `forecast.horizon_hours` | 120 | Forecast horizon (hours) — matches PV forecast |
-| `schedule.cron` | 15 * * * * | Cron schedule for forecast runs |
-| `log_level` | info | Logging level |
+See the [LoadForecast FSD](../loadforecast/Documents/loadforecast-fsd.md) §5 (Configuration) for
+this add-on's full parameter reference.
 
 ---
 
@@ -814,211 +796,13 @@ schema, the MeteoSwiss ICON / STAC pipeline, PV-system configuration, and shadin
 
 # Chapter 3: LoadForecast Add-on
 
-## 3.1 Overview
+LoadForecast is an independent Home Assistant add-on with its own self-contained FSD:
+**[loadforecast-fsd.md](../loadforecast/Documents/loadforecast-fsd.md)**.
 
-LoadForecast generates statistical household load consumption forecasts using historical consumption patterns. It analyzes 90 days of historical data to build time-of-day profiles and produces P10/P50/P90 percentile forecasts.
-
-| Property | Value |
-|----------|-------|
-| Name | LoadForecast |
-| Slug | `loadforecast` |
-| Architectures | aarch64, amd64, armv7 |
-| Timeout | 120 seconds |
-| Schedule | Hourly (cron: `15 * * * *`) |
-
-## 3.2 Features
-
-- **Statistical Profiling**: Time-of-day consumption profiles (96 daily slots)
-- **Historical Analysis**: Uses 90 days of consumption data
-- **Probabilistic Output**: P10/P50/P90 percentiles for uncertainty bands
-- **15-Minute Resolution**: Aligned with EnergyManager optimization timestep
-- **120-Hour (5-Day) Horizon**: Matches PV forecast range for consistent SOC simulation
-
-## 3.3 Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       LoadForecast Add-on                            │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  FORECAST CYCLE (every hour at :15)                                  │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │ 1. Query 90 days of house_load_power from HomeAssistant bucket │  │
-│  │                                                                 │  │
-│  │ 2. Build time-of-day profile:                                  │  │
-│  │    • Group into 96 daily slots (15-min periods)                │  │
-│  │    • Calculate P10/P50/P90 percentiles per slot                │  │
-│  │                                                                 │  │
-│  │ 3. Generate 48-hour forecast:                                  │  │
-│  │    • Map future timestamps to profile slots                    │  │
-│  │    • Look up P10/P50/P90 values                                │  │
-│  │                                                                 │  │
-│  │ 4. Write to load_forecast bucket                               │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-## 3.4 Algorithm
-
-### Time-of-Day Profiling
-
-The algorithm divides each day into 96 slots (15-minute periods):
-
-```
-Slot = hour × 4 + (minute ÷ 15)
-
-Slot  0 = 00:00 - 00:15
-Slot  1 = 00:15 - 00:30
-...
-Slot 47 = 11:45 - 12:00
-Slot 48 = 12:00 - 12:15
-...
-Slot 95 = 23:45 - 00:00
-```
-
-### Profile Building
-
-For each of the 96 slots:
-1. Collect all historical consumption values at that time slot
-2. Calculate statistics across the 90-day window:
-   - P10 (10th percentile): Low consumption, 90% chance to exceed
-   - P50 (50th percentile): Median/typical consumption
-   - P90 (90th percentile): High consumption, 10% chance to exceed
-
-### Forecast Generation
-
-For each future timestamp in the 120-hour (5-day) horizon:
-1. Calculate the slot number from the timestamp
-2. Look up P10/P50/P90 values from the profile
-3. Convert power (W) to per-period energy (Wh): `power × 0.25h`
-
-## 3.5 Configuration
-
-### Secrets (Configuration UI)
-
-Enter in **Settings → Add-ons → LoadForecast → Configuration**:
-- `influxdb_token` (required)
-
-### Non-Secrets (`/config/loadforecast.yaml`)
-
-```yaml
-# NOTE: Token is configured in the Configuration tab, not here!
-influxdb:
-  host: "192.168.0.203"
-  port: 8087
-  org: "energymanagement"
-  source_bucket: "HomeAssistant"    # Where to read historical data
-  target_bucket: "load_forecast"     # Where to write forecasts
-
-load_sensor:
-  entity_id: "house_load_power"      # HA entity to use for load
-
-forecast:
-  history_days: 90                   # Days of history to analyze
-  horizon_hours: 120                 # Forecast horizon (matches PV)
-
-schedule:
-  cron: "15 * * * *"                 # Run at :15 every hour
-
-log_level: "info"
-```
-
-## 3.6 InfluxDB Output Schema
-
-**Measurement:** `load_forecast`
-
-**Resolution:** 15-minute intervals
-
-### Tags
-
-| Tag | Values | Description |
-|-----|--------|-------------|
-| `model` | `statistical` | Forecast model type |
-
-### Fields
-
-| Field | Unit | Description |
-|-------|------|-------------|
-| `power_w_p10` | W | Load power (low, 90% chance to exceed) |
-| `power_w_p50` | W | Load power (median/typical) |
-| `power_w_p90` | W | Load power (high, 10% chance to exceed) |
-| `run_time` | ISO string | When forecast was calculated |
-
-**Note:** Values represent instantaneous power (W). To calculate energy per period: `energy_wh = power_w × 0.25` (for 15-min intervals).
-
-## 3.7 Data Source
-
-The add-on queries historical consumption data from the `HomeAssistant` InfluxDB bucket:
-
-```flux
-from(bucket: "HomeAssistant")
-  |> range(start: -90d)
-  |> filter(fn: (r) => r.entity_id == "house_load_power")
-  |> filter(fn: (r) => r._field == "value")
-  |> aggregateWindow(every: 15m, fn: mean)
-```
-
-**Important:** `sensor.house_load_power` is the Shelly 3EM 3-phase sum (direct measurement, template sensor `load_total_power`). The Huawei Solar integration also calculates a load value (`inverter_active_power - power_meter_active_power + battery_charge_discharge_power`) but the Shelly measurement is preferred for accuracy.
-
-## 3.8 Source Files
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `run.py` | 192 | Main entry point, scheduler loop |
-| `src/load_predictor.py` | 183 | Statistical forecasting algorithm |
-| `src/influxdb_writer.py` | 140 | InfluxDB forecast writer |
-
-## 3.9 Dependencies
-
-```
-pandas>=2.0.0              # Data manipulation
-numpy>=1.24.0              # Numerical computing
-influxdb-client>=1.36.0    # InfluxDB client
-croniter>=1.3.0            # Cron expression parsing
-```
-
-## 3.10 Grafana Queries
-
-**Load Forecast with uncertainty band:**
-```flux
-from(bucket: "load_forecast")
-  |> range(start: now(), stop: 120h)
-  |> filter(fn: (r) => r._measurement == "load_forecast")
-  |> filter(fn: (r) => r._field == "power_w_p10" or
-                       r._field == "power_w_p50" or
-                       r._field == "power_w_p90")
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-```
-
-**Forecast vs Actual:**
-```flux
-forecast = from(bucket: "load_forecast")
-  |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r._field == "power_w_p50")
-
-actual = from(bucket: "HomeAssistant")
-  |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r.entity_id == "house_load_power")
-  |> aggregateWindow(every: 15m, fn: mean)
-
-union(tables: [forecast, actual])
-```
-
-## 3.11 Limitations and Future Enhancements
-
-**Current Limitations:**
-- No weekday/weekend differentiation
-- No seasonal adjustment
-- No special event handling (holidays, vacations)
-- No appliance-level modeling
-
-**Potential Enhancements:**
-- Separate weekday/weekend profiles
-- Seasonal scaling factors
-- Short-term adaptation based on recent hours
-- Integration with calendar events
-- Machine learning models (LSTM, XGBoost)
+EnergyManager consumes its output as the load input to optimization — the `load_forecast` bucket
+(measurement `load_forecast`, fields `power_w_p10/p50/p90`, at 15-minute resolution) — to simulate
+future house load against the PV forecast. See the LoadForecast FSD for the profiling algorithm,
+data source, output schema, and configuration.
 
 ---
 
@@ -3662,7 +3446,9 @@ See Section 4.3.8 for adaptive polling logic.
 
 **Changelog:**
 
-- v2.77: **SwissSolarForecast spec extracted to its own self-contained add-on FSD (doc-only, no code change).** Each add-on is an independently shipped HA app and now owns a complete FSD; Chapter 2 (ICON/STAC pipeline, PV configuration, output schema, calculation pipeline, shading correction) and the §1.13.2 parameter block moved to `swisssolarforecast/Documents/swisssolarforecast-fsd.md`. This doc keeps a one-paragraph summary + link and the `pv_forecast` interface contract EnergyManager consumes. LoadForecast (Chapter 3) extraction pending.
+- v2.78: **LoadForecast spec extracted to its own self-contained add-on FSD (doc-only, no code change).** Chapter 3 (profiling algorithm, data source, output schema, configuration, limitations) and the §1.13.3 parameter block moved to `loadforecast/Documents/loadforecast-fsd.md`; this doc keeps a summary + link and the `load_forecast` interface contract EnergyManager consumes. Corrected the output-field contract there to `power_w_p10/p50/p90` + `run_time` (verified against `loadforecast/src/influxdb_writer.py` — the old stub listed `energy_wh_*`; energy is derived by consumers) and recorded the deployed 120 h horizon vs the 48 h code/example default. SwissSolarForecast and LoadForecast are now both self-contained; EnergyManager (Chapter 4) remains in this FSD.
+
+- v2.77: **SwissSolarForecast spec extracted to its own self-contained add-on FSD (doc-only, no code change).** Each add-on is an independently shipped HA app and now owns a complete FSD; Chapter 2 (ICON/STAC pipeline, PV configuration, output schema, calculation pipeline, shading correction) and the §1.13.2 parameter block moved to `swisssolarforecast/Documents/swisssolarforecast-fsd.md`. This doc keeps a one-paragraph summary + link and the `pv_forecast` interface contract EnergyManager consumes.
 
 - v2.76: **SOC-forecast scenarios renamed to the two decision options + the chosen path (Sections 4.2.1, 4.2.2, 4.5.1).** The `soc_forecast` `scenario` tag carried `with_strategy` / `without_strategy`, where `with_strategy` was actually the *winning* trajectory (the chosen path), not a fixed "discharge held" curve — so the two plotted lines collapsed onto each other whenever holding won nothing, and the names didn't say what each was. The decision is a per-cycle choice between two options: **battery_on** (free discharge) and **battery_off** (hold discharge during cheap hours); `calculate_decision` now returns both pure sims plus **planned** (whichever it selects). All three are written: `battery_on` and `battery_off` are the two candidate options the dashboard compares; `planned` is the realistic path the EV safety gate (`ev_battery.py`) and the forecast snapshot read (was `with_strategy`). Naming is now congruent across code, InfluxDB, and Grafana. Existing InfluxDB history was migrated in place to preserve it: `without_strategy` → `battery_on` and `with_strategy` → `planned` (the old `with_strategy` curve was the winning/chosen trajectory, i.e. `planned`); `battery_off` (the pure-hold sim) has no pre-deploy history because it was never stored as a separate series before. Observability/naming change — discharge actuation and the EV gate read the same trajectory as before. (1.8.43 -> 1.8.44)
 
