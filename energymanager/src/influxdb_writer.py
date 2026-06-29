@@ -44,7 +44,7 @@ class SimulationWriter:
     def write_soc_forecast(
         self,
         simulation: pd.DataFrame,
-        scenario: str = "with_strategy",
+        scenario: str = "planned",
     ) -> None:
         """Write SOC forecast to InfluxDB.
 
@@ -53,7 +53,8 @@ class SimulationWriter:
 
         Args:
             simulation: DataFrame with 'soc_percent' column, indexed by time
-            scenario: Tag to identify the scenario ("with_strategy" or "without_strategy")
+            scenario: Tag identifying the scenario ("battery_on", "battery_off",
+                or "planned")
 
         """
         if simulation.empty:

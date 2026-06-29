@@ -76,7 +76,7 @@ class EVBatteryOptimizer:
             from(bucket: "{self.bucket}")
               |> range(start: now(), stop: {stop})
               |> filter(fn: (r) => r._measurement == "soc_forecast")
-              |> filter(fn: (r) => r.scenario == "with_strategy")
+              |> filter(fn: (r) => r.scenario == "planned")
               |> filter(fn: (r) => r._field == "soc_percent")
               |> min()
             '''
@@ -131,7 +131,7 @@ class EVBatteryOptimizer:
         from(bucket: "{self.bucket}")
           |> range(start: now(), stop: {end_stop})
           |> filter(fn: (r) => r._measurement == "soc_forecast")
-          |> filter(fn: (r) => r.scenario == "with_strategy")
+          |> filter(fn: (r) => r.scenario == "planned")
           |> filter(fn: (r) => r._field == "soc_percent")
           |> max()
         """
@@ -148,7 +148,7 @@ class EVBatteryOptimizer:
             from(bucket: "{self.bucket}")
               |> range(start: now(), stop: {end_stop})
               |> filter(fn: (r) => r._measurement == "soc_forecast")
-              |> filter(fn: (r) => r.scenario == "with_strategy")
+              |> filter(fn: (r) => r.scenario == "planned")
               |> filter(fn: (r) => r._field == "soc_percent")
               |> filter(fn: (r) => r._value >= {full_threshold})
               |> first()

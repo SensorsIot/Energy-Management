@@ -65,16 +65,16 @@ class TestNoForecast:
     def test_no_forecast_data_allows_discharge(self) -> None:
         opt = BatteryOptimizer()
         now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
-        decision, a, b = opt.calculate_decision(
+        decision, on, off, planned = opt.calculate_decision(
             soc_percent=50, forecast=pd.DataFrame(), now=now
         )
         assert decision.discharge_allowed is True
         assert "No forecast data" in decision.reason
-        assert a.empty and b.empty
+        assert on.empty and off.empty and planned.empty
 
 
 class TestExpensiveImportComparison:
-    """FSD 4.2.2 Topic 4: lower expensive-hours import wins; tie -> without_strategy."""
+    """FSD 4.2.2 Topic 4: lower expensive-hours import wins; tie -> battery_on."""
 
     def test_abundant_pv_free_discharge_wins(self) -> None:
         """Strong PV -> no expensive import either way -> tie -> free discharge."""
@@ -83,20 +83,20 @@ class TestExpensiveImportComparison:
         pv = [0] * 32 + [5000] * 60 + [0] * 4
         load = [400] * 96
         fc = make_forecast(now, 48, pv, load)
-        decision, _, _ = opt.calculate_decision(soc_percent=80, forecast=fc, now=now)
+        decision, _, _, _ = opt.calculate_decision(soc_percent=80, forecast=fc, now=now)
         assert decision.discharge_allowed is True
         assert decision.expensive_import_wh == 0.0
         assert "free-discharge" in decision.reason
 
     def test_poor_pv_night_holds_discharge(self) -> None:
         """Cheap night + poor PV: free discharge empties the battery before the
-        expensive morning, so with_strategy buys less expensive energy -> hold now."""
+        expensive morning, so battery_off buys less expensive energy -> hold now."""
         opt = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0)
         now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
         pv = [0] * 36 + [300] * 40 + [0] * 20
         load = [1200] * 96
         fc = make_forecast(now, 48, pv, load)
-        decision, _, _ = opt.calculate_decision(soc_percent=40, forecast=fc, now=now)
+        decision, _, _, _ = opt.calculate_decision(soc_percent=40, forecast=fc, now=now)
         assert decision.discharge_allowed is False
         assert "Hold" in decision.reason
 
@@ -105,7 +105,7 @@ class TestExpensiveImportComparison:
         opt = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0)
         now = datetime(2026, 1, 26, 11, 0, tzinfo=SWISS_TZ).astimezone(UTC)  # expensive
         fc = make_forecast(now, 48, [0], [1500])
-        decision, _, _ = opt.calculate_decision(soc_percent=60, forecast=fc, now=now)
+        decision, _, _, _ = opt.calculate_decision(soc_percent=60, forecast=fc, now=now)
         assert decision.discharge_allowed is True
 
     def test_unavoidable_expensive_import_is_positive(self) -> None:
@@ -113,8 +113,39 @@ class TestExpensiveImportComparison:
         opt = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0)
         now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
         fc = make_forecast(now, 48, [0], [1000])
-        decision, _, _ = opt.calculate_decision(soc_percent=10, forecast=fc, now=now)
+        decision, _, _, _ = opt.calculate_decision(soc_percent=10, forecast=fc, now=now)
         assert decision.expensive_import_wh > 0
+
+
+class TestScenarioCurves:
+    """calculate_decision returns battery_on, battery_off, and the planned path."""
+
+    def test_three_distinct_curves_planned_matches_choice(self) -> None:
+        """Hold wins -> planned == battery_off; battery_off preserves more SOC."""
+        opt = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
+        pv = [0] * 36 + [300] * 40 + [0] * 20
+        load = [1200] * 96
+        fc = make_forecast(now, 48, pv, load)
+        decision, on, off, planned = opt.calculate_decision(
+            soc_percent=40, forecast=fc, now=now
+        )
+        assert not on.empty and not off.empty and not planned.empty
+        # Hold wins this scenario, so the planned path is battery_off.
+        assert decision.discharge_allowed is False
+        assert planned["soc_percent"].equals(off["soc_percent"])
+        # Holding discharge during cheap hours never ends below free discharge.
+        assert off["soc_percent"].iloc[-1] >= on["soc_percent"].iloc[-1]
+
+    def test_planned_is_one_of_the_two_options(self) -> None:
+        """planned always equals exactly one of the two candidate sims."""
+        opt = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0)
+        now = datetime(2026, 1, 26, 22, 0, tzinfo=SWISS_TZ).astimezone(UTC)
+        fc = make_forecast(now, 48, [0] * 32 + [5000] * 60 + [0] * 4, [400] * 96)
+        _, on, off, planned = opt.calculate_decision(soc_percent=80, forecast=fc, now=now)
+        matches_on = planned["soc_percent"].equals(on["soc_percent"])
+        matches_off = planned["soc_percent"].equals(off["soc_percent"])
+        assert matches_on or matches_off
 
 
 class TestReserveMargin:
@@ -125,10 +156,10 @@ class TestReserveMargin:
         pv = [0] * 36 + [800] * 40 + [0] * 20
         load = [1000] * 96
         fc = make_forecast(now, 48, pv, load)
-        d0, _, _ = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0).calculate_decision(
+        d0, _, _, _ = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0).calculate_decision(
             soc_percent=40, forecast=fc, now=now
         )
-        d20, _, _ = BatteryOptimizer(capacity_wh=10000, min_soc_percent=20).calculate_decision(
+        d20, _, _, _ = BatteryOptimizer(capacity_wh=10000, min_soc_percent=20).calculate_decision(
             soc_percent=40, forecast=fc, now=now
         )
         # A higher floor stops the battery earlier -> at least as much expensive import.
@@ -152,10 +183,10 @@ class TestReserveMargin:
                 pv.append(0.0)
             load.append(400.0)
         fc = make_forecast(now, 48, pv, load)
-        d0, _, _ = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0).calculate_decision(
+        d0, _, _, _ = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0).calculate_decision(
             soc_percent=42, forecast=fc, now=now
         )
-        d10, _, _ = BatteryOptimizer(capacity_wh=10000, min_soc_percent=10).calculate_decision(
+        d10, _, _, _ = BatteryOptimizer(capacity_wh=10000, min_soc_percent=10).calculate_decision(
             soc_percent=42, forecast=fc, now=now
         )
         assert d0.discharge_allowed is True       # bottom slice covers the morning
@@ -173,7 +204,7 @@ class TestWeekend:
         opt = BatteryOptimizer(capacity_wh=10000, min_soc_percent=0)
         now = datetime(2026, 1, 30, 23, 0, tzinfo=SWISS_TZ).astimezone(UTC)  # Friday
         fc = make_forecast(now, 48, [0], [500])
-        decision, _, _ = opt.calculate_decision(soc_percent=10, forecast=fc, now=now)
+        decision, _, _, _ = opt.calculate_decision(soc_percent=10, forecast=fc, now=now)
         assert decision.discharge_allowed is True
         assert decision.expensive_import_wh == 0.0
 

@@ -497,14 +497,17 @@ class BatteryOptimizer:
     ) -> tuple[DischargeDecision, pd.DataFrame, pd.DataFrame]:
         """Decide whether the home battery may discharge (FSD 4.2.2, Topic 4).
 
-        Simulates the next 48 h **without_strategy** (free discharge) and
-        **with_strategy** (hold discharge during cheap slots), sums the
+        Simulates the next 48 h two ways: **battery_on** (free discharge) and
+        **battery_off** (hold discharge during cheap slots), sums the
         expensive-hours grid import (Wh) for each, and the lower wins -- ties go
-        to without_strategy. Emits `expensive_import_wh` (== 0 means the battery
-        covers every expensive hour without buying). `previously_blocked` is
-        accepted but unused -- the metric is a stable cost, so no hysteresis.
+        to battery_on (free discharge). Emits `expensive_import_wh` (== 0 means
+        the battery covers every expensive hour without buying).
+        `previously_blocked` is accepted but unused -- the metric is a stable
+        cost, so no hysteresis.
 
-        Returns (decision, sim_without_strategy, sim_winning_strategy).
+        Returns (decision, sim_battery_on, sim_battery_off, sim_planned), where
+        sim_planned is whichever of the two the decision selects (the path that
+        actually executes).
         """
         if forecast.empty:
             logger.warning("No forecast data available")
@@ -515,6 +518,7 @@ class BatteryOptimizer:
                     min_soc_percent=100.0,
                     expensive_import_wh=0.0,
                 ),
+                pd.DataFrame(),
                 pd.DataFrame(),
                 pd.DataFrame(),
             )
@@ -543,12 +547,12 @@ class BatteryOptimizer:
         imp_without = float(sim_without.loc[expensive, "grid_import_wh"].sum())
         imp_with = float(sim_with.loc[expensive, "grid_import_wh"].sum())
 
-        # Lower expensive import wins; tie -> without_strategy (free discharge).
+        # Lower expensive import wins; tie -> battery_on (free discharge).
         use_with = imp_with < imp_without
         expensive_import_wh = imp_with if use_with else imp_without
-        winning = sim_with if use_with else sim_without
+        sim_planned = sim_with if use_with else sim_without
 
-        exp_soc = winning.loc[expensive, "soc_percent"]
+        exp_soc = sim_planned.loc[expensive, "soc_percent"]
         min_soc = float(exp_soc.min()) if not exp_soc.empty else 100.0
 
         now_cheap = bool(cheap.iloc[0]) if len(cheap) else False
@@ -573,8 +577,8 @@ class BatteryOptimizer:
             )
 
         logger.info(
-            f"Discharge: expensive import without={imp_without:.0f} Wh, "
-            f"with={imp_with:.0f} Wh -> {'with' if use_with else 'without'}_strategy; "
+            f"Discharge: expensive import battery_on={imp_without:.0f} Wh, "
+            f"battery_off={imp_with:.0f} Wh -> {'battery_off' if use_with else 'battery_on'}; "
             f"allowed={discharge_allowed}, exp_min_soc={min_soc:.0f}%"
         )
 
@@ -586,7 +590,8 @@ class BatteryOptimizer:
                 expensive_import_wh=expensive_import_wh,
             ),
             sim_without,
-            winning,
+            sim_with,
+            sim_planned,
         )
 
 def should_charge_now(

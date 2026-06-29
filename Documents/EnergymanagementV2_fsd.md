@@ -1722,14 +1722,15 @@ The home battery is the central buffer of the system. It runs **first** in the d
 
 ### 4.2.1 SOC Simulation
 
-The SOC simulation predicts battery state over the forecast horizon. This is the base curve for all energy management decisions. Runs every 15 min via `BatteryOptimizer.simulate_soc()`, producing two trajectories written to InfluxDB with tag `scenario`:
+The SOC simulation predicts battery state over the forecast horizon. This is the base curve for all energy management decisions. Runs every 15 min via `BatteryOptimizer.simulate_soc()`, producing three trajectories written to InfluxDB with tag `scenario`:
 
 | Scenario | Description | Used by |
 |---|---|---|
-| `with_strategy` | Discharge blocked during cheap hours per the 4.2.2 rule — the trajectory that will actually occur | EV safety rule (4.3), washer (4.4) |
-| `without_strategy` | Raw simulation with free discharge — the "why we block" reference | Grafana only |
+| `battery_on` | Free discharge — the implication of allowing discharge every deficit | Grafana, washer (4.4) |
+| `battery_off` | Discharge held during cheap hours per the 4.2.2 rule — the implication of holding | Grafana |
+| `planned` | Whichever of the two the 4.2.2 decision selects each cycle — the trajectory that actually occurs | EV safety rule (4.3) |
 
-`simulate_soc(soc_percent, forecast, block_from, block_until)` supports optional discharge-block windows; `calculate_decision()` uses this to generate the `with_strategy` curve.
+`battery_on` and `battery_off` are the two candidate options the decision chooses between; `planned` is the chosen one. `simulate_soc(soc_percent, forecast, block_from, block_until)` supports optional discharge-block windows; `calculate_decision()` uses this to generate all three curves.
 
 #### Basic Loop (net = PV − Load → battery flow)
 
@@ -1819,18 +1820,18 @@ This is the **complete** EBL low-tariff holiday list; other canton-BL holidays (
 #### Process
 
 1. **Simulate SOC twice** (`simulate_soc`, from current SOC, on `solar - house_load`):
-   - **without_strategy** -- discharge on every deficit.
-   - **with_strategy** -- skip discharge during **cheap** slots (that load is bought from the grid); discharge normally during **expensive** slots.
+   - **battery_on** -- discharge on every deficit (free discharge).
+   - **battery_off** -- skip discharge during **cheap** slots (that load is bought from the grid); discharge normally during **expensive** slots.
 2. **Label** every 15-min slot cheap/expensive (*Cheap/expensive labeling* above).
-3. **Sum expensive-hours import** for each strategy: total unserved load **energy (Wh)** over all **expensive** slots where the battery is empty (SOC = 0) -- the energy bought at the high price.
+3. **Sum expensive-hours import** for each option: total unserved load **energy (Wh)** over all **expensive** slots where the battery is empty (SOC = 0) -- the energy bought at the high price.
 4. **Compare** the two sums.
-5. **Lower wins. On a tie, without_strategy wins** (don't buy cheap energy or hold SOC for no expensive-hours benefit -- the Topic 3 longevity win).
+5. **Lower wins. On a tie, battery_on wins** (don't buy cheap energy or hold SOC for no expensive-hours benefit -- the Topic 3 longevity win). The winner is published as the `planned` trajectory.
 
 #### Outputs
 
 - **Discharge actuation:**
-  - without_strategy wins -> discharge allowed (5000 W).
-  - with_strategy wins -> discharge blocked (0 W) during cheap slots, allowed during expensive slots.
+  - battery_on wins -> discharge allowed (5000 W).
+  - battery_off wins -> discharge blocked (0 W) during cheap slots, allowed during expensive slots.
 - **`expensive_import_wh`** = the winning sum: `== 0` means the battery covers every expensive hour without buying; `> 0` means an expensive purchase is unavoidable.
 
 #### EV-charging override
@@ -2505,38 +2506,39 @@ Every 15 minutes:
 
 ### 4.5.1 SOC Forecast Scenarios
 
-The `soc_forecast` measurement uses a `scenario` tag to store two curves:
+The `soc_forecast` measurement uses a `scenario` tag to store three curves:
 
 | Scenario | Description | Color in Grafana |
 |----------|-------------|------------------|
-| `with_strategy` | What will happen with discharge blocking applied | Green (solid) |
-| `without_strategy` | What would happen without any blocking | Orange (dashed) |
+| `battery_off` | The implication of holding discharge during cheap hours | Green (solid) |
+| `battery_on` | The implication of free discharge on every deficit | Orange (dashed) |
+| `planned` | Whichever option the decision selects each cycle (what runs) | (internal — EV gate) |
 
 ### 4.5.2 Forecast Snapshot for Accuracy Tracking
 
 The `soc_forecast_snapshot` measurement provides persistent forecast storage:
 
-- **Written every 15 minutes** with the current "with_strategy" forecast
+- **Written every 15 minutes** with the current `planned` forecast
 - **Only overwrites from NOW onwards** — earlier points remain from previous writes
 - **Accumulates over time** — creates continuous forecast history
-- **Compare with actual SOC** from `HomeData` bucket to evaluate forecast accuracy
+- **Compare with actual SOC** from the `HomeAssistant` bucket (`battery_state_of_capacity`) to evaluate forecast accuracy
 
 Example: At 21:00, forecast is written for 21:00→21:00 next day. At 23:00, only 23:00→21:00 is overwritten, preserving the 21:00→23:00 portion.
 
 **Query examples:**
 
 ```flux
-# SOC forecast - with strategy (what will happen)
+# SOC forecast - battery off (the hold implication)
 from(bucket: "energy_manager")
   |> range(start: -1h, stop: 120h)
   |> filter(fn: (r) => r._measurement == "soc_forecast")
-  |> filter(fn: (r) => r.scenario == "with_strategy")
+  |> filter(fn: (r) => r.scenario == "battery_off")
 
-# SOC forecast - without strategy (why we block)
+# SOC forecast - battery on (the free-discharge implication)
 from(bucket: "energy_manager")
   |> range(start: -1h, stop: 120h)
   |> filter(fn: (r) => r._measurement == "soc_forecast")
-  |> filter(fn: (r) => r.scenario == "without_strategy")
+  |> filter(fn: (r) => r.scenario == "battery_on")
 
 # Forecast snapshot (for accuracy comparison)
 from(bucket: "energy_manager")
@@ -2544,10 +2546,10 @@ from(bucket: "energy_manager")
   |> filter(fn: (r) => r._measurement == "soc_forecast_snapshot")
 
 # Actual SOC (for comparison with forecast)
-from(bucket: "HomeData")
+from(bucket: "HomeAssistant")
   |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r._measurement == "Energy")
-  |> filter(fn: (r) => r._field == "BATT_Level")
+  |> filter(fn: (r) => r.entity_id == "battery_state_of_capacity")
+  |> filter(fn: (r) => r._field == "value")
 
 # Energy balance with cumulative
 from(bucket: "energy_manager")
@@ -2867,7 +2869,7 @@ plus the EV sensor's `snap_power_w` / `surplus_power_w` to say "Helping charge t
 car · N kW" (vs "Powering the house") while the car draws, where **N is the same
 battery-to-car value the EV card shows** (the two cards agree). The
 `battery_will_be_full` / `battery_full_time` / `battery_peak_soc` attributes
-come from `will_battery_hit_full()` (today's `with_strategy` SOC forecast,
+come from `will_battery_hit_full()` (today's `planned` SOC forecast,
 against the dynamic target) and are published independently of EV state, so the
 card can show "Reaches N% by HH:MM" even with no car plugged in.
 
@@ -4203,6 +4205,8 @@ See Section 4.3.8 for adaptive polling logic.
 *Version 2.50 - May 2026*
 
 **Changelog:**
+
+- v2.76: **SOC-forecast scenarios renamed to the two decision options + the chosen path (Sections 4.2.1, 4.2.2, 4.5.1).** The `soc_forecast` `scenario` tag carried `with_strategy` / `without_strategy`, where `with_strategy` was actually the *winning* trajectory (the chosen path), not a fixed "discharge held" curve — so the two plotted lines collapsed onto each other whenever holding won nothing, and the names didn't say what each was. The decision is a per-cycle choice between two options: **battery_on** (free discharge) and **battery_off** (hold discharge during cheap hours); `calculate_decision` now returns both pure sims plus **planned** (whichever it selects). All three are written: `battery_on` and `battery_off` are the two candidate options the dashboard compares; `planned` is the realistic path the EV safety gate (`ev_battery.py`) and the forecast snapshot read (was `with_strategy`). Naming is now congruent across code, InfluxDB, and Grafana. Observability/naming change — discharge actuation and the EV gate read the same trajectory as before. (1.8.43 -> 1.8.44)
 
 - v2.75: **Manual charge (immediate/cheap): user-facing feedback when the target SOC is already met (Section 4.3.4).** Selecting immediate/cheap while the car is already at/above `input_number.ev_target_soc` makes the state machine bounce straight back to IDLE on entry (the SOC stop), and the controller silently reverts the mode to `solar` — so pressing the button looked like nothing happened (observed: car 85 %, target 60 % → instant revert). Now, when the revert is a same-tick entry bounce (i.e. a button press, not the end of a real charge), a Home Assistant **persistent notification** is raised ("EV charge: target already reached — … Raise the EV target SOC to charge.") via a new `HAClient.create_notification` helper (fixed `notification_id`, so repeated presses replace rather than stack). No control-behaviour change — feedback only. (1.8.42 -> 1.8.43)
 

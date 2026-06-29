@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.43"
+__version__ = "1.8.44"
 
 import json
 import logging
@@ -1030,7 +1030,7 @@ class EnergyManager:
         if self._last_charge_power_w is not None:
             charge_limit_w = self._last_charge_power_w
         # When is the home battery forecast to reach 100% today (SOC forecast,
-        # with_strategy scenario)? Independent of EV state so the battery card
+        # planned scenario)? Independent of EV state so the battery card
         # can show "Full by HH:MM" even when no car is plugged in.
         battery_will_be_full = None
         battery_full_time = None
@@ -1180,22 +1180,24 @@ class EnergyManager:
                 self._battery_target_soc = 100.0
                 self._charge_target_reason = "charge target disabled"
 
-            # Discharge decision (Topic 4). The SOC forecast it produces
-            # (with_strategy) is the NATURAL charge-to-100 trajectory — the Topic
-            # 3 charge target is deliberately NOT threaded in, so the EV safety
-            # gate (Rule 4) and Topic 4 read the unpolluted forecast.
-            decision, sim_no_strategy, sim_with_strategy = self.optimizer.calculate_decision(
-                soc_percent=current_soc,
-                forecast=forecast,
-                now=now,
-                previously_blocked=self._discharge_blocked_by_protection,
-                max_soc_percent=100.0,
+            # Discharge decision (Topic 4). The planned SOC forecast it produces
+            # is the NATURAL charge-to-100 trajectory — the Topic 3 charge target
+            # is deliberately NOT threaded in, so the EV safety gate (Rule 4) and
+            # Topic 4 read the unpolluted forecast.
+            decision, sim_battery_on, sim_battery_off, sim_planned = (
+                self.optimizer.calculate_decision(
+                    soc_percent=current_soc,
+                    forecast=forecast,
+                    now=now,
+                    previously_blocked=self._discharge_blocked_by_protection,
+                    max_soc_percent=100.0,
+                )
             )
 
-            if not sim_no_strategy.empty:
+            if not sim_battery_on.empty:
                 logger.debug(
-                    f"Simulation first: {swiss_datetime(sim_no_strategy.index[0])} "
-                    f"SOC={sim_no_strategy['soc_percent'].iloc[0]:.1f}%"
+                    f"Simulation first: {swiss_datetime(sim_battery_on.index[0])} "
+                    f"SOC={sim_battery_on['soc_percent'].iloc[0]:.1f}%"
                 )
 
             # Log decision
@@ -1207,15 +1209,18 @@ class EnergyManager:
             logger.info(f"Reason: {decision.reason}")
 
             # Write results to InfluxDB
-            # Write both scenarios for visualization:
-            # - with_strategy: what will happen (discharge blocked during cheap hours)
-            # - without_strategy: what would happen without blocking (shows why we block)
-            self.simulation_writer.write_soc_forecast(sim_with_strategy, scenario="with_strategy")
-            self.simulation_writer.write_soc_forecast(sim_no_strategy, scenario="without_strategy")
+            # Three scenarios for visualization and the EV gate:
+            # - battery_on:  free discharge (the discharge-allowed implication)
+            # - battery_off: discharge held during cheap hours (the hold implication)
+            # - planned:     whichever of the two the decision selects (what runs);
+            #                the EV safety gate (Rule 4) reads this realistic path
+            self.simulation_writer.write_soc_forecast(sim_battery_on, scenario="battery_on")
+            self.simulation_writer.write_soc_forecast(sim_battery_off, scenario="battery_off")
+            self.simulation_writer.write_soc_forecast(sim_planned, scenario="planned")
             # Write forecast snapshot for accuracy tracking
             # Only overwrites from NOW onwards — earlier points preserved
             # for comparison with actual SOC
-            self.simulation_writer.write_forecast_snapshot(sim_with_strategy)
+            self.simulation_writer.write_forecast_snapshot(sim_planned)
 
             # Prime the EV safety cache so the 10-s EV loop can show real
             # values on the dashboard without hitting InfluxDB every cycle.
@@ -1242,7 +1247,7 @@ class EnergyManager:
 
             # Calculate appliance signal using full simulation
             # (checks if battery has enough energy to run appliance without grid import)
-            self.calculate_appliance_signal(current_soc, sim_no_strategy)
+            self.calculate_appliance_signal(current_soc, sim_battery_on)
 
         except Exception as e:
             logger.error(f"Optimization failed: {e}", exc_info=True)
