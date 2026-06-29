@@ -53,6 +53,15 @@ Home Assistant add-ons for energy forecasting and optimization.
               └─────────────────┘
 ```
 
+**InfluxDB buckets:**
+
+| Bucket | Source | Content | Retention |
+|--------|--------|---------|-----------|
+| `HomeAssistant` | HA integration | Real-time measurements | Long-term |
+| `pv_forecast` | SwissSolarForecast | PV forecasts (P10/P50/P90) | 30 days |
+| `load_forecast` | LoadForecast | Load forecasts (P10/P50/P90) | 30 days |
+| `energy_manager` | EnergyManager | Decisions, SOC forecasts, diagnostics | Long-term |
+
 ## Installation
 
 1. **Add Repository**

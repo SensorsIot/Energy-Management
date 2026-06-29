@@ -247,7 +247,7 @@ check P10 ≤ P50 ≤ P90 ordering; verify bucket creation/write behavior and cr
 ## Changelog
 
 - 2026-06-29: FSD made self-contained — folded the full LoadForecast spec (algorithm, data source,
-  output schema, configuration, limitations) in from the combined EnergymanagementV2 FSD, which now
-  links here. Corrected the output-field contract to `power_w_p10/p50/p90` + `run_time` (verified
+  output schema, configuration, limitations) in from the combined system FSD (since split into
+  per-add-on FSDs). Corrected the output-field contract to `power_w_p10/p50/p90` + `run_time` (verified
   against `src/influxdb_writer.py`; energy is derived by consumers). Noted the deployed 120 h horizon
   vs the 48 h code default.

@@ -486,4 +486,4 @@ from(bucket: "pv_forecast")
 
 - 2026-06-29: FSD made self-contained — folded the full SwissSolarForecast spec (ICON/STAC pipeline,
   PV config, output schema, calculation pipeline, shading correction) in from the combined
-  EnergymanagementV2 FSD, which now links here.
+  combined system FSD (since split into per-add-on FSDs).
