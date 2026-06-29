@@ -1,0 +1,65 @@
+{
+    "name": "Energy-Management - Python Development",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    "workspaceFolder": "/workspaces/Energy-Management",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "charliermarsh.ruff",
+                "ms-python.debugpy"
+            ],
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "python.defaultInterpreterPath": "/usr/bin/python3",
+                "python.analysis.typeCheckingMode": "basic",
+                "[python]": {
+                    "editor.defaultFormatter": "charliermarsh.ruff",
+                    "editor.formatOnSave": true
+                }
+            }
+        }
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/python:1": {
+            "version": "3.11"
+        },
+        "ghcr.io/devcontainers/features/git:1": {},
+        "ghcr.io/devcontainers/features/github-cli:1": {},
+        "ghcr.io/devcontainers/features/node:1": {
+            "version": "lts"
+        },
+        "ghcr.io/devcontainers/features/sshd:1": {
+            "version": "latest"
+        }
+    },
+    "runArgs": ["--name", "energy-management"],
+    "appPort": ["2235:2222"],
+    "postStartCommand": "sudo /etc/init.d/ssh start",
+    "postCreateCommand": "git config --global credential.helper store && git config --global core.sshCommand 'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' && (git clone https://github.com/SensorsIot/claude.git ~/.claude 2>/dev/null || (cd ~/.claude && git pull)) && npm install -g @anthropic-ai/claude-code && claude install && mkdir -p ~/.claude-data/projects && ln -sf ~/.claude-data/.credentials.json ~/.claude/.credentials.json && ln -sf ~/.claude-data/history.jsonl ~/.claude/history.jsonl && rm -rf ~/.claude/projects && ln -sf ~/.claude-data/projects ~/.claude/projects && ln -sf ~/.claude-data/.claude.json ~/.claude.json && echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc && echo 'alias superclaude=\"claude --dangerously-skip-permissions\"' >> ~/.bashrc && mkdir -p ~/.githooks && cp ~/.claude/githooks/pre-push ~/.githooks/pre-push && chmod +x ~/.githooks/pre-push && git config --global core.hooksPath ~/.githooks && pip install --break-system-packages -r requirements-dev.txt",
+    "remoteUser": "dev",
+    "mounts": [
+        "source=${localEnv:HOME}/.ssh/authorized_keys,target=/home/dev/.ssh/authorized_keys,type=bind,readonly",
+        "source=${localEnv:HOME}/.ssh/id_ed25519,target=/home/dev/.ssh/id_ed25519,type=bind,readonly",
+        "source=${localEnv:HOME}/.git-credentials,target=/home/dev/.git-credentials,type=bind,readonly",
+        "source=${localEnv:HOME}/.secrets,target=/home/dev/.secrets,type=bind,readonly",
+        "source=${localWorkspaceFolder}/.claude-data,target=/home/dev/.claude-data,type=bind",
+        "source=${localEnv:HOME}/.claude-containers/Energy-Management,target=/home/dev/.claude,type=bind"
+    ],
+    "containerEnv": {
+        "INFLUXDB_TOKEN": "${localEnv:INFLUXDB_TOKEN}",
+        "INFLUXDB_URL": "${localEnv:INFLUXDB_URL}",
+        "INFLUXDB_ORG": "${localEnv:INFLUXDB_ORG}",
+        "HA_TOKEN": "${localEnv:HA_TOKEN}",
+        "HA_TOKEN_NODERED": "${localEnv:HA_TOKEN_NODERED}",
+        "HA_URL": "${localEnv:HA_URL}",
+        "GRAFANA_URL": "${localEnv:GRAFANA_URL}",
+        "GRAFANA_USER": "${localEnv:GRAFANA_USER}",
+        "GRAFANA_PASSWORD": "${localEnv:GRAFANA_PASSWORD}",
+        "TELEGRAM_BOT_TOKEN": "${localEnv:TELEGRAM_BOT_TOKEN}"
+    }
+}

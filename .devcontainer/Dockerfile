@@ -1,0 +1,70 @@
+FROM mcr.microsoft.com/devcontainers/base:debian
+
+# Rename vscode user to dev (base image has vscode with UID 1000)
+RUN usermod -l dev -d /home/dev -m vscode \
+    && groupmod -n dev vscode \
+    && sed -i 's/vscode/dev/g' /etc/sudoers.d/vscode || true \
+    && mv /etc/sudoers.d/vscode /etc/sudoers.d/dev 2>/dev/null || true \
+    && echo "dev ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dev \
+    && chmod 0440 /etc/sudoers.d/dev
+
+# Remove unused zsh/oh-my-zsh (~15MB)
+RUN rm -rf /home/*/.oh-my-zsh /root/.oh-my-zsh && apt-get purge -y zsh && apt-get autoremove -y
+
+# Install Python and development dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    build-essential \
+    tmux \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python path
+ENV PATH="/home/dev/.local/bin:${PATH}"
+
+# SSH quiet config
+RUN mkdir -p /home/dev/.ssh \
+    && printf 'Host *\n    StrictHostKeyChecking accept-new\n    LogLevel ERROR\n' > /home/dev/.ssh/config \
+    && chmod 700 /home/dev/.ssh \
+    && chmod 600 /home/dev/.ssh/config \
+    && chown -R dev:dev /home/dev/.ssh
+
+USER dev
+
+# Set default working directory for both docker exec and SSH logins
+WORKDIR /workspaces/Energy-Management
+RUN echo 'cd /workspaces/Energy-Management 2>/dev/null' >> /home/dev/.bashrc
+
+# Force UTF-8 locale so tmux renders Unicode block glyphs (e.g. claude's splash
+# logo) correctly. Without this, LC_CTYPE=POSIX makes tmux misalign half-block
+# characters. Must come BEFORE the tmux guard below: the guard `exec`s tmux on
+# SSH login, so any bashrc lines after it never run for the SSH-login shell.
+RUN echo 'export LANG=C.UTF-8' >> /home/dev/.bashrc
+
+# Persistent claude session: interactive SSH logins auto-attach a tmux session
+# "main" running claude, so it survives disconnects (reconnect = continue).
+# Skips non-interactive shells, shells already in tmux, VS Code terminals, and
+# any login while ~/.no-tmux exists (escape hatch).
+# claude is installed at ~/.local/bin (native installer) and reachable on PATH
+# via ~/.profile + the .bashrc PATH export above.
+RUN printf '%s\n' \
+    '' \
+    '# --- Persistent claude session (auto-attach tmux on interactive SSH) ---' \
+    'if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ] && [ "$TERM_PROGRAM" != "vscode" ] && [ ! -f "$HOME/.no-tmux" ] && command -v tmux >/dev/null 2>&1; then' \
+    '    case "$-" in' \
+    '        *i*) exec tmux new-session -A -s main -c /workspaces/Energy-Management "claude --dangerously-skip-permissions; exec bash" ;;' \
+    '    esac' \
+    'fi' \
+    >> /home/dev/.bashrc
+
+# Tmux UX: mouse (wheel scrolling), right-click pastes the tmux paste-buffer,
+# OSC52 syncs the paste-buffer with the host terminal's clipboard (Wezterm /
+# iTerm2 supported) so selections inside tmux flow to the host clipboard.
+RUN printf '%s\n' \
+    'set -g mouse on' \
+    'bind-key -n MouseDown3Pane paste-buffer' \
+    'set -g set-clipboard on' \
+    >> /home/dev/.tmux.conf
