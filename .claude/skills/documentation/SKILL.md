@@ -14,8 +14,8 @@ the procedure (A vs B at the bottom).
 
 | Role | This project | Notes |
 |---|---|---|
-| `[SPEC]` | the FSD that owns the subsystem — in-repo: `Documents/EnergymanagementV2_fsd.md` (battery/EV/appliance logic) and `ocpp-server/Documents/ocpp-server-fsd.md` (OCPP wallbox). Physical-install spec `Home-Installation-fsd.md` is maintained **outside the repo** (`/workspaces/HomeAssistant/Documents/`). | the **WHAT**; authoritative per CLAUDE.md → *Specifications* |
-| `[INTERFACES]` | a **section of `[SPEC]`** — ocpp-server FSD §3.6 (External Interface) | route by section. No standalone Smart-car interface doc exists; don't invent one |
+| `[SPEC]` | **distributed** — each add-on ships its own self-contained FSD; route a change to the FSD of the add-on it touches: `swisssolarforecast/Documents/swisssolarforecast-fsd.md`, `loadforecast/Documents/loadforecast-fsd.md`, `energymanager/Documents/energymanager-fsd.md` (deep battery/EV/appliance control logic in `Documents/EnergymanagementV2_fsd.md`), `ocpp-server/Documents/ocpp-server-fsd.md`. Physical-install spec `Home-Installation-fsd.md` is maintained **outside the repo** (`/workspaces/HomeAssistant/Documents/`). | the **WHAT**; route by the owning add-on. An add-on FSD is self-contained — don't make it defer core spec to another doc |
+| `[INTERFACES]` | a **section of the owning `[SPEC]`** — e.g. ocpp-server FSD §3.6 (External Interface); the Smart-car API is `energymanager/Documents/Hello Smart API.md`. Each add-on documents its own inter-add-on data contracts (InfluxDB buckets it reads/writes) in its FSD. | route by section/add-on |
 | `[HARNESS]` | `CLAUDE.md` | the **HOW** — only how to *work on* the repo; references the FSD, never restates behaviour |
 
 Roles with no file here — `[HANDBOOK]`, `[GLOSSARY]`, `[DOC-LINTER]` — do not exist; never invent them.

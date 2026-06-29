@@ -1,6 +1,6 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 3.8 | **Status:** Draft | **Created:** 2026-02-10
+**Version:** 3.8 | **Status:** Active | **Created:** 2026-02-10
 
 ## 1. Overview
 
@@ -451,24 +451,6 @@ The divisor 637 is the midpoint of the safe range [612, 662], derived from the M
 | 7624 | 11.97 | 12 | 12 ✓ |
 
 This replaces the previous `round(W / (phases × 230), 1)` formula which produced decimal amps and relied on the wallbox's internal flooring.
-
-### 7.3 Historical: Grid Meter Calibration (2026-02-11)
-
-Measured with AcTec EV-AC22K (FW V1.17.9), 3-phase. Superseded by §7.1.
-
-| Req A | Req W | WB Total W | Meter Diff W | Delta W |
-|------:|------:|-----------:|-------------:|--------:|
-|    16 | 11040 |      10446 |        10623 |    +177 |
-|    15 | 10350 |       9817 |        10007 |    +190 |
-|    14 |  9660 |       9166 |         9321 |    +155 |
-|    13 |  8970 |       8403 |         8545 |    +142 |
-|    12 |  8280 |       7755 |         7852 |     +97 |
-|    11 |  7590 |       7152 |         7245 |     +93 |
-|    10 |  6900 |       6361 |         6445 |     +84 |
-|     9 |  6210 |       5730 |         5835 |    +105 |
-|     8 |  5520 |       5019 |         5137 |    +118 |
-|     7 |  4830 |       4311 |         3863 |    -448 |
-|     6 |  4140 |       3970 |         4094 |    +124 |
 
 ## 8. Test Cases
 

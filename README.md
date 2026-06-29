@@ -13,7 +13,7 @@ Home Assistant add-ons for energy forecasting and optimization.
 | [SwissSolarForecast](swisssolarforecast/) | PV power forecast using MeteoSwiss ICON data | [FSD](swisssolarforecast/Documents/swisssolarforecast-fsd.md) |
 | [LoadForecast](loadforecast/) | Statistical load prediction from historical data | [FSD](loadforecast/Documents/loadforecast-fsd.md) |
 | [EnergyManager](energymanager/) | Battery/EV/appliance optimization using forecasts | [FSD](energymanager/Documents/energymanager-fsd.md) |
-| [OCPP Server](ocpp-server/) | OCPP 1.6j wallbox server for Home Assistant control | [FSD](Documents/ocpp-server-fsd.md) |
+| [OCPP Server](ocpp-server/) | OCPP 1.6j wallbox server for Home Assistant control | [FSD](ocpp-server/Documents/ocpp-server-fsd.md) |
 
 ## Architecture
 
@@ -127,11 +127,11 @@ This format is designed for integration with Model Predictive Control (MPC) and 
 
 | Document | Scope |
 |----------|-------|
-| [Home Installation FSD](Documents/Home-Installation-fsd.md) | Overall home installation and Home Assistant system overview |
 | [SwissSolarForecast FSD](swisssolarforecast/Documents/swisssolarforecast-fsd.md) | PV forecast add-on design and data contracts |
 | [LoadForecast FSD](loadforecast/Documents/loadforecast-fsd.md) | Load forecast add-on design and data contracts |
 | [EnergyManager FSD](energymanager/Documents/energymanager-fsd.md) | Energy optimization add-on design and control contracts |
-| [OCPP Server FSD](Documents/ocpp-server-fsd.md) | Wallbox/OCPP add-on design and entity contracts |
+| [OCPP Server FSD](ocpp-server/Documents/ocpp-server-fsd.md) | Wallbox/OCPP add-on design and entity contracts |
+| Home Installation FSD | Overall home installation and Home Assistant system overview (maintained outside this repo) |
 
 ## Contributing
 
