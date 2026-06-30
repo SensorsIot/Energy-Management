@@ -1,7 +1,5 @@
 # OCPP Server HA Add-on - Functional Specification Document
 
-**Version:** 3.8 | **Status:** Active | **Created:** 2026-02-10
-
 ## 1. Overview
 
 Home Assistant add-on providing an OCPP 1.6J Central System that bridges EV charging stations to Home Assistant. Exposes wallbox state as HA entities and accepts control via a single power limit entity.
@@ -51,14 +49,8 @@ Home Assistant add-on providing an OCPP 1.6J Central System that bridges EV char
 
 ### 2.1 Software Stack
 
-| Component | Technology |
-|-----------|-----------|
-| Language | Python 3.11+ |
-| OCPP library | `ocpp` (Python) |
-| WebSocket | `websockets` |
-| HA integration | REST API (Supervisor) |
-| Phase switch | EARU breaker: BK7231N (LibreTiny/ESPHome) + BL0942 energy meter |
-| Deployment | HA add-on (Docker, s6-overlay) |
+Build stack and deployment are HOW — see the Harness:
+[`Harness/project/modules/ocpp-server.md`](../../Harness/project/modules/ocpp-server.md).
 
 ### 2.2 Wallbox States
 
@@ -105,7 +97,7 @@ The wallbox reports its state via OCPP `StatusNotification`. These states drive 
 
 **Re-send logic:** In `SuspendedEVSE` with last sent > 0W, retries at 10s, 30s, 60s intervals. Cloud check runs in parallel — if car-initiated stop confirmed, corrects to `SuspendedEV` and stops retries.
 
-**Keep-alive pulse:** Removed (v0.9.53). Testing on 2026-03-24 confirmed the Actec wallbox maintains sessions indefinitely at 0W in SuspendedEVSE without periodic pulses. The previous 25-minute pulse was a precaution that proved unnecessary.
+**Keep-alive pulse:** None. The AcTec wallbox maintains sessions indefinitely at 0W in SuspendedEVSE without periodic pulses, so the server sends none.
 
 ## 3. Functional Requirements
 
@@ -230,7 +222,7 @@ The OCPP server exposes HA entities as its external interface. All OCPP details,
 2. `SuspendedEVSE` + last sent > 0W → poll the entity configured as `cloud_charging_entity` (typically `sensor.smart_charging_status_raw_value`):
    - Raw 25 (user-stopped) or 4 (complete) → correct to `SuspendedEV`, stop retries
    - Otherwise → continue retries
-3. In `SuspendedEV` → keep polling. If raw changes (no longer 25/4) → back to `SuspendedEVSE`
+3. In `SuspendedEV` → keep polling. If raw changes away from 25/4 → back to `SuspendedEVSE`
 
 If `cloud_charging_entity` is empty the correction is disabled and `SuspendedEVSE` is reported as-is.
 
@@ -383,7 +375,7 @@ Manual refresh: `homeassistant.update_entity` on any smarthashtag entity.
 
 The AcTec wallbox sends a `Sample.Clock` MeterValues message at every 15-minute boundary (`:00`, `:15`, `:30`, `:45`). This message contains **only** `Energy.Active.Import.Register` — no Power, Current, or Voltage measurands. The message arrives at `:XX:47` (consistently ~13s before the clock boundary).
 
-The OCPP server must **not** update `sensor.wallbox_power` from these messages, because the absence of Power measurands would incorrectly zero the reported power. Energy is still updated normally. Before v0.9.42 this bug caused false 0W readings for ~50s every 15 minutes, which — combined with the Huawei inverter's simultaneous battery rebalancing cycle — produced grid export spikes of -3,500W.
+The OCPP server must **not** update `sensor.wallbox_power` from these messages, because the absence of Power measurands would incorrectly zero the reported power. Energy is still updated normally.
 
 ### 5.4 AcTec SuspendedEVSE Bug
 
@@ -438,7 +430,8 @@ The energymanager sends demand values in M-Bus watts (the actual power delivered
 limit_a = round(power_w / 637)
 ```
 
-The divisor 637 is the midpoint of the safe range [612, 662], derived from the M-Bus calibration sweep. This ensures each M-Bus power value maps to the correct integer amp:
+The divisor 637 is the midpoint of the safe range [612, 662], derived from the M-Bus calibration sweep. Each M-Bus power value maps to the correct integer amp, without relying on the wallbox's internal
+flooring:
 
 | M-Bus W | W / 637 | round() | Correct A |
 |--------:|--------:|--------:|----------:|
@@ -449,8 +442,6 @@ The divisor 637 is the midpoint of the safe range [612, 662], derived from the M
 | 6288 | 9.87 | 10 | 10 ✓ |
 | 7034 | 11.04 | 11 | 11 ✓ |
 | 7624 | 11.97 | 12 | 12 ✓ |
-
-This replaces the previous `round(W / (phases × 230), 1)` formula which produced decimal amps and relied on the wallbox's internal flooring.
 
 ## 8. Test Cases
 
@@ -475,32 +466,7 @@ This replaces the previous `round(W / (phases × 230), 1)` formula which produce
 
 ## 9. File Structure
 
-```
-ocpp-server/
-├── config.yaml              # HA add-on manifest
-├── Dockerfile
-├── requirements.txt
-├── run.py                   # Entry point: OCPPServer class
-├── src/
-│   ├── ha_entities.py       # HA entity definitions
-│   └── ocpp_handler.py      # OCPP message handlers
-├── rootfs/                  # s6 service definition
-├── tests/
-│   └── test_ocpp_handler.py
-└── docs/
-    └── this file
-```
-
-## 10. Implementation Status
-
-| Component | Status |
-|-----------|--------|
-| WebSocket server | Done |
-| OCPP message handling | Done |
-| HA entity integration | Done |
-| Phase switching | Done |
-| Unit tests (21) | Done |
-| Wallbox integration test | Done |
+File structure and build stack are HOW — see [`Harness/project/modules/ocpp-server.md`](../../Harness/project/modules/ocpp-server.md).
 
 ## Appendix A — Wallbox Power Calibration (AcTec EV-AC22K)
 
@@ -532,7 +498,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 - Max effective current is 15A. To reach 16A, demand must be ≥ 11040W (`16 × 3 × 230`).
 - Adjacent demand values landing on the same integer amp produce identical output.
 
-## 11. Revision History
+## Changelog
 
 | Version | Date | Changes |
 |---------|------|---------|

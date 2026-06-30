@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Opt-in documentation gate. Runs the doc-linter over the Markdown files staged for this commit
+# and blocks the commit if it finds present-state or broken-link errors. Enable per clone with:
+#
+#     git config core.hooksPath .githooks
+#
+# Bypass a single commit (when you know better) with `git commit --no-verify`.
+set -euo pipefail
+
+# Resolve the linter — installed by project-docs-bootstrap, default location first.
+LINTER=""
+for cand in Documentation/tools/doc_lint.py tools/doc_lint.py scripts/doc_lint.py; do
+    if [ -f "$cand" ]; then LINTER="$cand"; break; fi
+done
+if [ -z "$LINTER" ]; then
+    echo "pre-commit: doc_lint.py not found; skipping doc gate" >&2
+    exit 0
+fi
+
+# Markdown files staged in this commit (added/copied/modified).
+# Agent-skill files (.claude/skills/) are NOT project documentation — and necessarily quote the
+# very history/rationale patterns the linter flags — so they are excluded from the doc gate.
+mapfile -t MD < <(git diff --cached --name-only --diff-filter=ACM | grep -E '\.md$' | grep -vE '(^|/)\.claude/skills/' || true)
+if [ ${#MD[@]} -eq 0 ]; then
+    exit 0
+fi
+
+if ! python3 "$LINTER" --files "${MD[@]}"; then
+    echo "" >&2
+    echo "pre-commit: documentation lint failed — fix the findings above, or 'git commit --no-verify' to bypass." >&2
+    exit 1
+fi

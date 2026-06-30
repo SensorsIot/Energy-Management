@@ -44,27 +44,8 @@ Out of scope: PV forecasting, battery/EV optimization, and any Home Assistant en
 
 ## 3. Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       LoadForecast Add-on                            │
-├─────────────────────────────────────────────────────────────────────┤
-│  FORECAST CYCLE (every hour at :15)                                 │
-│    1. Query 90 days of house_load_power from the HomeAssistant bucket│
-│    2. Build a time-of-day profile:                                  │
-│         • group into 96 daily slots (15-min periods)                │
-│         • compute P10/P50/P90 per slot                              │
-│    3. Project the profile over the forecast horizon                 │
-│    4. Write to the load_forecast bucket                             │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-Primary modules:
-
-| Module | Responsibility |
-|--------|----------------|
-| `run.py` | Entry point, config loading, cron scheduling loop |
-| `src/load_predictor.py` | Historical query + percentile forecast generation |
-| `src/influxdb_writer.py` | Bucket creation and forecast writes |
+Build/architecture, module layout, and the forecast-cycle diagram are HOW — see the Harness:
+[`Harness/project/modules/loadforecast.md`](../../Harness/project/modules/loadforecast.md).
 
 ## 4. Algorithm
 
@@ -185,45 +166,16 @@ Values are instantaneous power (W). Per-period energy is `power_w × 0.25` for 1
 
 ## 9. Source files
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `run.py` | 192 | Entry point, scheduler loop |
-| `src/load_predictor.py` | 183 | Statistical forecasting algorithm |
-| `src/influxdb_writer.py` | 140 | InfluxDB forecast writer |
+Source-file layout is HOW — see [`Harness/project/modules/loadforecast.md`](../../Harness/project/modules/loadforecast.md).
 
 ## 10. Dependencies
 
-```
-pandas>=2.0.0              # data manipulation
-numpy>=1.24.0             # numerical computing
-influxdb-client>=1.36.0   # InfluxDB client
-croniter>=1.3.0           # cron expression parsing
-```
-
-Requires at least 7 days of historical load data (90+ recommended).
+Requires at least 7 days of historical load data (90+ recommended). The build dependency list is
+HOW — see [`Harness/project/modules/loadforecast.md`](../../Harness/project/modules/loadforecast.md).
 
 ## 11. Grafana queries
 
-**Load forecast with uncertainty band:**
-```flux
-from(bucket: "load_forecast")
-  |> range(start: now(), stop: 120h)
-  |> filter(fn: (r) => r._measurement == "load_forecast")
-  |> filter(fn: (r) => r._field == "power_w_p10" or r._field == "power_w_p50" or r._field == "power_w_p90")
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-```
-
-**Forecast vs actual:**
-```flux
-forecast = from(bucket: "load_forecast")
-  |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r._field == "power_w_p50")
-actual = from(bucket: "HomeAssistant")
-  |> range(start: -24h, stop: now())
-  |> filter(fn: (r) => r.entity_id == "house_load_power")
-  |> aggregateWindow(every: 15m, fn: mean)
-union(tables: [forecast, actual])
-```
+Operator dashboard queries are OPERATE — see [`Handbook.md` → Dashboards & queries → LoadForecast](../../Handbook.md#dashboards--queries).
 
 ## 12. Failure handling
 
@@ -241,8 +193,7 @@ from recent hours; calendar-event integration; machine-learning models (LSTM, XG
 
 ## 14. Tests and validation
 
-Confirm an InfluxDB query against known history; check forecast output shape and 15-minute spacing;
-check P10 ≤ P50 ≤ P90 ordering; verify bucket creation/write behavior and cron scheduling.
+Test approach and invocation are HOW — see [`Harness/project/modules/loadforecast.md`](../../Harness/project/modules/loadforecast.md).
 
 ## Changelog
 

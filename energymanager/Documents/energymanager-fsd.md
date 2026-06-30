@@ -329,12 +329,8 @@ The following invariants should hold under normal operation. Runtime sanity chec
 
 ## 1.10 Design Principles
 
-1. **Deterministic Core Logic** - All numerical calculations produce identical results for identical inputs
-2. **Probabilistic Uncertainty** - P10/P50/P90 percentiles quantify forecast uncertainty
-3. **InfluxDB as Single Source of Truth** - All data stored as time series
-4. **Rolling Horizon** - Decisions recalculated every 5-15 minutes
-5. **Decoupled Components** - Each add-on operates independently with clear interfaces
-6. **Power for Storage, Energy for Calculations** - Forecasts stored as Power (W), converted to Energy (Wh) only when needed
+Project-wide design principles are HOW — see the Harness:
+[`Harness/project/design-principles.md`](../../Harness/project/design-principles.md).
 
 ## 1.11 Data Units and Flow
 
@@ -386,247 +382,10 @@ All forecasts are stored and displayed in **Power (W)**. Energy (Wh) is calculat
 
 ## 1.12 Home Assistant Add-on Architecture
 
-This section describes the canonical Home Assistant add-on configuration architecture used by all add-ons in this project.
-
-### 1.12.1 Configuration Philosophy
-
-Home Assistant add-ons follow a specific pattern for configuration management:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Configuration Architecture                            │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│   SECRETS                              NON-SECRETS                          │
-│   (tokens, passwords)                  (settings, options)                  │
-│                                                                              │
-│   ┌─────────────────────┐              ┌─────────────────────────────────┐  │
-│   │  HA Configuration   │              │  /config/<addon>.yaml           │  │
-│   │       Tab           │              │  (Public Add-on Config)         │  │
-│   │                     │              │                                 │  │
-│   │  • Masked fields    │              │  • Editable via File Editor    │  │
-│   │  • Secure storage   │              │  • Editable via VS Code        │  │
-│   │  • Never in files   │              │  • Version controlled          │  │
-│   └──────────┬──────────┘              └───────────────┬─────────────────┘  │
-│              │                                         │                    │
-│              │ bashio::config                          │ YAML load          │
-│              │ → Environment vars                      │                    │
-│              ▼                                         ▼                    │
-│   ┌──────────────────────────────────────────────────────────────────────┐  │
-│   │                         Python Runtime                                │  │
-│   │                                                                       │  │
-│   │   config = load_yaml("/config/addon.yaml")                           │  │
-│   │   config["influxdb"]["token"] = os.environ["INFLUXDB_TOKEN"]         │  │
-│   │   config["telegram"]["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"] │  │
-│   │                                                                       │  │
-│   │   # Final merged config ready for use                                 │  │
-│   └──────────────────────────────────────────────────────────────────────┘  │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 1.12.2 Secrets (HA Configuration UI)
-
-Secrets are sensitive values that should **never** be stored in YAML files.
-
-**What qualifies as a secret:**
-- API tokens (InfluxDB, external services)
-- Passwords and credentials
-- Bot tokens (Telegram, Discord)
-- Private keys
-
-**How secrets are configured:**
-
-1. User opens **Settings → Add-ons → [Add-on] → Configuration**
-2. User enters secrets in masked password fields
-3. HA Supervisor stores secrets securely in `/data/options.json`
-4. Startup script reads via `bashio::config` and exports as environment variables
-5. Python reads from `os.environ`
-
-**Example `config.yaml` schema:**
-
-```yaml
-options:
-  influxdb_token: ""
-  telegram_bot_token: ""
-  telegram_chat_id: ""
-
-schema:
-  influxdb_token: password
-  telegram_bot_token: password?
-  telegram_chat_id: str?
-```
-
-**Example startup script:**
-
-```bash
-#!/command/with-contenv bashio
-
-# Read secrets from HA Configuration UI
-if bashio::config.has_value 'influxdb_token'; then
-  export INFLUXDB_TOKEN="$(bashio::config 'influxdb_token')"
-fi
-
-if bashio::config.has_value 'telegram_bot_token'; then
-  export TELEGRAM_BOT_TOKEN="$(bashio::config 'telegram_bot_token')"
-fi
-
-exec python3 /app/run.py --config "/config/addon.yaml"
-```
-
-### 1.12.3 Non-Secrets (Public Add-on Config)
-
-All non-sensitive configuration is stored in user-editable YAML files.
-
-**Storage location:**
-
-| Context | Path |
-|---------|------|
-| Inside container | `/config/<addon>.yaml` |
-| HA File Editor / VS Code | `/addon_configs/<addon_slug>/<addon>.yaml` |
-| Host filesystem | `/usr/share/hassio/addon_configs/<addon_slug>/` |
-
-**Enable with `map` in `config.yaml`:**
-
-```yaml
-map:
-  - addon_config:rw
-```
-
-**What goes in YAML config:**
-- Connection settings (host, port, org - but NOT tokens)
-- Device settings (battery capacity, entity IDs)
-- Schedule settings (tariff times, intervals)
-- Feature flags and options
-- Logging level
-
-**Example user config (`/config/energymanager.yaml`):**
-
-```yaml
-# InfluxDB connection (token in Configuration tab, not here!)
-influxdb:
-  host: "192.168.0.203"
-  port: 8087
-  org: "energymanagement"
-
-# Battery settings
-battery:
-  capacity_kwh: 10.0
-  discharge_control_entity: "number.battery_maximum_discharging_power"
-
-# Tariff schedule
-tariff:
-  weekday_cheap_start: "21:00"
-  weekday_cheap_end: "06:00"
-```
-
-### 1.12.4 Templates and Defaults
-
-Each add-on ships with a template/example configuration.
-
-**Template location:** `/usr/share/<addon>/<addon>.yaml.example`
-
-**Behavior:**
-
-| Event | Action |
-|-------|--------|
-| First run (no user config) | Copy template → `/config/<addon>.yaml` |
-| Every start | Copy template → `/config/<addon>.yaml.example` |
-| Update/upgrade | **Never** overwrite user config |
-| New options added | Handle via defaults in code, update `.example` |
-
-**Example startup script:**
-
-```bash
-USER_CONFIG="/config/energymanager.yaml"
-TEMPLATE="/usr/share/energymanager/energymanager.yaml.example"
-
-# First run: create user config from template
-if [ ! -f "$USER_CONFIG" ]; then
-  cp "$TEMPLATE" "$USER_CONFIG"
-  bashio::log.warning "Created $USER_CONFIG - please edit and restart"
-fi
-
-# Always refresh the example (shows new options after updates)
-cp "$TEMPLATE" "/config/energymanager.yaml.example"
-```
-
-### 1.12.5 Configuration Merge Order
-
-At runtime, configuration is assembled in this order:
-
-```
-1. Load defaults from template
-   └─► /usr/share/addon/addon.yaml.example
-
-2. Load user config (overrides defaults)
-   └─► /config/addon.yaml
-
-3. Overlay secrets from environment (overrides everything)
-   └─► INFLUXDB_TOKEN, TELEGRAM_BOT_TOKEN, etc.
-
-4. Apply code defaults for missing keys
-   └─► config.get("key", default_value)
-
-Final: Merged configuration ready for use
-```
-
-**Python implementation:**
-
-```python
-def load_config(config_path: str) -> dict:
-    # 1. Load defaults
-    defaults = yaml.safe_load(open("/usr/share/addon/addon.yaml.example"))
-
-    # 2. Load user config
-    user_config = yaml.safe_load(open(config_path))
-
-    # 3. Deep merge (user wins)
-    merged = deep_merge(defaults, user_config)
-
-    # 4. Overlay secrets from environment
-    if os.environ.get("INFLUXDB_TOKEN"):
-        merged["influxdb"]["token"] = os.environ["INFLUXDB_TOKEN"]
-
-    return merged
-```
-
-### 1.12.6 Add-on Configuration Files Summary
-
-| Add-on | Secrets (Config UI) | Non-Secrets (YAML) |
-|--------|--------------------|--------------------|
-| **EnergyManager** | `influxdb_token`, `telegram_bot_token`, `telegram_chat_id` | `/config/energymanager.yaml` |
-| **SwissSolarForecast** | `influxdb_token`, `telegram_bot_token`, `telegram_chat_id` | `/config/swisssolarforecast.yaml` |
-| **LoadForecast** | `influxdb_token` | `/config/loadforecast.yaml` |
-
-### 1.12.7 User Workflow
-
-**Initial Setup:**
-
-1. Install add-on from repository
-2. Go to **Configuration** tab → Enter secrets (tokens)
-3. Click **Save**
-4. Start add-on (creates default config file)
-5. Edit `/addon_configs/<slug>/<addon>.yaml` via File Editor
-6. Restart add-on
-
-**After Updates:**
-
-1. Add-on updates automatically (if enabled)
-2. User config is **never** modified
-3. Check `/config/<addon>.yaml.example` for new options
-4. Manually add desired new options to user config
-5. Restart add-on
-
-### 1.12.8 Best Practices Summary
-
-| Practice | Do | Don't |
-|----------|----|----- |
-| **Secrets** | Store in HA Configuration UI | Put in YAML files |
-| **User config** | Let user edit via File Editor | Auto-modify user files |
-| **Defaults** | Apply in code for missing keys | Require all keys in user config |
-| **Updates** | Refresh `.example` file | Overwrite user config |
-| **Logging** | Log "token loaded" (not the value) | Log secret values |
+The Home Assistant add-on configuration architecture (secrets vs non-secrets, templates, merge
+order, best practices) is shared by all add-ons and is HOW — see the Harness:
+[`Harness/project/addon-architecture.md`](../../Harness/project/addon-architecture.md). The operator
+setup/update workflow is in [`Handbook.md` → Installation](../../Handbook.md#installation).
 
 ---
 
@@ -999,7 +758,7 @@ during the highest part of the day, **shaving the maximum of the export
 curve**.
 
 The charge is applied at a **reduced power** (`charge_shaving_power_w`,
-default 2500 W — below `max_charge_w`) rather than the full inverter rate.
+default 2500 W — below `max_charge_w`) not the full inverter rate.
 Two reasons: (1) a gentler C-rate is easier on the battery (less heat,
 longer life); (2) absorbing at a lower power spreads the charge across more
 15-min intervals, so the battery fills over a wider midday window instead of
@@ -1023,7 +782,7 @@ Before the decision hour the mode defaults to **car day**. The snapshot is
 taken once (the first 15-min tick at/after the decision hour) and then held,
 with **one one-way downgrade — the departure trigger** (`_car_departed()`): a
 shaving day reverts to a **car day** the moment its premise breaks — the car
-**disconnects** (`car_ready = off`) **or drops below target** ("no longer
+**disconnects** (`car_ready = off`) **or drops below target** ("below
 full", `smart_battery_last_known < smart_charging_max_last_known`). It then
 stays a car day for the rest of the day and never re-arms shaving (a later
 full reconnect does not restore it). Rationale: a car that was full at 08:00
@@ -1422,7 +1181,7 @@ The floor it is compared against is **`battery.no_buy_floor_percent`** (default 
 
 - Horizon: 48 h.
 - No hysteresis -- the same bar for every consumer.
-- **Not a Topic 1 gate.** It is no longer a may-charge veto (the former 48 h "home battery safe" rule was superseded by Rule 4 below); Topic 1 still publishes it for the dashboard.
+- **Not a Topic 1 gate.** It is not a may-charge veto; Topic 1 publishes it for the dashboard only. The may-charge decision is Rule 4 below.
 
 #### Rules
 
@@ -1438,7 +1197,7 @@ The wallbox may charge **iff all four hold**; the first that fails stops it.
 **Notes**
 
 - Rule 3's threshold is the manual `input_number.ev_min_solar_power`. 1-phase / 3-phase does not appear in this gate; phases define the *available steps* for Topic 2.
-- Rule 4 gives the **home battery priority** over the car: the same `compute_charge_target` survival model (Section 4.2.4) drives both the battery's target *and* the car's permission. The reachability forecast is **car-excluded**, so it reads as *"if the car stops now and the battery gets all the surplus from here on, does it still reach the target today?"* When that turns false, the car yields all surplus to the battery. It is **self-correcting**: while the car charges it steals surplus, so each cycle the sim is re-anchored to a lower (car-suppressed) live SOC; the moment the battery can no longer reach the target, the car stops, the battery then receives 100 % of the surplus and lands at (nearly) the target. Full-battery exception: at 100 % SOC the battery has already reached the target, so the check is skipped (the Rule-1 grid-export-capture path applies).
+- Rule 4 gives the **home battery priority** over the car: the same `compute_charge_target` survival model (Section 4.2.4) drives both the battery's target *and* the car's permission. The reachability forecast is **car-excluded**, so it reads as *"if the car stops now and the battery gets all the surplus from here on, does it still reach the target today?"* When that turns false, the car yields all surplus to the battery. It is **self-correcting**: while the car charges it steals surplus, so each cycle the sim is re-anchored to a lower (car-suppressed) live SOC; the moment the battery cannot reach the target, the car stops, the battery then receives 100 % of the surplus and lands at (nearly) the target. Full-battery exception: at 100 % SOC the battery has already reached the target, so the check is skipped (the Rule-1 grid-export-capture path applies).
 - **Evaluated on the live 10-s loop, re-anchored to the live SOC.** `reaches_target_today` re-runs `simulate_soc` from the current SOC over the cached net-energy forecast every EV cycle. The earlier implementation read the `soc_forecast` curve from InfluxDB — but that curve is regenerated only on the 15-min cycle and anchored to the SOC *at that cycle*, so while the car drained the battery the gate stayed optimistic and let the car run ~one forecast period too long (≈ `car_power × 15 min` of overshoot, e.g. observed 79 % vs a 90 % target on 2026-06-25). Re-anchoring to live SOC closes that gap to one 10-s step. The 15-min `soc_forecast` write to InfluxDB remains, now purely for the dashboard. (`will_battery_hit_full` still backs the dashboard `battery_full_time`/`battery_peak_soc` attributes on `sensor.battery_decision`, published on the 15-min cycle.)
 - **Why no 48 h no-buy-floor veto?** A previous rule also blocked charging when `battery_min_soc_48h` fell below `no_buy_floor_percent`. Rule 4 supersedes it: charging *at or below* surplus never drains the battery (the remainder still charges it), the *only* draining step (Topic 2 step-up) is already gated by the instantaneous SOC floor (Section 4.3.7), and any multi-day trough is driven by future PV/load — not by the car spending *today's* surplus, which Rule 4 already protects. So the 48 h veto only ever produced false positives (when Rule 4 passed) or fired redundantly (when Rule 4 had already stopped the car).
 
@@ -1468,7 +1227,7 @@ Power = Rule 2's step, bumped one step by Rule 3 when allowed. We never match su
 
 #### `will_battery_hit_full()` -- dashboard (15-min)
 
-Lives on `EVBatteryOptimizer`. Returns whether the **peak** home-battery SOC reaches its `full_threshold` (passed as `battery_target_soc`, Section 4.2.4) between now and end of today (midnight local), plus the time it first does, by reading the 15-min `soc_forecast` curve from InfluxDB. Backs the `battery_will_be_full` / `battery_full_time` / `battery_peak_soc` dashboard attributes on `sensor.battery_decision` (published on the 15-min cycle). **It no longer gates the car** — the Topic 1 Rule 4 gate uses `reaches_target_today` re-anchored to the live SOC on the 10-s loop (Section 4.3.6); `sensor.ev_target_power`'s `battery_will_be_full` / `battery_full_time` come from that live path.
+Lives on `EVBatteryOptimizer`. Returns whether the **peak** home-battery SOC reaches its `full_threshold` (passed as `battery_target_soc`, Section 4.2.4) between now and end of today (midnight local), plus the time it first does, by reading the 15-min `soc_forecast` curve from InfluxDB. Backs the `battery_will_be_full` / `battery_full_time` / `battery_peak_soc` dashboard attributes on `sensor.battery_decision` (published on the 15-min cycle). **It does not gate the car** — the Topic 1 Rule 4 gate uses `reaches_target_today` re-anchored to the live SOC on the 10-s loop (Section 4.3.6); `sensor.ev_target_power`'s `battery_will_be_full` / `battery_full_time` come from that live path.
 
 #### Amp-step conversion (plumbing)
 
@@ -1556,7 +1315,7 @@ A 15-min time-series forecast of the EV battery SOC over the next 5 days, writte
 
 **Efficiency (0.9 default):** lumps three real losses — AC→DC at the wallbox (~3 %), house-battery round-trip for the fraction of surplus that cycles through it (~5 %), and standby/phantom loads during the day (~2 %).
 
-**What the forecast intentionally omits:** the strict `ev_min_solar_power` threshold, amp-step snapping, and the 48-h safety rule from the live EV charging logic (Sections 4.3.6-4.3.7). Those rules operate on the 10-second decision loop; the forecast is a best-case multi-day outlook and would become overly pessimistic (≈40 % final SOC in a typical 2-day window) if it copied them.
+**What the forecast omits:** the strict `ev_min_solar_power` threshold, amp-step snapping, and the 48-h safety rule from the live EV charging logic (Sections 4.3.6-4.3.7), which operate on the 10-second decision loop. The forecast is a best-case multi-day outlook.
 
 ---
 
@@ -2450,155 +2209,15 @@ Implemented in the **SwissSolarForecast** add-on:
 
 > **Status:** To be defined when EV charging optimization is validated in production.
 
-# Appendix A: Installation Guide
+# Appendix A: Operations (installation, dashboards, troubleshooting)
 
-## A.1 Prerequisites
-
-- Home Assistant OS or Supervised installation
-- InfluxDB 2.x with buckets configured
-- Network access to MeteoSwiss API
-
-## A.2 Add Repository
-
-1. Navigate to **Settings** → **Add-ons** → **Add-on Store**
-2. Click **⋮** → **Repositories**
-3. Add: `https://github.com/SensorsIot/Energy-Management`
-
-## A.3 Install Add-ons
-
-1. Find each add-on in the store
-2. Click **Install**
-3. Configure options in the **Configuration** tab
-4. Start the add-on
-
-## A.4 InfluxDB Setup
-
-Create required buckets:
-
-```bash
-influx bucket create --name pv_forecast --retention 30d
-influx bucket create --name load_forecast --retention 30d
-```
-
-## A.5 Verify Operation
-
-Check add-on logs:
-```
-Settings → Add-ons → [Add-on Name] → Log
-```
-
-Query InfluxDB:
-```flux
-from(bucket: "pv_forecast")
-  |> range(start: -1h)
-  |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> limit(n: 10)
-```
+Operator procedures — installation, the pre-built Grafana dashboard, and troubleshooting — are
+OPERATE, not WHAT. See the Handbook:
+[`Handbook.md` → Installation](../../Handbook.md#installation),
+[Dashboards & queries](../../Handbook.md#dashboards--queries), and
+[Troubleshooting](../../Handbook.md#troubleshooting).
 
 ---
-
-# Appendix B: Grafana Dashboard
-
-A pre-built Grafana dashboard is available at:
-`/home/energymanagement/swisssolarforecast/grafana-forecast-dashboard.json`
-
-**Import:**
-1. Grafana → **Dashboards** → **New** → **Import**
-2. Upload JSON file
-3. Select InfluxDB datasource
-
-**Panels:**
-- PV Power Forecast (P10/P50/P90 bands)
-- Load Forecast (P10/P50/P90 bands)
-- Net Power (Surplus/Deficit)
-- Cumulative Energy
-- Weather (GHI, Temperature)
-- Statistics Table
-
----
-
-# Appendix C: Troubleshooting
-
-## C.1 No Forecast Data
-
-**Check GRIB downloads:**
-```bash
-ls -la /share/swisssolarforecast/icon-ch1/
-ls -la /share/swisssolarforecast/icon-ch2/
-```
-
-**Check add-on logs for errors:**
-```
-Settings → Add-ons → SwissSolarForecast → Log
-```
-
-## C.2 InfluxDB Connection Failed
-
-**Test connection:**
-```bash
-curl -H "Authorization: Token YOUR_TOKEN" \
-  http://192.168.0.203:8087/api/v2/buckets
-```
-
-**Verify credentials in add-on configuration.**
-
-## C.3 Load Forecast Empty
-
-**Check historical data exists:**
-```flux
-from(bucket: "HomeAssistant")
-  |> range(start: -7d)
-  |> filter(fn: (r) => r.entity_id == "house_load_power")
-  |> count()
-```
-
-**Verify entity_id matches your sensor.**
-
-## C.4 InfluxDB Delete API Performance Issues
-
-**Symptoms:**
-- Add-ons hang at "Deleting future forecasts" step
-- InfluxDB container using excessive memory (>5GB)
-- High CPU usage on InfluxDB server
-- Timeout errors in add-on logs
-
-**Diagnosis:**
-
-Check InfluxDB goroutine count:
-```bash
-curl http://192.168.0.203:8087/debug/pprof/goroutine?debug=1 | head -1
-```
-
-Normal: 100-200 goroutines. Problem: >1000 goroutines.
-
-**Solution:**
-
-1. **Restart InfluxDB container:**
-   ```bash
-   docker restart influxdb2
-   ```
-
-2. **Verify recovery:**
-   ```bash
-   docker stats influxdb2 --no-stream
-   ```
-   Memory should drop to ~2GB.
-
-**Prevention:**
-
-All add-ons use `run_time` as a field instead of a tag. This allows points to overwrite on the same timestamp without needing delete operations. The delete API calls have been removed from the code.
-
-**Technical Background:**
-
-InfluxDB 2.x points are uniquely identified by: `measurement + tags + timestamp`
-
-- If `run_time` is a **tag**: Each forecast run creates NEW points (duplicates accumulate)
-- If `run_time` is a **field**: Points OVERWRITE on same timestamp+tags (no duplicates)
-
-The delete API in InfluxDB 2.x can be slow with large datasets and may cause goroutine deadlocks under certain conditions.
-
----
-
 # Appendix D: Test Cases
 
 ## D.1 Battery Discharge Optimizer Tests
@@ -2647,9 +2266,9 @@ Test file: `energymanager/tests/test_battery_optimizer.py`
 
 | Test | Description | Conditions | Expected Result |
 |------|-------------|------------|-----------------|
-| `test_previously_blocked_requires_margin_to_reallow` | When previously blocked, min_soc barely above 10% stays blocked | Cheap tariff, min_soc 10-12%, `previously_blocked=True` | `discharge_allowed=False` |
-| `test_previously_blocked_allows_with_clear_margin` | When previously blocked but min_soc clearly above 12%, allow | Cheap tariff, SOC 90%, `previously_blocked=True` | `discharge_allowed=True` |
-| `test_not_previously_blocked_allows_at_threshold` | When not previously blocked, min_soc at 10% allows normally | Cheap tariff, min_soc 10-12%, `previously_blocked=False` | `discharge_allowed=True` |
+| `test_previously_blocked_requires_margin_to_reallow` | When already blocked, min_soc barely above 10% stays blocked | Cheap tariff, min_soc 10-12%, `previously_blocked=True` | `discharge_allowed=False` |
+| `test_previously_blocked_allows_with_clear_margin` | When already blocked but min_soc clearly above 12%, allow | Cheap tariff, SOC 90%, `previously_blocked=True` | `discharge_allowed=True` |
+| `test_not_previously_blocked_allows_at_threshold` | When not already blocked, min_soc at 10% allows normally | Cheap tariff, min_soc 10-12%, `previously_blocked=False` | `discharge_allowed=True` |
 
 #### Dataclass Validation
 
@@ -3315,11 +2934,7 @@ See Section 4.3.8 for adaptive polling logic.
 
 ---
 
-**End of Document**
-
-*Version 2.50 - May 2026*
-
-**Changelog:**
+## Changelog
 
 - v2.78: **LoadForecast spec extracted to its own self-contained add-on FSD (doc-only, no code change).** Chapter 3 (profiling algorithm, data source, output schema, configuration, limitations) and the §1.13.3 parameter block moved to `loadforecast/Documents/loadforecast-fsd.md`; this doc keeps a summary + link and the `load_forecast` interface contract EnergyManager consumes. Corrected the output-field contract there to `power_w_p10/p50/p90` + `run_time` (verified against `loadforecast/src/influxdb_writer.py` — the old stub listed `energy_wh_*`; energy is derived by consumers) and recorded the deployed 120 h horizon vs the 48 h code/example default. SwissSolarForecast and LoadForecast are now both self-contained; EnergyManager (Chapter 4) remains in this FSD.
 
