@@ -54,13 +54,13 @@ restart.
 ## Monitoring
 
 **Grid-correction watchdog** — a native HA automation (`automation.grid_correction_watchdog`) that
-alerts via Telegram when the corrected Huawei DTSU (`sensor.power_meter_active_power`) **under-reads**
-the grid versus the independent M-Bus meter (`sensor.grid_power`) by more than **1 kW for 90 s** while
-the wallbox is charging (`sensor.wallbox_power` > 1.5 kW) — i.e. the proxy correction has failed and
-the inverter is not seeing the car load (ocpp-server-fsd §3.6.6). A healthy correction tracks within
-~100 W, so 1 kW is a clear failure with margin. The check is **directional** (`power_meter − grid >
-1 kW`): only the under-read failure alarms — the by-design ramp overshoot (corrected briefly
-over-reads) does not.
+alerts via Telegram only when **buying** energy (M-Bus `sensor.grid_power` < 0 = import) while the
+wallbox is charging (`sensor.wallbox_power` > 1.5 kW) **and** the corrected Huawei DTSU
+(`sensor.power_meter_active_power`) **under-reads** that import by more than **1 kW for 90 s** — i.e.
+the proxy correction has failed and the grid is silently supplying the car (ocpp-server-fsd §3.6.6).
+A healthy correction tracks within ~100 W, so 1 kW is a clear failure with margin. The check is
+**directional and import-only** (`grid < 0` and `power_meter − grid > 1 kW`): export and the by-design
+ramp overshoot never alarm — only a costly silent import does.
 
 It runs entirely in HA (production) — no external host, script, or cron — and sends via the
 `telegram_bot.send_message` service (chat configured in HA). `mode: single` gives a natural
