@@ -51,6 +51,20 @@ restart.
 - **Inspect time-series / dashboards** — InfluxDB and Grafana, reached via the `remote-connections`
   skill.
 
+## Monitoring
+
+**Grid-correction watchdog** — alerts via Telegram when the Huawei DTSU grid meter (corrected by the
+ESP32 Modbus proxy with the wallbox power) diverges from the independent M-Bus meter while the
+wallbox is charging — i.e. the proxy correction has failed and the inverter is not seeing the
+car load (ocpp-server-fsd §3.6.6).
+
+- Script: `tools/grid_correction_watchdog.py` (read-only InfluxDB; alerts via HA `telegram_bot.send_message`).
+- Runs on the VM host as the systemd service `grid-correction-watchdog.service` (`--loop`, 30 s cadence).
+- Fires on a sustained divergence (default ≥ 3 bins of 30 s over 2.5 kW while wallbox > 1.5 kW), then
+  stays quiet for 30 min. Tunables via `WD_*` env vars (`WD_THRESHOLD_W`, `WD_CONSEC`, `WD_COOLDOWN_S`, …).
+- Manage: `sudo systemctl {status,restart} grid-correction-watchdog` on the VM host;
+  `python3 tools/grid_correction_watchdog.py --test` sends a test alert, `-v` prints a one-shot check.
+
 ## Dashboards & queries
 
 Grafana queries operators use to visualize each add-on's output. Behaviour/schemas these read are
