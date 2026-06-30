@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.60"
+__version__ = "0.9.61"
 
 import asyncio
 import json
@@ -230,6 +230,9 @@ class OCPPServer:
         self._last_mqtt_power: float = (
             0.0  # re-publish periodically to prevent staleness
         )
+        # Post-resume ramp bridge: feed the proxy the commanded power instead of
+        # the wallbox's stale 0 W until the first real MeterValues>0 arrives.
+        self._proxy_bridging: bool = False
 
         # Phase switching state
         self._current_phases = 3
@@ -366,6 +369,30 @@ class OCPPServer:
         except Exception as e:
             logger.warning(f"MQTT publish failed: {e}")
 
+    # Statuses where the car is definitively not drawing — end any ramp bridge.
+    _PROXY_STOP_STATUSES = {"SuspendedEV", "Finishing", "Available"}
+
+    def _proxy_power_w(self) -> float:
+        """Wallbox power to feed the ESP32 Modbus proxy.
+
+        After a resume the wallbox reports 0 W (then nothing) for up to one
+        MeterValues interval (~60 s) while the car physically ramps to the
+        commanded current. Publishing that 0 makes the proxy briefly blind to the
+        wallbox, so the SUN2000's grid meter under-reads and the grid quietly
+        supplies the car. While bridging, feed the proxy the commanded power
+        instead; the measured value takes over as soon as a real MeterValues>0
+        arrives. Commanded 0 (a real pause) falls through to the measured value.
+        """
+        cp = self.charge_point
+        measured = cp.current_power_w if cp else 0.0
+        if self._proxy_bridging and self._last_sent_power_w > 0:
+            return float(self._last_sent_power_w)
+        return float(measured)
+
+    def _publish_proxy_power(self) -> None:
+        """Recompute and publish the proxy correction value."""
+        asyncio.ensure_future(self._publish_mqtt_power(self._proxy_power_w()))
+
     def _on_status_change(self, key: str, value) -> None:
         """Handle a wallbox status change: update HA entity and MQTT."""
         entity_id = STATUS_ENTITY_MAP.get(key)
@@ -383,6 +410,7 @@ class OCPPServer:
                 # Reset so reconciliation detects the mismatch and re-sends
                 self._last_sent_power_w = 0
                 self._last_requested_power_w = 0
+                self._proxy_bridging = False
                 # Re-apply current HA power limit (car may reconnect quickly)
                 asyncio.ensure_future(self._apply_current_power_limit())
         elif key == "power_w":
@@ -392,12 +420,25 @@ class OCPPServer:
 
         asyncio.ensure_future(self.ha.set_state(entity_id, state))
 
-        # Publish wallbox power to MQTT for ESP32 Modbus Proxy correction
+        # Publish wallbox power to MQTT for ESP32 Modbus Proxy correction.
+        # A real MeterValues>0 ends the post-resume bridge; a 0 W reading while
+        # bridging is the ramp, so it is suppressed (commanded power held).
         if key == "power_w":
-            asyncio.ensure_future(self._publish_mqtt_power(float(value)))
+            if self._proxy_bridging and self._last_sent_power_w > 0 and value > 0:
+                self._proxy_bridging = False
+            self._publish_proxy_power()
 
         if key == "status":
             asyncio.ensure_future(self._update_car_ready())
+
+            # Begin the ramp bridge on (re)entering Charging; end it once the car
+            # confirms it is not drawing (the wallbox reports 0 there legitimately).
+            if value == "Charging":
+                self._proxy_bridging = True
+                self._publish_proxy_power()
+            elif value in self._PROXY_STOP_STATUSES:
+                self._proxy_bridging = False
+                self._publish_proxy_power()
 
             # Reset escalating re-send counter when leaving SuspendedEVSE
             if value != "SuspendedEVSE":
@@ -672,6 +713,10 @@ class OCPPServer:
 
         self._pending_power_w = None
         self._last_sent_power_w = power_w
+        # If the commanded power changes mid-bridge (an amp step before the first
+        # real MeterValues), push the new value to the proxy immediately.
+        if self._proxy_bridging:
+            self._publish_proxy_power()
         logger.info(f"Sent power profile: {power_w}W")
 
 

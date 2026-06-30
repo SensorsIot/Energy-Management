@@ -320,6 +320,30 @@ Non-overlapping ranges provide natural hysteresis.
 | Throttle | Rate-limit SetChargingProfile (0W bypasses) |
 | Device quirks | AcTec: SuspendedEVSE bug, integer-only amps, profile-before-start |
 
+#### 3.6.6 Modbus-proxy power feed (MQTT)
+
+The server publishes the wallbox's active power to MQTT topic `wallbox` (config `mqtt_host` /
+`mqtt_port` / `mqtt_topic`) for the ESP32 Modbus Proxy, which adds it to the Huawei DTSU meter so the
+SUN2000 sees grid demand including the wallbox (wired outside the DTSU loop). The last value is
+re-published every 10 s to prevent staleness.
+
+**Source of the published value:**
+
+- While `Charging` with fresh readings — the measured MeterValues power (after the §7.1 linear
+  correction). This is the steady-state source: the car draws slightly less than commanded due to
+  integer-amp flooring, so the measured value is the accurate one.
+- **Post-resume ramp bridge** — on entering `Charging`, the server publishes the **commanded** power
+  (`_last_sent_power_w`) until the first MeterValues with power > 0 arrives. The AcTec sends
+  MeterValues only every ~60 s, and the first reading after a resume is `0 W` because the car has not
+  physically ramped yet (it ramps over ~60 s; see §5.1). Without the bridge the proxy is fed `0` for
+  up to a full MeterValues interval while the car already draws several kW — the DTSU correction
+  drops out, the inverter exports PV while the grid silently supplies the car, and only the external
+  M-Bus grid meter records the (expensive) import. A `0 W` MeterValues while bridging is treated as
+  ramp, not stop, and is suppressed.
+- `0 W` on a confirmed stop: a commanded `0` pause, `SuspendedEV`, `Finishing`, `Available`, or
+  transaction end. The bridge ends here too, so a car that refuses to charge (`SuspendedEV`, no
+  MeterValues > 0 ever) never produces a phantom commanded load.
+
 ## 4. EARU Breaker Hardware
 
 | Component | Chip | Function |
@@ -516,3 +540,4 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 | 3.6 | 2026-03-24 | Removed keep-alive pulse — Actec confirmed to maintain sessions at 0W indefinitely without periodic nudging (tested 2026-03-24) |
 | 3.7 | 2026-03-29 | Stale MeterValues filter: drop readings with wallbox timestamps > 5 min old. Actec replays buffered meter-log queue after reconnects (e.g. DST reboot), causing energy counter jumps that corrupt daily statistics. TC-05c |
 | 3.8 | 2026-04-27 | Config refactor: `wallbox_type` enum (`three_phase`/`external_breaker`/`universal`) replaces `single_phase_supported` bool; new optional `cloud_charging_entity` makes the AcTec SuspendedEVSE cloud-correction source explicit. Consolidated two duplicate FSD copies into a single canonical document under `Documents/`. |
+| 3.9 | 2026-06-30 | Modbus-proxy power feed: post-resume ramp bridge (§3.6.6). The MQTT `wallbox` value feeding the ESP32 proxy now uses the commanded power on `→Charging` until the first MeterValues>0, instead of the wallbox's stale `0 W` during the ~60 s ramp — closing the window where the DTSU correction dropped out and the grid silently supplied the car (visible as M-Bus-vs-DTSU grid divergence). Bridge ends on first real reading or a confirmed stop (`SuspendedEV`/`Finishing`/`Available`/pause), so a refusing car makes no phantom load. ocpp-server 0.9.61; 4 tests (`TestProxyRampBridge`). |
