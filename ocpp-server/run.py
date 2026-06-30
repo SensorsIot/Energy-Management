@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.61"
+__version__ = "0.9.62"
 
 import asyncio
 import json
@@ -230,9 +230,10 @@ class OCPPServer:
         self._last_mqtt_power: float = (
             0.0  # re-publish periodically to prevent staleness
         )
-        # Post-resume ramp bridge: feed the proxy the commanded power instead of
-        # the wallbox's stale 0 W until the first real MeterValues>0 arrives.
-        self._proxy_bridging: bool = False
+        # Proxy correction: while we are commanding the car to charge, feed the
+        # ESP32 Modbus proxy the COMMANDED power (not the measured MeterValues),
+        # so the SUN2000 sees the load the instant charging is commanded.
+        self._proxy_charging: bool = False
 
         # Phase switching state
         self._current_phases = 3
@@ -369,25 +370,29 @@ class OCPPServer:
         except Exception as e:
             logger.warning(f"MQTT publish failed: {e}")
 
-    # Statuses where the car is definitively not drawing — end any ramp bridge.
+    # Statuses where the car is definitively not drawing — stop the correction.
     _PROXY_STOP_STATUSES = {"SuspendedEV", "Finishing", "Available"}
+    # Statuses where the car will draw within seconds of a >0 command (warm
+    # resume / amp change) — inject commanded immediately. NOT Preparing, where a
+    # cold-start car draws 0 for minutes and would export the whole time.
+    _PROXY_LIVE_STATUSES = {"Charging", "SuspendedEVSE"}
 
     def _proxy_power_w(self) -> float:
         """Wallbox power to feed the ESP32 Modbus proxy.
 
-        After a resume the wallbox reports 0 W (then nothing) for up to one
-        MeterValues interval (~60 s) while the car physically ramps to the
-        commanded current. Publishing that 0 makes the proxy briefly blind to the
-        wallbox, so the SUN2000's grid meter under-reads and the grid quietly
-        supplies the car. While bridging, feed the proxy the commanded power
-        instead; the measured value takes over as soon as a real MeterValues>0
-        arrives. Commanded 0 (a real pause) falls through to the measured value.
+        The measured MeterValues are unusable as the correction source: ~60 s
+        cadence, the first post-resume reading is a tiny ramp value (~120 W) that
+        trips the proxy's activation threshold, and the value then sits stale
+        through the car's whole ramp. So the correction is the **commanded** power
+        the entire time we are commanding a charge, and 0 otherwise. This signals
+        the SUN2000 the full load the instant charging is commanded; if the car
+        starts late we briefly export (sell) — preferable to under-reading and
+        importing (buying). The commanded value also slightly overstates the
+        actual draw in steady state (integer-amp flooring), biasing toward export.
         """
-        cp = self.charge_point
-        measured = cp.current_power_w if cp else 0.0
-        if self._proxy_bridging and self._last_sent_power_w > 0:
+        if self._proxy_charging and self._last_sent_power_w > 0:
             return float(self._last_sent_power_w)
-        return float(measured)
+        return 0.0
 
     def _publish_proxy_power(self) -> None:
         """Recompute and publish the proxy correction value."""
@@ -410,7 +415,8 @@ class OCPPServer:
                 # Reset so reconciliation detects the mismatch and re-sends
                 self._last_sent_power_w = 0
                 self._last_requested_power_w = 0
-                self._proxy_bridging = False
+                self._proxy_charging = False
+                self._publish_proxy_power()
                 # Re-apply current HA power limit (car may reconnect quickly)
                 asyncio.ensure_future(self._apply_current_power_limit())
         elif key == "power_w":
@@ -420,24 +426,21 @@ class OCPPServer:
 
         asyncio.ensure_future(self.ha.set_state(entity_id, state))
 
-        # Publish wallbox power to MQTT for ESP32 Modbus Proxy correction.
-        # A real MeterValues>0 ends the post-resume bridge; a 0 W reading while
-        # bridging is the ramp, so it is suppressed (commanded power held).
-        if key == "power_w":
-            if self._proxy_bridging and self._last_sent_power_w > 0 and value > 0:
-                self._proxy_bridging = False
-            self._publish_proxy_power()
+        # The MQTT proxy correction is driven by the COMMANDED power (see
+        # _proxy_power_w), not the measured MeterValues — so the measured update
+        # here only refreshes the HA sensor above, never the correction.
 
         if key == "status":
             asyncio.ensure_future(self._update_car_ready())
 
-            # Begin the ramp bridge on (re)entering Charging; end it once the car
-            # confirms it is not drawing (the wallbox reports 0 there legitimately).
+            # Inject commanded the moment the car confirms Charging (covers the
+            # cold-start path after Preparing); stop on a confirmed not-drawing
+            # status (the car reports 0 there legitimately).
             if value == "Charging":
-                self._proxy_bridging = True
+                self._proxy_charging = True
                 self._publish_proxy_power()
             elif value in self._PROXY_STOP_STATUSES:
-                self._proxy_bridging = False
+                self._proxy_charging = False
                 self._publish_proxy_power()
 
             # Reset escalating re-send counter when leaving SuspendedEVSE
@@ -713,9 +716,20 @@ class OCPPServer:
 
         self._pending_power_w = None
         self._last_sent_power_w = power_w
-        # If the commanded power changes mid-bridge (an amp step before the first
-        # real MeterValues), push the new value to the proxy immediately.
-        if self._proxy_bridging:
+
+        # Drive the proxy correction from the command itself, immediately:
+        # - >0 while the car is already in a charging session (Charging /
+        #   SuspendedEVSE = warm resume or amp change) → it will draw within
+        #   seconds, so signal the commanded load now. A cold-start (Preparing)
+        #   is excluded — there the car draws 0 for minutes; it picks up on the
+        #   later →Charging in _on_status_change.
+        # - 0 (pause) → stop the correction.
+        status = self.charge_point.current_status if self.charge_point else None
+        if power_w > 0 and status in self._PROXY_LIVE_STATUSES:
+            self._proxy_charging = True
+            self._publish_proxy_power()
+        elif power_w == 0:
+            self._proxy_charging = False
             self._publish_proxy_power()
         logger.info(f"Sent power profile: {power_w}W")
 

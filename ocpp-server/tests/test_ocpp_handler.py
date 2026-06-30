@@ -1677,14 +1677,14 @@ class TestPostConnectApplyLimit:
         server.charge_point.set_charging_power.assert_not_called()
 
 
-class TestProxyRampBridge:
-    """Post-resume ramp bridge for the ESP32 Modbus proxy correction.
+class TestProxyCommandedCorrection:
+    """Commanded-primary correction for the ESP32 Modbus proxy.
 
-    After a resume the wallbox reports 0 W for up to one MeterValues interval
-    (~60 s) while the car physically ramps to the commanded current. Publishing
-    that 0 makes the proxy blind to the wallbox, so the SUN2000 grid meter
-    under-reads and the grid supplies the car. The bridge feeds the commanded
-    power until the first real MeterValues>0 arrives.
+    The proxy correction is the COMMANDED power the whole time we command a
+    charge — never the measured MeterValues (60 s cadence, tiny ramp first
+    reading that trips the proxy threshold). This signals the SUN2000 the full
+    load the instant charging is commanded; a late-starting car briefly exports
+    (sells) rather than under-reading and importing (buying).
     """
 
     @pytest.fixture
@@ -1708,66 +1708,73 @@ class TestProxyRampBridge:
         return srv
 
     @pytest.mark.asyncio
-    async def test_resume_bridges_commanded_until_real_meter(self, server) -> None:
-        """Resume → commanded power feeds the proxy; a 0 W reading is suppressed;
-        the first real MeterValues>0 hands back to the measured value."""
-        # Resume: commanded 5117 W, wallbox not yet drawing (measured 0).
-        server._last_sent_power_w = 5117.0
-        server.charge_point.current_power_w = 0
-
-        server._on_status_change("status", "Charging")
+    async def test_warm_resume_injects_commanded_immediately(self, server) -> None:
+        """A >0 command while SuspendedEVSE (warm resume) signals the commanded
+        load at once — no wait for Charging, no measured value."""
+        server.charge_point.current_status = "SuspendedEVSE"
+        server.charge_point.current_power_w = 0  # car not drawing yet
+        await server._send_power_to_wallbox(6000.0)
         await asyncio.sleep(0)
-        assert server._proxy_bridging is True
-        assert server._proxy_power_w() == 5117.0  # commanded, not the measured 0
-        assert server._last_mqtt_power == 5117.0
-
-        # The post-resume 0 W reading (ramp) must not collapse the correction.
-        server._on_status_change("power_w", 0)
-        await asyncio.sleep(0)
-        assert server._proxy_bridging is True
-        assert server._proxy_power_w() == 5117.0
-
-        # First real MeterValues>0 ends the bridge; measured takes over.
-        server.charge_point.current_power_w = 5100
-        server._on_status_change("power_w", 5100)
-        await asyncio.sleep(0)
-        assert server._proxy_bridging is False
-        assert server._proxy_power_w() == 5100.0
-        assert server._last_mqtt_power == 5100.0
+        assert server._proxy_charging is True
+        assert server._proxy_power_w() == 6000.0
+        assert server._last_mqtt_power == 6000.0
 
     @pytest.mark.asyncio
-    async def test_suspended_ev_ends_bridge_no_phantom_load(self, server) -> None:
-        """If the car refuses after resume (SuspendedEV, no MeterValues>0 ever),
-        the bridge ends and 0 is published — not a phantom commanded load."""
+    async def test_charging_status_injects_commanded(self, server) -> None:
+        """Reaching Charging (cold-start path after Preparing) injects commanded."""
+        server._last_sent_power_w = 5117.0
+        server._on_status_change("status", "Charging")
+        await asyncio.sleep(0)
+        assert server._proxy_charging is True
+        assert server._proxy_power_w() == 5117.0
+
+    @pytest.mark.asyncio
+    async def test_measured_metervalues_do_not_change_correction(self, server) -> None:
+        """While charging at commanded 6000 W, measured readings (tiny ramp 120 W,
+        then 5681 W) must NOT change the correction — it stays at commanded."""
+        server.charge_point.current_status = "SuspendedEVSE"
+        await server._send_power_to_wallbox(6000.0)
+        await asyncio.sleep(0)
+        assert server._proxy_power_w() == 6000.0
+
+        for measured in (120, 5681):
+            server.charge_point.current_power_w = measured
+            server._on_status_change("power_w", measured)
+            await asyncio.sleep(0)
+            assert server._proxy_power_w() == 6000.0  # unchanged by measured
+        assert server._last_mqtt_power == 6000.0
+
+    @pytest.mark.asyncio
+    async def test_cold_start_preparing_no_injection(self, server) -> None:
+        """A >0 command during Preparing (cold start, car draws 0 for minutes)
+        must NOT inject — no minutes-long phantom export."""
+        server.charge_point.current_status = "Preparing"
+        await server._send_power_to_wallbox(6000.0)
+        await asyncio.sleep(0)
+        assert server._proxy_charging is False
+        assert server._proxy_power_w() == 0.0
+
+    @pytest.mark.asyncio
+    async def test_suspended_ev_stops_correction(self, server) -> None:
+        """Car refuses (SuspendedEV) → correction goes to 0, no phantom load."""
         server._last_sent_power_w = 5000.0
-        server.charge_point.current_power_w = 0
         server._on_status_change("status", "Charging")
         await asyncio.sleep(0)
         assert server._proxy_power_w() == 5000.0
-
-        # Car refuses: status SuspendedEV, wallbox draws 0.
         server.charge_point.current_status = "SuspendedEV"
-        server.charge_point.current_power_w = 0
         server._on_status_change("status", "SuspendedEV")
         await asyncio.sleep(0)
-        assert server._proxy_bridging is False
-        assert server._proxy_power_w() == 0.0
-        assert server._last_mqtt_power == 0.0
-
-    @pytest.mark.asyncio
-    async def test_commanded_zero_pause_uses_measured(self, server) -> None:
-        """A real pause commands 0 W; even mid-bridge the proxy gets the measured
-        value (0), never a stale commanded value."""
-        server._proxy_bridging = True
-        server._last_sent_power_w = 0.0  # we commanded a pause
-        server.charge_point.current_power_w = 0
+        assert server._proxy_charging is False
         assert server._proxy_power_w() == 0.0
 
     @pytest.mark.asyncio
-    async def test_steady_charging_uses_measured_not_commanded(self, server) -> None:
-        """Outside the bridge, the accurate measured power is used (the car draws
-        slightly less than commanded due to integer-amp flooring)."""
-        server._proxy_bridging = False
-        server._last_sent_power_w = 5000.0
-        server.charge_point.current_power_w = 4830
-        assert server._proxy_power_w() == 4830.0
+    async def test_pause_stops_correction(self, server) -> None:
+        """Commanding 0 W (pause) stops the correction immediately."""
+        server.charge_point.current_status = "Charging"
+        server._proxy_charging = True
+        server._last_sent_power_w = 6000.0
+        server.charge_point.current_power_w = 5681
+        await server._send_power_to_wallbox(0.0)
+        await asyncio.sleep(0)
+        assert server._proxy_charging is False
+        assert server._proxy_power_w() == 0.0
