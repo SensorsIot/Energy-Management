@@ -42,8 +42,10 @@ Ask: *is this WHAT the system is, or HOW it is built / operated?*
 |---|---|---|
 | a current-state fact, rule, or contract about what an add-on **is / does** | **WHAT** | `[SPEC]` (that add-on's FSD) |
 | an external interface contract (an API, a third-party system) | **WHAT** | `[INTERFACES]` |
+| a **test case** (acceptance criteria for a behaviour rule) | **WHAT** | the owning `[SPEC]`'s numbered **test chapter** — never an appendix (see below); indexed in `[HARNESS]` `project/testing.md` |
 | *why* a rule is what it is | — | **not recorded** — capture the live constraint as a present-tense rule; the running system is the decision |
 | a prescriptive rule for **how** to build / change correctly | **HOW** | `[HARNESS]` |
+| an identifier or doc-file **naming** decision | **HOW** | `[HARNESS]` naming standard (`project/naming.md`) |
 | a step-by-step procedure for one operation | **HOW (procedure)** | the relevant skill |
 | an operator walkthrough | **HOW (operations)** | `[HANDBOOK]` |
 | the definition of a domain term | **WHAT (vocabulary)** | the owning `[SPEC]` |
@@ -93,7 +95,8 @@ live in **`references/present-state-scrub.md`** — read it when running Procedu
 
 Present-state + positive + no fabrication: unbuilt tooling goes under a `## Target` heading with a
 `Check:` line naming a real command (or marked `(Target)`). Quotes stored straight; TODOs deleted
-when done (not struck through); entities linked by ID.
+when done (not struck through); entities linked by ID. When **creating or renaming** a doc file,
+follow the naming standard (`<component>-fsd.md`, kebab-case) — see `[HARNESS]` `project/naming.md`.
 
 ---
 
