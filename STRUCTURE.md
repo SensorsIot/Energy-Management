@@ -11,6 +11,12 @@ distributed doc**: it names the canonical home of each kind of documentation, an
 | **HOW** | how it is built / changed | `Harness/` — index `00-Overview.md`, entry `AI-Workflow.md`, project-wide rules in `project/`, module-specific HOW in `project/modules/<addon>.md` |
 | **OPERATE** | how it is run | `Handbook.md` |
 
+**Testing spans planes** and is a first-class part of the spec: the strategy and levels are HOW
+([`Harness/standards/testing.md`](Harness/standards/testing.md)), each add-on's test-case specs are
+WHAT (its FSD test chapter — see the *Tests* column in *Components*), and both are indexed together in
+[`Harness/project/testing.md`](Harness/project/testing.md). Every behaviour rule has a test case;
+every change ships its test (`AI-Workflow.md` step 3).
+
 ## Single source of truth (SSOT registry)
 
 Each kind of content has **exactly one canonical home** (its SSOT). Every other doc that needs it
@@ -26,7 +32,7 @@ reference.
 | External interface contract owned by one add-on (e.g. Smart-car API) | a section of the owning add-on's FSD | — |
 | Project-wide build contract & conventions (HOW) | `Harness/AI-Workflow.md`, `Harness/standards/`, `Harness/project/` | every FSD's *Build* reference |
 | Testing strategy + test-case index (HOW) | `Harness/standards/testing.md` (levels/rules) + `Harness/project/testing.md` (index → the FSD chapter each add-on's cases live in) | `AI-Workflow.md` step 3; the FSD test chapters |
-| Test-case specs (WHAT — acceptance criteria) | the owning add-on's FSD test chapter (energymanager Chapter 6, ocpp-server §8, …) | `Harness/project/testing.md` indexes them |
+| Test-case specs (WHAT — acceptance criteria) | the owning add-on's FSD test chapter (the *Tests* column in *Components*) | `Harness/project/testing.md` indexes them |
 | Module-specific build / architecture / file-layout / test-invocation (HOW) | `Harness/project/modules/<addon>.md` | that add-on's FSD |
 | Operator procedures (OPERATE) — install, troubleshoot, dashboards | `Handbook.md` | the FSDs' *Operations* references |
 | Documentation governance rules | `Harness/standards/documentation.md` + the `documentation` skill | `STRUCTURE.md` |
@@ -37,12 +43,12 @@ reference.
 One row per add-on that owns its own FSD beside its code. This is the overview's link-out: the
 `documentation` skill routes a change to the FSD of the add-on it touches.
 
-| Component | FSD (WHAT) | Owns |
-|---|---|---|
-| `energymanager` | [`energymanager/Documents/energymanager-fsd.md`](energymanager/Documents/energymanager-fsd.md) | Battery optimizer, EV charging, appliance signals. Includes the Smart-car API contract (`energymanager/Documents/Hello Smart API.md`). |
-| `loadforecast` | [`loadforecast/Documents/loadforecast-fsd.md`](loadforecast/Documents/loadforecast-fsd.md) | Statistical load prediction (P10/P50/P90 per 15-min). |
-| `swisssolarforecast` | [`swisssolarforecast/Documents/swisssolarforecast-fsd.md`](swisssolarforecast/Documents/swisssolarforecast-fsd.md) | PV production forecast (ICON weather + pvlib model). |
-| `ocpp-server` | [`ocpp-server/Documents/ocpp-server-fsd.md`](ocpp-server/Documents/ocpp-server-fsd.md) | OCPP 1.6j wallbox server; publishes HA entities. |
+| Component | FSD (WHAT) | Test cases (WHAT) | Owns |
+|---|---|---|---|
+| `energymanager` | [`energymanager/Documents/energymanager-fsd.md`](energymanager/Documents/energymanager-fsd.md) | [Chapter 6](energymanager/Documents/energymanager-fsd.md#chapter-6-test-cases) | Battery optimizer, EV charging, appliance signals. Includes the Smart-car API contract (`energymanager/Documents/Hello Smart API.md`). |
+| `loadforecast` | [`loadforecast/Documents/loadforecast-fsd.md`](loadforecast/Documents/loadforecast-fsd.md) | [§14](loadforecast/Documents/loadforecast-fsd.md#14-tests-and-validation) *(no code yet)* | Statistical load prediction (P10/P50/P90 per 15-min). |
+| `swisssolarforecast` | [`swisssolarforecast/Documents/swisssolarforecast-fsd.md`](swisssolarforecast/Documents/swisssolarforecast-fsd.md) | [§16](swisssolarforecast/Documents/swisssolarforecast-fsd.md#16-tests-and-validation) | PV production forecast (ICON weather + pvlib model). |
+| `ocpp-server` | [`ocpp-server/Documents/ocpp-server-fsd.md`](ocpp-server/Documents/ocpp-server-fsd.md) | [§8](ocpp-server/Documents/ocpp-server-fsd.md#8-test-cases) | OCPP 1.6j wallbox server; publishes HA entities. |
 
 Interfaces stay where the contract lives: the Smart-car API contract is a doc owned by
 `energymanager`, not a top-level file. There is no cross-component interface that needs a shared
