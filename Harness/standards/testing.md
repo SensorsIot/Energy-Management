@@ -32,3 +32,25 @@ reach.
   suite blocks the commit.
 - **No silent gaps.** Unbuilt-but-specified cases are marked (e.g. `Future`) with their prerequisite,
   so the coverage picture is honest.
+
+## Security testing — anchor to international standards
+
+Security is a test dimension of its own, and its cases are grounded in **international standards**,
+not ad-hoc checks. Anchor security test cases to (as applicable):
+
+| Standard | Role |
+|---|---|
+| **OWASP ASVS** (Application Security Verification Standard) | the requirements catalogue — each verification requirement is a test case |
+| **OWASP Top 10** + **WSTG** (Web Security Testing Guide) | the common risk classes and the test procedures for them |
+| **CWE** (MITRE Common Weakness Enumeration) | classify each finding by weakness ID |
+| **CVSS** | score the severity of a finding |
+| **NIST SP 800-115** | the methodology for technical security testing |
+| **ISO/IEC 27001 / 27034** | the governing security-management / application-security frameworks |
+
+Rules:
+- **Every security-relevant behaviour rule has a security test case** — authentication, authorization,
+  input validation, secrets handling, cryptography, and the OWASP Top 10 classes relevant to the
+  component.
+- **Security cases live in the owning FSD's test chapter** like any other, each **tagged with its
+  standard reference** (e.g. ASVS requirement ID, CWE ID) so the coverage traces to the standard.
+- Score and triage findings by **CVSS**; don't leave a known weakness unclassified.

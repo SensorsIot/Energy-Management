@@ -1,7 +1,8 @@
 # Project — Naming conventions
 
-How every identifier in this suite is named. Names are strategic, anchored to recognized standards
-(sources below); the repo's identifiers are conforming examples, not the source of the rules.
+How every identifier in this suite is named. Names are strategic, anchored to **international
+standards** (sources below); the repo's identifiers are conforming examples, not the source of the
+rules.
 
 Two tiers, with different stakes:
 
