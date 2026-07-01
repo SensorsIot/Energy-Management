@@ -23,7 +23,7 @@ def weather_run_complete(
 ) -> tuple[bool, str]:
     """Confirm the latest downloaded weather run is complete and fresh.
 
-    Reads the fetcher's per-run ``metadata.json`` (written by IconFetcher):
+    Reads the fetcher's per-run ``metadata.json`` (written by ICONFetcher):
 
     - ``files_failed`` must be ≤ max_failed — a partial download yields gaps
       that corrupt de-accumulated radiation.

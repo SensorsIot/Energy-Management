@@ -49,7 +49,7 @@ MODEL_CONFIG = {
 PUBLICATION_DELAY_HOURS = 2
 
 
-class IconFetcher:
+class ICONFetcher:
     """Fetches ICON forecast data from MeteoSwiss STAC API."""
 
     def __init__(
@@ -430,7 +430,7 @@ def fetch_hybrid_forecast(
     ch1_end = min(33, target_hours)
     logger.info(f"Fetching CH1 ensemble: hours 0-{ch1_end}")
 
-    ch1_fetcher = IconFetcher(
+    ch1_fetcher = ICONFetcher(
         model="ch1",
         latitude=latitude,
         longitude=longitude,
@@ -447,7 +447,7 @@ def fetch_hybrid_forecast(
         ch2_end = target_hours
         logger.info(f"Fetching CH2 ensemble: hours {ch2_start}-{ch2_end}")
 
-        ch2_fetcher = IconFetcher(
+        ch2_fetcher = ICONFetcher(
             model="ch2",
             latitude=latitude,
             longitude=longitude,
@@ -493,7 +493,7 @@ def fetch_icon_data(
 
     model_dir = output_dir / f"icon-{model}"
 
-    fetcher = IconFetcher(
+    fetcher = ICONFetcher(
         model=model,
         latitude=latitude,
         longitude=longitude,

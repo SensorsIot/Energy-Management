@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.scheduler import ForecastScheduler
 from src.influxdb_writer import ForecastWriter
-from src.icon_fetcher import IconFetcher
+from src.icon_fetcher import ICONFetcher
 from src.grib_parser import load_hybrid_ensemble_forecast
 from src.pv_model import forecast_ensemble_plants, forecast_all_plants
 from src.local_fetcher import LocalFetcher
@@ -192,7 +192,7 @@ class SwissSolarForecast:
         """Fetch ICON-CH1 ensemble data."""
         logger.info("Fetching ICON-CH1 data...")
 
-        fetcher = IconFetcher(
+        fetcher = ICONFetcher(
             model="ch1",
             latitude=self.latitude,
             longitude=self.longitude,
@@ -212,7 +212,7 @@ class SwissSolarForecast:
         """Fetch ICON-CH2 ensemble data."""
         logger.info("Fetching ICON-CH2 data...")
 
-        fetcher = IconFetcher(
+        fetcher = ICONFetcher(
             model="ch2",
             latitude=self.latitude,
             longitude=self.longitude,

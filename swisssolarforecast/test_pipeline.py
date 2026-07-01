@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import yaml
 
 from src.config import PVSystemConfig
-from src.icon_fetcher import IconFetcher
+from src.icon_fetcher import ICONFetcher
 from src.grib_parser import load_hybrid_ensemble_forecast
 from src.pv_model import forecast_ensemble_plants
 from src.influxdb_writer import ForecastWriter
@@ -51,7 +51,7 @@ def main() -> int:
     logger.info("STEP 1: Fetching ICON-CH1 data from MeteoSwiss...")
     logger.info("=" * 60)
 
-    fetcher = IconFetcher(
+    fetcher = ICONFetcher(
         model="ch1",
         latitude=LATITUDE,
         longitude=LONGITUDE,

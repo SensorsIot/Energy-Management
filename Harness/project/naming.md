@@ -79,15 +79,8 @@ Internal Python identifiers hold no stored state and rename freely.
 
 - `HomeAssistant` bucket — created and named by Home Assistant.
 - `SUN2000`, `DTSU` — Huawei product/model names.
-
-**Fixed contracts that differ from the convention** — new identifiers follow the rules above; these
-existing ones stand until a migration (see Stability):
-
-- Add-on slugs `energymanager`, `loadforecast`, `swisssolarforecast` run words together; a new add-on
-  is kebab-case (`ocpp-server` already is).
-- MQTT topic `MBUS-PROXY/power` is upper-kebab; a new topic is lowercase (`mbus-proxy/power`).
-- Doc `Hello Smart API.md` uses spaces and Title Case; a new doc is kebab-case
-  (`hello-smart-api.md`).
+- MQTT topic `MBUS-PROXY/power` — published by the ESP32 Modbus-proxy firmware, not this repo. The
+  repo's own OCPP topic (`wallbox`) is lowercase and conforms.
 
 Code style beyond naming is in [`code-style.md`](code-style.md); the data-store architecture these
 identifiers live in is in [`stack.md`](stack.md).
