@@ -1607,7 +1607,7 @@ class TestPostConnectApplyLimit:
     """Post-connect setup should immediately apply current HA power limit.
 
     Without this, the OCPP server waits for a _change_ in the HA entity,
-    which may never come if the energymanager already set the value.
+    which may never come if the energy-manager already set the value.
     """
 
     @pytest.fixture

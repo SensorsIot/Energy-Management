@@ -2,7 +2,7 @@
 # EnergyManager - combined dev requirements
 # ============================================================
 
-# --- energymanager ---
+# --- energy-manager ---
 pandas>=2.0.0
 numpy>=1.24.0
 influxdb-client>=1.36.0
@@ -11,13 +11,13 @@ APScheduler>=3.10.0
 python-dateutil>=2.8.0
 PyYAML>=6.0
 
-# --- swisssolarforecast ---
+# --- swiss-solar-forecast ---
 pvlib>=0.10.0
 xarray>=2023.1.0
 cfgrib>=0.9.10
 eccodes>=1.5.0
 
-# --- loadforecast ---
+# --- load-forecast ---
 croniter>=1.3.0
 
 # --- ocpp-server ---

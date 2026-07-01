@@ -1,0 +1,34 @@
+name: "EnergyManager"
+version: "1.8.44"
+slug: "energy-manager"
+description: "Energy optimization using PV and load forecasts"
+url: "https://github.com/SensorsIot/Energy-Management"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+
+startup: services
+boot: auto
+timeout: 120
+
+# Enable Home Assistant API access for battery control
+homeassistant_api: true
+hassio_api: true
+auth_api: true
+
+# Map config directory for user to access config file via File Editor/VSCode
+map:
+  - addon_config:rw
+
+# Secrets entered via HA Configuration UI (not stored in YAML files)
+options:
+  influxdb_token: ""
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+
+schema:
+  influxdb_token: password
+  telegram_bot_token: password?
+  telegram_chat_id: str?

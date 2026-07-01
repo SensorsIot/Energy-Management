@@ -46,13 +46,13 @@ One row per add-on that owns its own FSD beside its code. This is the overview's
 
 | Component | FSD (WHAT) | Test cases (WHAT) | Owns |
 |---|---|---|---|
-| `energymanager` | [`energymanager/Documents/energymanager-fsd.md`](energymanager/Documents/energymanager-fsd.md) | [Chapter 6](energymanager/Documents/energymanager-fsd.md#chapter-6-test-cases) | Battery optimizer, EV charging, appliance signals. Includes the Smart-car API contract (`energymanager/Documents/hello-smart-api.md`). |
-| `loadforecast` | [`loadforecast/Documents/loadforecast-fsd.md`](loadforecast/Documents/loadforecast-fsd.md) | [§14](loadforecast/Documents/loadforecast-fsd.md#14-tests-and-validation) *(no code yet)* | Statistical load prediction (P10/P50/P90 per 15-min). |
-| `swisssolarforecast` | [`swisssolarforecast/Documents/swisssolarforecast-fsd.md`](swisssolarforecast/Documents/swisssolarforecast-fsd.md) | [§16](swisssolarforecast/Documents/swisssolarforecast-fsd.md#16-tests-and-validation) | PV production forecast (ICON weather + pvlib model). |
+| `energy-manager` | [`energy-manager/Documents/energy-manager-fsd.md`](energy-manager/Documents/energy-manager-fsd.md) | [Chapter 6](energy-manager/Documents/energy-manager-fsd.md#chapter-6-test-cases) | Battery optimizer, EV charging, appliance signals. Includes the Smart-car API contract (`energy-manager/Documents/hello-smart-api.md`). |
+| `load-forecast` | [`load-forecast/Documents/load-forecast-fsd.md`](load-forecast/Documents/load-forecast-fsd.md) | [§14](load-forecast/Documents/load-forecast-fsd.md#14-tests-and-validation) *(no code yet)* | Statistical load prediction (P10/P50/P90 per 15-min). |
+| `swiss-solar-forecast` | [`swiss-solar-forecast/Documents/swiss-solar-forecast-fsd.md`](swiss-solar-forecast/Documents/swiss-solar-forecast-fsd.md) | [§16](swiss-solar-forecast/Documents/swiss-solar-forecast-fsd.md#16-tests-and-validation) | PV production forecast (ICON weather + pvlib model). |
 | `ocpp-server` | [`ocpp-server/Documents/ocpp-server-fsd.md`](ocpp-server/Documents/ocpp-server-fsd.md) | [§8](ocpp-server/Documents/ocpp-server-fsd.md#8-test-cases) | OCPP 1.6j wallbox server; publishes HA entities. |
 
 Interfaces stay where the contract lives: the Smart-car API contract is a doc owned by
-`energymanager`, not a top-level file. There is no cross-component interface that needs a shared
+`energy-manager`, not a top-level file. There is no cross-component interface that needs a shared
 home.
 
 ## External specs (depended on, not owned)
@@ -71,7 +71,7 @@ Every top-level directory, what it holds, and its **lifecycle**.
 
 | Path | Lifecycle | Purpose |
 |---|---|---|
-| `energymanager/`, `loadforecast/`, `swisssolarforecast/`, `ocpp-server/` | Permanent/runtime | The four add-ons — code (`run.py`, `src/`, `tests/`) and each add-on's own `Documents/` FSD (the WHAT plane). |
+| `energy-manager/`, `load-forecast/`, `swiss-solar-forecast/`, `ocpp-server/` | Permanent/runtime | The four add-ons — code (`run.py`, `src/`, `tests/`) and each add-on's own `Documents/` FSD (the WHAT plane). |
 | `Harness/` | Permanent | The HOW plane — the AI build contract (`AI-Workflow.md`), portable `standards/`, project-wide `project/` rules, and module-specific HOW in `project/modules/<addon>.md`. |
 | `tools/` | Permanent | Tracked tooling — the doc-linter (`doc_lint.py`). |
 | `scripts/` | Local-only (gitignored) | Standalone utilities (InfluxDB migration, Smart car status). Not tracked — never the source of truth. |

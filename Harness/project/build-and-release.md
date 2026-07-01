@@ -14,26 +14,26 @@ variables (the location of a credential may be documented; the secret never is).
 ## Command reference
 
 ```bash
-# Run all energymanager tests
-python -m pytest energymanager/tests/ -v
+# Run all energy-manager tests
+python -m pytest energy-manager/tests/ -v
 
 # Run a specific test file
-python -m pytest energymanager/tests/test_ev_state_machine.py -v
+python -m pytest energy-manager/tests/test_ev_state_machine.py -v
 
 # Run with coverage
-python -m pytest energymanager/tests/ --cov=energymanager/src --cov-report=term-missing
+python -m pytest energy-manager/tests/ --cov=energy-manager/src --cov-report=term-missing
 
-# Run swisssolarforecast tests
-python -m pytest swisssolarforecast/test_pipeline.py -v
+# Run swiss-solar-forecast tests
+python -m pytest swiss-solar-forecast/test_pipeline.py -v
 
 # Run ocpp-server tests
 python -m pytest ocpp-server/tests/ -v
 
 # Lint all add-ons
-ruff check energymanager/ loadforecast/ ocpp-server/ swisssolarforecast/
+ruff check energy-manager/ load-forecast/ ocpp-server/ swiss-solar-forecast/
 
 # Format all add-ons
-ruff format energymanager/ loadforecast/ ocpp-server/ swisssolarforecast/
+ruff format energy-manager/ load-forecast/ ocpp-server/ swiss-solar-forecast/
 
 # Install all dev dependencies
 pip install -r requirements-dev.txt

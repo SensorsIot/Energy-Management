@@ -119,7 +119,7 @@ from(bucket: "pv_forecast")
 ### Pre-built Grafana dashboard
 
 A pre-built dashboard JSON ships at
-`/home/energymanagement/swisssolarforecast/grafana-forecast-dashboard.json`. Import it via Grafana →
+`/home/energymanagement/swiss-solar-forecast/grafana-forecast-dashboard.json`. Import it via Grafana →
 **Dashboards → New → Import**, upload the JSON, and select the InfluxDB datasource. Panels: PV Power
 Forecast (P10/P50/P90 bands), Load Forecast (P10/P50/P90 bands), Net Power (surplus/deficit),
 Cumulative Energy, Weather (GHI, temperature), and a statistics table.
@@ -129,8 +129,8 @@ Cumulative Energy, Weather (GHI, temperature), and a statistics table.
 ### No forecast data
 Check GRIB downloads and the add-on log:
 ```bash
-ls -la /share/swisssolarforecast/icon-ch1/
-ls -la /share/swisssolarforecast/icon-ch2/
+ls -la /share/swiss-solar-forecast/icon-ch1/
+ls -la /share/swiss-solar-forecast/icon-ch2/
 ```
 Then **Settings → Add-ons → SwissSolarForecast → Log**.
 

@@ -22,8 +22,8 @@ This is a **distributed** repo: each add-on owns its FSD beside its code. The do
 
 | Role | Bound to | Notes |
 |---|---|---|
-| `[SPEC]` | the add-on's own FSD — `energymanager/Documents/energymanager-fsd.md`, `loadforecast/Documents/loadforecast-fsd.md`, `swisssolarforecast/Documents/swisssolarforecast-fsd.md`, `ocpp-server/Documents/ocpp-server-fsd.md` | **Distributed** — route a change to the FSD of the add-on it touches (see `STRUCTURE.md` *Components*). |
-| `[INTERFACES]` | a section of the owning FSD; `energymanager/Documents/hello-smart-api.md` for the Smart-car API | Component-owned. No top-level `Interfaces.md` — don't create one. |
+| `[SPEC]` | the add-on's own FSD — `energy-manager/Documents/energy-manager-fsd.md`, `load-forecast/Documents/load-forecast-fsd.md`, `swiss-solar-forecast/Documents/swiss-solar-forecast-fsd.md`, `ocpp-server/Documents/ocpp-server-fsd.md` | **Distributed** — route a change to the FSD of the add-on it touches (see `STRUCTURE.md` *Components*). |
+| `[INTERFACES]` | a section of the owning FSD; `energy-manager/Documents/hello-smart-api.md` for the Smart-car API | Component-owned. No top-level `Interfaces.md` — don't create one. |
 | `[HARNESS]` | `Harness/` — `00-Overview.md`, `AI-Workflow.md`, `standards/`, `project/` | Tracked, versioned. `CLAUDE.md` is **not** the harness. |
 | `[HANDBOOK]` | `Handbook.md` (repo root) | OPERATE plane. |
 | `[GLOSSARY]` | *none* | This project keeps no separate glossary — don't invent one; define terms in the owning FSD. |
@@ -145,5 +145,5 @@ commit — fix it, don't bypass it.
 - The rule catalog itself → the owning FSD owns it; this skill only routes content.
 - Operational procedures → the matching operational skill.
 - Code comments → a comment-cleanup skill, not this one.
-- Genuine historical records (`swisssolarforecast/CHANGELOG.md`, dated audit data) → left intact;
+- Genuine historical records (`swiss-solar-forecast/CHANGELOG.md`, dated audit data) → left intact;
   they are historical by design.

@@ -8,7 +8,7 @@ Conventions observed across the add-on source. New code follows them.
   a gate.
 - **Dataclasses for structured return values** (not dicts) — `@dataclass`.
 - **`StrEnum` for HA-compatible state values** — e.g. `class EVState(StrEnum)` in
-  `energymanager/src/ev_state_machine.py` (Python 3.11 `enum.StrEnum`; the member value is the
+  `energy-manager/src/ev_state_machine.py` (Python 3.11 `enum.StrEnum`; the member value is the
   string the HA entity carries).
 - **Logging via `logging.getLogger(__name__)`** — no `print` statements.
 - **All times UTC internally**, converted to `Europe/Zurich` only for display/logs.

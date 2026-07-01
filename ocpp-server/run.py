@@ -594,7 +594,7 @@ class OCPPServer:
         charging profile), and the Actec wallbox resumes at its 6 A minimum on
         every reconnect, so the 0 A profile must be re-asserted — otherwise the
         car keeps charging (draining the home battery) after a WS reconnect even
-        though the energymanager commanded stop.
+        though the energy-manager commanded stop.
         """
         power_state = await self.ha.get_state("number.wallbox_power_limit")
         if power_state is None:

@@ -98,9 +98,9 @@ def load_config(config_path: str) -> dict:
 
 | Add-on | Secrets (Config UI) | Non-Secrets (YAML) |
 |--------|--------------------|--------------------|
-| EnergyManager | `influxdb_token`, `telegram_bot_token`, `telegram_chat_id` | `/config/energymanager.yaml` |
-| SwissSolarForecast | `influxdb_token`, `telegram_bot_token`, `telegram_chat_id` | `/config/swisssolarforecast.yaml` |
-| LoadForecast | `influxdb_token` | `/config/loadforecast.yaml` |
+| EnergyManager | `influxdb_token`, `telegram_bot_token`, `telegram_chat_id` | `/config/energy-manager.yaml` |
+| SwissSolarForecast | `influxdb_token`, `telegram_bot_token`, `telegram_chat_id` | `/config/swiss-solar-forecast.yaml` |
+| LoadForecast | `influxdb_token` | `/config/load-forecast.yaml` |
 
 ## Best practices
 

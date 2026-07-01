@@ -454,7 +454,7 @@ The corrected power is published to `sensor.wallbox_power` as an integer (rounde
 
 ### 7.2 Demand Calibration (v0.9.47)
 
-The energymanager sends demand values in M-Bus watts (the actual power delivered at each amp level). The OCPP server converts these to integer amps using a calibrated divisor:
+The energy-manager sends demand values in M-Bus watts (the actual power delivered at each amp level). The OCPP server converts these to integer amps using a calibrated divisor:
 
 ```
 limit_a = round(power_w / 637)

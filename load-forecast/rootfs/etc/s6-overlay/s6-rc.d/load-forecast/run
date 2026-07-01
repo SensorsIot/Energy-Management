@@ -1,0 +1,48 @@
+#!/usr/bin/with-contenv bashio
+# shellcheck shell=bash
+# ==============================================================================
+# LoadForecast Add-on
+# ==============================================================================
+set -euo pipefail
+
+USER_CONFIG="/config/load-forecast.yaml"
+TEMPLATE="/usr/share/load-forecast/load-forecast.yaml.example"
+EXAMPLE_DEST="/config/load-forecast.yaml.example"
+
+# ==============================================================================
+# Read secrets from HA Configuration UI and export as environment variables
+# ==============================================================================
+if bashio::config.exists 'influxdb_token' && bashio::config.has_value 'influxdb_token'; then
+  export INFLUXDB_TOKEN="$(bashio::config 'influxdb_token')"
+  bashio::log.info "InfluxDB token loaded from configuration"
+else
+  bashio::log.warning "InfluxDB token not configured - set it in the Configuration tab"
+fi
+
+# ==============================================================================
+# First-run bootstrap: copy template if user config doesn't exist
+# ==============================================================================
+if [ ! -f "$USER_CONFIG" ]; then
+  bashio::log.info "No user config found. Creating $USER_CONFIG from template."
+  mkdir -p /config
+  cp "$TEMPLATE" "$USER_CONFIG"
+  chmod 644 "$USER_CONFIG" || true
+  bashio::log.warning "Please edit $USER_CONFIG with your settings and restart."
+  bashio::log.warning "Edit via: File Editor or VS Code at /addon_configs/load-forecast/"
+else
+  bashio::log.info "Using existing config: $USER_CONFIG"
+fi
+
+# ==============================================================================
+# Always refresh the example file (so users see new options after updates)
+# ==============================================================================
+if [ -f "$TEMPLATE" ]; then
+  cp "$TEMPLATE" "$EXAMPLE_DEST"
+  bashio::log.debug "Updated example config at $EXAMPLE_DEST"
+fi
+
+# ==============================================================================
+# Start LoadForecast
+# ==============================================================================
+bashio::log.info "Starting LoadForecast..."
+exec python3 /app/run.py --config "$USER_CONFIG"

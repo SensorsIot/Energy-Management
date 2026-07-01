@@ -60,7 +60,7 @@ Two tiers, with different stakes:
 | MQTT / JSON payload key | `snake_case` | `dtsu`, `wallbox`, `sun2000`, `active` | 11179 |
 | Add-on slug | lowercase `kebab-case` | `ocpp-server` | HA add-on |
 | Config key (YAML) | `snake_case`, dotted namespace | `ev_charging.reserve_percent` | 11179 |
-| Doc / spec file | `kebab-case`, `<addon>-fsd.md` | `energymanager-fsd.md` | project |
+| Doc / spec file | `kebab-case`, `<addon>-fsd.md` | `energy-manager-fsd.md` | project |
 
 ## Stability — external names are contracts
 

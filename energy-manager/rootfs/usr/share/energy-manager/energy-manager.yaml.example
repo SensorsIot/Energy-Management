@@ -1,0 +1,135 @@
+# EnergyManager Configuration
+# ============================
+# This file contains non-secret configuration parameters.
+# Edit via File Editor or VS Code at: /addon_configs/energy-manager/
+#
+# SECRETS (tokens, passwords) are configured in the add-on Configuration tab,
+# NOT in this file. They are securely managed by Home Assistant.
+#
+# After editing, restart the add-on to apply changes.
+
+# InfluxDB connection for forecasts
+# NOTE: The token is configured in the add-on Configuration tab (not here)
+influxdb:
+  host: "192.168.0.203"
+  port: 8087
+  org: "energymanagement"
+  pv_bucket: "pv_forecast"
+  load_bucket: "load_forecast"
+  output_bucket: "energy_manager"
+  soc_bucket: "HomeData"
+  soc_measurement: "Energy"
+  soc_field: "BATT_Level"
+
+# Battery settings
+battery:
+  capacity_kwh: 10.0
+  reserve_percent: 10
+  # Buy-protection floor: home-battery SOC kept to avoid grid purchases
+  # (shared by Topics 1/2/3; FSD 4.2.2/4.3.6).
+  no_buy_floor_percent: 20
+  charge_efficiency: 0.95
+  discharge_efficiency: 0.95
+  max_charge_w: 5000
+  max_discharge_w: 5000
+  soc_entity: "sensor.battery_state_of_capacity"
+  discharge_control_entity: "number.battery_maximum_discharging_power"
+  # Export-peak shaving: defer battery charging so its headroom absorbs
+  # the midday export peak (only when the car is disconnected or full).
+  # Re-evaluated every 15 min. Always on — no enable/disable switch. See FSD 4.2.3.
+  # Charge power (W) used while shaving the export peak (use case B). Lower
+  # than max_charge_w on purpose: a gentler C-rate is easier on the battery
+  # and spreads absorption over more intervals → flatter feed-in. Use case A
+  # (car connected & not full) still releases to max_charge_w.
+  charge_shaving_power_w: 2500
+  # Marginal-day gate (B0): shaving only runs on an abundant day — one where
+  # the battery is forecast to reach full today even under a conservative,
+  # low-production estimate (p10 PV vs p50 load). On a marginal shoulder-season
+  # day it would not fill under that pessimistic forecast → charge greedily, no
+  # shaving. The p10/p50 forecast band is the safety margin. See FSD 4.2.3 B0.
+  # Fill-margin: shave only when the day's surplus exceeds the headroom by at
+  # least this factor (1.2 = 20% more than needed to fill). A day that only
+  # just fills, or fills near sunset, has no real export peak worth deferring
+  # for → it routes to greedy charging instead.
+  charge_shaving_fill_margin: 1.2
+  # Day-mode decision hour (local, Europe/Zurich): the shave-vs-car-day choice
+  # is made ONCE per day at this hour, then frozen until midnight. If the car
+  # is connected & at/above its target at this time → shaving day; if it needs
+  # energy or is absent → car day (battery charges greedily all day). See FSD
+  # 4.2.3 day-mode.
+  shaving_decision_hour: 8
+  # Fail-safe: if the PV forecast heartbeat is older than this many minutes,
+  # the forecast is stale/untrusted (SwissSolarForecast keeps the last-good
+  # forecast when the weather download is incomplete/stale) → don't shave,
+  # charge greedily (the safe default that never under-fills the battery).
+  forecast_max_age_minutes: 120
+  charge_control_entity: "number.battery_maximum_charging_power"
+  # Dynamic charge target (FSD 4.2.4): charge the LFP battery only to the SOC
+  # needed to survive the next days under worst-case PV (p10), not 100% — less
+  # high-SOC dwell, longer life. No fixed cap: reaches 100% when genuinely
+  # needed; lands below 100% most days. Enforced in software via
+  # charge_control_entity (limit 0 at/above target) — the inverter's native
+  # max-SOC accepts only 90-100% and cannot enforce a lower ceiling.
+  charge_target_enabled: false   # Topic 3 dynamic charge target — off pending validation (FSD 4.2.4)
+  charge_target_margin: 10            # extra % of capacity above the worst-case need
+  charge_target_horizon_h: 48         # survival look-ahead (worst-case p10 PV / p50 load)
+  charge_target_min: 90               # floor on the target — always charge to >= this SOC (LFP-safe; banks more for the car/house)
+  charge_target_full_interval_days: 7 # force a 100% calibration charge this long after the last >=99% (LFP BMS)
+  # Dashboard sensor that surfaces the combined battery reasoning
+  # (discharge + charge-shaving). Advisory only. See FSD 4.6.4.
+  battery_decision_entity: "sensor.battery_decision"
+
+# Electricity tariff settings
+tariff:
+  weekday_cheap_start: "21:00"
+  weekday_cheap_end: "06:00"
+  weekend_all_day_cheap: true
+  holidays: []
+
+# Appliance control settings
+appliances:
+  power_w: 2500
+  energy_wh: 1500
+
+# Sensor entities for appliance signal calculation
+sensors:
+  pv_power: "sensor.solar_pv_total_ac_power"
+  load_power: "sensor.load_power"
+  mbus_grid_power: "sensor.grid_power"            # EBL smart meter via gPlug M-Bus
+  dtsu_grid_power: "sensor.power_meter_active_power"  # Huawei DTSU666-H at inverter
+  appliance_signal: "sensor.appliance_signal"
+
+# EV charging settings (FSD 4.5)
+ev_charging:
+  enabled: true
+
+  # Wallbox power limits (1-phase: 1400–3700, 3-phase: 4100–11000, switchable: 1400–11000)
+  min_power_w: 1400
+  max_power_w: 11000
+  # EV safety rule: charging is allowed only while the home-battery SOC
+  # forecast stays >= reserve_percent across the next 48 h (with the
+  # candidate EV load subtracted). Independent of battery.reserve_percent
+  # (which gates nightly discharge) — set this higher to keep a buffer
+  # for house consumption before diverting surplus to the car.
+  reserve_percent: 20
+  auto_reset_timeout_min: 5         # Minutes of 0W before auto-revert to solar
+
+  # Entity overrides (defaults should work for most setups)
+  # mode_entity: "input_select.ev_charging_mode"
+  # charge_status_entity: "sensor.ev_charge_status"
+  # wallbox_status_entity: "sensor.wallbox_status"
+
+# Smart car SOC (reads from smarthashtag HA custom integration)
+# Requires: https://github.com/DasBasti/SmartHashtag installed in HA
+smart_car:
+  enabled: true
+  soc_entity: "sensor.smart_battery"
+  capacity_kwh: 100.0          # EV usable battery capacity
+  charge_efficiency: 0.9       # end-to-end surplus→car efficiency (Car SOC Forecast)
+
+# Schedule settings
+schedule:
+  update_interval_minutes: 15
+
+# Logging level: debug, info, warning, error
+log_level: "info"

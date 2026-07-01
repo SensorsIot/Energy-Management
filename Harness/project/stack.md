@@ -23,9 +23,9 @@ Dev dependencies are consolidated in `requirements-dev.txt`.
 ## Per-add-on key libraries
 | Add-on | Libraries (beyond the shared `influxdb-client`, `PyYAML`, `requests`) |
 |--------|------------------------------------------------------------------------|
-| energymanager | `pandas`, `numpy`, `APScheduler`, `python-dateutil` |
-| swisssolarforecast | `pvlib`, `xarray`, `cfgrib`, `eccodes`, `numpy`, `pandas`, `APScheduler` |
-| loadforecast | `pandas`, `numpy`, `croniter` |
+| energy-manager | `pandas`, `numpy`, `APScheduler`, `python-dateutil` |
+| swiss-solar-forecast | `pvlib`, `xarray`, `cfgrib`, `eccodes`, `numpy`, `pandas`, `APScheduler` |
+| load-forecast | `pandas`, `numpy`, `croniter` |
 | ocpp-server | `websockets`, `ocpp`, `aiohttp` |
 
 ## Data & integration
