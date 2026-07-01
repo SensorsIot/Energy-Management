@@ -930,6 +930,20 @@ class OCPPServer:
         # Apply current HA power limit immediately (don't wait for change)
         await self._apply_current_power_limit()
 
+    def _reject_duplicate_connection(self, cp_id: str) -> bool:
+        """Refuse a foreign charge-point id while a transaction is live (SEC-04).
+
+        CWE-287: a stray/foreign device must not hijack or disrupt the active
+        wallbox session. A reconnect from the same id is allowed — it replaces a
+        stale connection.
+        """
+        active = self.charge_point
+        return (
+            active is not None
+            and active.transaction_id is not None
+            and cp_id != active.id
+        )
+
     async def handle_websocket(self, websocket) -> None:
         """Handle incoming WebSocket connection from wallbox."""
         # Extract charge point ID from path (e.g., /AcTec001)
@@ -937,6 +951,19 @@ class OCPPServer:
         path = websocket.request.path if hasattr(websocket, "request") else "/"
         cp_id = path.strip("/").split("/")[-1] if path.strip("/") else self.wallbox_id
         logger.info(f"Wallbox connecting: id={cp_id}, path={path}")
+
+        # SEC-04: a foreign charge-point id must not take over a live session.
+        if self._reject_duplicate_connection(cp_id):
+            logger.warning(
+                f"SEC-04: refusing connection id={cp_id} — active charge point "
+                f"{self.charge_point.id} has a live transaction "
+                f"(txn={self.charge_point.transaction_id})"
+            )
+            try:
+                await websocket.close(code=1008, reason="charge point busy")
+            except Exception as e:  # noqa: BLE001 — best-effort close
+                logger.debug(f"Error closing rejected connection: {e}")
+            return
 
         # Create charge point handler
         cp = ChargePointHandler(

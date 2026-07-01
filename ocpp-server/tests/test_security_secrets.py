@@ -87,3 +87,39 @@ class TestSecretHandling:
         mgr = run.HAEntityManager()
         assert mgr._token is None
         assert "Bearer" in mgr._headers["Authorization"]  # built without raising
+
+
+class TestConnectionGuard:
+    """SEC-04 (CWE-287): a stray charge-point id can't disrupt an active transaction."""
+
+    @staticmethod
+    def _server():
+        return run.OCPPServer({"wallbox_id": "wallbox1"})
+
+    @staticmethod
+    def _active_handler(cp_id="wallbox1", txn=1):
+        h = MagicMock()
+        h.id = cp_id
+        h.transaction_id = txn
+        return h
+
+    def test_sec04_rejects_foreign_id_during_active_transaction(self):
+        srv = self._server()
+        srv.charge_point = self._active_handler(cp_id="wallbox1", txn=5)
+        assert srv._reject_duplicate_connection("rogue-device") is True
+
+    def test_sec04_allows_same_id_reconnect(self):
+        """The same wallbox reconnecting (e.g. after a network drop) is allowed."""
+        srv = self._server()
+        srv.charge_point = self._active_handler(cp_id="wallbox1", txn=5)
+        assert srv._reject_duplicate_connection("wallbox1") is False
+
+    def test_sec04_allows_foreign_id_when_no_active_transaction(self):
+        srv = self._server()
+        srv.charge_point = self._active_handler(cp_id="wallbox1", txn=None)
+        assert srv._reject_duplicate_connection("rogue-device") is False
+
+    def test_sec04_allows_first_connection(self):
+        srv = self._server()
+        srv.charge_point = None
+        assert srv._reject_duplicate_connection("anything") is False
