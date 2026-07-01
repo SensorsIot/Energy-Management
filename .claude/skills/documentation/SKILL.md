@@ -42,7 +42,7 @@ Ask: *is this WHAT the system is, or HOW it is built / operated?*
 |---|---|---|
 | a current-state fact, rule, or contract about what an add-on **is / does** | **WHAT** | `[SPEC]` (that add-on's FSD) |
 | an external interface contract (an API, a third-party system) | **WHAT** | `[INTERFACES]` |
-| a **test case** (acceptance criteria for a behaviour rule) | **WHAT** | the owning `[SPEC]`'s numbered **test chapter** — never an appendix (see below); indexed in `[HARNESS]` `project/testing.md` |
+| a **test case** — incl. **security** cases (auth / input / secrets / OWASP Top 10) | **WHAT** | the owning `[SPEC]`'s numbered **test chapter** — never an appendix (see below); indexed in `[HARNESS]` `project/testing.md`. Anchor security cases to the standards there (OWASP ASVS / CWE) |
 | *why* a rule is what it is | — | **not recorded** — capture the live constraint as a present-tense rule; the running system is the decision |
 | a prescriptive rule for **how** to build / change correctly | **HOW** | `[HARNESS]` |
 | an identifier or doc-file **naming** decision | **HOW** | `[HARNESS]` naming standard (`project/naming.md`) |

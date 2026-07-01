@@ -16,7 +16,10 @@ Read this before any change. It is how new functionality is built and how the do
    chapter (energy-manager Chapter 6, ocpp-server §8, etc.), add/update the **test** beside the code
    in `tests/`, and run the suite green (commands in
    [`project/build-and-release.md`](project/build-and-release.md), which also carries the version
-   bump). A bug fix adds its **regression test first**.
+   bump). A bug fix adds its **regression test first**. If the change touches a **security-relevant**
+   surface (authn, authz, input validation, secrets, crypto, or an OWASP Top 10 class), add a
+   **security test case** anchored to the standards in [`standards/testing.md`](standards/testing.md)
+   (OWASP ASVS / CWE, scored by CVSS).
 4. **Reconcile the docs** (the `documentation` skill, Procedure B):
    - the **FSD** absorbs new/changed behaviour — *verify, don't transcribe* (if the code deviates
      from the intended spec, fix the code, don't enshrine the defect);
