@@ -36,12 +36,12 @@ Per-add-on build/run detail is in each `modules/<addon>.md`; the run commands ar
 ## Security-testing gaps (per add-on)
 
 Per the security-testing standard ([`../standards/testing.md`](../standards/testing.md)), **no add-on
-yet has security test cases**. The untested security surface, per add-on (with the standard to anchor
-the cases to):
+yet has security test _code_**. `ocpp-server` has drafted **specs** (§8.1, SEC-01…08); the others
+have neither. The untested security surface, per add-on (with the standard to anchor the cases to):
 
 | Add-on | Untested security surface | Anchor |
 |---|---|---|
-| **ocpp-server** (highest — network-facing) | Runs an OCPP 1.6j **WebSocket server** accepting wallbox connections and `Authorize`/`BootNotification` messages from the network; `on_authorize` accepts every id_tag. No case covers connection authentication, id_tag authorization, or malformed-message handling. | OWASP ASVS V2/V4, **CWE-287** (improper authn), **CWE-20** (input validation) |
+| **ocpp-server** (highest — network-facing) | Runs an OCPP 1.6j **WebSocket server** (`0.0.0.0`, no connection auth, unvalidated charge-point id) and accepts `Authorize`/`BootNotification` from the network; `on_authorize` accepts every id_tag; MQTT is cleartext. **Specs drafted (§8.1 SEC-01…08), none built** — connection/id_tag authz, malformed-message handling, secret non-leak, control-command bounds, MQTT transport. | OWASP ASVS V2/V4/V5/V6, **CWE-287**, **CWE-20**, **CWE-532** |
 | **energy-manager** | Loads InfluxDB / HA / Telegram / Smart-car **secrets** from env and issues **hardware-control** commands via the HA API. No case asserts secrets don't reach logs / InfluxDB / MQTT, or that control values are bounded. | ASVS V6 (secrets), **CWE-532** (log exposure), **CWE-306** |
 | **swiss-solar-forecast** | Ingests **external weather data over HTTP** and parses GRIB (eccodes) + JSON metadata — untrusted external input. No case for malformed/oversized input, transport verification, or parser-failure handling. | ASVS V5, **CWE-20**, **CWE-494** (no integrity check on fetched data) |
 | **load-forecast** | Smallest surface — reads InfluxDB with a token, writes a forecast bucket. No security case (and no test code at all). | ASVS V6 (secret handling) |

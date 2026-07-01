@@ -497,6 +497,31 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-13 | Full charge cycle | Start → Charge → Pause → Resume → Stop |
 | TC-14 | HA restart with active wallbox | Entities re-registered, state re-synced |
 
+### 8.1 Security test cases
+
+The OCPP server is deployed for a **single trusted wallbox on a private LAN**: the WebSocket server
+binds `0.0.0.0` with subprotocol `ocpp1.6` and no connection authentication, the charge-point id is
+read from the connection URL path (not allow-listed), `on_authorize` accepts every id_tag, and the
+MQTT link to the LAN broker is cleartext/unauthenticated. These cases pin robustness within that
+model and make the trust-boundary choices explicit and test-guarded. All are **unbuilt** — no
+security test code exists yet; each is anchored to a standard (per
+[`Harness/standards/testing.md`](../../Harness/standards/testing.md)) and carries an **estimated**
+CVSS pending formal scoring.
+
+| ID | Test | Expected | Anchor | CVSS (est.) | Status |
+|----|------|----------|--------|-------------|--------|
+| SEC-01 | Malformed OCPP frame (bad JSON, unknown `Action`, wrong field types) | Frame rejected and logged; connection and existing state intact; no unhandled exception / crash | ASVS V5.1, CWE-20 | 5.3 M | 🔮 Future |
+| SEC-02 | MeterValues flood / oversized payload | Bounded CPU + memory; the rate-limit (TC-10) and stale filters (TC-05c) hold; no unbounded growth | CWE-400 | 5.3 M | 🔮 Future |
+| SEC-03 | MeterValues with negative / non-numeric / out-of-range phase power | Value dropped or clamped with a log; `wallbox_power` never set from a corrupt reading | CWE-20 | 4.3 M | 🔮 Future |
+| SEC-04 | An unexpected charge-point id connects while the trusted wallbox has an active transaction | The stray connection cannot hijack, stop, or corrupt the active transaction/state | ASVS V2/V4, CWE-287 | 6.5 M | 🔮 Proposed — needs policy decision (accept-any vs allow-list) |
+| SEC-05 | `Authorize` / `StartTransaction` with an unknown id_tag | Authorization policy is explicit and asserted (current design: accept-all) so any future change is caught by the test | ASVS V4, CWE-306 | 4.3 M | 🔮 Proposed — pin current policy |
+| SEC-06 | Secret handling (HA / InfluxDB / MQTT tokens) | Tokens never appear in logs, MQTT payloads, or HA entity attributes; only their presence is logged | ASVS V6, CWE-532 | 5.5 M | 🔮 Future |
+| SEC-07 | Control-command bounds (`SetChargingProfile`, `RemoteStart/Stop`) | Power / current values are bounded to safe ranges before being sent to the wallbox; out-of-range commands are refused | CWE-20, CWE-306 | 5.0 M | 🔮 Future |
+| SEC-08 | MQTT transport assumption | The LAN-cleartext posture is documented and asserted; no secret is ever published on the `wallbox` / proxy topics | ASVS V6, CWE-319 | 4.3 M | 🔮 Proposed — pin LAN-cleartext assumption |
+
+Close these by implementing the cases in `ocpp-server/tests/` (each tagged with its anchor ID) and
+replacing the estimated CVSS with a scored value.
+
 ## 9. File Structure
 
 File structure and build stack are HOW — see [`Harness/project/modules/ocpp-server.md`](../../Harness/project/modules/ocpp-server.md).
@@ -550,4 +575,5 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 | 3.7 | 2026-03-29 | Stale MeterValues filter: drop readings with wallbox timestamps > 5 min old. Actec replays buffered meter-log queue after reconnects (e.g. DST reboot), causing energy counter jumps that corrupt daily statistics. TC-05c |
 | 3.8 | 2026-04-27 | Config refactor: `wallbox_type` enum (`three_phase`/`external_breaker`/`universal`) replaces `single_phase_supported` bool; new optional `cloud_charging_entity` makes the AcTec SuspendedEVSE cloud-correction source explicit. Consolidated two duplicate FSD copies into a single canonical document under `Documents/`. |
 | 3.9 | 2026-06-30 | Modbus-proxy power feed: post-resume ramp bridge (§3.6.6). The MQTT `wallbox` value feeding the ESP32 proxy now uses the commanded power on `→Charging` until the first MeterValues>0, instead of the wallbox's stale `0 W` during the ~60 s ramp — closing the window where the DTSU correction dropped out and the grid silently supplied the car (visible as M-Bus-vs-DTSU grid divergence). Bridge ends on first real reading or a confirmed stop (`SuspendedEV`/`Finishing`/`Available`/pause), so a refusing car makes no phantom load. ocpp-server 0.9.61; 4 tests (`TestProxyRampBridge`). |
+| 3.11 | 2026-07-01 | Security test cases drafted (§8.1, SEC-01…08) anchored to OWASP ASVS / MITRE CWE per `Harness/standards/testing.md` — input validation, authn/authz on the LAN-facing WebSocket + `on_authorize`, secret non-leak, control-command bounds, MQTT transport. Specs only (all unbuilt); SEC-04/05/08 flag trust-boundary policy decisions. |
 | 3.10 | 2026-06-30 | Modbus-proxy feed → **commanded-primary** (§3.6.6). Live MQTT measurement showed 3.9 collapsed after ~4 s: the bridge handed off on the first MeterValues (~120 W), which falls below the proxy's activation threshold, leaving the correction off for the ~60 s ramp. Now the correction is the **commanded** power the whole time a charge is commanded — injected the instant the command is sent during an active session (`Charging`/`SuspendedEVSE`), not waiting for `→Charging` (was ~9 s) and never handed to the measured value. Cold-start (`Preparing`) excluded to avoid minutes-long export. Biases to export-not-import per design. Measured still drives `sensor.wallbox_power` display only. ocpp-server 0.9.62; tests `TestProxyCommandedCorrection`. |
