@@ -52,6 +52,22 @@ Within the HOW, route to the layer that owns the topic (`standards/` for portabl
 `project/` for Energy-Management bindings). Cross-cutting → a layer doc; **scoped to one operation →
 that operation's own skill**, never a shared layer doc.
 
+### Main body vs appendix — placement within a doc
+
+Triage picks the *doc*; this picks the *location within it*. A **numbered chapter** is part of the
+contract a human reads to understand what the system is and does. An **appendix** is reference
+material an implementer looks up — complete and precise, but not needed to understand the system.
+
+| Numbered chapter (main body) | Appendix |
+|---|---|
+| behaviour, rules, algorithms, interfaces — the spec proper | bulk lookup data: full parameter tables, enumerations |
+| **test cases** — the acceptance contract | complete config-file listings (the deployed YAML) |
+| anything a human must read to understand what the add-on **is / does** | third-party raw payloads kept verbatim for fidelity (e.g. a raw API dump) |
+
+Test: *would a human skip this to understand the system, and only an implementer consult it?* →
+**appendix**. *Is it needed to understand what the system is or does?* → **main body**. Test cases
+are spec, never an appendix. This is a judgment rule — the doc-linter can't enforce it.
+
 ### One canonical home
 
 A doc **links** to the canonical source, never restates it. The HOW references the WHAT; it does
