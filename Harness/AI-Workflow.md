@@ -13,7 +13,7 @@ Read this before any change. It is how new functionality is built and how the do
 3. **Test — the gate (not optional).** A change is **not done** until its test case exists and its
    test passes. Per [`standards/testing.md`](standards/testing.md) and the index in
    [`project/testing.md`](project/testing.md): define/update the **test case** in the owning FSD
-   chapter (energymanager Appendix D, ocpp-server §8, etc.), add/update the **test** beside the code
+   chapter (energymanager Chapter 6, ocpp-server §8, etc.), add/update the **test** beside the code
    in `tests/`, and run the suite green (commands in
    [`project/build-and-release.md`](project/build-and-release.md), which also carries the version
    bump). A bug fix adds its **regression test first**.

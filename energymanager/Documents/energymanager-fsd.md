@@ -2209,21 +2209,14 @@ Implemented in the **SwissSolarForecast** add-on:
 
 > **Status:** To be defined when EV charging optimization is validated in production.
 
-# Appendix A: Operations (installation, dashboards, troubleshooting)
-
-Operator procedures — installation, the pre-built Grafana dashboard, and troubleshooting — are
-OPERATE, not WHAT. See the Handbook:
-[`Handbook.md` → Installation](../../Handbook.md#installation),
-[Dashboards & queries](../../Handbook.md#dashboards--queries), and
-[Troubleshooting](../../Handbook.md#troubleshooting).
-
 ---
-# Appendix D: Test Cases
+
+# Chapter 6: Test Cases
 
 This chapter is the canonical home for EnergyManager's test-case specs; it is indexed in the testing
 hub `Harness/project/testing.md` (strategy + levels in `Harness/standards/testing.md`).
 
-## D.1 Battery Discharge Optimizer Tests
+## 6.1 Battery Discharge Optimizer Tests
 
 Test file: `energymanager/tests/test_battery_optimizer.py`
 
@@ -2288,7 +2281,7 @@ cd energymanager && python -m pytest tests/test_battery_optimizer.py -v
 
 ---
 
-## D.2 Appliance Signal Tests
+## 6.2 Appliance Signal Tests
 
 Test file: `energymanager/tests/test_appliance_signal.py`
 
@@ -2369,7 +2362,7 @@ cd energymanager && python -m pytest tests/test_appliance_signal.py -v
 
 ---
 
-## D.3 EV Charging State Machine Tests
+## 6.3 EV Charging State Machine Tests
 
 Test file: `energymanager/tests/test_ev_state_machine.py`
 
@@ -2448,7 +2441,7 @@ cd energymanager && python -m pytest tests/test_ev_state_machine.py -v
 
 ---
 
-## D.4 Discharge Blocking Tests
+## 6.4 Discharge Blocking Tests
 
 Test file: `energymanager/tests/test_discharge_blocking.py`
 
@@ -2500,7 +2493,7 @@ cd energymanager && python -m pytest tests/test_discharge_blocking.py -v
 
 ---
 
-## D.5 EV Charging Power Tests
+## 6.5 EV Charging Power Tests
 
 Test file: `energymanager/tests/test_ev_charging.py`
 
@@ -2557,11 +2550,11 @@ cd energymanager && python -m pytest tests/test_ev_charging.py -v
 
 ---
 
-## D.6 Integration Tests
+## 6.6 Integration Tests
 
 Integration tests verify cross-module behavior — interactions between EV charging, battery optimizer, tariff boundaries, OCPP transactions, and fail-safes.
 
-### D.6.1 Staleness & Timing (Category A)
+### 6.6.1 Staleness & Timing (Category A)
 
 | ID | Description | Setup | Expected | Status |
 |----|-------------|-------|----------|--------|
@@ -2570,7 +2563,7 @@ Integration tests verify cross-module behavior — interactions between EV charg
 | IT-TIME-01 | Scheduler fires at 15-min boundaries | APScheduler mock with time steps | `run_optimization` called at :00, :15, :30, :45 | 🔮 Future — requires scheduler mock |
 | IT-TIME-02 | EV loop runs at 10 s interval | APScheduler mock | `control_ev_charging` called every 10 s | 🔮 Future — requires scheduler mock |
 
-### D.6.2 Fail-Safe & Watchdog (Category B)
+### 6.6.2 Fail-Safe & Watchdog (Category B)
 
 | ID | Description | Setup | Expected | Status |
 |----|-------------|-------|----------|--------|
@@ -2579,7 +2572,7 @@ Integration tests verify cross-module behavior — interactions between EV charg
 | IT-FAIL-03 | Smart car API timeout → stale SOC retained | `HelloSmartClient.authenticate` raises | Previous SOC entity unchanged | 🔮 Future — requires Smart car mock |
 | IT-FAIL-04 | Wallbox disconnects mid-charge → power limit reset | `wallbox_connected` transitions False | No power limit commands sent | 🔮 Future — requires OCPP mock |
 
-### D.6.3 Phase Switching & Gap (Category C)
+### 6.6.3 Phase Switching & Gap (Category C)
 
 | ID | Description | Setup | Expected | Status |
 |----|-------------|-------|----------|--------|
@@ -2587,7 +2580,7 @@ Integration tests verify cross-module behavior — interactions between EV charg
 | IT-PHASE-02 | Phase transition on battery-full change | Excess in gap, toggle `battery_full` | Output switches 3700↔4140 only on flag change | 🔮 Future — pure-logic (extend TestPhaseGapStability) |
 | IT-PHASE-03 | Wallbox confirms phase switch | OCPP `MeterValues` after gap-snap change | Measured power matches target phase | 🔮 Future — requires OCPP mock |
 
-### D.6.4 Battery ↔ EV Cross-Coupling (Category D)
+### 6.6.4 Battery ↔ EV Cross-Coupling (Category D)
 
 | ID | Description | Setup | Expected | Status |
 |----|-------------|-------|----------|--------|
@@ -2596,14 +2589,14 @@ Integration tests verify cross-module behavior — interactions between EV charg
 | IT-BATT-03 | Tariff boundary transitions | 20:59 (expensive), 21:01 (cheap), 05:59 (cheap), 06:01 (expensive) | Correct `is_cheap_now` flag | ✅ `test_battery_optimizer.py::TestTariffBoundaryTransitions` |
 | IT-BATT-04 | Wallbox idle detection exits all modes | SOLAR/CHEAP/IMMEDIATE + `wallbox_idle=True` | State machine → IDLE, 0 W | ✅ `test_ev_state_machine.py::TestIdleDetection` |
 
-### D.6.5 Authorization & Transaction (Category E)
+### 6.6.5 Authorization & Transaction (Category E)
 
 | ID | Description | Setup | Expected | Status |
 |----|-------------|-------|----------|--------|
 | IT-OCPP-01 | RFID authorize → transaction start | OCPP `Authorize.req` with valid tag | `StartTransaction.conf` accepted, power flows | 🔮 Future — requires OCPP handler mock |
 | IT-OCPP-02 | Remote stop → transaction ends | `RemoteStopTransaction.req` during charge | Power → 0, `StopTransaction.req` sent | 🔮 Future — requires OCPP handler mock |
 
-### D.6.6 End-to-End Scenarios (Category F)
+### 6.6.6 End-to-End Scenarios (Category F)
 
 | ID | Description | Setup | Expected | Status |
 |----|-------------|-------|----------|--------|
@@ -2612,14 +2605,14 @@ Integration tests verify cross-module behavior — interactions between EV charg
 
 **Legend:** ✅ Implemented and passing | 🔮 Future (prerequisite listed)
 
-## D.7 Passive Integration Observer Tests
+## 6.7 Passive Integration Observer Tests
 
 24 tests (11 normal, 13 edge) run automatically every 10 s cycle during live operation.
 Results persist to `/config/ev_integration_tests.json`; Telegram notifications on status changes.
 
 Report version: **3** (bumped when test definitions change — invalidates stale results).
 
-### D.7.1 Normal Operation (11 tests)
+### 6.7.1 Normal Operation (11 tests)
 
 | ID | Name | Preconditions | Pass condition |
 |----|------|---------------|----------------|
@@ -2635,7 +2628,7 @@ Report version: **3** (bumped when test definitions change — invalidates stale
 | NO-12 | IMMEDIATE blocks discharge | state=IMMEDIATE, power>0 | discharge_blocked=True |
 | NO-13 | SOLAR exits when strategy returns 0 | prev output=SOLAR, strategy≤0, not idle, mode=solar | state=IDLE, power=0 |
 
-### D.7.2 Edge Cases (13 tests)
+### 6.7.2 Edge Cases (13 tests)
 
 | ID | Name | Preconditions | Pass condition |
 |----|------|---------------|----------------|
@@ -2652,6 +2645,16 @@ Report version: **3** (bumped when test definitions change — invalidates stale
 | EC-14 | Faulted/Unknown → IDLE | wallbox Faulted/Unknown | state=IDLE, power=0 |
 | EC-15 | CHEAP→IDLE clears discharge | prev=CHEAP, mode≠cheap | state=IDLE, power=0, blocked=False |
 | EC-16 | Idle detection exits to IDLE | prev=SOLAR/CHEAP/IMMEDIATE, idle=True | state=IDLE, power=0 |
+
+---
+
+# Appendix A: Operations (installation, dashboards, troubleshooting)
+
+Operator procedures — installation, the pre-built Grafana dashboard, and troubleshooting — are
+OPERATE, not WHAT. See the Handbook:
+[`Handbook.md` → Installation](../../Handbook.md#installation),
+[Dashboards & queries](../../Handbook.md#dashboards--queries), and
+[Troubleshooting](../../Handbook.md#troubleshooting).
 
 ---
 
@@ -2939,6 +2942,8 @@ See Section 4.3.8 for adaptive polling logic.
 
 ## Changelog
 
+- v2.79: **Test cases promoted from Appendix D to Chapter 6 (doc-only).** The test-case specs are a first-class part of the spec, not implementation trivia, so they now live in a numbered chapter (`Chapter 6: Test Cases`, placed after Chapter 5 and before the appendices) rather than an appendix. D.1–D.7 renumbered to 6.1–6.7 (subsections D.6.x/D.7.x → 6.6.x/6.7.x); appendices reserved for implementation-detail reference (config, Smart-car raw API). Updated the testing index (`Harness/project/testing.md`), `STRUCTURE.md`, `Harness/AI-Workflow.md`, and in-doc changelog pointers.
+
 - v2.78: **LoadForecast spec extracted to its own self-contained add-on FSD (doc-only, no code change).** Chapter 3 (profiling algorithm, data source, output schema, configuration, limitations) and the §1.13.3 parameter block moved to `loadforecast/Documents/loadforecast-fsd.md`; this doc keeps a summary + link and the `load_forecast` interface contract EnergyManager consumes. Corrected the output-field contract there to `power_w_p10/p50/p90` + `run_time` (verified against `loadforecast/src/influxdb_writer.py` — the old stub listed `energy_wh_*`; energy is derived by consumers) and recorded the deployed 120 h horizon vs the 48 h code/example default. SwissSolarForecast and LoadForecast are now both self-contained; EnergyManager (Chapter 4) remains in this FSD.
 
 - v2.77: **SwissSolarForecast spec extracted to its own self-contained add-on FSD (doc-only, no code change).** Each add-on is an independently shipped HA app and now owns a complete FSD; Chapter 2 (ICON/STAC pipeline, PV configuration, output schema, calculation pipeline, shading correction) and the §1.13.2 parameter block moved to `swisssolarforecast/Documents/swisssolarforecast-fsd.md`. This doc keeps a one-paragraph summary + link and the `pv_forecast` interface contract EnergyManager consumes.
@@ -2998,9 +3003,9 @@ See Section 4.3.8 for adaptive polling logic.
 - v2.45: Restructured Chapter 4 into a consumer-oriented layout — each decision block (home battery, EV battery, washer) is now a self-contained section covering its forecasts and rules. New **Section 4.1 Prerequisites** consolidates all shared inputs (PV forecast, load forecast, live SOC, tariff schedule, battery configuration, time/unit conventions) previously scattered across the chapter. Former separate sections collapsed into one per consumer: 4.2 Home Battery (sim + discharge rule), 4.3 EV Battery (state machine + power calc + 48-h safety rule + car SOC polling + car SOC forecast — merges the previous duplicate "## 4.6" numbering bug), 4.4 Washer (Appliance Signal), 4.5 Shared Forecast Helpers. Renumbered downstream: 4.6 InfluxDB Storage, 4.7 Dashboard, 4.8 Error Handling. Documentation-only; no code changes.
 - v2.44: Replaced the EV battery-protection gate with a self-correcting 48-h min-SOC rule (Section 4.3.6). Root cause: the old rule targeted `tariff.target`, which during daytime (06:00–21:00) resolved to **tomorrow's** 21:00 — giving the forecast a full extra sun-day of headroom, so `reaches_target` stayed true all day even as the actual battery never climbed past ~48%. New rule: EV is allowed only while the home-battery SOC forecast stays ≥ `battery.reserve_percent` at every point across the next 48 h, with one 15-min slot of the candidate EV load subtracted as worst case. Re-evaluated every 15 min — if the forecast drops below the floor, EV stops and the battery (now EV-free) rides the remaining forecast back up. New module `src/ev_battery.py` (`EVBatteryOptimizer.check_ev_safe`); deleted `check_battery_protection`, `will_battery_hit_minimum`, `get_forecast_soc_at_target`; removed `ev_charging.battery_protection_soc` config (no per-EV target needed). Sensor attrs: `reaches_target`/`battery_will_hit_min`/`battery_forecast_soc` → `ev_safe`/`battery_min_soc_forecast_48h`/`battery_min_soc_floor`. 8 new unit tests (`test_ev_battery.py`); `test_power_calculation.py` `battery_check_fn` signature collapsed from `(bool,bool)` to `bool` (v1.8.0)
 - v2.43: Car SOC Forecast (new Sections 4.6.4, 4.6.5) — multi-day prediction of EV SOC written to `energy_balance.car_soc_percent` every 15 min. House battery modelled as buffer: surplus first refills the house, overflow × efficiency goes to the car. New `smart_car.capacity_kwh` and `smart_car.charge_efficiency` config. Last-known-value fallback for `sensor.smart_battery` via InfluxDB (Python side) and `sensor.smart_battery_last_known` trigger-based template sensor (HA side). Grafana BatteryForecast panel 4 "Cumulative Energy Balance (Wh)" replaced by "Car SOC Forecast". Amazon Fire dashboard updated to reference the cached template sensor (v1.7.6)
-- v2.42: Added 2% hysteresis to discharge soc_ok threshold (Section 4.3.2) — once blocked, projected min SOC must reach 12% (not 10%) to re-allow; prevents oscillation where shrinking simulation window causes min_soc to wobble ~0.5% around threshold every 15 min, flip-flopping discharge limit between 0W/5000W all night; 3 new tests (Appendix D.1) (v1.6.97)
+- v2.42: Added 2% hysteresis to discharge soc_ok threshold (Section 4.3.2) — once blocked, projected min SOC must reach 12% (not 10%) to re-allow; prevents oscillation where shrinking simulation window causes min_soc to wobble ~0.5% around threshold every 15 min, flip-flopping discharge limit between 0W/5000W all night; 3 new tests (§6.1) (v1.6.97)
 - v2.41: Both rules use surplus_power (PV − house load) as input (Section 4.6.6) — eliminates grid_export feedback loop; snap-up tries next amp step above surplus if battery protected; surplus smoothing 60s→30s, rate limit 60s→30s; removed stale power floor clamp; updated flowchart, scenarios, and snap description (v1.6.93–v1.6.96)
-- v2.40: Added S0/C0/M0 wallbox-unavailable guards to all active state transitions (Section 4.6.5.2); `will_battery_hit_full()` now returns `full_time_local` HH:MM (Section 4.4.2); updated NO-01 test scope (Appendix D.7.1) (v1.6.92)
+- v2.40: Added S0/C0/M0 wallbox-unavailable guards to all active state transitions (Section 4.6.5.2); `will_battery_hit_full()` now returns `full_time_local` HH:MM (Section 4.4.2); updated NO-01 test scope (§6.7.1) (v1.6.92)
 - v2.39: Added Section 2.13.11 (Calibration History) — documents 2026-03-20 parameter change boundary, retrofitted data in InfluxDB (pv_forecast_retrofitted), and retrofit limitations
 - v2.38: Updated Section 2.6 PV System Configuration — calibrated Pdc0 values (E:445W, W:490W, S:425W) and inverter efficiency (0.98) from per-string actual vs clear-sky model on sunny days; these are model calibration parameters, not changes to physical hardware; added calibration note explaining methodology
 - v2.37: Added Section 2.13 (Shading Correction) — clear-sky reference model using pvlib.clearsky.ineichen(), per-hour sunny detection (actual GHI / clearsky GHI > 0.85), per-string shading factor calculation, InfluxDB storage schema for accuracy evaluation; replaces previous weather-factor-based approach that suffered from circular dependency
@@ -3016,21 +3021,21 @@ See Section 4.3.8 for adaptive polling logic.
 - v2.29: Appliance signal uses appliance-load simulation (Section 4.5.2.1) — subtracts appliance energy from SOC trajectory and checks min SOC ≥ reserve%; grid export is now contextual info, not a separate ORANGE path; renamed `final_soc_percent` → `min_soc_percent` attribute
 - v2.28: Fix grid power sign convention in surplus capture formula (Section 1.9.1) — grid sensor uses positive=export, code was negating it; corrected sanity invariant (Section 1.9.2); skip peak-SOC override query in battery protection when past cheap_start (Section 4.6.6)
 - v2.27: Surplus-based EV forecast strategy (Section 4.6.6) — forecast path now snaps current `sensor.surplus_power` to next wallbox amp step instead of bottom-up search from min to max; entry gate changed from `ev_forecasted_power_w >= threshold` to `surplus_power >= ev_min_solar_power` (live surplus must exceed configured minimum); battery protection check steps down from candidate amp level; updated Selection Rules table, Input Parameters, and Scenarios
-- v2.26: Passive integration observer test revision (Appendix D.7) — replaced 5 obsolete surplus-tracking tests (NO-03, NO-04, EC-01, EC-10, EC-11) with forecast-strategy-aligned tests (NO-05, NO-13, EC-05, EC-06, EC-07); updated NO-02 preconditions for strategy-based entry; report version bumped to 3; evidence includes `strategy` field
+- v2.26: Passive integration observer test revision (§6.7) — replaced 5 obsolete surplus-tracking tests (NO-03, NO-04, EC-01, EC-10, EC-11) with forecast-strategy-aligned tests (NO-05, NO-13, EC-05, EC-06, EC-07); updated NO-02 preconditions for strategy-based entry; report version bumped to 3; evidence includes `strategy` field
 - v2.25: Forecast-based EV solar charging strategy (Section 4.6.7) — replaces instantaneous open-loop/closed-loop excess with SOC simulation; battery acts as buffer for coarse amp steps (690W on 3-phase); bottom-up search from min to max amps; dynamic protection target adapts to bad days; `min_solar_power_w` config for early charging below wallbox minimum; `sensor.surplus_power` for entry decision; renamed `sensor.load_power` → `sensor.house_load_power`; added `sensor.total_load_power` (house + wallbox for Fire display)
 - v2.24: Appendix F — Comprehensive Smart Car API reference: full `electricVehicleStatus` field catalogue with all 16 `chargerState` values (from pySmartHashtag/evcc/ioBroker), `statusOfChargerConnection` physical cable states, V2L fields, charging lids, DC charging fields; HA entity mapping table; other `vehicleStatus` sections (climate, doors, maintenance, GPS, 12V battery); poll frequency table
 - v2.23: Wallbox idle detection exits all EV modes — added `wallbox_idle` input (Section 4.6.6); S1/C1/M1 transitions exit SOLAR/CHEAP/IMMEDIATE to IDLE when car finishes charging (wallbox idle ≥ 5 min); idle timer extended from immediate/cheap to all modes; dashboard shows `idle_minutes` and `wallbox_idle` attributes; EC-16 passive integration test; IT-BATT-04 test catalogue entry
-- v2.22: Integration test catalogue (Appendix D.5/D.6) — 22 tests across 6 categories; 3 implemented (IT-PHASE-01, IT-BATT-01, IT-BATT-03), 19 documented as future; EV charging power tests documented (Appendix D.5)
+- v2.22: Integration test catalogue (§6.5/6.6) — 22 tests across 6 categories; 3 implemented (IT-PHASE-01, IT-BATT-01, IT-BATT-03), 19 documented as future; EV charging power tests documented (§6.5)
 - v2.21: Added wallbox status display mapping table for dashboard (Section 4.8.1) — documents how raw OCPP status is shown to the user
 - v2.20: SOC poll on charging mode change — switching modes (e.g. solar → immediate) triggers immediate SOC refresh for dashboard accuracy (Section 4.6.1)
 - v2.19: Adaptive Smart car SOC polling — 1-minute during charging, immediate on car connection, hourly baseline; cached Hello Smart client reduces API calls from 6 to 2 per poll (Section 4.6)
 - v2.18: Removed battery protection gate from solar EV charging — solar mode always active when excess available; battery protection is now informational (dashboard only); removed S4 transition from SOLAR state; updated N3 condition (Section 4.6.6)
-- v2.17: Two-flag battery discharge blocking — EV charging in immediate/cheap mode now independently blocks battery discharge (Section 4.3.2); prevents SUN2000 from draining battery to cover wallbox load via DTSU correction; 17 new tests (Appendix D.4)
+- v2.17: Two-flag battery discharge blocking — EV charging in immediate/cheap mode now independently blocks battery discharge (Section 4.3.2); prevents SUN2000 from draining battery to cover wallbox load via DTSU correction; 17 new tests (§6.4)
 - v2.16: Added sections 4.7 (InfluxDB Storage), 4.8 (Dashboard Examples), 4.9 (Error Handling and Notifications), Chapter 5 (Forecast Accuracy Tracking), Appendix E (EnergyManager Configuration). Updated EV config for 4-state machine (phase-based min power, phase_threshold_kwh). Updated EV decision table to include EV charging forecast dependency.
 - v2.15: FSD improvements — signal conventions box; weekend battery guard as explicit policy (`battery_guard_on_weekends`); `allow_1p_auto` flag for 1φ vs 3φ minimum; `effective_min_power_w` derived threshold; S06 forecast contract (measurement, field, staleness, missing=conservative); `battery_guard_margin_pct` (2% safety margin); smoothing defined (rolling median, 4 samples); rate limiting formalized (`setpoint_min_interval_s`, `setpoint_max_step_w`, `setpoint_step_w`); import tolerance (`import_tolerance_w`, `import_tolerance_cycles`); auto-revert trigger refined (only when setpoint > 0 recently); mode reset write-back semantics (one-shot, retry, idempotency); fault required-signals-per-mode; hard fault test-setpoint procedure; anti-flap table; S02 renamed EV_UNAVAILABLE; state priority order; scenario-based test table; edge-case worked examples (H: stale SoC, I: tariff boundary, J: phase gap)
 - v2.14: Redesigned EV state machine — states represent charging behavior, not device status (Section 4.6.6); 12 states in 3 groups (base/policy/PV-excess); debounce (S21), hysteresis (200W), cooldown (S24) prevent oscillation; soft/hard fault classification with recovery dwell and anti-flap; battery reserve guard with configurable scope policy; mode renamed to auto_pv_excess/immediate/deferred_tariff; auto-revert on EV finish
 - v2.13: Refactored EV charging to transition-based state machine with hysteresis (Section 4.6.6); 200W dead band prevents PAUSED↔SOLAR oscillation; 111 unit tests
-- v2.12: Moved all test cases to Appendix D with references from main chapters; dashboard button feedback (orange/green); car status card redesign
+- v2.12: Moved all test cases into a dedicated Test Cases chapter (now Chapter 6) with references from main chapters; dashboard button feedback (orange/green); car status card redesign
 - v2.11: Appliance signal ORANGE now also triggers on grid export >= 1.5kWh before evening (Section 4.5.2.2)
 - v2.10: Expensive hours check now excludes weekend/holiday days (Section 4.3.2, 4.3.3); fixes incorrect discharge blocking on Friday nights
 - v2.9: Appliance signal uses min SOC instead of final SOC for ORANGE check (Section 4.5); ensures SOC never dips below threshold at any point in simulation

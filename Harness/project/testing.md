@@ -8,7 +8,7 @@ chapter) and **implemented** (its code). The portable levels and rules are in
 
 | Add-on | Test cases defined in (FSD chapter) | Test code |
 |---|---|---|
-| **energymanager** | **Appendix D — Test Cases** (D.1 battery discharge, D.2 appliance, D.3 EV state machine, D.4 discharge blocking, D.5 EV power, **D.6 integration** A–F, **D.7 passive observer**) | `energymanager/tests/test_*.py` |
+| **energymanager** | **Chapter 6 — Test Cases** (6.1 battery discharge, 6.2 appliance, 6.3 EV state machine, 6.4 discharge blocking, 6.5 EV power, **6.6 integration** A–F, **6.7 passive observer**) | `energymanager/tests/test_*.py` |
 | **ocpp-server** | **§8 Test Cases** (TC-01…TC-14, incl. TC-13 full charge cycle) | `ocpp-server/tests/test_ocpp_handler.py` |
 | **swisssolarforecast** | **§16 Tests and validation** | `swisssolarforecast/test_pipeline.py`, `test_data_integrity.py` |
 | **loadforecast** | **§14 Tests and validation** | *(none yet — gap)* |
@@ -21,16 +21,16 @@ Per-add-on build/run detail is in each `modules/<addon>.md`; the run commands ar
 
 | Level | Where the cases are | Status |
 |---|---|---|
-| **Unit** | energymanager Appendix D.1–D.5 (per component); ocpp-server §8 | ✅ implemented across `test_*.py` |
-| **Integration** (cross-module) | energymanager **Appendix D.6** (Categories A–E) | ⚠️ partial — some ✅ (`IT-PHASE-01`, `IT-BATT-01…04`), some 🔮 future (need mocks) |
-| **End-to-end** (full system) | energymanager **Appendix D.6.6** (`IT-E2E-01`, `IT-E2E-02`) | 🔮 **specified, not yet built** (need PV/load/Smart-car/OCPP mocks together) |
-| **Live / observer** | energymanager **Appendix D.7** | ✅ `test_integration_observer.py` (runs against the live system) |
+| **Unit** | energymanager §6.1–6.5 (per component); ocpp-server §8 | ✅ implemented across `test_*.py` |
+| **Integration** (cross-module) | energymanager **§6.6** (Categories A–E) | ⚠️ partial — some ✅ (`IT-PHASE-01`, `IT-BATT-01…04`), some 🔮 future (need mocks) |
+| **End-to-end** (full system) | energymanager **§6.6.6** (`IT-E2E-01`, `IT-E2E-02`) | 🔮 **specified, not yet built** (need PV/load/Smart-car/OCPP mocks together) |
+| **Live / observer** | energymanager **§6.7** | ✅ `test_integration_observer.py` (runs against the live system) |
 
 ## Known gaps (kept honest)
 
-- **End-to-end IT-E2E-01/02** are defined (D.6.6) but unbuilt — the only full-system coverage today is
-  the passive observer (D.7).
+- **End-to-end IT-E2E-01/02** are defined (§6.6.6) but unbuilt — the only full-system coverage today is
+  the passive observer (§6.7).
 - **loadforecast has no test code** — §14 defines the validation approach; no `tests/` yet.
-- Several D.6 integration cases are 🔮 future pending mocks (HA client, scheduler, OCPP, Smart car).
+- Several §6.6 integration cases are 🔮 future pending mocks (HA client, scheduler, OCPP, Smart car).
 
 Each case's `Status` column in the owning FSD is authoritative; this table is the overview.
