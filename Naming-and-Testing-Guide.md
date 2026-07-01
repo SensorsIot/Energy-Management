@@ -48,8 +48,8 @@ treat existing code as a *conforming example*, not the source of the rule.
 1. **Name by role and meaning**, never by type or implementation. No Hungarian notation.
 2. **One case convention per namespace.** Prefer `snake_case` for every data / config / entity
    identifier; reserve `PascalCase` and `UPPER_SNAKE` for classes and constants (per your style guide).
-3. **Encode the unit** on any physical quantity, using the lowercased SI symbol: `_w`, `_wh`,
-   `_kwh`, `_percent`, `_s`. Never a bare `power` / `energy` / `soc` where a unit is meaningful.
+3. **Encode the unit** on any physical quantity via the lowercased SI symbol suffix (`_w`, `_wh`,
+   `_kwh`, `_percent`, `_s`) — a bare `power` / `energy` / `soc` is ambiguous and not allowed.
 4. **Structure data-element names object → property → representation** (ISO 11179): scope prefix,
    then property, then unit/representation term — e.g. `power_w_p50`, `battery_min_soc_forecast_48h`.
 5. **Spell words out.** Only established domain acronyms are allowed, and each keeps **one fixed
@@ -84,8 +84,8 @@ treat existing code as a *conforming example*, not the source of the rule.
 An external identifier is bound by consumers that store or read the exact string (historical data,
 dashboards, sibling services, automations). Changing one is a **migration**:
 
-1. Rename it in **every** consumer in the same change.
-2. **Migrate existing stored history in place** — rewrite the key/field/measurement on past records so
+1. Update the identifier at **all** its consumers within the one change.
+2. **Migrate the stored history in place** — rewrite the key/field/measurement on existing records so
    the series stays continuous. **Never orphan** old data under the old name.
 
 Internal identifiers hold no stored state and rename freely.
@@ -99,9 +99,9 @@ A companion rule to naming: where content sits in a spec.
 - An **appendix** is reference material an implementer looks up — bulk parameter tables, full config
   listings, raw third-party payloads kept verbatim.
 
-Test: *would a human skip this to understand the system, and only an implementer consult it?* →
-appendix. *Is it needed to understand what the system is/does?* → main body. This is a judgment rule;
-a linter can't enforce it.
+Decide by asking: *is this something a human must read to grasp what the system does, or only
+something an implementer looks up?* — the former belongs in the main body, the latter in an appendix.
+It's a judgment call no linter can enforce.
 
 ## A.7 Exempt / externally-owned names
 
@@ -125,7 +125,8 @@ third-party firmware (`MBUS-PROXY/power`).
 
 ## B.2 The rules
 
-- **Every behaviour rule has a test case.** If a rule in the spec has no case, that's a gap to close.
+- **Every behaviour rule maps to a test case.** A spec rule with no corresponding case is an
+  untested contract — treat it as a gap.
 - **Every change ships its test.** No behaviour change lands without the test that pins it.
 - **Specs live with the behaviour**, code lives beside the component — WHAT and code stay near what
   they describe.
