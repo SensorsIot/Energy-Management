@@ -34,4 +34,5 @@ Dev dependencies are consolidated in `requirements-dev.txt`.
 - **Grafana** — dashboards (operator queries in [`../../Handbook.md`](../../Handbook.md)).
 - **OCPP 1.6j** (`ocpp`) — wallbox protocol, in `ocpp-server`.
 
+Naming of buckets, entities, topics, and other identifiers is in [`naming.md`](naming.md).
 Per-add-on build/structure detail is in [`modules/`](modules/).

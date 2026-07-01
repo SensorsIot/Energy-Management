@@ -10,6 +10,7 @@ Entry point for any task: **[`AI-Workflow.md`](AI-Workflow.md)**.
   - [`stack.md`](project/stack.md) — languages, frameworks, runtime architecture.
   - [`build-and-release.md`](project/build-and-release.md) — version-bump, test, secrets, command reference.
   - [`code-style.md`](project/code-style.md) — coding conventions for new code.
+  - [`naming.md`](project/naming.md) — naming conventions (code, entities, InfluxDB, MQTT, slugs, files), anchored to ISO/IEC 11179, ISO 80000, PEP 8.
   - [`design-principles.md`](project/design-principles.md) — project-wide design principles.
   - [`testing.md`](project/testing.md) — testing structure + the index of where each add-on's test cases are defined.
   - [`addon-architecture.md`](project/addon-architecture.md) — HA add-on config architecture.

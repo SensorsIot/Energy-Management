@@ -13,5 +13,8 @@ Conventions observed across the add-on source. New code follows them.
 - **Logging via `logging.getLogger(__name__)`** — no `print` statements.
 - **All times UTC internally**, converted to `Europe/Zurich` only for display/logs.
 
+Identifier naming (code, entities, InfluxDB, MQTT, slugs, files) is a standard of its own — see
+[`naming.md`](naming.md).
+
 Formatting and linting run through Ruff (line length 100); see
 [`build-and-release.md`](build-and-release.md) for the commands.
