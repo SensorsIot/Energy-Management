@@ -193,7 +193,8 @@ from recent hours; calendar-event integration; machine-learning models (LSTM, XG
 
 ## 14. Tests and validation
 
-Test approach and invocation are HOW — see [`Harness/project/modules/loadforecast.md`](../../Harness/project/modules/loadforecast.md).
+Test approach and invocation are HOW — see [`Harness/project/modules/loadforecast.md`](../../Harness/project/modules/loadforecast.md)
+and the testing hub [`Harness/project/testing.md`](../../Harness/project/testing.md). No test code exists yet (gap).
 
 ## Changelog
 

@@ -5,11 +5,15 @@ Entry point for any task: **[`AI-Workflow.md`](AI-Workflow.md)**.
 
 ## Layout
 - **`standards/`** — *portable* rules, reusable on any project ([documentation governance](standards/documentation.md),
-  [engineering conventions](standards/engineering.md)).
+  [engineering conventions](standards/engineering.md), [testing](standards/testing.md)).
 - **`project/`** — *Energy-Management-specific* bindings:
   - [`stack.md`](project/stack.md) — languages, frameworks, runtime architecture.
   - [`build-and-release.md`](project/build-and-release.md) — version-bump, test, secrets, command reference.
   - [`code-style.md`](project/code-style.md) — coding conventions for new code.
+  - [`design-principles.md`](project/design-principles.md) — project-wide design principles.
+  - [`testing.md`](project/testing.md) — testing structure + the index of where each add-on's test cases are defined.
+  - [`addon-architecture.md`](project/addon-architecture.md) — HA add-on config architecture.
+  - [`modules/`](project/modules/) — per-add-on build/architecture HOW.
 
 ## Authority order
 1. **Harness (HOW)** — how to build (this directory).

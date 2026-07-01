@@ -8,16 +8,22 @@ Read this before any change. It is how new functionality is built and how the do
    exists, the work starts by defining the **WHAT** (a new FSD rule), not by writing code.
 2. **Build per the Harness.** Follow [`standards/`](standards/) + [`project/`](project/) rules —
    conventions, constraints, prohibitions. Reuse an existing helper/skill before adding new code;
-   make the smallest change that satisfies the rule. Before any commit, apply the
-   release rule in [`project/build-and-release.md`](project/build-and-release.md) (version bump +
-   passing tests) and the conventions in [`project/code-style.md`](project/code-style.md).
-3. **Reconcile the docs** (the `documentation` skill, Procedure B):
+   make the smallest change that satisfies the rule. Apply the conventions in
+   [`project/code-style.md`](project/code-style.md).
+3. **Test — the gate (not optional).** A change is **not done** until its test case exists and its
+   test passes. Per [`standards/testing.md`](standards/testing.md) and the index in
+   [`project/testing.md`](project/testing.md): define/update the **test case** in the owning FSD
+   chapter (energymanager Appendix D, ocpp-server §8, etc.), add/update the **test** beside the code
+   in `tests/`, and run the suite green (commands in
+   [`project/build-and-release.md`](project/build-and-release.md), which also carries the version
+   bump). A bug fix adds its **regression test first**.
+4. **Reconcile the docs** (the `documentation` skill, Procedure B):
    - the **FSD** absorbs new/changed behaviour — *verify, don't transcribe* (if the code deviates
      from the intended spec, fix the code, don't enshrine the defect);
    - the **Handbook** absorbs operator-facing changes;
    - the **Harness stays put** unless the change taught a *universally valid* rule.
    All present-state, no history.
-4. **Verify.** Confirm the implementation matches the FSD (compliant / deviation / missing, both
+5. **Verify.** Confirm the implementation matches the FSD (compliant / deviation / missing, both
    directions). Deviations fix the code; gaps get documented; contradictions get escalated. Run the
    doc-linter (`tools/doc_lint.py`) before commit.
 

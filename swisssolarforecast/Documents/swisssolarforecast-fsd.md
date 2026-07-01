@@ -405,7 +405,8 @@ Operator dashboard queries are OPERATE — see [`Handbook.md` → Dashboards & q
 
 ## 16. Tests and validation
 
-Test approach and invocation are HOW — see [`Harness/project/modules/swisssolarforecast.md`](../../Harness/project/modules/swisssolarforecast.md).
+Test approach and invocation are HOW — see [`Harness/project/modules/swisssolarforecast.md`](../../Harness/project/modules/swisssolarforecast.md)
+and the testing hub [`Harness/project/testing.md`](../../Harness/project/testing.md).
 
 ## Changelog
 

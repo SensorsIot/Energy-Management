@@ -25,6 +25,8 @@ reference.
 | An add-on's behaviour (WHAT) — entities, algorithms, schemas, config contract | that add-on's FSD (*Components* below) | the other add-ons' FSDs; the Harness module HOW |
 | External interface contract owned by one add-on (e.g. Smart-car API) | a section of the owning add-on's FSD | — |
 | Project-wide build contract & conventions (HOW) | `Harness/AI-Workflow.md`, `Harness/standards/`, `Harness/project/` | every FSD's *Build* reference |
+| Testing strategy + test-case index (HOW) | `Harness/standards/testing.md` (levels/rules) + `Harness/project/testing.md` (index → the FSD chapter each add-on's cases live in) | `AI-Workflow.md` step 3; the FSD test chapters |
+| Test-case specs (WHAT — acceptance criteria) | the owning add-on's FSD test chapter (energymanager Appendix D, ocpp-server §8, …) | `Harness/project/testing.md` indexes them |
 | Module-specific build / architecture / file-layout / test-invocation (HOW) | `Harness/project/modules/<addon>.md` | that add-on's FSD |
 | Operator procedures (OPERATE) — install, troubleshoot, dashboards | `Handbook.md` | the FSDs' *Operations* references |
 | Documentation governance rules | `Harness/standards/documentation.md` + the `documentation` skill | `STRUCTURE.md` |

@@ -475,6 +475,9 @@ flooring:
 
 ## 8. Test Cases
 
+This section is the canonical home for OCPP-server test-case specs; it is indexed in the testing hub
+`Harness/project/testing.md`.
+
 | ID | Test | Expected |
 |----|------|----------|
 | TC-01 | Wallbox connects via WebSocket | First message accepted, `wallbox_connected` = on |

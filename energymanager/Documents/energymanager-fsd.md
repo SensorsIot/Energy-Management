@@ -2220,6 +2220,9 @@ OPERATE, not WHAT. See the Handbook:
 ---
 # Appendix D: Test Cases
 
+This chapter is the canonical home for EnergyManager's test-case specs; it is indexed in the testing
+hub `Harness/project/testing.md` (strategy + levels in `Harness/standards/testing.md`).
+
 ## D.1 Battery Discharge Optimizer Tests
 
 Test file: `energymanager/tests/test_battery_optimizer.py`
