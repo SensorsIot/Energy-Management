@@ -194,6 +194,16 @@ here — imports and contracts are exercised), run the doc linter, and check no 
 **C.7 Migrate external names as history-preserving migrations** (§A.5), separately and deliberately —
 never bundled into an unrelated change, and never as a blanket replace.
 
+**C.8 Institutionalize it — so it stays enforced after the cleanup.** A one-time audit decays without
+governance. Bake the rules into how the project runs going forward:
+- **Route new content through a triage** that explicitly names where naming decisions go (the naming
+  standard) and where test cases go (the owning spec's numbered test chapter) — so the next author
+  places them right without re-deriving the rule.
+- **Make testing a build gate** (§B.3), not a review afterthought — a change isn't done until its
+  test case and test exist.
+- **Surface naming and testing in the top-level doc map** as first-class entries, so they're
+  discoverable rather than buried in a subfolder.
+
 ## Adapting to your stack
 
 Replace the data-store nouns with yours: *InfluxDB bucket/measurement/tag/field* → your database's
