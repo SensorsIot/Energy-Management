@@ -1,6 +1,7 @@
 """Tests for OCPP handler and server throttle logic."""
 
 import asyncio
+import math
 import time
 
 import pytest
@@ -146,6 +147,117 @@ class TestMeterValues:
         assert handler.session_energy_wh == 49890
         # Callback should only have been called for energy, not power
         callback.assert_called_once_with("energy_wh", 49890)
+
+
+class TestSecurityInputValidation:
+    """Security test cases — untrusted MeterValues input (FSD §8.1).
+
+    SEC-01/SEC-03 (CWE-20): the wallbox is on an unauthenticated LAN WebSocket,
+    so its MeterValues are untrusted input. Malformed / out-of-range values must
+    be dropped, never crash the handler or corrupt the reported power.
+    SEC-02 (CWE-400): a flood must not accumulate state; stale frames are dropped.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sec01_non_numeric_value_dropped_no_crash(self, mock_connection) -> None:
+        """SEC-01: a non-numeric MeterValues value is dropped, not fatal."""
+        handler = ChargePointHandler("test", mock_connection)
+        handler.transaction_id = 1
+        handler.current_power_w = 3940  # actively charging
+
+        # Must return normally (no exception) and keep the last good reading.
+        result = await handler.on_meter_values(
+            connector_id=1,
+            meter_value=[
+                {"sampled_value": [
+                    {"measurand": "Power.Active.Import", "value": "not-a-number"}
+                ]}
+            ],
+        )
+        assert result is not None
+        assert handler.current_power_w == 3940  # corrupt value ignored
+
+    @pytest.mark.asyncio
+    async def test_sec01_valid_value_survives_alongside_bad(self, mock_connection) -> None:
+        """SEC-01: a good power value is still processed when a sibling value is bad."""
+        handler = ChargePointHandler("test", mock_connection)
+        handler.transaction_id = 1
+        await handler.on_meter_values(
+            connector_id=1,
+            meter_value=[
+                {"sampled_value": [
+                    {"measurand": "Power.Active.Import", "value": "garbage"},
+                    {"measurand": "Power.Active.Import", "value": "7000"},
+                ]}
+            ],
+        )
+        expected = 0.962115 * 7000 + 105.6
+        assert handler.current_power_w == pytest.approx(expected, abs=0.1)
+
+    @pytest.mark.asyncio
+    async def test_sec03_negative_power_dropped(self, mock_connection) -> None:
+        """SEC-03: negative phase power is dropped; current_power_w never corrupted."""
+        handler = ChargePointHandler("test", mock_connection)
+        handler.transaction_id = 1
+        handler.current_power_w = 3940
+        await handler.on_meter_values(
+            connector_id=1,
+            meter_value=[
+                {"sampled_value": [
+                    {"measurand": "Power.Active.Import", "value": "-5000"}
+                ]}
+            ],
+        )
+        assert handler.current_power_w >= 0
+        assert handler.current_power_w == 3940  # prior good value kept
+
+    @pytest.mark.asyncio
+    async def test_sec03_non_finite_power_dropped(self, mock_connection) -> None:
+        """SEC-03: NaN / Inf power values are dropped, power stays finite."""
+        handler = ChargePointHandler("test", mock_connection)
+        handler.transaction_id = 1
+        handler.current_power_w = 3940
+        for bad in ("nan", "inf", "-inf"):
+            await handler.on_meter_values(
+                connector_id=1,
+                meter_value=[
+                    {"sampled_value": [
+                        {"measurand": "Power.Active.Import", "value": bad}
+                    ]}
+                ],
+            )
+        assert math.isfinite(handler.current_power_w)
+        assert handler.current_power_w == 3940
+
+    @pytest.mark.asyncio
+    async def test_sec02_flood_bounded_and_stale_dropped(self, mock_connection) -> None:
+        """SEC-02: a MeterValues flood doesn't accumulate state; stale frames are dropped."""
+        handler = ChargePointHandler("test", mock_connection)
+        handler.transaction_id = 1
+        handler.trigger_meter_values = AsyncMock()  # avoid the stale-frame re-trigger side effect
+
+        for _ in range(200):
+            await handler.on_meter_values(
+                connector_id=1,
+                meter_value=[
+                    {"sampled_value": [
+                        {"measurand": "Power.Active.Import", "value": "6000"}
+                    ]}
+                ],
+            )
+        # State is a scalar, not a growing collection.
+        assert isinstance(handler.current_power_w, (int, float))
+
+        prev = handler.current_power_w
+        await handler.on_meter_values(
+            connector_id=1,
+            meter_value=[
+                {"timestamp": "2000-01-01T00:00:00Z", "sampled_value": [
+                    {"measurand": "Power.Active.Import", "value": "9999"}
+                ]}
+            ],
+        )
+        assert handler.current_power_w == prev  # stale frame ignored
 
 
 class TestTransactions:

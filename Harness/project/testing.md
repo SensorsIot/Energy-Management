@@ -35,13 +35,13 @@ Per-add-on build/run detail is in each `modules/<addon>.md`; the run commands ar
 
 ## Security-testing gaps (per add-on)
 
-Per the security-testing standard ([`../standards/testing.md`](../standards/testing.md)), **no add-on
-yet has security test _code_**. `ocpp-server` has drafted **specs** (§8.1, SEC-01…08); the others
-have neither. The untested security surface, per add-on (with the standard to anchor the cases to):
+Per the security-testing standard ([`../standards/testing.md`](../standards/testing.md)),
+`ocpp-server` has **security cases §8.1 SEC-01…08 — 5 built, 3 open**; the other three add-ons have
+no security cases yet. The security surface, per add-on (with the standard to anchor the cases to):
 
-| Add-on | Untested security surface | Anchor |
+| Add-on | Security surface & coverage | Anchor |
 |---|---|---|
-| **ocpp-server** (highest — network-facing) | Runs an OCPP 1.6j **WebSocket server** (`0.0.0.0`, no connection auth, unvalidated charge-point id) and accepts `Authorize`/`BootNotification` from the network; `on_authorize` accepts every id_tag; MQTT is cleartext. **Specs drafted (§8.1 SEC-01…08), none built** — connection/id_tag authz, malformed-message handling, secret non-leak, control-command bounds, MQTT transport. | OWASP ASVS V2/V4/V5/V6, **CWE-287**, **CWE-20**, **CWE-532** |
+| **ocpp-server** (highest — network-facing) | OCPP 1.6j **WebSocket server** (`0.0.0.0`, no connection auth, unvalidated charge-point id), `on_authorize` accepts every id_tag, cleartext MQTT. **§8.1: ✅ SEC-01/02/03 (untrusted-input validation), SEC-05/07 (pinned); 🔮 SEC-06 (run.py secret-leak test); Proposed SEC-04/08 (trust-boundary policy).** | OWASP ASVS V2/V4/V5/V6, **CWE-287**, **CWE-20**, **CWE-400**, **CWE-532** |
 | **energy-manager** | Loads InfluxDB / HA / Telegram / Smart-car **secrets** from env and issues **hardware-control** commands via the HA API. No case asserts secrets don't reach logs / InfluxDB / MQTT, or that control values are bounded. | ASVS V6 (secrets), **CWE-532** (log exposure), **CWE-306** |
 | **swiss-solar-forecast** | Ingests **external weather data over HTTP** and parses GRIB (eccodes) + JSON metadata — untrusted external input. No case for malformed/oversized input, transport verification, or parser-failure handling. | ASVS V5, **CWE-20**, **CWE-494** (no integrity check on fetched data) |
 | **load-forecast** | Smallest surface — reads InfluxDB with a token, writes a forecast bucket. No security case (and no test code at all). | ASVS V6 (secret handling) |

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, UTC
 from collections.abc import Callable
@@ -165,12 +166,33 @@ class ChargePointHandler(CP):
 
             for sampled in mv.get("sampled_value", []):
                 measurand = sampled.get("measurand", "Energy.Active.Import.Register")
-                value = float(sampled.get("value", 0))
+                raw_value = sampled.get("value", 0)
+                # Validate untrusted wallbox input: drop non-numeric, non-finite,
+                # or negative values rather than crashing or corrupting state.
+                # (Security SEC-01/SEC-03, CWE-20 input validation.)
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"MeterValues: dropped non-numeric {measurand} value {raw_value!r}"
+                    )
+                    continue
+                if not math.isfinite(value):
+                    logger.warning(
+                        f"MeterValues: dropped non-finite {measurand} value {value}"
+                    )
+                    continue
 
                 if "Power" in measurand:
+                    if value < 0:
+                        logger.warning(f"MeterValues: dropped negative power {value}W")
+                        continue
                     total_power += value
                     has_power_measurand = True
                 elif "Energy" in measurand:
+                    if value < 0:
+                        logger.warning(f"MeterValues: dropped negative energy {value}Wh")
+                        continue
                     self.session_energy_wh = value
                     if self.on_status_change:
                         self.on_status_change("energy_wh", value)
