@@ -33,4 +33,22 @@ Per-add-on build/run detail is in each `modules/<addon>.md`; the run commands ar
 - **load-forecast has no test code** — §14 defines the validation approach; no `tests/` yet.
 - Several §6.6 integration cases are 🔮 future pending mocks (HA client, scheduler, OCPP, Smart car).
 
+## Security-testing gaps (per add-on)
+
+Per the security-testing standard ([`../standards/testing.md`](../standards/testing.md)), **no add-on
+yet has security test cases**. The untested security surface, per add-on (with the standard to anchor
+the cases to):
+
+| Add-on | Untested security surface | Anchor |
+|---|---|---|
+| **ocpp-server** (highest — network-facing) | Runs an OCPP 1.6j **WebSocket server** accepting wallbox connections and `Authorize`/`BootNotification` messages from the network; `on_authorize` accepts every id_tag. No case covers connection authentication, id_tag authorization, or malformed-message handling. | OWASP ASVS V2/V4, **CWE-287** (improper authn), **CWE-20** (input validation) |
+| **energy-manager** | Loads InfluxDB / HA / Telegram / Smart-car **secrets** from env and issues **hardware-control** commands via the HA API. No case asserts secrets don't reach logs / InfluxDB / MQTT, or that control values are bounded. | ASVS V6 (secrets), **CWE-532** (log exposure), **CWE-306** |
+| **swiss-solar-forecast** | Ingests **external weather data over HTTP** and parses GRIB (eccodes) + JSON metadata — untrusted external input. No case for malformed/oversized input, transport verification, or parser-failure handling. | ASVS V5, **CWE-20**, **CWE-494** (no integrity check on fetched data) |
+| **load-forecast** | Smallest surface — reads InfluxDB with a token, writes a forecast bucket. No security case (and no test code at all). | ASVS V6 (secret handling) |
+
+Cross-cutting: all four load tokens from env (HA UI) and reach InfluxDB / HA / MQTT over the LAN in
+cleartext; no test pins the **secret-non-leak** or the transport assumptions. Close each gap by adding
+security cases — tagged with the CWE/ASVS IDs above and scored by CVSS — to the owning add-on's test
+chapter.
+
 Each case's `Status` column in the owning FSD is authoritative; this table is the overview.
