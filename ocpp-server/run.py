@@ -241,6 +241,8 @@ class OCPPServer:
         self._phase_switching_disabled = False
         self._last_sent_power_w: float = 0.0
         self._last_requested_power_w: float = 0.0  # pre-clamping HA value
+        self._last_measured_power_w: float = 0.0   # calibrated measured draw (proxy handoff)
+        self._last_measured_time: float = 0.0      # monotonic time of last measured update
         self._last_phase_switch_time: float = 0.0
         self.PHASE_SWITCH_LOCK_S = 300  # 5-minute time lock after phase switch
 
@@ -376,23 +378,44 @@ class OCPPServer:
     # resume / amp change) — inject commanded immediately. NOT Preparing, where a
     # cold-start car draws 0 for minutes and would export the whole time.
     _PROXY_LIVE_STATUSES = {"Charging", "SuspendedEVSE"}
+    # Hand off from the commanded bridge to the calibrated measured draw once the
+    # measured reading has climbed to this fraction of the commanded setpoint.
+    _PROXY_MEASURED_MIN_RATIO = 0.85
+    # Measured freshness window (MeterValues arrive at ~60 s cadence).
+    _PROXY_MEASURED_MAX_AGE_S = 90
+    # Positive offset added to the correction so the corrected grid leans to
+    # export (sell) rather than import (buy).
+    _PROXY_EXPORT_BIAS_W = 200
 
     def _proxy_power_w(self) -> float:
-        """Wallbox power to feed the ESP32 Modbus proxy.
+        """Wallbox power fed to the ESP32 Modbus proxy — measured-primary + commanded bridge.
 
-        The measured MeterValues are unusable as the correction source: ~60 s
-        cadence, the first post-resume reading is a tiny ramp value (~120 W) that
-        trips the proxy's activation threshold, and the value then sits stale
-        through the car's whole ramp. So the correction is the **commanded** power
-        the entire time we are commanding a charge, and 0 otherwise. This signals
-        the SUN2000 the full load the instant charging is commanded; if the car
-        starts late we briefly export (sell) — preferable to under-reading and
-        importing (buying). The commanded value also slightly overstates the
-        actual draw in steady state (integer-amp flooring), biasing toward export.
+        The correction should equal the wallbox's *actual* draw so the SUN2000's
+        corrected DTSU matches the M-Bus grid meter. The calibrated measured power
+        (`ChargePointHandler._correct_meter_power`) is that value, but it lags — ~60 s
+        cadence and a slow post-command ramp — so:
+
+        - **Bridge:** while a charge is commanded but the fresh measured reading has
+          not yet reached `_PROXY_MEASURED_MIN_RATIO` of the commanded setpoint (or is
+          stale), feed the **commanded** power. This signals the full load the instant
+          charging is commanded and covers the whole ramp (a late car briefly exports).
+        - **Steady state:** once the fresh measured power reaches ≥85 % of commanded,
+          feed the **calibrated measured** draw — removing the integer-amp-flooring
+          overstatement of the commanded value (the ~12 %/W divergence from M-Bus).
+
+        `_PROXY_EXPORT_BIAS_W` is added on top so the corrected grid leans to export.
+        Returns 0 when not commanding a charge.
         """
-        if self._proxy_charging and self._last_sent_power_w > 0:
-            return float(self._last_sent_power_w)
-        return 0.0
+        if not (self._proxy_charging and self._last_sent_power_w > 0):
+            return 0.0
+        commanded = float(self._last_sent_power_w)
+        measured = float(self._last_measured_power_w)
+        fresh = (time.monotonic() - self._last_measured_time) <= self._PROXY_MEASURED_MAX_AGE_S
+        if fresh and measured >= self._PROXY_MEASURED_MIN_RATIO * commanded:
+            base = measured  # steady state: accurate calibrated draw
+        else:
+            base = commanded  # bridge: instant response through the ramp
+        return base + self._PROXY_EXPORT_BIAS_W
 
     def _publish_proxy_power(self) -> None:
         """Recompute and publish the proxy correction value."""
@@ -421,14 +444,16 @@ class OCPPServer:
                 asyncio.ensure_future(self._apply_current_power_limit())
         elif key == "power_w":
             state = round(value)
+            # Capture the calibrated measured draw for the proxy handoff, then
+            # recompute the correction (measured may now have caught up to
+            # commanded — see _proxy_power_w).
+            self._last_measured_power_w = float(value)
+            self._last_measured_time = time.monotonic()
+            self._publish_proxy_power()
         else:
             state = value
 
         asyncio.ensure_future(self.ha.set_state(entity_id, state))
-
-        # The MQTT proxy correction is driven by the COMMANDED power (see
-        # _proxy_power_w), not the measured MeterValues — so the measured update
-        # here only refreshes the HA sensor above, never the correction.
 
         if key == "status":
             asyncio.ensure_future(self._update_car_ready())

@@ -1789,15 +1789,17 @@ class TestPostConnectApplyLimit:
         server.charge_point.set_charging_power.assert_not_called()
 
 
-class TestProxyCommandedCorrection:
-    """Commanded-primary correction for the ESP32 Modbus proxy.
+class TestProxyCorrection:
+    """ESP32 Modbus-proxy correction — measured-primary with a commanded bridge.
 
-    The proxy correction is the COMMANDED power the whole time we command a
-    charge — never the measured MeterValues (60 s cadence, tiny ramp first
-    reading that trips the proxy threshold). This signals the SUN2000 the full
-    load the instant charging is commanded; a late-starting car briefly exports
-    (sells) rather than under-reading and importing (buying).
+    The correction feeds the wallbox's actual draw so the SUN2000's corrected DTSU
+    matches the M-Bus grid meter: the **commanded** power bridges the ramp, then once
+    the calibrated **measured** draw reaches ≥85 % of commanded the correction switches
+    to measured (removing the integer-amp-flooring overstatement). A +200 W export bias
+    is added so the corrected grid leans to sell, not buy.
     """
+
+    BIAS = 200  # == OCPPServer._PROXY_EXPORT_BIAS_W
 
     @pytest.fixture
     def server(self):
@@ -1820,41 +1822,79 @@ class TestProxyCommandedCorrection:
         return srv
 
     @pytest.mark.asyncio
-    async def test_warm_resume_injects_commanded_immediately(self, server) -> None:
-        """A >0 command while SuspendedEVSE (warm resume) signals the commanded
-        load at once — no wait for Charging, no measured value."""
+    async def test_warm_resume_bridges_with_commanded(self, server) -> None:
+        """A >0 command while SuspendedEVSE (warm resume, car not drawing) signals
+        the commanded load at once (bridge) + export bias — no wait for measured."""
         server.charge_point.current_status = "SuspendedEVSE"
         server.charge_point.current_power_w = 0  # car not drawing yet
         await server._send_power_to_wallbox(6000.0)
         await asyncio.sleep(0)
         assert server._proxy_charging is True
-        assert server._proxy_power_w() == 6000.0
-        assert server._last_mqtt_power == 6000.0
+        assert server._proxy_power_w() == 6000.0 + self.BIAS
+        assert server._last_mqtt_power == 6000.0 + self.BIAS
 
     @pytest.mark.asyncio
-    async def test_charging_status_injects_commanded(self, server) -> None:
-        """Reaching Charging (cold-start path after Preparing) injects commanded."""
+    async def test_charging_status_bridges_with_commanded(self, server) -> None:
+        """Reaching Charging with no measured reading yet feeds commanded + bias."""
         server._last_sent_power_w = 5117.0
         server._on_status_change("status", "Charging")
         await asyncio.sleep(0)
         assert server._proxy_charging is True
-        assert server._proxy_power_w() == 5117.0
+        assert server._proxy_power_w() == 5117.0 + self.BIAS
 
     @pytest.mark.asyncio
-    async def test_measured_metervalues_do_not_change_correction(self, server) -> None:
-        """While charging at commanded 6000 W, measured readings (tiny ramp 120 W,
-        then 5681 W) must NOT change the correction — it stays at commanded."""
+    async def test_bridge_during_ramp_then_handoff_to_measured(self, server) -> None:
+        """Commanded 6000: a tiny ramp reading (120 W) stays on commanded; once
+        measured reaches ≥85 % (5681 W) the correction switches to measured."""
         server.charge_point.current_status = "SuspendedEVSE"
         await server._send_power_to_wallbox(6000.0)
         await asyncio.sleep(0)
-        assert server._proxy_power_w() == 6000.0
+        assert server._proxy_power_w() == 6000.0 + self.BIAS  # bridge
 
-        for measured in (120, 5681):
-            server.charge_point.current_power_w = measured
-            server._on_status_change("power_w", measured)
-            await asyncio.sleep(0)
-            assert server._proxy_power_w() == 6000.0  # unchanged by measured
-        assert server._last_mqtt_power == 6000.0
+        server._on_status_change("power_w", 120)  # ramp toe, <85% → stay commanded
+        await asyncio.sleep(0)
+        assert server._proxy_power_w() == 6000.0 + self.BIAS
+
+        server._on_status_change("power_w", 5681)  # 95% ≥ 85% → measured
+        await asyncio.sleep(0)
+        assert server._proxy_power_w() == 5681.0 + self.BIAS
+        assert server._last_mqtt_power == 5681.0 + self.BIAS
+
+    @pytest.mark.asyncio
+    async def test_handoff_threshold(self, server) -> None:
+        """Below 85 % of commanded → bridge (commanded); at/above → measured."""
+        server.charge_point.current_status = "SuspendedEVSE"
+        await server._send_power_to_wallbox(6000.0)
+        await asyncio.sleep(0)
+        server._on_status_change("power_w", 5000)  # 83 % → bridge
+        await asyncio.sleep(0)
+        assert server._proxy_power_w() == 6000.0 + self.BIAS
+        server._on_status_change("power_w", 5200)  # 87 % → measured
+        await asyncio.sleep(0)
+        assert server._proxy_power_w() == 5200.0 + self.BIAS
+
+    @pytest.mark.asyncio
+    async def test_car_draws_less_stays_on_bridge(self, server) -> None:
+        """A car capping below 85 % of commanded keeps the correction on commanded
+        (safe direction: over-state → export, never silent import)."""
+        server.charge_point.current_status = "SuspendedEVSE"
+        await server._send_power_to_wallbox(7000.0)
+        await asyncio.sleep(0)
+        server._on_status_change("power_w", 5000)  # 71 % < 85 %
+        await asyncio.sleep(0)
+        assert server._proxy_power_w() == 7000.0 + self.BIAS
+
+    @pytest.mark.asyncio
+    async def test_stale_measured_falls_back_to_commanded(self, server) -> None:
+        """A measured reading older than the freshness window is ignored → bridge."""
+        server.charge_point.current_status = "SuspendedEVSE"
+        await server._send_power_to_wallbox(6000.0)
+        await asyncio.sleep(0)
+        server._on_status_change("power_w", 5800)  # fresh & ≥85 % → measured
+        await asyncio.sleep(0)
+        assert server._proxy_power_w() == 5800.0 + self.BIAS
+        server._last_measured_time -= (server._PROXY_MEASURED_MAX_AGE_S + 10)
+        assert server._proxy_power_w() == 6000.0 + self.BIAS  # stale → bridge
 
     @pytest.mark.asyncio
     async def test_cold_start_preparing_no_injection(self, server) -> None:
@@ -1872,7 +1912,7 @@ class TestProxyCommandedCorrection:
         server._last_sent_power_w = 5000.0
         server._on_status_change("status", "Charging")
         await asyncio.sleep(0)
-        assert server._proxy_power_w() == 5000.0
+        assert server._proxy_power_w() == 5000.0 + self.BIAS
         server.charge_point.current_status = "SuspendedEV"
         server._on_status_change("status", "SuspendedEV")
         await asyncio.sleep(0)
@@ -1885,7 +1925,6 @@ class TestProxyCommandedCorrection:
         server.charge_point.current_status = "Charging"
         server._proxy_charging = True
         server._last_sent_power_w = 6000.0
-        server.charge_point.current_power_w = 5681
         await server._send_power_to_wallbox(0.0)
         await asyncio.sleep(0)
         assert server._proxy_charging is False

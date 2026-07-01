@@ -335,26 +335,31 @@ re-published every 10 s to prevent staleness. The proxy applies the value to the
 ~1 s (≈1 Hz RS485 serve); HA's own read of the corrected DTSU (every ~30 s) is downstream display
 only and not in this loop.
 
-**The correction is the commanded power, not the measured MeterValues.** Measured readings are
-unusable as the correction source: ~60 s cadence, the first post-resume reading is a tiny ramp value
-(~120 W) that falls below the proxy's activation threshold, and it then sits stale through the car's
-whole ramp. So the published value is:
+**The correction is the calibrated measured draw, bridged by the commanded power.** It should equal
+the wallbox's *actual* draw so the corrected DTSU matches the M-Bus grid meter. The calibrated
+measured power (`ChargePointHandler._correct_meter_power`, `METER_SCALE·raw + METER_OFFSET`) is that
+value, but it lags — ~60 s cadence and a slow post-command ramp — so the published value is:
 
-- The **commanded** power (`_last_sent_power_w`) the entire time a charge is commanded — injected the
-  instant the command is sent while the car is in an active session (`Charging` or `SuspendedEVSE` =
-  warm resume / amp change), and on reaching `Charging` for the cold-start path. This signals the
-  SUN2000 the full load immediately, so it stops charging the home battery and covers the car. If the
-  car starts late, the inverter briefly **exports** (sells) — deliberately preferred over
-  under-reading and **importing** (buying). Commanded also slightly overstates the actual draw in
-  steady state (integer-amp flooring), keeping the bias toward export.
+- **Bridge — commanded** (`_last_sent_power_w`): while a charge is commanded but the fresh measured
+  reading has **not yet reached 85 %** of the commanded setpoint (or is stale, >90 s), publish the
+  commanded power. Injected the instant the command is sent during an active session (`Charging` or
+  `SuspendedEVSE` = warm resume / amp change), and on reaching `Charging` for the cold-start path. This
+  signals the SUN2000 the full load immediately and covers the whole ramp; a late car briefly
+  **exports** (sells) — deliberately preferred over under-reading and **importing** (buying).
+- **Steady state — measured:** once the fresh measured draw reaches ≥85 % of commanded, publish the
+  **calibrated measured** power. This removes the integer-amp-flooring **over-statement** of the
+  commanded value (a ~12 %/W linear over-correction that left the grid leaning to a steady ~150–200 W
+  import during charging) and tracks a car that draws less than offered. Stale measured (>90 s) falls
+  back to the commanded bridge.
+- **Export bias:** a fixed **+200 W** (`_PROXY_EXPORT_BIAS_W`) is added to the published value so the
+  corrected grid leans to export (sell) rather than import (buy).
 - `0` on a confirmed stop: a commanded `0` pause, `SuspendedEV`, `Finishing`, `Available`, or
   transaction end — so a car that refuses to charge (`SuspendedEV`) produces no phantom load.
 - **Cold start excluded:** a `>0` command during `Preparing` (car drawing 0 for up to ~7 min, §5.1)
   does **not** inject — it would export for minutes. The correction starts only when that car reaches
   `Charging`.
 
-The measured MeterValues still drive the `sensor.wallbox_power` HA entity (display); they do not
-affect the proxy correction.
+The measured MeterValues also drive the `sensor.wallbox_power` HA entity (display).
 
 ## 4. EARU Breaker Hardware
 
@@ -585,6 +590,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 | 3.9 | 2026-06-30 | Modbus-proxy power feed: post-resume ramp bridge (§3.6.6). The MQTT `wallbox` value feeding the ESP32 proxy now uses the commanded power on `→Charging` until the first MeterValues>0, instead of the wallbox's stale `0 W` during the ~60 s ramp — closing the window where the DTSU correction dropped out and the grid silently supplied the car (visible as M-Bus-vs-DTSU grid divergence). Bridge ends on first real reading or a confirmed stop (`SuspendedEV`/`Finishing`/`Available`/pause), so a refusing car makes no phantom load. ocpp-server 0.9.61; 4 tests (`TestProxyRampBridge`). |
 | 3.14 | 2026-07-01 | SEC-04 duplicate-connection guard (§3.4). `handle_websocket` now refuses a connection from a **different** charge-point id while a transaction is live (closed with code 1008) so a stray/foreign device can't hijack the active session; a same-id reconnect still replaces a stale connection. New `_reject_duplicate_connection` + `TestConnectionGuard` (4 tests, 96 → 100). §3.4 also records the decided id_tag policy (accept-all, no RFID). ocpp-server 0.9.64. |
 | 3.13 | 2026-07-01 | Security §8.1 completed. SEC-06 built (`test_security_secrets.py` — HA token used for auth but never logged or placed in the entity payload; CWE-532). SEC-04/05/08 decided by the trusted-LAN security posture (Harness design-principles §7): LAN traffic is not encrypted by rule, RFID/id_tag authorization is unused (accept-all), so those cases are accepted-posture with downgraded severity. All eight SEC cases now resolved (built or decided). Doc + test only, no add-on code change. |
+| 3.15 | 2026-07-01 | Modbus-proxy feed → **measured-primary with a commanded bridge** (§3.6.6). Live InfluxDB analysis showed the commanded-primary feed (3.10) over-states the actual draw by a **linear ~12 %/W** term (integer-amp flooring — commanded runs ~4.5 % above measured), leaving the corrected grid ~150–200 W on the **import** side during charging. The correction now feeds the **calibrated measured** draw once it reaches **≥85 %** of commanded; the commanded power only **bridges** the ramp (and is the stale-measured fallback). A **+200 W** export bias keeps the corrected grid leaning to sell. `TestProxyCommandedCorrection` → `TestProxyCorrection` (bridge→handoff, 85 % threshold, car-draws-less, stale fallback, export bias); 100 → 103 tests. ocpp-server 0.9.65. |
 | 3.12 | 2026-07-01 | Security hardening + tests (§8.1). `on_meter_values` now validates untrusted wallbox input — non-numeric, non-finite (NaN/Inf), and negative sample values are dropped instead of crashing the handler or corrupting `wallbox_power` (§3 MeterValues row). Built SEC-01/02/03 (`TestSecurityInputValidation`); SEC-05/07 pinned by existing tests. Remaining: SEC-06 (run.py secret-leak test) and the SEC-04/08 trust-boundary policy calls. ocpp-server 0.9.63; tests 89 → 94. |
 | 3.11 | 2026-07-01 | Security test cases drafted (§8.1, SEC-01…08) anchored to OWASP ASVS / MITRE CWE per `Harness/standards/testing.md` — input validation, authn/authz on the LAN-facing WebSocket + `on_authorize`, secret non-leak, control-command bounds, MQTT transport. Specs only (all unbuilt); SEC-04/05/08 flag trust-boundary policy decisions. |
 | 3.10 | 2026-06-30 | Modbus-proxy feed → **commanded-primary** (§3.6.6). Live MQTT measurement showed 3.9 collapsed after ~4 s: the bridge handed off on the first MeterValues (~120 W), which falls below the proxy's activation threshold, leaving the correction off for the ~60 s ramp. Now the correction is the **commanded** power the whole time a charge is commanded — injected the instant the command is sent during an active session (`Charging`/`SuspendedEVSE`), not waiting for `→Charging` (was ~9 s) and never handed to the measured value. Cold-start (`Preparing`) excluded to avoid minutes-long export. Biases to export-not-import per design. Measured still drives `sensor.wallbox_power` display only. ocpp-server 0.9.62; tests `TestProxyCommandedCorrection`. |
