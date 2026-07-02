@@ -438,14 +438,23 @@ Logging goes to both the console (s6/journal, wiped on restart) and a rotating f
 
 ### 7.1 Linear Regression (v0.9.46)
 
-OCPP MeterValues over-report power compared to M-Bus ground truth.
-Corrected at source in `on_meter_values()` using a single linear formula:
+OCPP MeterValues are corrected at source in `on_meter_values()` using a single linear formula:
 
 ```
-corrected = 0.962115 × raw + 105.6
+corrected = 1.048 × raw − 286      (recalibrated 2026-07-02, full-system grid match)
 ```
 
-Regression on 2026-03-04 sweep (6–14A), max residual ≈ 33W (<0.5%).
+**Recalibrated 2026-07-02 for full-system grid match.** The original wallbox-only fit
+(`0.962115 × raw + 105.6`, 2026-03-04 sweep 6–14 A, max residual ≈ 33 W) made the wallbox's own
+meter track M-Bus, but with the corrected value driving the Modbus-proxy DTSU (§3.6.6) the resulting
+grid tracked M-Bus only near ~4.5 kW and drifted to ~130 W **import** at 7 kW — a residual **~9 %/W**
+slope in `Huawei_corrected − M-Bus`, measured across a live 4.3–7 kW solar charge. The gain was
+raised (0.962 → 1.048) with a compensating offset (−286) to absorb that slope, so the corrected DTSU
+— and thus the grid — stays flat and slightly export-biased (~+80 W target) across the charging
+range. The fit is anchored on the steady 4.5 kW point (M-Bus ≈ +85 W) and the steady 7 kW sample
+(≈ −130 W). This shifts `sensor.wallbox_power` (display + EnergyManager surplus calc) away from the
+wallbox-only sweep value, but **not** the kWh charge budget, which reads the separate OCPP energy
+register (uncorrected). The values below are from the original 6–14 A sweep (historical reference).
 
 | Amps | OCPP W | M-Bus W (actual) | Error W |
 |-----:|-------:|-----------------:|--------:|
@@ -591,6 +600,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 | 3.14 | 2026-07-01 | SEC-04 duplicate-connection guard (§3.4). `handle_websocket` now refuses a connection from a **different** charge-point id while a transaction is live (closed with code 1008) so a stray/foreign device can't hijack the active session; a same-id reconnect still replaces a stale connection. New `_reject_duplicate_connection` + `TestConnectionGuard` (4 tests, 96 → 100). §3.4 also records the decided id_tag policy (accept-all, no RFID). ocpp-server 0.9.64. |
 | 3.13 | 2026-07-01 | Security §8.1 completed. SEC-06 built (`test_security_secrets.py` — HA token used for auth but never logged or placed in the entity payload; CWE-532). SEC-04/05/08 decided by the trusted-LAN security posture (Harness design-principles §7): LAN traffic is not encrypted by rule, RFID/id_tag authorization is unused (accept-all), so those cases are accepted-posture with downgraded severity. All eight SEC cases now resolved (built or decided). Doc + test only, no add-on code change. |
 | 3.15 | 2026-07-01 | Modbus-proxy feed → **measured-primary with a commanded bridge** (§3.6.6). Live InfluxDB analysis showed the commanded-primary feed (3.10) over-states the actual draw by a **linear ~12 %/W** term (integer-amp flooring — commanded runs ~4.5 % above measured), leaving the corrected grid ~150–200 W on the **import** side during charging. The correction now feeds the **calibrated measured** draw once it reaches **≥85 %** of commanded; the commanded power only **bridges** the ramp (and is the stale-measured fallback). A **+200 W** export bias keeps the corrected grid leaning to sell. `TestProxyCommandedCorrection` → `TestProxyCorrection` (bridge→handoff, 85 % threshold, car-draws-less, stale fallback, export bias); 100 → 103 tests. ocpp-server 0.9.65. |
+| 3.16 | 2026-07-02 | **Wallbox meter correction recalibrated for full-system grid match (§7.1).** With the measured-primary correction (3.15) driving the DTSU, a live 4.3–7 kW solar charge showed the corrected grid tracked M-Bus near ~4.5 kW but drifted to ~130 W **import** at 7 kW — a residual **~9 %/W** slope in `Huawei_corrected − M-Bus` (identified by comparing the Huawei/inverter grid reading against M-Bus; the home battery, with ~4.4 kW of discharge headroom, was *not* masking it, so the corrected signal fed to the inverter was demonstrably too export-leaning at high power). The linear meter correction gain was retuned **0.962115 → 1.048** with offset **105.6 → −286** to absorb the slope, flattening the grid to a small (~+80 W) export across the range. Trade-off: `sensor.wallbox_power` (display + EnergyManager surplus calc) now departs from the wallbox-only 2026-03-04 sweep value; the kWh charge budget is unaffected (it reads the OCPP energy register, uncorrected). Fit anchored on the steady 4.5 kW (+85 W) and 7 kW (−130 W) points; to be verified live and iterated. ocpp-server 0.9.66. |
 | 3.12 | 2026-07-01 | Security hardening + tests (§8.1). `on_meter_values` now validates untrusted wallbox input — non-numeric, non-finite (NaN/Inf), and negative sample values are dropped instead of crashing the handler or corrupting `wallbox_power` (§3 MeterValues row). Built SEC-01/02/03 (`TestSecurityInputValidation`); SEC-05/07 pinned by existing tests. Remaining: SEC-06 (run.py secret-leak test) and the SEC-04/08 trust-boundary policy calls. ocpp-server 0.9.63; tests 89 → 94. |
 | 3.11 | 2026-07-01 | Security test cases drafted (§8.1, SEC-01…08) anchored to OWASP ASVS / MITRE CWE per `Harness/standards/testing.md` — input validation, authn/authz on the LAN-facing WebSocket + `on_authorize`, secret non-leak, control-command bounds, MQTT transport. Specs only (all unbuilt); SEC-04/05/08 flag trust-boundary policy decisions. |
 | 3.10 | 2026-06-30 | Modbus-proxy feed → **commanded-primary** (§3.6.6). Live MQTT measurement showed 3.9 collapsed after ~4 s: the bridge handed off on the first MeterValues (~120 W), which falls below the proxy's activation threshold, leaving the correction off for the ~60 s ramp. Now the correction is the **commanded** power the whole time a charge is commanded — injected the instant the command is sent during an active session (`Charging`/`SuspendedEVSE`), not waiting for `→Charging` (was ~9 s) and never handed to the measured value. Cold-start (`Preparing`) excluded to avoid minutes-long export. Biases to export-not-import per design. Measured still drives `sensor.wallbox_power` display only. ocpp-server 0.9.62; tests `TestProxyCommandedCorrection`. |

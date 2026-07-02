@@ -75,7 +75,7 @@ class TestMeterValues:
         # Power is only accepted during an active transaction
         handler.transaction_id = 1
 
-        # OCPP reports 7000W → corrected = 0.962115 * 7000 + 105.6 = 6840.4
+        # OCPP reports 7000W → corrected = 1.048 * 7000 - 286 = 7050.0
         await handler.on_meter_values(
             connector_id=1,
             meter_value=[
@@ -87,7 +87,7 @@ class TestMeterValues:
             ],
         )
 
-        expected = 0.962115 * 7000 + 105.6
+        expected = 1.048 * 7000 - 286.0
         assert handler.current_power_w == pytest.approx(expected, abs=0.1)
         callback.assert_called_once()
         assert callback.call_args[0][0] == "power_w"
@@ -191,7 +191,7 @@ class TestSecurityInputValidation:
                 ]}
             ],
         )
-        expected = 0.962115 * 7000 + 105.6
+        expected = 1.048 * 7000 - 286.0
         assert handler.current_power_w == pytest.approx(expected, abs=0.1)
 
     @pytest.mark.asyncio

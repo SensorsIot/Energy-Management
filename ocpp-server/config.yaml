@@ -1,5 +1,5 @@
 name: "OCPP Server"
-version: "0.9.65"
+version: "0.9.66"
 slug: "ocpp-server"
 description: "OCPP 1.6j server for EV wallbox control via HA entities"
 url: "https://github.com/SensorsIot/Energy-Management"

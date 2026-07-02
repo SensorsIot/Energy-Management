@@ -31,10 +31,15 @@ class ChargePointHandler(CP):
     """
 
     # Linear meter correction: corrected = METER_SCALE * raw + METER_OFFSET
-    # Regression on 2026-03-04 sweep (6–14A): OCPP MeterValues vs M-Bus.
-    # Max residual ≈ 33W (<0.5%).
-    METER_SCALE = 0.962115
-    METER_OFFSET = 105.6
+    # Recalibrated 2026-07-02 for full-system grid match: the Huawei-corrected DTSU
+    # tracked M-Bus well at ~4.5 kW but drifted to ~130 W import at 7 kW (a residual
+    # ~9 %/W slope in Huawei − M-Bus, measured across a 4.3–7 kW solar charge). The
+    # gain absorbs that slope so the corrected DTSU (and thus the grid) stays flat and
+    # slightly export-biased across the charging range. Anchored on the 4.5 kW steady
+    # point (M-Bus ≈ +85 W) and the 7 kW steady sample (≈ −130 W).
+    # Prior wallbox-only fit (2026-03-04 sweep 6–14 A): 0.962115 * raw + 105.6.
+    METER_SCALE = 1.048
+    METER_OFFSET = -286.0
 
     # Demand calibration: W→A divisor so round(mbus_w / DEMAND_DIVISOR) = correct amps.
     # Midpoint of safe range [612, 662] from 2026-03-04 M-Bus calibration sweep.
