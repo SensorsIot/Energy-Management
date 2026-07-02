@@ -1,4 +1,4 @@
-"""Tests for 4-state EV charging state machine."""
+"""Tests for 5-state EV charging state machine."""
 
 import pytest
 
@@ -54,8 +54,9 @@ class TestEVStateEnum:
         assert isinstance(EVState.IDLE, str)
         assert EVState.IDLE == "idle"
 
-    def test_four_states(self) -> None:
-        assert len(EVState) == 4
+    def test_five_states(self) -> None:
+        assert len(EVState) == 5
+        assert EVState.OFF == "off"
 
     def test_snake_case_values(self) -> None:
         for member in EVState:
@@ -628,6 +629,55 @@ class TestBudgetStop:
         out = sm.step(budget_inputs(car_soc=25.0, session_energy_wh=100_000.0))
         assert out.state == EVState.IDLE
         assert "Target reached" in out.reason
+
+
+# ===================================================================
+# OFF mode (X0/X1) — user hard-stop, sticky
+# ===================================================================
+
+class TestOffMode:
+    def test_off_from_idle_holds_zero(self) -> None:
+        sm = EVStateMachine()  # starts IDLE
+        out = sm.step(make_inputs(charging_mode="off"))
+        assert out.state == EVState.OFF
+        assert out.target_power_w == 0
+
+    def test_off_from_solar_stops_despite_surplus(self) -> None:
+        # SOLAR, plenty of surplus and pre-computed power — OFF must still win.
+        sm = make_sm(EVState.SOLAR)
+        out = sm.step(make_inputs(charging_mode="off", ev_charging_power_w=5000.0))
+        assert out.state == EVState.OFF
+        assert out.target_power_w == 0
+
+    def test_off_from_immediate_clears_budget(self) -> None:
+        sm = EVStateMachine()
+        sm.step(budget_inputs())  # enter IMMEDIATE, snapshot budget
+        assert sm._budget_start_soc is not None
+        out = sm.step(budget_inputs(charging_mode="off"))
+        assert out.state == EVState.OFF
+        assert out.target_power_w == 0
+        assert sm._budget_start_soc is None  # budget cleared on entry to OFF
+
+    def test_off_is_sticky_under_surplus(self) -> None:
+        # Repeated ticks with surplus available never resume charging.
+        sm = make_sm(EVState.OFF)
+        for _ in range(3):
+            out = sm.step(make_inputs(charging_mode="off", ev_charging_power_w=5000.0))
+            assert out.state == EVState.OFF
+            assert out.target_power_w == 0
+
+    def test_off_honoured_when_wallbox_unavailable(self) -> None:
+        sm = make_sm(EVState.SOLAR)
+        out = sm.step(make_inputs(charging_mode="off", wallbox_available=False))
+        assert out.state == EVState.OFF
+        assert out.target_power_w == 0
+
+    def test_off_to_solar_resumes(self) -> None:
+        # X1: leaving OFF for solar drops to IDLE then picks up SOLAR this cycle.
+        sm = make_sm(EVState.OFF)
+        out = sm.step(make_inputs(charging_mode="solar", ev_charging_power_w=5000.0))
+        assert out.state == EVState.SOLAR
+        assert out.target_power_w == 5000.0
 
 
 if __name__ == "__main__":

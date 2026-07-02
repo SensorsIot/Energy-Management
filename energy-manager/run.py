@@ -1428,8 +1428,10 @@ class EnergyManager:
             # Read inputs for state machine
             ev_mode = self.ha_client.get_input_select(self.ev_charging_mode_entity)
 
-            # Guard: only solar/immediate/cheap are valid — no "off" state
-            if ev_mode not in ("solar", "immediate", "cheap"):
+            # Guard: only off/solar/immediate/cheap are valid. "off" is a real
+            # sticky hard-stop (handled in the state machine, FSD 4.3.4); any
+            # other value is reset to solar.
+            if ev_mode not in ("off", "solar", "immediate", "cheap"):
                 logger.warning(f"EV charging mode '{ev_mode}' is invalid, resetting to solar")
                 self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
                 ev_mode = "solar"

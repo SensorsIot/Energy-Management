@@ -1,6 +1,7 @@
-"""EV charging state machine — 4-state design.
+"""EV charging state machine — 5-state design.
 
 States:
+  0. OFF             — charging disabled by user (sticky; never auto-reverts)
   1. IDLE            — no EV charging, SUN2000 has full control
   2. SOLAR           — variable power from solar excess
   3. CHEAP           — max during cheap tariff, 0 during expensive
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 class EVState(StrEnum):
     """EV charging states (str so it works as an HA sensor value)."""
 
+    OFF = "off"
     IDLE = "idle"
     SOLAR = "solar"
     CHEAP = "cheap"
@@ -45,7 +47,7 @@ class EVInputs:
     wallbox_status: str               # for OCPP status logging only
     wallbox_idle: bool                 # wallbox idle >= timeout (car finished)
     battery_soc: float
-    charging_mode: str                # "solar" / "immediate" / "cheap"
+    charging_mode: str                # "off" / "solar" / "immediate" / "cheap"
     is_cheap_tariff: bool
     grid_power_w: float
     surplus_power_w: float             # solar surplus (PV - house load) (W)
@@ -94,6 +96,21 @@ class EVStateMachine:
 
     def step(self, inputs: EVInputs) -> EVOutput:
         """One cycle: evaluate transitions from current state, return output."""
+        # OFF override (X0/X1, FSD 4.3.5): a hard, user-set stop. While the mode
+        # is "off" the wallbox is held at 0 W from any state — ignoring surplus,
+        # tariff, and wallbox availability — and it is sticky: never auto-reverts
+        # to solar. On entry the manual-charge budget is cleared.
+        if inputs.charging_mode == "off":
+            if self.state != EVState.OFF:
+                self._clear_budget()
+                self._set_state(EVState.OFF)
+            return EVOutput(EVState.OFF, 0, "Charging off — disabled by user")
+
+        # Leaving OFF (user picked another mode): resume from IDLE and let the
+        # normal transitions pick up solar/cheap/immediate this cycle.
+        if self.state == EVState.OFF:
+            self._set_state(EVState.IDLE)
+
         handler = _DISPATCH[self.state]
         return handler(self, inputs)
 

@@ -1035,6 +1035,7 @@ The user selects one of three charging modes via the kitchen dashboard (Amazon F
 
 | Mode | `input_select` value | Dashboard Label | Description |
 |------|---------------------|----------------|-------------|
+| **Off** | `off` | Off | Charging disabled. No wallbox charging even when PV surplus is available. Sticky — never auto-reverts. |
 | **Solar** | `solar` | *(default — button-card greyed)* | Follow PV surplus only; safety-gated by 48-h SOC forecast |
 | **Immediate** | `immediate` | Charge Now | Charge at `manual_power_w` regardless of tariff or surplus |
 | **Cheap** | `cheap` | Cheap Charge | Charge at `manual_power_w` during cheap tariff, 0 W during expensive |
@@ -1044,7 +1045,7 @@ The user selects one of three charging modes via the kitchen dashboard (Amazon F
 - If `input_select.ev_charging_mode` already equals the pressed mode → revert to `solar` (Stop).
 - Otherwise → call `script.ev_start_manual_charge`, which clamps `input_number.ev_target_soc` against `sensor.smart_charging_max_last_known` and sets `input_select.ev_charging_mode` to the pressed mode.
 
-There is **no off mode** — solar is the resting state. The target-SOC slider lives on `lovelace-amazonfire/energy-manager` inside the **Car** card; a server-side automation (`clamp_ev_target_soc_to_car_max`) snaps the slider back if the user drags it above the car's reported max.
+**Off** is a distinct hard-stop mode: while `input_select.ev_charging_mode` is `off`, the state machine holds the wallbox at 0 W from any state, ignoring PV surplus and tariff, and gives the home battery full control (as in IDLE). It is **sticky** — unlike Immediate/Cheap, it never auto-reverts to `solar`; it stays `off` until the user selects another mode. `solar` remains the default resting state that charges automatically on surplus; `off` is the way to suppress that. The target-SOC slider lives on `lovelace-amazonfire/energy-manager` inside the **Car** card; a server-side automation (`clamp_ev_target_soc_to_car_max`) snaps the slider back if the user drags it above the car's reported max.
 
 **Target-already-met feedback:** if the user presses Charge Now / Cheap Charge while the car is already at/above `input_number.ev_target_soc`, the state machine bounces straight back to IDLE on entry (the SOC stop, Section 4.3.5) and the controller reverts the mode to `solar`. To avoid this looking like a no-op, that same-tick entry bounce raises a Home Assistant **persistent notification** (*"EV charge: target already reached — … Raise the EV target SOC to charge."*; fixed `notification_id`, so repeats replace). Reverts that follow an actual charge (budget/SOC reached after charging, idle timeout, unplug) do not notify.
 
@@ -1058,6 +1059,7 @@ The state machine routes the wallbox to the correct operating mode based on user
 
 | # | State | Description | Power output |
 |---|-------|-------------|--------------|
+| 0 | **OFF** | Charging disabled by user. SUN2000 has full control of the battery. Sticky (never auto-reverts). | `0` |
 | 1 | **IDLE** | No EV charging. SUN2000 has full control of the battery. | `0` |
 | 2 | **SOLAR** | Solar charging. Power from Section 4.3.6. | `ev_charging_power_w` |
 | 3 | **CHEAP** | Cheap-tariff charging at user-set power. Battery discharge blocked. | `manual_power_w` when cheap, `0` when expensive |
@@ -1068,6 +1070,15 @@ Initial state: **IDLE**
 #### Transitions
 
 The machine stays in its current state unless one of the listed conditions triggers a change. Conditions are evaluated in listed order — first match fires.
+
+**OFF override (highest priority, evaluated before all per-state transitions):**
+
+| # | Condition | → New State |
+|---|-----------|-------------|
+| X0 | `charging_mode == "off"` (from **any** state) | OFF (0 W; on entry the manual-charge budget is cleared) |
+| X1 | In OFF **and** `charging_mode != "off"` | IDLE (normal transitions then resume this cycle) |
+
+OFF is a hard, user-set stop: it is honoured from any state regardless of `wallbox_available`, surplus, or tariff, and it never triggers the `solar` auto-revert.
 
 **IDLE** — *Stays in IDLE unless:*
 
@@ -1130,7 +1141,7 @@ Freshness of `car_soc` (age of `sensor.smart_battery.last_updated`) is logged in
 
 **Fallback** — if `car_soc` is `None` at entry (smart-car API stale), the kWh budget is **not** enforced (no `start_soc` to anchor against). Charging stops only via the wallbox-idle path or the SOC stop once `car_soc` becomes available.
 
-**Auto-revert** — when CHEAP/IMMEDIATE → IDLE for any reason while `input_select.ev_charging_mode` is still `cheap`/`immediate`, `run.py` sets the mode back to `solar` so the dashboard reflects the stop.
+**Auto-revert** — when CHEAP/IMMEDIATE → IDLE for any reason while `input_select.ev_charging_mode` is still `cheap`/`immediate`, `run.py` sets the mode back to `solar` so the dashboard reflects the stop. **OFF is exempt** — it is a deliberate user choice, so it is never auto-reverted; it persists until the user picks another mode.
 
 #### Shared Concepts
 
@@ -2387,6 +2398,7 @@ Test file: `energy-manager/tests/test_ev_state_machine.py`
 | TestSolarTransitions | 3 | S2 (→ IMMEDIATE), S3 (→ CHEAP, cheap/expensive tariff) |
 | TestCheapTransitions | 2 | C2 (mode changed to solar/immediate) |
 | TestMaxTransitions | 2 | M2 (mode changed to solar/cheap) |
+| TestOffMode | 6 | X0 from IDLE/SOLAR/IMMEDIATE (→ OFF, 0 W, budget cleared); sticky under surplus; not auto-reverted; X1 OFF → solar resumes |
 
 ### CHEAP power toggle tests
 
@@ -2436,6 +2448,7 @@ cd energy-manager && python -m pytest tests/test_ev_state_machine.py -v
 | EV-14 | Mode change while charging | New mode takes effect within ~60 s (OCPP throttle) |
 | EV-15 | Battery safety gates charging | SOLAR mode: surplus above threshold but `check_ev_safe` fails → ev_charging_power_w=0, stays IDLE; dashboard `ev_safe=false` and `battery_min_soc_forecast_48h` below `battery_min_soc_floor` |
 | EV-16 | Battery full, low excess | SOLAR with 1-phase min_power_w — captures every watt |
+| EV-17 | Select `off` while solar-charging | Wallbox → 0 W, `sensor.ev_charge_status` = `off`; mode stays `off` (no revert to `solar`) even with surplus present |
 | EV-17 | Cheap tariff toggles | CHEAP state: charges at max during cheap, pauses during expensive, no state change |
 | EV-18 | Car reaches target SOC | Returns to IDLE from any charging state |
 
@@ -2941,6 +2954,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.80: **New OFF charging mode — a real user hard-stop (Section 4.3.4 / 4.3.5).** `input_select.ev_charging_mode` already offered an `off` option, but `run.py` treated any value other than `solar`/`immediate`/`cheap` as invalid and forced it back to `solar` on the next ~10 s cycle — so selecting `off` self-reverted (observed live 2026-07-02: `off` → `solar` in 0.5 s). `off` is now a first-class mode: a new `EVState.OFF` and a top-of-`step()` override hold the wallbox at 0 W from any state, ignoring surplus and tariff and giving the SUN2000 full battery control (as in IDLE). Unlike Immediate/Cheap it is **sticky** — never auto-reverted to `solar`; it persists until the user selects another mode (the auto-revert path is unchanged and still scoped to immediate/cheap). On entry to OFF the manual-charge budget is cleared. `run.py`'s mode-validity guard now accepts `off` (still resets genuinely-invalid values to `solar`). `sensor.ev_charge_status` publishes `off`. 6 new tests in `test_ev_state_machine.py` (`TestOffMode`). Note: `src/ev_goal_mode.py` remains dead code (the live path is `EVStateMachine`); not modified. (1.8.44 -> 1.8.45)
 
 - v2.79: **Test cases promoted from Appendix D to Chapter 6 (doc-only).** The test-case specs are a first-class part of the spec, not implementation trivia, so they now live in a numbered chapter (`Chapter 6: Test Cases`, placed after Chapter 5 and before the appendices) rather than an appendix. D.1–D.7 renumbered to 6.1–6.7 (subsections D.6.x/D.7.x → 6.6.x/6.7.x); appendices reserved for implementation-detail reference (config, Smart-car raw API). Updated the testing index (`Harness/project/testing.md`), `STRUCTURE.md`, `Harness/AI-Workflow.md`, and in-doc changelog pointers.
 
