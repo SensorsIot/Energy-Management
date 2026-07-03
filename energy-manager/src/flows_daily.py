@@ -22,13 +22,16 @@ logger = logging.getLogger(__name__)
 LONGTERM_BUCKET = "energy_longterm"
 
 # Cumulative energy counters in the HomeAssistant bucket (entity_id, unit-to-kWh divisor)
+# Grid uses the Huawei DTSU registers (accurate, full history). The DTSU sits
+# between the grid and the house subsystem, so import/export are the house-side
+# grid exchange EXCLUDING the wallbox branch; the car is reported separately.
 COUNTERS = {
     "car": ("wallbox_energy", 1000.0),          # Wh, resets per session
     "desk": ("shelly_2pm_white_switch_1_energy", 1.0),
     "bench": ("shelly_2pm_white_switch_0_energy", 1.0),
     "house": ("load_energy", 1.0),              # Shelly 3EM total (excl. car)
-    "import": ("grid_import_energy", 1.0),      # M-Bus based, whole site
-    "export": ("grid_export_energy", 1.0),
+    "import": ("power_meter_consumption", 1.0),  # DTSU import register
+    "export": ("power_meter_exported", 1.0),     # DTSU export register
 }
 # Daily-resetting production counters
 PRODUCTION = {"huawei": "inverter_daily_yield", "enphase": "enphase_energy_today"}
