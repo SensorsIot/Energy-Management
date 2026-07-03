@@ -1399,6 +1399,31 @@ The `soc_forecast` measurement uses a `scenario` tag to store three curves:
 | `battery_on` | The implication of free discharge on every deficit | Orange (dashed) |
 | `planned` | Whichever option the decision selects each cycle (what runs) | (internal — EV gate) |
 
+### 4.5.2a Daily Flows Summary (long-term reporting)
+
+**Measurement `flows_daily`, bucket `energy_longterm` (infinite retention)** — one point per day
+(timestamp = local midnight of the summarized day), written at 23:58 local. Owns the household
+energy flows and money; PV physics lives in swiss-solar-forecast's `pv_daily` (its FSD §8.1).
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `car_kwh` | kWh | Wallbox charging energy (OCPP counter, reset-safe delta) |
+| `lab_kwh` | kWh | Lab (Shelly 2PM Desk + Bench) |
+| `house_rest_kwh` | kWh | House (3EM) minus lab |
+| `house_kwh` | kWh | House total (3EM; excludes car) |
+| `import_kwh` / `export_kwh` | kWh | Grid exchange (M-Bus-based counters, whole site) |
+| `import_cost_chf` | CHF | Hourly import × HT/NT rate via the EBL calendar (§4.2.2 `expensive_mask`) |
+| `export_revenue_chf` | CHF | Export × feed-in rate |
+| `net_cost_chf` | CHF | Cost − revenue |
+| `production_kwh` | kWh | Total PV production (both inverters) |
+| `consumption_kwh` | kWh | production − export + import |
+| `autarky` | — | 1 − import/consumption |
+| `self_consumption` | — | (production − export)/production |
+
+Tariff rates are configuration (`reporting.import_ht_chf_kwh` 0.3202, `reporting.import_nt_chf_kwh`
+0.2434, `reporting.feed_in_chf_kwh` 0.09 — EBL 2026 incl. VAT; feed-in follows the quarterly
+reference market price and is updated in config when EBL statements change).
+
 ### 4.5.2 Forecast Snapshot for Accuracy Tracking
 
 The `soc_forecast_snapshot` measurement provides persistent forecast storage:
@@ -2617,6 +2642,14 @@ Integration tests verify cross-module behavior — interactions between EV charg
 | IT-E2E-02 | Cloudy day with cheap-mode EV | Low PV forecast, cheap mode at 21:30 | Discharge blocked, EV charges at max, battery holds | 🔮 Future — requires all mocks |
 
 **Legend:** ✅ Implemented and passing | 🔮 Future (prerequisite listed)
+
+## 6.7a Daily Flows Summary Tests
+
+| Case | Assertion | Test |
+|------|-----------|------|
+| Consumer split & balance | lab = desk+bench; rest = house − lab; consumption = production − export + import; autarky/self-consumption per §4.5.2a | `tests/test_flows_daily.py::test_consumers_and_balance` |
+| Tariff attribution | Hourly import costed by HT/NT mask, not a flat rate | `tests/test_flows_daily.py::test_tariff_attribution` |
+| Degraded input | Missing hourly data falls back to NT pricing | `tests/test_flows_daily.py::test_no_hourly_data_falls_back_to_nt` |
 
 ## 6.7 Passive Integration Observer Tests
 

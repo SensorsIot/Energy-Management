@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.8.44"
+__version__ = "1.9.0"
 
 import json
 import logging
@@ -33,6 +33,7 @@ from src.ev_charging import (
 )
 from src.influxdb_writer import SimulationWriter
 from src.integration_observer import CycleSnapshot, IntegrationObserver
+from src.flows_daily import FlowsDaily
 from src.notifications import init_telegram, notify_error
 from src.sanity import validate_power_readings
 
@@ -251,6 +252,19 @@ class EnergyManager:
             token=influx_token,
             org=influx_opts.get("org", "energymanagement"),
             bucket=self.output_bucket,
+        )
+
+        # Daily household flows summary (long-term reporting)
+        reporting_opts = options.get("reporting", {})
+        self.flows_daily = FlowsDaily(
+            influx_host=influx_opts.get("host", "192.168.0.203"),
+            influx_port=influx_opts.get("port", 8087),
+            influx_token=influx_token,
+            influx_org=influx_opts.get("org", "energymanagement"),
+            tariff=self.optimizer,
+            ht_chf_kwh=reporting_opts.get("import_ht_chf_kwh", 0.3202),
+            nt_chf_kwh=reporting_opts.get("import_nt_chf_kwh", 0.2434),
+            feed_in_chf_kwh=reporting_opts.get("feed_in_chf_kwh", 0.09),
         )
 
         # Initialize Telegram notifications
@@ -1945,6 +1959,13 @@ class EnergyManager:
         except Exception as e:
             logger.warning(f"Failed to check initial sensors: {e}")
 
+    def write_flows_daily(self) -> None:
+        """Write the daily household flows summary (long-term reporting)."""
+        try:
+            self.flows_daily.write_summary()
+        except Exception as e:
+            logger.error(f"Daily flows summary failed: {e}", exc_info=True)
+
     def start(self) -> None:
         """Start the scheduler."""
         logger.info(f"Starting scheduler (every {self.update_interval} minutes)")
@@ -1970,6 +1991,18 @@ class EnergyManager:
             minutes=self.update_interval,
             id="optimization",
             name="Battery Optimization",
+            max_instances=1,
+            coalesce=True,
+        )
+
+        # Daily household flows summary (23:58 local; long-term reporting)
+        from apscheduler.triggers.cron import CronTrigger
+
+        self.scheduler.add_job(
+            self.write_flows_daily,
+            CronTrigger.from_crontab("58 23 * * *", timezone="Europe/Zurich"),
+            id="flows_daily",
+            name="Daily flows summary",
             max_instances=1,
             coalesce=True,
         )
