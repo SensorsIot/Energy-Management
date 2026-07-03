@@ -1411,7 +1411,7 @@ energy flows and money; PV physics lives in swiss-solar-forecast's `pv_daily` (i
 | `lab_kwh` | kWh | Lab (Shelly 2PM Desk + Bench) |
 | `house_rest_kwh` | kWh | House (3EM) minus lab |
 | `house_kwh` | kWh | House total (3EM; excludes car) |
-| `import_kwh` / `export_kwh` | kWh | Grid exchange, Huawei DTSU registers (house-side, excludes the wallbox branch; car is a separate consumer) |
+| `import_kwh` / `export_kwh` | kWh | Whole-site grid exchange, integrated from the M-Bus power signal `grid_power` (includes the wallbox branch — matches what the utility meters) |
 | `import_cost_chf` | CHF | Hourly import × HT/NT rate via the EBL calendar (§4.2.2 `expensive_mask`) |
 | `export_revenue_chf` | CHF | Export × feed-in rate |
 | `net_cost_chf` | CHF | Cost − revenue |

@@ -22,17 +22,16 @@ logger = logging.getLogger(__name__)
 LONGTERM_BUCKET = "energy_longterm"
 
 # Cumulative energy counters in the HomeAssistant bucket (entity_id, unit-to-kWh divisor)
-# Grid uses the Huawei DTSU registers (accurate, full history). The DTSU sits
-# between the grid and the house subsystem, so import/export are the house-side
-# grid exchange EXCLUDING the wallbox branch; the car is reported separately.
 COUNTERS = {
     "car": ("wallbox_energy", 1000.0),          # Wh, resets per session
     "desk": ("shelly_2pm_white_switch_1_energy", 1.0),
     "bench": ("shelly_2pm_white_switch_0_energy", 1.0),
     "house": ("load_energy", 1.0),              # Shelly 3EM total (excl. car)
-    "import": ("power_meter_consumption", 1.0),  # DTSU import register
-    "export": ("power_meter_exported", 1.0),     # DTSU export register
 }
+# Grid import/export are integrated from the M-Bus power signal (`grid_power`,
+# positive = export) at the main connection — the WHOLE-SITE exchange including
+# the wallbox branch, so cost/autarky reflect what the utility actually meters.
+GRID_POWER_ENTITY = "grid_power"
 # Daily-resetting production counters
 PRODUCTION = {"huawei": "inverter_daily_yield", "enphase": "enphase_energy_today"}
 
@@ -148,6 +147,42 @@ class FlowsDaily:
             logger.error(f"Counter delta failed for {entity}: {exc}")
             return pd.Series(dtype=float)
 
+    def _grid_energy(self, start: datetime, stop: datetime,
+                     every: str = "1d") -> tuple[pd.Series, pd.Series]:
+        """Integrate the signed M-Bus power into import/export kWh per window.
+
+        `grid_power` positive = export. 1-min mean power summed over each window
+        gives W·min; /60000 → kWh. Returns (import_kwh, export_kwh) series.
+        """
+        s = start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        e = stop.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def integ(expr: str) -> pd.Series:
+            flux = f'''
+            from(bucket: "{self.ha_bucket}")
+              |> range(start: {s}, stop: {e})
+              |> filter(fn: (r) => r.entity_id == "{GRID_POWER_ENTITY}" and r._field == "value")
+              |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
+              |> map(fn: (r) => ({{r with _value: {expr}}}))
+              |> aggregateWindow(every: {every}, fn: sum, createEmpty: false)
+              |> map(fn: (r) => ({{r with _value: r._value / 60000.0}}))
+              |> keep(columns: ["_time", "_value"])
+            '''
+            try:
+                df = self._query(flux)
+                if df.empty:
+                    return pd.Series(dtype=float)
+                ser = df.set_index("_time")["_value"].astype(float)
+                ser.index = pd.DatetimeIndex(ser.index).tz_convert("UTC")
+                return ser
+            except Exception as exc:
+                logger.error(f"Grid integration failed: {exc}")
+                return pd.Series(dtype=float)
+
+        imp = integ("if r._value < 0.0 then r._value * -1.0 else 0.0")
+        exp = integ("if r._value > 0.0 then r._value else 0.0")
+        return imp, exp
+
     def _production_total(self, start: datetime, stop: datetime) -> float:
         total = 0.0
         s = start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -181,10 +216,12 @@ class FlowsDaily:
             ser = self._counter_delta(entity, day_start, day_end, every="1d")
             daily[name] = float(ser.sum()) / div if len(ser) else 0.0
 
-        hourly_import = (
-            self._counter_delta(COUNTERS["import"][0], day_start, day_end, every="1h")
-            / COUNTERS["import"][1]
-        )
+        # Whole-site grid import/export from the M-Bus power signal
+        imp_d, exp_d = self._grid_energy(day_start, day_end, every="1d")
+        daily["import"] = float(imp_d.sum()) if len(imp_d) else 0.0
+        daily["export"] = float(exp_d.sum()) if len(exp_d) else 0.0
+
+        hourly_import, _ = self._grid_energy(day_start, day_end, every="1h")
         # aggregateWindow stamps window END; tariff attribution uses window START
         if len(hourly_import):
             hourly_import.index = hourly_import.index - pd.Timedelta(hours=1)
