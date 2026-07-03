@@ -1419,6 +1419,7 @@ energy flows and money; PV physics lives in swiss-solar-forecast's `pv_daily` (i
 | `consumption_kwh` | kWh | metered load (house + car); grid-balance fallback if load meters missing |
 | `autarky` | — | 1 − import/consumption, where consumption = metered load (house + car); clamped 0–1 |
 | `battery_min_soc` | — | Daily minimum battery SOC (0–1); near the reserve floor = battery emptied → import → lower autarky |
+| `battery_max_soc` | — | Daily maximum battery SOC (0–1); short of full = battery never fully charged (weak-production day) |
 | `self_consumption` | — | (load − battery_discharge − import + battery_charge)/production (battery is PV-only charged); clamped 0–1 |
 
 Tariff rates are configuration (`reporting.import_ht_chf_kwh` 0.3202, `reporting.import_nt_chf_kwh`

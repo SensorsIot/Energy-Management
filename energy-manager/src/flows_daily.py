@@ -215,13 +215,14 @@ class FlowsDaily:
             logger.error(f"Counter max failed for {entity}: {exc}")
             return 0.0
 
-    def _min_soc_day(self, day_start: datetime, day_end: datetime) -> float | None:
-        """Daily minimum battery SOC, as a 0–1 fraction.
+    def _soc_range(
+        self, day_start: datetime, day_end: datetime
+    ) -> tuple[float | None, float | None]:
+        """Daily (min, max) battery SOC as 0–1 fractions.
 
-        The low can fall in the morning (battery drains until PV overtakes the
-        house load) or the evening; the daily minimum captures it whenever it
-        occurs. Near the reserve floor means the battery ran empty and the house
-        imported — the usual reason daily autarky isn't 100%.
+        Min near the reserve floor = battery ran empty → import → lower autarky.
+        Max short of full = battery never fully charged (weak-production day).
+        Together they show the battery's daily swing.
         """
         s = day_start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         e = day_end.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -229,14 +230,19 @@ class FlowsDaily:
         from(bucket: "{self.ha_bucket}")
           |> range(start: {s}, stop: {e})
           |> filter(fn: (r) => r.entity_id == "battery_state_of_capacity" and r._field == "value")
-          |> min()
+          |> reduce(fn: (r, accumulator) => ({{
+                mn: if r._value < accumulator.mn then r._value else accumulator.mn,
+                mx: if r._value > accumulator.mx then r._value else accumulator.mx
+             }}), identity: {{mn: 100.0, mx: 0.0}})
         '''
         try:
             df = self._query(flux)
-            return float(df["_value"].iloc[0]) / 100.0 if not df.empty else None
+            if df.empty:
+                return None, None
+            return float(df["mn"].iloc[0]) / 100.0, float(df["mx"].iloc[0]) / 100.0
         except Exception as exc:
-            logger.error(f"Min SOC fetch failed: {exc}")
-            return None
+            logger.error(f"SOC range fetch failed: {exc}")
+            return None, None
 
     def _production_total(self, start: datetime, stop: datetime) -> float:
         total = 0.0
@@ -298,9 +304,11 @@ class FlowsDaily:
             battery_charge_kwh=batt_charge, battery_discharge_kwh=batt_discharge,
         )
 
-        soc_min = self._min_soc_day(day_start, day_end)
+        soc_min, soc_max = self._soc_range(day_start, day_end)
         if soc_min is not None:
             fields["battery_min_soc"] = round(soc_min, 3)
+        if soc_max is not None:
+            fields["battery_max_soc"] = round(soc_max, 3)
 
         point = Point("flows_daily").time(day_start, WritePrecision.S)
         for k, v in fields.items():
