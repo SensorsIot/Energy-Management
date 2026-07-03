@@ -143,22 +143,27 @@ latest run is kept; older runs are deleted before each download.
 
 ## 6. PV system configuration
 
-The panel and plant geometry is defined in `/config/swiss-solar-forecast.yaml`:
+The panel and plant geometry is defined in `/config/swiss-solar-forecast.yaml`. Panel entries
+carry **manufacturer ground truth only** — nameplate STC power (`pdc0`, W) and the datasheet
+temperature coefficient (`gamma_pdc`, 1/K). Empirical corrections (soiling, shading, seasonal
+drift) belong exclusively to the shading-correction layer (§10) and are never folded into panel
+data. The installed modules with full datasheet values and sources are listed in
+[Appendix A](#appendix-a--installed-pv-modules-ground-truth).
 
 ```yaml
 panels:
-  - id: "AE445"
-    model: "AE Solar AC-455MH/144V (calibrated 445W)"
-    pdc0: 445
+  - id: "AXITEC455"
+    model: "AXITEC AC-455MH/144V (AXIpremium XL HC)"
+    pdc0: 455
     gamma_pdc: -0.0035
-  - id: "AE490"
-    model: "AE Solar AC-455MH/144V (calibrated 490W)"
-    pdc0: 490
-    gamma_pdc: -0.0035
-  - id: "Generic425"
-    model: "Generic 400W (calibrated 425W)"
-    pdc0: 425
-    gamma_pdc: -0.0035
+  - id: "LONGI350"
+    model: "LONGi LR4-60HPB-350M (Hi-MO 4m)"
+    pdc0: 350
+    gamma_pdc: -0.0037
+  - id: "MB385"
+    model: "Meyer Burger White 385 (HJT)"
+    pdc0: 385
+    gamma_pdc: -0.0026
 
 plants:
   - name: "House"
@@ -168,19 +173,27 @@ plants:
       altitude: 330
       timezone: "Europe/Zurich"
     inverters:
-      - name: "EastWest"
+      - name: "EastWest"        # Huawei 10 kW hybrid; per-string DC on PV1 (East) / PV2 (West)
         max_power: 10000
         efficiency: 0.98
         strings:
-          - { name: "East", azimuth: 103.3, tilt: 15, panel: "AE445", count: 8 }
-          - { name: "West", azimuth: 283.3, tilt: 15, panel: "AE490", count: 9 }
-      - name: "South"
-        max_power: 1500
+          - { name: "East", azimuth: 103.3, tilt: 15, panel: "AXITEC455", count: 8 }
+          - { name: "West", azimuth: 283.3, tilt: 15, panel: "AXITEC455", count: 9 }
+      - name: "South"           # Enphase microinverters, one per panel, 300 W AC each
+        max_power: 1500         # 5 micros × 300 W
         efficiency: 0.98
         strings:
-          - { name: "SouthFront", azimuth: 193.3, tilt: 70, panel: "Generic425", count: 3 }
-          - { name: "SouthBack",  azimuth: 193.3, tilt: 60, panel: "Generic425", count: 2 }
+          - { name: "SouthFront",  azimuth: 193.3, tilt: 70, panel: "LONGI350", count: 3 }
+          - { name: "SouthBack",   azimuth: 193.3, tilt: 30, panel: "LONGI350", count: 1 }
+          - { name: "SouthBackMB", azimuth: 193.3, tilt: 30, panel: "MB385",    count: 1 }
 ```
+
+The two SouthBack panels sit on an adjustable mount; `tilt` reflects the current setting and is
+updated in the config when the mount is changed.
+
+**Target — per-panel AC clipping:** each Enphase microinverter clips its panel at 300 W AC. The
+model clips at inverter level only (`max_power`), which understates clipping when one panel would
+exceed 300 W while others are below. Check: `grep -n "max_power" swiss-solar-forecast/src/pv_model.py`.
 
 ## 7. Configuration
 
@@ -333,7 +346,7 @@ outliers.
 |--------|---------|------|---------|
 | East | 103.3° | 15° | Shaded in the morning (buildings to the east), clears by midday |
 | West | 283.3° | 15° | Clear in the morning, may shade in late afternoon |
-| South | 193.3° | 60°/70° | Least shading (high tilt catches midday sun) |
+| South | 193.3° | 70° (front) / 30° (back, adjustable) | Back pair shaded in the morning **and** evening; the pattern shifts with season |
 
 ### 10.7 InfluxDB storage
 
@@ -408,8 +421,48 @@ Operator dashboard queries are OPERATE — see [`Handbook.md` → Dashboards & q
 Test approach and invocation are HOW — see [`Harness/project/modules/swiss-solar-forecast.md`](../../Harness/project/modules/swiss-solar-forecast.md)
 and the testing hub [`Harness/project/testing.md`](../../Harness/project/testing.md).
 
+## Appendix A — Installed PV modules (ground truth)
+
+Reference data for the panel definitions in §6. All electrical values are manufacturer datasheet
+values (sources below) — never calibration results.
+
+**Site:** Lausen BL — 47.4751° N, 7.7673° E, 330 m altitude.
+**Totals:** 9.52 kWp DC; AC ceiling 10 kW (Huawei) + 1.5 kW (Enphase).
+
+| | East | West | SouthFront | SouthBack | SouthBack |
+|---|---|---|---|---|---|
+| Module | AXITEC AC-455MH/144V | AXITEC AC-455MH/144V | LONGi LR4-60HPB-350M | LONGi LR4-60HPB-350M | Meyer Burger White 385 |
+| Series | AXIpremium XL HC | AXIpremium XL HC | Hi-MO 4m (Black) | Hi-MO 4m (Black) | White (HJT) |
+| Count | 8 | 9 | 3 | 1 | 1 |
+| Nameplate | 455 Wp | 455 Wp | 350 Wp | 350 Wp | 385 Wp |
+| String DC | 3640 W | 4095 W | 1050 W | 350 W | 385 W |
+| Cell type | 144 half-cut mono PERC | 144 half-cut mono PERC | 120 half-cut mono PERC | 120 half-cut mono PERC | 120 half-cut HJT, SmartWire |
+| γ Pmax | −0.35 %/K | −0.35 %/K | −0.37 %/K | −0.37 %/K | −0.259 %/K |
+| NOCT/NMOT | 45 °C | 45 °C | 45 °C | 45 °C | 44 °C |
+| STC Vmp / Imp | 41.61 V / 10.94 A | 41.61 V / 10.94 A | 33.3 V / 10.52 A | 33.3 V / 10.52 A | 37.6 V / 10.3 A |
+| STC Voc / Isc | 50.34 V / 11.54 A | 50.34 V / 11.54 A | 40.5 V / 11.02 A | 40.5 V / 11.02 A | 44.5 V / 10.9 A |
+| Efficiency | 20.9 % | 20.9 % | 18.7 % | 18.7 % | 20.9 % |
+| Tolerance | 0/+5 Wp | 0/+5 Wp | 0/+5 W | 0/+5 W | −0/+5 W |
+| Azimuth | 103.3° | 283.3° | 193.3° | 193.3° | 193.3° |
+| Tilt | 15° | 15° | 70° | 30° (adjustable) | 30° (adjustable) |
+| Inverter | Huawei 10 kW, string PV1 | Huawei 10 kW, string PV2 | Enphase micro ×3, 300 W each | Enphase micro, 300 W | Enphase micro, 300 W |
+| Actual-power sensor | `sensor.inverter_pv_1_power` (DC) | `sensor.inverter_pv_2_power` (DC) | `sensor.enphase_power` (AC, all 5 panels combined) | ← | ← |
+
+Label note: "PV-R03C" printed on a module label is a junction-box component code, not a module
+model. The Meyer Burger label reading "R White 385 M2" is "Meyer Burger® White 385", build
+revision M2.
+
+**Datasheet sources:**
+
+- AXITEC AC-455MH/144V: `DB_144zlg_mono XL_HC_MiA_EN_1500V_0.pdf` —
+  <https://web.archive.org/web/20220726125928/https://www.axitecsolar.com/sites/default/files/solar_modules_pdf/DB_144zlg_mono%20XL_HC_MiA_EN_1500V_0.pdf>
+- LONGi LR4-60HPB 345~365M (V10): <https://midsummerwholesale.co.uk/pdfs/longi-345-360w-datasheet.pdf>
+- Meyer Burger White (380–400 Wp): <https://www.meyerburger.com/fileadmin/user_upload/PDFs/Produktdatenblaetter/EN/DS_Meyer_Burger_White_en.pdf>
+
 ## Changelog
 
+- 2026-07-03: §6 panel definitions replaced with datasheet ground truth (AXITEC / LONGi /
+  Meyer Burger, corrected tilts); calibration values removed from panel data; Appendix A added.
 - 2026-06-29: FSD made self-contained — folded the full SwissSolarForecast spec (ICON/STAC pipeline,
   PV config, output schema, calculation pipeline, shading correction) in from the combined
   combined system FSD (since split into per-add-on FSDs).
