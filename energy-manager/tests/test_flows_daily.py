@@ -12,7 +12,7 @@ def _hourly(values, start="2026-07-04 06:00"):
     return pd.Series(values, index=idx)
 
 
-def test_consumers_and_balance():
+def test_consumers_and_metered_consumption():
     f = compute_flows(
         daily_kwh={"car": 13.7, "desk": 10.0, "bench": 0.5, "house": 13.5,
                    "import": 5.0, "export": 40.0},
@@ -24,10 +24,29 @@ def test_consumers_and_balance():
     assert f["car_kwh"] == 13.7
     assert f["lab_kwh"] == 10.5
     assert f["house_rest_kwh"] == 3.0
-    assert f["consumption_kwh"] == 62.0 - 40.0 + 5.0
-    assert f["autarky"] == round(1 - 5.0 / 27.0, 3)
-    assert f["self_consumption"] == round(22.0 / 62.0, 3)
+    # consumption is metered load (house + car), not the grid balance
+    assert f["consumption_kwh"] == round(13.5 + 13.7, 3)
+    assert f["autarky"] == round(1 - 5.0 / 27.2, 3)
     assert f["export_revenue_chf"] == round(40.0 * FEED, 3)
+
+
+def test_ratios_clamped_on_bad_export():
+    # Regression for 2026-05-18: a spurious export reading exceeding production
+    # must NOT drive autarky/self-consumption negative.
+    f = compute_flows(
+        daily_kwh={"car": 29.0, "house": 12.0, "import": 18.07, "export": 30.61},
+        hourly_import_kwh=pd.Series(dtype=float),
+        expensive_mask=pd.Series(dtype=bool),
+        production_kwh=24.91,
+        ht_chf_kwh=HT, nt_chf_kwh=NT, feed_in_chf_kwh=FEED,
+        battery_charge_kwh=6.2, battery_discharge_kwh=7.7,
+    )
+    assert f["consumption_kwh"] == 41.0
+    assert 0.0 <= f["autarky"] <= 1.0
+    assert f["autarky"] == round(1 - 18.07 / 41.0, 3)      # ~0.56
+    assert 0.0 <= f["self_consumption"] <= 1.0
+    # self_pv = 41 - 7.7 - 18.07 + 6.2 = 21.43 → 21.43/24.91
+    assert f["self_consumption"] == round(21.43 / 24.91, 3)  # ~0.86
 
 
 def test_tariff_attribution():

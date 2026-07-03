@@ -1416,9 +1416,9 @@ energy flows and money; PV physics lives in swiss-solar-forecast's `pv_daily` (i
 | `export_revenue_chf` | CHF | Export × feed-in rate |
 | `net_cost_chf` | CHF | Cost − revenue |
 | `production_kwh` | kWh | Total PV production (both inverters) |
-| `consumption_kwh` | kWh | production − export + import |
-| `autarky` | — | 1 − import/consumption |
-| `self_consumption` | — | (production − export)/production |
+| `consumption_kwh` | kWh | metered load (house + car); grid-balance fallback if load meters missing |
+| `autarky` | — | 1 − import/consumption, where consumption = metered load (house + car); clamped 0–1 |
+| `self_consumption` | — | (load − battery_discharge − import + battery_charge)/production (battery is PV-only charged); clamped 0–1 |
 
 Tariff rates are configuration (`reporting.import_ht_chf_kwh` 0.3202, `reporting.import_nt_chf_kwh`
 0.2434, `reporting.feed_in_chf_kwh` 0.09 — EBL 2026 incl. VAT; feed-in follows the quarterly

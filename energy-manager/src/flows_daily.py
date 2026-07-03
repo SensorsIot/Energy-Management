@@ -44,10 +44,14 @@ def compute_flows(
     ht_chf_kwh: float,
     nt_chf_kwh: float,
     feed_in_chf_kwh: float,
+    battery_charge_kwh: float = 0.0,
+    battery_discharge_kwh: float = 0.0,
 ) -> dict:
     """Pure computation of the flows_daily fields (unit-testable).
 
     hourly_import_kwh and expensive_mask share a (UTC) hourly index.
+    battery_charge_kwh/battery_discharge_kwh are the day's counters (used for a
+    battery-aware, grid-independent self-consumption).
     """
     car = daily_kwh.get("car", 0.0)
     lab = daily_kwh.get("desk", 0.0) + daily_kwh.get("bench", 0.0)
@@ -75,13 +79,24 @@ def compute_flows(
     fields["export_revenue_chf"] = round(exp * feed_in_chf_kwh, 3)
     fields["net_cost_chf"] = round(fields["import_cost_chf"] - fields["export_revenue_chf"], 3)
 
-    # Energy balance at the grid point
-    consumption = production_kwh - exp + imp
+    # Consumption is the directly-metered load (house + car), NOT the grid
+    # balance P - E + I: the latter breaks on battery-cycling days and when a
+    # grid reading is bad (e.g. a spurious export spike), which can push the
+    # ratios out of [0, 1]. Fall back to the balance only if the load meters
+    # are missing.
+    load = house + car
+    consumption = load if load > 0 else max(0.0, production_kwh - exp + imp)
     fields["consumption_kwh"] = round(consumption, 3)
     if consumption > 0:
-        fields["autarky"] = round(1.0 - imp / consumption, 3)
+        fields["autarky"] = round(max(0.0, min(1.0, 1.0 - imp / consumption)), 3)
     if production_kwh > 0:
-        fields["self_consumption"] = round((production_kwh - exp) / production_kwh, 3)
+        # Self-consumed PV = PV that served the load or charged the battery.
+        # The battery is PV-only charged, so with metered load and the battery
+        # counters this is exact and immune to a bad export reading:
+        #   self_pv = load - battery_discharge - import + battery_charge
+        self_pv = load - battery_discharge_kwh - imp + battery_charge_kwh
+        self_pv = max(0.0, min(production_kwh, self_pv))
+        fields["self_consumption"] = round(self_pv / production_kwh, 3)
 
     return fields
 
@@ -183,6 +198,23 @@ class FlowsDaily:
         exp = integ("if r._value > 0.0 then r._value else 0.0")
         return imp, exp
 
+    def _counter_max(self, entity: str, start: datetime, stop: datetime) -> float:
+        """Day total of a midnight-resetting counter = its max over the day."""
+        s = start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        e = stop.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        flux = f'''
+        from(bucket: "{self.ha_bucket}")
+          |> range(start: {s}, stop: {e})
+          |> filter(fn: (r) => r.entity_id == "{entity}" and r._field == "value")
+          |> max()
+        '''
+        try:
+            df = self._query(flux)
+            return float(df["_value"].iloc[0]) if not df.empty else 0.0
+        except Exception as exc:
+            logger.error(f"Counter max failed for {entity}: {exc}")
+            return 0.0
+
     def _production_total(self, start: datetime, stop: datetime) -> float:
         total = 0.0
         s = start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -230,6 +262,9 @@ class FlowsDaily:
             if len(hourly_import) else pd.Series(dtype=bool)
         )
 
+        batt_charge = self._counter_max("battery_day_charge", day_start, day_end)
+        batt_discharge = self._counter_max("battery_day_discharge", day_start, day_end)
+
         ht, nt, feed_in = self.rates
         fields = compute_flows(
             daily_kwh=daily,
@@ -237,6 +272,7 @@ class FlowsDaily:
             expensive_mask=mask,
             production_kwh=self._production_total(day_start, day_end),
             ht_chf_kwh=ht, nt_chf_kwh=nt, feed_in_chf_kwh=feed_in,
+            battery_charge_kwh=batt_charge, battery_discharge_kwh=batt_discharge,
         )
 
         point = Point("flows_daily").time(day_start, WritePrecision.S)
