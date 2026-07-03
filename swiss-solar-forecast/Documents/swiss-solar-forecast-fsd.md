@@ -83,8 +83,10 @@ three steps:
    interval end lags the diurnal ramp by half an interval (under-forecasts mornings,
    over-forecasts evenings).
 
-GHI is then `ASOB_S_interval / (1 − albedo)` with ground albedo 0.2. The MeteoSwiss local point
-forecast (`gre000h0`, hourly means stamped at hour end) receives the same midpoint shift.
+GHI is then `ASOB_S_interval / (1 − albedo)` with ground albedo 0.13 — ICON's effective surface
+albedo at this grid cell, set so that clear-day derived GHI integrates to the Ineichen clear-sky
+level. The MeteoSwiss local point forecast (`gre000h0`, hourly means stamped at hour end) receives
+the same midpoint shift.
 
 **Model selection:** today's forecast uses ICON-CH1-EPS (higher resolution, sufficient horizon);
 tomorrow's uses ICON-CH2-EPS (longer horizon). In hybrid mode, CH1 covers hours 0–33 and CH2 covers
@@ -436,7 +438,7 @@ and the testing hub [`Harness/project/testing.md`](../../Harness/project/testing
 | De-accumulation | Running time-mean series → exact per-interval means | `test_radiation.py::test_deaccumulate_recovers_interval_means` |
 | Anchor semantics | First element of a de-accumulated series is an anchor, dropped by callers (h0 and mid-run starts) | `test_radiation.py::test_deaccumulate_first_element_is_anchor_only`, `::test_midpoints_drop_anchor_and_shift_half_interval` |
 | No diurnal lag | Interval means stamped at midpoints reproduce a linear ramp exactly (regression: morning under-forecast) | `test_radiation.py::test_midpoints_no_morning_lag` |
-| Albedo compensation | GHI = ASOB_S / (1 − 0.2); compensation raises, never lowers | `test_radiation.py::test_ground_albedo_compensation_factor` |
+| Albedo compensation | GHI = ASOB_S / (1 − albedo), albedo 0.13; compensation raises, never lowers | `test_radiation.py::test_ground_albedo_compensation_factor` |
 
 **Test cases (calibration, §10):**
 

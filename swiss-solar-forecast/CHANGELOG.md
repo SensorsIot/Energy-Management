@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.1] - 2026-07-03
+
+### Fixed
+- Ground albedo for ASOB_S→GHI compensation corrected 0.2 → 0.13 (ICON's
+  effective surface albedo at this grid cell). With 0.2, clear-day GHI
+  integrated to 8.7% above the Ineichen clear-sky ceiling, making cloudless
+  forecasts ~9% optimistic (71 kWh vs a ~65 kWh physical ceiling).
+
 ## [1.5.0] - 2026-07-03
 
 ### Added

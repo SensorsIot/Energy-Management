@@ -485,7 +485,10 @@ def load_local_forecast(
 
 # ICON's ASOB_S is NET shortwave at the surface (downward minus ground-reflected),
 # i.e. GHI * (1 - albedo). Dividing by (1 - ALBEDO) recovers the true GHI.
-GROUND_ALBEDO = 0.2
+# 0.13 is ICON's effective surface albedo at this grid cell, derived from
+# clear-day evidence: derived GHI must integrate to the Ineichen clear-sky
+# level (actual production matches that reference to <1%).
+GROUND_ALBEDO = 0.13
 
 
 def deaccumulate_avg(values: np.ndarray, hours: np.ndarray) -> np.ndarray:
