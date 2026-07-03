@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.6.0] - 2026-07-03
+
+### Added
+- Daily long-term summary (FSD §8.1): one `pv_daily` point per day written at
+  23:55 local to the infinite-retention `energy_longterm` bucket — production
+  per inverter, specific yield, peak power, clear-sky performance ratio,
+  sunny-interval PR, calibration gains, clipping hours, forecast P50 + bias.
+  `src/longterm.py` + `test_longterm.py`.
+
 ## [1.5.1] - 2026-07-03
 
 ### Fixed

@@ -40,6 +40,7 @@ from src.local_fetcher import LocalFetcher
 from src.config import PVSystemConfig
 from src.accuracy_tracker import AccuracyTracker, create_accuracy_tracker
 from src.calibration import CalibrationTracker, create_calibration_tracker
+from src.longterm import DailySummary
 from src.data_integrity import weather_run_complete
 
 
@@ -95,6 +96,7 @@ class SwissSolarForecast:
         self.scheduler: ForecastScheduler | None = None
         self.accuracy_tracker: AccuracyTracker | None = None
         self.calibration_tracker: CalibrationTracker | None = None
+        self.daily_summary: DailySummary | None = None
 
     def _get_ha_value(self, entity_id: str) -> float | None:
         """Fetch numeric value from Home Assistant entity."""
@@ -145,6 +147,9 @@ class SwissSolarForecast:
         )
         self.calibration_tracker.connect()
         logger.info("Calibration tracker initialized")
+        self.daily_summary = DailySummary(
+            self.calibration_tracker, total_dc_wp=self.pv_config.get_total_dc_power()
+        )
 
     def init_scheduler(self) -> None:
         """Initialize scheduler with callbacks."""
@@ -167,6 +172,7 @@ class SwissSolarForecast:
             snapshot=self.snapshot_forecast if self.accuracy_tracker else None,
             evaluate=self.evaluate_forecast if self.accuracy_tracker else None,
             calibration_update=self.update_calibration if self.calibration_tracker else None,
+            daily_summary=self.write_daily_summary if self.daily_summary else None,
         )
 
         # Add local point forecast job (hourly, parallel to GRIB pipeline)
@@ -423,6 +429,15 @@ class SwissSolarForecast:
                     logger.warning(f"Forecast evaluation returned no data (model={model})")
             except Exception as e:
                 logger.error(f"Forecast evaluation failed (model={model}): {e}", exc_info=True)
+
+    def write_daily_summary(self) -> None:
+        """Write the pv_daily long-term summary point (FSD §8.1, 23:55 local)."""
+        if not self.daily_summary:
+            return
+        try:
+            self.daily_summary.write_summary()
+        except Exception as e:
+            logger.error(f"Daily summary failed: {e}", exc_info=True)
 
     def update_calibration(self) -> None:
         """Run the daily calibration learning cycle (FSD §10).

@@ -279,7 +279,30 @@ forecast (see §1, Input). Values are fetched from the Supervisor REST API
 **Fields (`inverter="EastWest"` or `"South"`):** `power_w_p10` / `power_w_p50` / `power_w_p90`.
 
 Companion measurements in the same bucket: `pv_forecast_snapshot` (frozen forecast for accuracy
-comparison), `pv_accuracy` (accuracy metrics), `shading_observations` (see §10).
+comparison), `pv_accuracy` (accuracy metrics), `calibration_observations` (see §10).
+
+### 8.1 Daily long-term summary
+
+**Measurement `pv_daily`, bucket `energy_longterm` (infinite retention)** — one point per day
+(timestamp = local midnight of the summarized day), written at 23:55 local. This is the add-on's
+long-term reporting contract (PV physics and health only; household energy flows are out of scope —
+they belong to the Home Assistant energy statistics).
+
+| Field | Unit | Description |
+|-------|------|-------------|
+| `production_huawei_kwh` | kWh | Huawei daily yield (roof, East+West) |
+| `production_enphase_kwh` | kWh | Enphase daily yield (balcony) |
+| `production_total_kwh` | kWh | Sum |
+| `specific_yield_kwh_kwp` | kWh/kWp | Total ÷ installed DC (from §6 config) |
+| `peak_power_w` | W | Max 15-min mean total AC power |
+| `clearsky_potential_kwh` | kWh | Same-day clear-sky ceiling (§10.2 reference) |
+| `performance_ratio` | — | production_total ÷ clearsky_potential (weather-mixed) |
+| `pr_sunny` | — | Median calibration ratio of the day's sunny intervals (weather-free; absent if no sunny intervals) |
+| `gain_east` / `gain_west` / `gain_south` | — | Current calibration gains (§10.5) |
+| `clipping_hours_south` | h | Hours Enphase AC ≥ 96 % of its 1.5 kW cap |
+| `clipping_hours_huawei` | h | Hours Huawei AC ≥ 96 % of its 10 kW cap |
+| `forecast_p50_kwh` | kWh | This day's P50 from the previous evening's 21:00 snapshot (absent if no snapshot) |
+| `forecast_bias` | — | production_total ÷ forecast_p50_kwh (absent if no snapshot) |
 
 ## 9. Calculation pipeline
 
@@ -399,7 +422,8 @@ South strings.
 | ICON-CH2 fetch | Cron (4× daily, after model runs) |
 | Forecast calculation | Every 15 minutes |
 | Accuracy tracking | Optional scheduled evaluation |
-| Shading update | Daily (21:15) |
+| Calibration learning | Daily (21:15) |
+| Daily long-term summary (§8.1) | Daily (23:55 local) |
 
 Each calculation: load latest GRIB → parse variables at the grid point → run the PV model per
 string/inverter → aggregate per-inverter and total → write to `pv_forecast` → optionally update

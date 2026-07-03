@@ -63,6 +63,7 @@ class ForecastScheduler:
         self.snapshot_callback: Callable | None = None
         self.evaluate_callback: Callable | None = None
         self.calibration_update_callback: Callable | None = None
+        self.daily_summary_callback: Callable | None = None
 
         # Status tracking
         self.last_fetch_ch1: datetime | None = None
@@ -79,6 +80,7 @@ class ForecastScheduler:
         snapshot: Callable | None = None,
         evaluate: Callable | None = None,
         calibration_update: Callable | None = None,
+        daily_summary: Callable | None = None,
     ) -> None:
         """Set callback functions for scheduled tasks."""
         self.fetch_ch1_callback = fetch_ch1
@@ -87,6 +89,7 @@ class ForecastScheduler:
         self.snapshot_callback = snapshot
         self.evaluate_callback = evaluate
         self.calibration_update_callback = calibration_update
+        self.daily_summary_callback = daily_summary
 
     def _fetch_ch1_job(self) -> None:
         """Job wrapper for CH1 fetch."""
@@ -159,6 +162,16 @@ class ForecastScheduler:
         except Exception as e:
             logger.error(f"Forecast evaluation failed: {e}", exc_info=True)
 
+    def _daily_summary_job(self) -> None:
+        """Job wrapper for the daily long-term summary (23:55 local)."""
+        logger.info("Scheduled daily summary starting...")
+        try:
+            if self.daily_summary_callback:
+                self.daily_summary_callback()
+                logger.info("Daily summary completed")
+        except Exception as e:
+            logger.error(f"Daily summary failed: {e}", exc_info=True)
+
     def setup_jobs(self) -> None:
         """Configure scheduled jobs."""
         # CH1 fetch job
@@ -218,6 +231,19 @@ class ForecastScheduler:
                 CronTrigger.from_crontab("15 21 * * *", timezone=self.local_timezone),
                 id="accuracy_evaluate",
                 name="Evaluate forecast accuracy",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
+
+        # Daily long-term summary: 23:55 LOCAL (after the PV day is fully over)
+        if self.daily_summary_callback:
+            logger.info(f"Setting up daily summary: 23:55 {self.local_timezone} daily")
+            self.scheduler.add_job(
+                self._daily_summary_job,
+                CronTrigger.from_crontab("55 23 * * *", timezone=self.local_timezone),
+                id="daily_summary",
+                name="Write daily long-term summary",
                 replace_existing=True,
                 max_instances=1,
                 coalesce=True,
