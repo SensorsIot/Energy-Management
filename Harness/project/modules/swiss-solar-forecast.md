@@ -40,7 +40,7 @@ Primary modules:
 | `src/pv_model.py` | pvlib-based PV power modeling |
 | `src/influxdb_writer.py` | Forecast writes |
 | `src/config.py` | PV system configuration loader |
-| `src/shading_tracker.py` | Shading observation/factor handling |
+| `src/calibration.py` | Calibration tracker: shade map, eff curve, gain (FSD §10) |
 | `src/accuracy_tracker.py` | Forecast accuracy tracking |
 | `src/notifications.py` | Optional Telegram notifications |
 

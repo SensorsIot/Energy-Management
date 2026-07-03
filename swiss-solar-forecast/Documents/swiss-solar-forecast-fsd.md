@@ -298,104 +298,96 @@ For each ensemble member (11 for CH1, 21 for CH2):
 Stack members → array [members × time_steps] → percentiles P10 / P50 / P90
 ```
 
-## 10. Shading correction
+## 10. Calibration — corrections separated from physics
 
-### 10.1 Problem
+### 10.1 Correction model
 
-Each PV string (East, West, South) is physically shaded by buildings, trees, and roof edges at
-certain sun positions. The pvlib model assumes an unobstructed sky, so a per-hour, per-string
-shading factor corrects for the actual obstructions. Shading depends on sun position (elevation +
-azimuth), which changes with hour and season: factors calibrated in winter do not apply in summer,
-when the sun is higher and shadows fall differently.
-
-### 10.2 Architecture
+The forecast is pure physics (MeteoSwiss weather × ground-truth panel data, §6/§9) multiplied by
+three learned corrections, each owned by a distinct physical cause with a distinct signature:
 
 ```
-Layer 1: CLEAR-SKY REFERENCE (astronomy, no weather dependency)
-  pvlib.clearsky.ineichen → theoretical GHI → PV model (no shading) → clearsky_power_w per string/hour
-Layer 2: SUNNY HOUR DETECTION (per hour)
-  actual_ghi / clearsky_ghi > 0.85 → hour usable for calibration
-Layer 3: SHADING FACTOR
-  on sunny hours: shading_factor = actual_power_w / clearsky_power_w  (< 1.0 means shading)
+forecast[string] = physics[string] × shade[string](sun_az, sun_el) × eff[string](P/P_rated) × gain[string]
 ```
 
-Clear-sky GHI is pure astronomy (no forecast involved), so sunny-hour detection and shading
-calculation are independent of forecast quality.
+| Effect | Nature | Correction |
+|--------|--------|-----------|
+| Clouds | random | **never calibrated** — expressed by the ICON ensemble (P10/P50/P90) |
+| Infrastructure shading | fixed function of sun position | `shade` — static map over (azimuth, elevation) bins |
+| Model/efficiency deviation | constant in time, varies with power level | `eff` — curve over power-fraction bins |
+| Soiling / snow | slow in time, broadband, resets on cleaning | `gain` — per-string scalar, EWMA |
 
-### 10.3 Clear-sky reference
+Every correction is neutral (1.0) until observations justify it: with no data the system degrades
+gracefully to pure physics. Weather-model error must never be absorbed into a correction — a
+systematic sunny-day deviation indicates a physics/config defect to fix at the source.
 
-`pvlib.clearsky.ineichen()` computes the theoretical maximum GHI for the installation
-(47.475°N, 7.767°E, 330 m). The same pipeline (GHI decomposition → POA → PVWatts DC → inverter
-efficiency) is run with clear-sky input and **no** shading factors, yielding `clearsky_power_w` per
-string. This reference depends only on sun position and atmospheric clarity (Linke turbidity) — not
-on forecasts, history, or current shading factors.
+### 10.2 Observations (daily, 21:15)
 
-### 10.4 Sunny-hour detection
+For each 15-minute interval of the past day:
 
-```
-ghi_ratio = actual_ghi / clearsky_ghi
-sunny = ghi_ratio > 0.85
-```
+1. **Clear-sky reference** — `pvlib.clearsky.ineichen()` GHI for the site, run through the same
+   physics pipeline with **all corrections neutral**, yields `clearsky_power_w` per string (DC for
+   East/West, AC for South). Pure astronomy + Linke turbidity; independent of forecasts.
+2. **Actuals** — East: `inverter_pv_1_power` (DC), West: `inverter_pv_2_power` (DC), South:
+   `enphase_power` (AC, whole inverter — the five panels share one sensor, so South is learned at
+   inverter level and applied to its strings uniformly).
+3. **Sunny gate** — an interval is usable when the whole-system ratio
+   `actual_total / clearsky_total` exceeds 0.75 **and** is locally smooth (rolling 3-interval
+   standard deviation of the ratio < 0.05). Clouds fail smoothness; fixed shading does not.
+   Per-interval gating lets partly-cloudy days contribute their clear intervals.
+4. **Observation** — per string: `ratio = actual / clearsky_power` clamped to [0.1, 1.3], recorded
+   with solar azimuth/elevation at the interval midpoint and the power fraction
+   `clearsky_power / rated_power`. Intervals where the string is clipping (inverter at
+   `max_power`) are excluded from `eff`/`gain` learning.
 
-A per-hour decision (a partly cloudy day still contributes sunny hours at noon). Actual GHI comes
-from a HomeAssistant sensor or is derived from actual PV production. The 0.85 threshold tolerates
-haze and thin cirrus while excluding significant cloud cover.
+### 10.3 Shade map (infrastructure shading)
 
-### 10.5 Shading factor
+- Bins: 10° solar azimuth × 5° solar elevation, per string.
+- `shade_raw[bin]` = median observation ratio per bin over a 90-day window, minimum 5 observations.
+- Normalization: `shade[bin] = min(1.0, shade_raw[bin] / reference_level)` where `reference_level`
+  is the 90th percentile of all populated bins for that string — the unshaded level, so `shade`
+  carries geometry only and `eff`/`gain` carry the rest.
+- Unpopulated bins are neutral (1.0). The map converges once the sun has swept a bin on any clear
+  day and then stays — the same sun position casts the same infrastructure shadow year-round.
 
-```
-shading_factor[string][hour] = actual_power_w / clearsky_power_w
-```
+### 10.4 Efficiency curve (model deviation)
 
-| Factor | Meaning |
-|--------|---------|
-| 1.00 | No shading — full sky |
-| 0.80 | 20% lost to physical shading |
-| 0.50 | Heavy shading — half the sky blocked |
+- Bins: power fraction `P/P_rated` in 10 equal bins, per string.
+- `eff[bin]` = median observation ratio per bin (unshaded bins only: `shade ≥ 0.98`), minimum 20
+  observations, normalized to 1.0 at the 40–60 % reference band.
+- Captures what the datasheet model misses: inverter low-load efficiency, low-light panel
+  behaviour, nameplate tolerance. Time-invariant by construction (long-horizon median).
 
-Factors are aggregated over the last 10 sunny observations per slot using the median to reject
-outliers.
+### 10.5 Gain (soiling)
 
-### 10.6 Strings
+- `gain[string]` = exponentially weighted moving average (7-day time constant) of the daily median
+  observation ratio in the reference regime (unshaded bins, power fraction 0.3–0.8), divided by the
+  learned `eff` at that band.
+- A drop below 0.93 raises a notification (panels likely need cleaning); a step recovery after
+  cleaning is expected and requires no intervention.
+
+### 10.6 Application
+
+`pv_model` applies corrections per string and timestep during forecast calculation: `shade` looked
+up from the solar position already computed for the transposition, `eff` from the string's
+instantaneous power fraction, `gain` as a scalar. South-inverter calibration applies to all three
+South strings.
+
+### 10.7 Storage
+
+- **`calibration_observations`** (bucket `pv_forecast`): tags `string`, `snapshot_id`; fields
+  `ratio`, `sun_azimuth`, `sun_elevation`, `power_fraction`, `clearsky_power_w`, `actual_power_w`,
+  `is_clipping`.
+- **`calibration.yaml`** (add-on data dir): the current `shade` map, `eff` curve, and `gain` per
+  string — a cache so forecasts keep their corrections when InfluxDB is unreachable; rebuilt after
+  each daily learning cycle.
+
+### 10.8 Site shading patterns (reference)
 
 | String | Azimuth | Tilt | Pattern |
 |--------|---------|------|---------|
 | East | 103.3° | 15° | Shaded in the morning (buildings to the east), clears by midday |
 | West | 283.3° | 15° | Clear in the morning, may shade in late afternoon |
-| South | 193.3° | 70° (front) / 30° (back, adjustable) | Back pair shaded in the morning **and** evening; the pattern shifts with season |
-
-### 10.7 InfluxDB storage
-
-**Measurement:** `shading_observations` (bucket `pv_forecast`).
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `string` | tag | East / West / South |
-| `date` | tag | YYYY-MM-DD |
-| `hour` | int | Local hour (0–23) |
-| `clearsky_ghi` | float | Theoretical clear-sky GHI (W/m²) |
-| `actual_ghi` | float | Measured GHI (W/m²) |
-| `ghi_ratio` | float | actual_ghi / clearsky_ghi |
-| `clearsky_power_w` | float | PV model output with clear-sky, no shading |
-| `actual_power_w` | float | Actual string production (W) |
-| `shading_factor` | float | actual_power / clearsky_power |
-| `sun_elevation` | float | Solar elevation angle (°) |
-| `sun_azimuth` | float | Solar azimuth angle (°) |
-| `is_sunny` | bool | ghi_ratio > 0.85 |
-
-### 10.8 Application and seasonal update
-
-The forecast pipeline applies factors after the clear-sky power is computed:
-
-```
-forecasted_power = pvlib_model_output × shading_factor[string][hour]
-```
-
-Factors are loaded from `shading_factors.yaml`, refreshed after each evaluation cycle (21:15 daily);
-the YAML serves as a cache when InfluxDB is unavailable. A rolling 90-day window of recent sunny
-observations (weighted toward recent) tracks the seasonal change in sun elevation. Stored
-observations support retrospective analysis: per-string shading profiles, seasonal drift, model
-quality (forecast-with-shading vs actual), and validation of the 0.85 sunny threshold.
+| South | 193.3° | 70° (front) / 30° (back, adjustable) | Back pair shaded in the morning **and** evening; mutual row-shading of the back pair by the front row at low sun is part of the same fixed geometry |
 
 ## 11. Runtime behavior
 
@@ -445,6 +437,16 @@ and the testing hub [`Harness/project/testing.md`](../../Harness/project/testing
 | Anchor semantics | First element of a de-accumulated series is an anchor, dropped by callers (h0 and mid-run starts) | `test_radiation.py::test_deaccumulate_first_element_is_anchor_only`, `::test_midpoints_drop_anchor_and_shift_half_interval` |
 | No diurnal lag | Interval means stamped at midpoints reproduce a linear ramp exactly (regression: morning under-forecast) | `test_radiation.py::test_midpoints_no_morning_lag` |
 | Albedo compensation | GHI = ASOB_S / (1 − 0.2); compensation raises, never lowers | `test_radiation.py::test_ground_albedo_compensation_factor` |
+
+**Test cases (calibration, §10):**
+
+| Case | Assertion | Test |
+|------|-----------|------|
+| Shade normalization | Unshaded bins → 1.0 (model deviation goes to eff/gain, not shade); a blocked bin carries pure geometry | `test_calibration.py::test_shade_map_normalized_to_unshaded_level` |
+| Minimum evidence | Bins below the observation minimum stay neutral | `test_calibration.py::test_shade_map_requires_min_observations` |
+| Gain EWMA | Converges toward the sustained daily ratio with the 7-day time constant | `test_calibration.py::test_gain_tracks_daily_ratio` |
+| Clipping exclusion | Clipped observations never disturb eff/gain | `test_calibration.py::test_clipping_excluded_from_eff_and_gain` |
+| Application | shade×eff×gain applied per timestep by sun position and power fraction; neutral calibration is the identity | `test_calibration.py::test_apply_calibration_*`, `::test_neutral_calibration_is_identity` |
 
 ## Appendix A — Installed PV modules (ground truth)
 

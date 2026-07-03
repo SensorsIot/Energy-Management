@@ -39,7 +39,7 @@ from src.pv_model import forecast_ensemble_plants, forecast_all_plants
 from src.local_fetcher import LocalFetcher
 from src.config import PVSystemConfig
 from src.accuracy_tracker import AccuracyTracker, create_accuracy_tracker
-from src.shading_tracker import ShadingTracker, create_shading_tracker
+from src.calibration import CalibrationTracker, create_calibration_tracker
 from src.data_integrity import weather_run_complete
 
 
@@ -94,7 +94,7 @@ class SwissSolarForecast:
         self.influx_writer: ForecastWriter | None = None
         self.scheduler: ForecastScheduler | None = None
         self.accuracy_tracker: AccuracyTracker | None = None
-        self.shading_tracker: ShadingTracker | None = None
+        self.calibration_tracker: CalibrationTracker | None = None
 
     def _get_ha_value(self, entity_id: str) -> float | None:
         """Fetch numeric value from Home Assistant entity."""
@@ -138,11 +138,13 @@ class SwissSolarForecast:
         self.accuracy_tracker.connect()
         logger.info("Accuracy tracker initialized")
 
-    def init_shading_tracker(self) -> None:
-        """Initialize shading correction tracker."""
-        self.shading_tracker = create_shading_tracker(self.options)
-        self.shading_tracker.connect()
-        logger.info("Shading tracker initialized")
+    def init_calibration_tracker(self) -> None:
+        """Initialize the calibration tracker (FSD §10)."""
+        self.calibration_tracker = create_calibration_tracker(
+            self.options, self.pv_config.plants, self.data_dir
+        )
+        self.calibration_tracker.connect()
+        logger.info("Calibration tracker initialized")
 
     def init_scheduler(self) -> None:
         """Initialize scheduler with callbacks."""
@@ -164,7 +166,7 @@ class SwissSolarForecast:
             calculate=self.calculate_forecast,
             snapshot=self.snapshot_forecast if self.accuracy_tracker else None,
             evaluate=self.evaluate_forecast if self.accuracy_tracker else None,
-            shading_update=self.update_shading_factors if self.shading_tracker else None,
+            calibration_update=self.update_calibration if self.calibration_tracker else None,
         )
 
         # Add local point forecast job (hourly, parallel to GRIB pipeline)
@@ -247,18 +249,18 @@ class SwissSolarForecast:
 
             logger.info(f"Loaded {len(ensemble_weather)} ensemble members")
 
-            # Load shading factors if available
-            shading_factors = None
-            if self.shading_tracker:
-                shading_factors = self.shading_tracker.load_shading_factors()
-                if shading_factors:
-                    logger.info(f"Applying shading correction for: {list(shading_factors.keys())}")
+            # Load learned corrections if available (FSD §10)
+            calibration = None
+            if self.calibration_tracker:
+                calibration = self.calibration_tracker.load_calibration() or None
+                if calibration:
+                    logger.info(f"Applying calibration for: {list(calibration.keys())}")
 
             # Calculate PV forecast using configured plants
             pv_forecast = forecast_ensemble_plants(
                 ensemble_weather,
                 plants=self.pv_config.plants,
-                shading_factors=shading_factors,
+                calibration=calibration,
             )
             logger.info(f"Generated PV forecast with {len(pv_forecast)} time steps")
 
@@ -327,16 +329,16 @@ class SwissSolarForecast:
                 logger.warning("No local forecast data available")
                 return
 
-            # Load shading factors if available
-            shading_factors = None
-            if self.shading_tracker:
-                shading_factors = self.shading_tracker.load_shading_factors()
+            # Load learned corrections if available (FSD §10)
+            calibration = None
+            if self.calibration_tracker:
+                calibration = self.calibration_tracker.load_calibration() or None
 
             # Single deterministic forecast through same PV model
             pv_forecast = forecast_all_plants(
                 weather,
                 plants=self.pv_config.plants,
-                shading_factors=shading_factors,
+                calibration=calibration,
             )
             logger.info(f"Local PV forecast: {len(pv_forecast)} time steps")
 
@@ -422,30 +424,23 @@ class SwissSolarForecast:
             except Exception as e:
                 logger.error(f"Forecast evaluation failed (model={model}): {e}", exc_info=True)
 
-    def update_shading_factors(self) -> None:
-        """Update shading factors from recent accuracy data."""
-        if not self.shading_tracker:
+    def update_calibration(self) -> None:
+        """Run the daily calibration learning cycle (FSD §10).
+
+        Observe today's clear intervals against the clear-sky reference and
+        rebuild the correction maps.
+        """
+        if not self.calibration_tracker:
             return
 
-        logger.info("Updating shading factors...")
+        logger.info("Running calibration learning cycle...")
         try:
-            # Get yesterday's snapshot_id
-            from datetime import timedelta
-            from zoneinfo import ZoneInfo
-
-            local_tz = ZoneInfo(self.timezone)
-            yesterday = datetime.now(local_tz) - timedelta(days=1)
-            snapshot_id = yesterday.strftime("%Y-%m-%d")
-
-            # Process accuracy data and store shading observations
-            if self.shading_tracker.process_accuracy_data(snapshot_id):
-                # Update the YAML with recalculated factors
-                self.shading_tracker.update_shading_yaml()
-                logger.info("Shading factors updated")
+            if self.calibration_tracker.learn_daily():
+                logger.info("Calibration updated")
             else:
-                logger.info("No shading update (not a sunny day)")
+                logger.info("No calibration update (no usable observations)")
         except Exception as e:
-            logger.error(f"Shading factors update failed: {e}", exc_info=True)
+            logger.error(f"Calibration update failed: {e}", exc_info=True)
 
     def start(self) -> None:
         """Start the add-on."""
@@ -454,7 +449,7 @@ class SwissSolarForecast:
         # Initialize components
         self.init_influxdb()
         self.init_accuracy_tracker()  # Must be before scheduler
-        self.init_shading_tracker()   # Must be before scheduler
+        self.init_calibration_tracker()  # Must be before scheduler
         self.init_scheduler()
 
         # Start scheduler
@@ -502,8 +497,8 @@ class SwissSolarForecast:
         if self.accuracy_tracker:
             self.accuracy_tracker.close()
 
-        if self.shading_tracker:
-            self.shading_tracker.close()
+        if self.calibration_tracker:
+            self.calibration_tracker.close()
 
         if self.influx_writer:
             self.influx_writer.close()

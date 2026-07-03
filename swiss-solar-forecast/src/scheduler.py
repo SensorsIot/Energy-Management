@@ -62,7 +62,7 @@ class ForecastScheduler:
         self.calculate_callback: Callable | None = None
         self.snapshot_callback: Callable | None = None
         self.evaluate_callback: Callable | None = None
-        self.shading_update_callback: Callable | None = None
+        self.calibration_update_callback: Callable | None = None
 
         # Status tracking
         self.last_fetch_ch1: datetime | None = None
@@ -78,7 +78,7 @@ class ForecastScheduler:
         calculate: Callable,
         snapshot: Callable | None = None,
         evaluate: Callable | None = None,
-        shading_update: Callable | None = None,
+        calibration_update: Callable | None = None,
     ) -> None:
         """Set callback functions for scheduled tasks."""
         self.fetch_ch1_callback = fetch_ch1
@@ -86,7 +86,7 @@ class ForecastScheduler:
         self.calculate_callback = calculate
         self.snapshot_callback = snapshot
         self.evaluate_callback = evaluate
-        self.shading_update_callback = shading_update
+        self.calibration_update_callback = calibration_update
 
     def _fetch_ch1_job(self) -> None:
         """Job wrapper for CH1 fetch."""
@@ -149,11 +149,11 @@ class ForecastScheduler:
                 self.last_evaluation = datetime.now()
                 logger.info("Forecast evaluation completed")
 
-                # Update shading factors after evaluation
-                if self.shading_update_callback:
-                    logger.info("Updating shading factors...")
-                    self.shading_update_callback()
-                    logger.info("Shading factors update completed")
+                # Run calibration learning after evaluation
+                if self.calibration_update_callback:
+                    logger.info("Running calibration learning...")
+                    self.calibration_update_callback()
+                    logger.info("Calibration learning completed")
             else:
                 logger.warning("No evaluate callback registered")
         except Exception as e:

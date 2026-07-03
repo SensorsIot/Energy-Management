@@ -11,8 +11,36 @@ import pandas as pd
 import numpy as np
 import logging
 
+from src.calibration import eff_bin_index, shade_bin_key
 
 logger = logging.getLogger(__name__)
+
+
+def apply_calibration(
+    dc_power: np.ndarray,
+    azimuth: np.ndarray,
+    elevation: np.ndarray,
+    dc_rated: float,
+    cal: dict,
+) -> np.ndarray:
+    """Apply learned corrections to a string's DC power (FSD §10.6).
+
+    corrected = dc × shade(sun position) × eff(power fraction) × gain
+    Missing map entries are neutral (1.0).
+    """
+    shade_map = cal.get("shade") or {}
+    eff = cal.get("eff") or []
+    gain = float(cal.get("gain", 1.0))
+
+    out = np.asarray(dc_power, dtype=float).copy()
+    for i in range(len(out)):
+        factor = gain
+        if shade_map and elevation[i] > 0:
+            factor *= shade_map.get(shade_bin_key(azimuth[i], elevation[i]), 1.0)
+        if eff and dc_rated > 0:
+            factor *= eff[eff_bin_index(out[i] / dc_rated)]
+        out[i] *= factor
+    return out
 
 
 def align_weather_index(weather: pd.DataFrame, target_tz) -> pd.DataFrame:
@@ -31,7 +59,7 @@ def forecast_string_dc_power(
     longitude: float,
     altitude: float,
     timezone: str,
-    shading_factors: dict | None = None,
+    calibration: dict | None = None,
 ) -> pd.Series:
     """Calculate DC power forecast for a single string."""
     tilt = string["tilt"]
@@ -112,26 +140,27 @@ def forecast_string_dc_power(
         temp_ref=25,
     )
 
-    result = pd.Series(np.asarray(dc_power), index=times, name=string["name"])
+    dc_values = np.asarray(dc_power)
 
-    # Apply shading correction if provided
-    if shading_factors:
-        string_name = string["name"]
-        if string_name in shading_factors:
-            hourly_factors = shading_factors[string_name]
-            for idx in result.index:
-                local_hour = idx.hour  # Already in local timezone
-                factor = hourly_factors.get(local_hour, 1.0)
-                result[idx] = result[idx] * factor
-            logger.debug(f"Applied shading correction to {string_name}")
+    # Apply learned corrections if provided (FSD §10)
+    cal = (calibration or {}).get(string["name"])
+    if cal:
+        dc_values = apply_calibration(
+            dc_values,
+            np.asarray(solar_pos["azimuth"]),
+            np.asarray(solar_pos["elevation"]),
+            dc_power_stc,
+            cal,
+        )
+        logger.debug(f"Applied calibration to {string['name']}")
 
-    return result
+    return pd.Series(dc_values, index=times, name=string["name"])
 
 
 def forecast_inverter_power(
     weather: pd.DataFrame,
     inverter: dict,
-    shading_factors: dict | None = None,
+    calibration: dict | None = None,
 ) -> pd.DataFrame:
     """Calculate power forecast for an inverter and all its strings.
 
@@ -151,7 +180,7 @@ def forecast_inverter_power(
 
     # Calculate DC power for each string
     for string in inverter["strings"]:
-        dc_power = forecast_string_dc_power(weather, string, lat, lon, alt, tz, shading_factors)
+        dc_power = forecast_string_dc_power(weather, string, lat, lon, alt, tz, calibration)
         results[f"{string['name']}_dc"] = dc_power
 
     # Get index from first result
@@ -173,7 +202,7 @@ def forecast_inverter_power(
 def forecast_plant_power(
     weather: pd.DataFrame,
     plant: dict,
-    shading_factors: dict | None = None,
+    calibration: dict | None = None,
 ) -> pd.DataFrame:
     """Calculate power forecast for a plant and all its inverters."""
     loc = plant["location"]
@@ -191,7 +220,7 @@ def forecast_plant_power(
         }
 
         logger.info(f"Calculating forecast for inverter: {inverter['name']}")
-        inv_result = forecast_inverter_power(weather, inv_with_loc, shading_factors)
+        inv_result = forecast_inverter_power(weather, inv_with_loc, calibration)
 
         # Store inverter AC power
         results[f"{inverter['name']}_ac_power"] = inv_result["ac_power"]
@@ -212,14 +241,14 @@ def forecast_plant_power(
 def forecast_all_plants(
     weather: pd.DataFrame,
     plants: list[dict],
-    shading_factors: dict | None = None,
+    calibration: dict | None = None,
 ) -> pd.DataFrame:
     """Calculate power forecast for all plants.
 
     Args:
         weather: Weather DataFrame with ghi, temp_air, wind_speed
         plants: List of plant dicts from PVSystemConfig.plants
-        shading_factors: Optional dict mapping string name -> hour -> factor.
+        calibration: Optional per-string corrections (shade/eff/gain, FSD §10).
 
     Returns:
         DataFrame with power forecast for all plants
@@ -230,7 +259,7 @@ def forecast_all_plants(
 
     for plant in plants:
         logger.info(f"Calculating forecast for plant: {plant['name']}")
-        plant_result = forecast_plant_power(weather, plant, shading_factors)
+        plant_result = forecast_plant_power(weather, plant, calibration)
 
         # Prefix columns with plant name if multiple plants
         if len(plants) > 1:
@@ -264,14 +293,14 @@ def forecast_all_plants(
 def forecast_ensemble_plants(
     ensemble_weather: dict[int, pd.DataFrame],
     plants: list[dict],
-    shading_factors: dict | None = None,
+    calibration: dict | None = None,
 ) -> pd.DataFrame:
     """Calculate power forecast with uncertainty bands using ensemble weather data.
 
     Args:
         ensemble_weather: Dict mapping member number to weather DataFrame
         plants: List of plant dicts from PVSystemConfig.plants
-        shading_factors: Optional dict mapping string name -> hour -> factor.
+        calibration: Optional per-string corrections (shade/eff/gain, FSD §10).
 
     Returns:
         DataFrame with P10, P50, P90 columns for total AC power,
@@ -285,7 +314,7 @@ def forecast_ensemble_plants(
     member_forecasts = {}
     for member, weather in ensemble_weather.items():
         try:
-            forecast = forecast_all_plants(weather, plants=plants, shading_factors=shading_factors)
+            forecast = forecast_all_plants(weather, plants=plants, calibration=calibration)
             member_forecasts[member] = forecast
         except Exception as e:
             logger.warning(f"Failed to calculate forecast for member {member}: {e}")

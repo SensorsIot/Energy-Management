@@ -1,5 +1,0 @@
-shading_correction:
-  description: Per-string, per-hour shading factors (FSD §10). Neutral (no factors)
-    until relearned by the shading tracker from sunny-day observations with
-    ground-truth panel data.
-  factors: {}

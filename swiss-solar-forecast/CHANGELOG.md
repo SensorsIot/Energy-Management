@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.5.0] - 2026-07-03
+
+### Added
+- Calibration model (FSD §10): forecast = physics × shade × eff × gain
+  - shade per string over sun-position bins — fixed infrastructure shading as a
+    static map (10°×5° bins, median, min 5 obs, normalized to the unshaded
+    level) — season-proof by construction
+  - eff per string over power-fraction bins — time-invariant model/efficiency
+    deviation curve (10 bins, min 20 obs, normalized at the 40–60% band)
+  - gain per string — soiling/snow EWMA (7-day time constant) with a
+    below-0.93 cleaning notification
+  - Learning compares actuals against a clear-sky physics reference (pvlib
+    Ineichen) — independent of forecast quality; clouds are never calibrated
+  - Per-interval sunny gate: system ratio > 0.75 AND rolling smoothness;
+    clipping intervals excluded from eff/gain
+  - `src/calibration.py` + `test_calibration.py`; cache `calibration.yaml`
+    lives in the data dir (persists across image rebuilds)
+
+### Removed
+- Hour-keyed shading factors (`src/shading_tracker.py`, `shading_factors.yaml`)
+  — replaced by the sun-position calibration model
+
 ## [1.4.0] - 2026-07-03
 
 ### Fixed
