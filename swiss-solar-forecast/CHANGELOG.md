@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.4.0] - 2026-07-03
+
+### Fixed
+- ICON radiation handling (root cause of ~2× clear-sky morning under-forecast):
+  - `ASOB_S` net shortwave is now albedo-compensated (÷0.8) to true GHI
+  - De-accumulated interval means are stamped at interval midpoints (was: interval
+    end, lagging the diurnal ramp by 30 min — low mornings, high evenings)
+  - The de-accumulation anchor point is dropped (was: written as a zero-power
+    point at every run reference time, and a garbage since-run-start average at
+    the CH2 h33 series start)
+- MeteoSwiss local point forecast hourly means shifted to interval midpoints
+
+### Changed
+- Panel definitions replaced with manufacturer datasheet ground truth
+  (AXITEC AC-455MH/144V ×17, LONGi LR4-60HPB-350M ×4, Meyer Burger White 385 ×1;
+  corrected tilts incl. SouthBack 30°; per-module gamma) — FSD Appendix A
+- Calibration separated from panel data: hardcoded default shading factors
+  removed (neutral until relearned from sunny-day observations); inverter
+  efficiency set to datasheet-plausible values (0.98 Huawei / 0.97 Enphase)
+
+### Added
+- `test_radiation.py` — regression tests for de-accumulation, anchor drop,
+  midpoint stamping, and albedo compensation (FSD §16)
+
 ## [1.2.4] - 2026-02-09
 
 ### Added

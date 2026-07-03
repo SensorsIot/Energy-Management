@@ -19,21 +19,9 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-# Default shading factors (baseline from April 30, 2025 analysis)
-DEFAULT_SHADING_FACTORS = {
-    "East": {
-        6: 0.20, 7: 0.25, 8: 0.55, 9: 0.60, 10: 0.65, 11: 0.67,
-        12: 0.72, 13: 0.78, 14: 0.83, 15: 0.86, 16: 0.85, 17: 0.90, 18: 0.95
-    },
-    "West": {
-        6: 0.65, 7: 0.75, 8: 0.82, 9: 0.89, 10: 0.95, 11: 0.93,
-        12: 0.92, 13: 0.90, 14: 0.88, 15: 0.84, 16: 0.78, 17: 0.70, 18: 0.62
-    },
-    "South": {
-        6: 0.45, 7: 0.45, 8: 0.60, 9: 0.70, 10: 0.90, 11: 0.93,
-        12: 0.92, 13: 0.94, 14: 0.92, 15: 0.96, 16: 1.00, 17: 1.00, 18: 1.00
-    },
-}
+# Neutral default: shading factors are LEARNED from shading_observations
+# (FSD §10) — calibration values are never hardcoded here.
+DEFAULT_SHADING_FACTORS: dict[str, dict[int, float]] = {}
 
 # Minimum weather factor to consider a day "sunny"
 SUNNY_THRESHOLD = 0.90

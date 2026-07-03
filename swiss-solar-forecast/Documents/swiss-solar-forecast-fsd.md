@@ -68,8 +68,23 @@ Runtime cadence is in §11; the per-member calculation is in §9.
 
 | Variable | ICON name | Description | Unit |
 |----------|-----------|-------------|------|
-| GHI | `ASOB_S` | Net shortwave radiation at surface | W/m² |
+| Net shortwave | `ASOB_S` | Net shortwave radiation at surface (running time-mean) | W/m² |
 | Temperature | `T_2M` | Air temperature at 2 m height | K |
+
+**Radiation processing.** ICON radiation fields are running time-means since forecast start and
+`ASOB_S` is *net* shortwave (downward minus ground-reflected). The parser recovers usable GHI in
+three steps:
+
+1. **De-accumulate** the running mean to per-interval means:
+   `interval(h) = avg(h)·h − avg(h_prev)·h_prev`.
+2. **Drop the accumulation anchor** (the series' first point — zero at h0, a since-run-start
+   average when a series starts mid-run, e.g. CH2 at h33).
+3. **Stamp each interval mean at the interval midpoint** — an interval mean stamped at the
+   interval end lags the diurnal ramp by half an interval (under-forecasts mornings,
+   over-forecasts evenings).
+
+GHI is then `ASOB_S_interval / (1 − albedo)` with ground albedo 0.2. The MeteoSwiss local point
+forecast (`gre000h0`, hourly means stamped at hour end) receives the same midpoint shift.
 
 **Model selection:** today's forecast uses ICON-CH1-EPS (higher resolution, sufficient horizon);
 tomorrow's uses ICON-CH2-EPS (longer horizon). In hybrid mode, CH1 covers hours 0–33 and CH2 covers
@@ -268,7 +283,8 @@ comparison), `pv_accuracy` (accuracy metrics), `shading_observations` (see §10)
 
 ```
 For each ensemble member (11 for CH1, 21 for CH2):
-├─► Extract GHI, Temperature at PV location
+├─► Extract ASOB_S, Temperature at PV location
+├─► De-accumulate → interval means at midpoints, albedo-compensate → GHI (§4)
 ├─► Decompose GHI → DNI + DHI (Erbs model)
 ├─► For each string:
 │   ├─► Solar position (lat/lon/time)
@@ -420,6 +436,15 @@ Operator dashboard queries are OPERATE — see [`Handbook.md` → Dashboards & q
 
 Test approach and invocation are HOW — see [`Harness/project/modules/swiss-solar-forecast.md`](../../Harness/project/modules/swiss-solar-forecast.md)
 and the testing hub [`Harness/project/testing.md`](../../Harness/project/testing.md).
+
+**Test cases (radiation processing, §4):**
+
+| Case | Assertion | Test |
+|------|-----------|------|
+| De-accumulation | Running time-mean series → exact per-interval means | `test_radiation.py::test_deaccumulate_recovers_interval_means` |
+| Anchor semantics | First element of a de-accumulated series is an anchor, dropped by callers (h0 and mid-run starts) | `test_radiation.py::test_deaccumulate_first_element_is_anchor_only`, `::test_midpoints_drop_anchor_and_shift_half_interval` |
+| No diurnal lag | Interval means stamped at midpoints reproduce a linear ramp exactly (regression: morning under-forecast) | `test_radiation.py::test_midpoints_no_morning_lag` |
+| Albedo compensation | GHI = ASOB_S / (1 − 0.2); compensation raises, never lowers | `test_radiation.py::test_ground_albedo_compensation_factor` |
 
 ## Appendix A — Installed PV modules (ground truth)
 

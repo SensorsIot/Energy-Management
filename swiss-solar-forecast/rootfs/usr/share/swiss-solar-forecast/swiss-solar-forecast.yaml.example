@@ -21,51 +21,63 @@ location:
   altitude: 330
   timezone: "Europe/Zurich"
 
-# Panel definitions
+# Panel definitions — manufacturer datasheet ground truth ONLY (nameplate pdc0,
+# datasheet gamma). Corrections (soiling, shading, drift) belong to the shading
+# layer, never here. Datasheet sources: Documents/swiss-solar-forecast-fsd.md App. A.
 panels:
-  - id: "AE455"
-    model: "AE Solar AC-455MH/144V"
+  - id: "AXITEC455"
+    model: "AXITEC AC-455MH/144V (AXIpremium XL HC)"
     pdc0: 455
     gamma_pdc: -0.0035
 
-  - id: "Generic400"
-    model: "Generic 400W"
-    pdc0: 400
-    gamma_pdc: -0.0035
+  - id: "LONGI350"
+    model: "LONGi LR4-60HPB-350M (Hi-MO 4m)"
+    pdc0: 350
+    gamma_pdc: -0.0037
+
+  - id: "MB385"
+    model: "Meyer Burger White 385 (HJT)"
+    pdc0: 385
+    gamma_pdc: -0.00259
 
 # Plant definitions with inverters and strings
 plants:
   - name: "House"
     inverters:
-      - name: "EastWest"
+      - name: "EastWest"        # Huawei 10 kW hybrid; East on PV1, West on PV2
         max_power: 10000
-        efficiency: 0.95
+        efficiency: 0.98
         strings:
           - name: "East"
             azimuth: 103.3
             tilt: 15
-            panel: "AE455"
+            panel: "AXITEC455"
             count: 8
           - name: "West"
             azimuth: 283.3
             tilt: 15
-            panel: "AE455"
+            panel: "AXITEC455"
             count: 9
 
-      - name: "South"
-        max_power: 1500
-        efficiency: 0.96
+      - name: "South"           # Enphase microinverters, one per panel, 300 W AC each
+        max_power: 1500         # 5 micros x 300 W
+        efficiency: 0.97
         strings:
           - name: "SouthFront"
             azimuth: 193.3
             tilt: 70
-            panel: "Generic400"
+            panel: "LONGI350"
             count: 3
-          - name: "SouthBack"
+          - name: "SouthBack"   # adjustable mount — tilt reflects the current setting
             azimuth: 193.3
-            tilt: 60
-            panel: "Generic400"
-            count: 2
+            tilt: 30
+            panel: "LONGI350"
+            count: 1
+          - name: "SouthBackMB" # adjustable mount — tilt reflects the current setting
+            azimuth: 193.3
+            tilt: 30
+            panel: "MB385"
+            count: 1
 
 # Schedule settings (cron in UTC)
 schedule:

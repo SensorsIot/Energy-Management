@@ -1,46 +1,5 @@
 shading_correction:
-  description: Shading factors by hour (local time). Calibrated from sunny hours
-    Mar 13-20 2026 using clear-sky reference with calibrated panel params
-    (E:445W, W:490W, S:425W, eff 0.98).
-  last_updated: '2026-03-20T16:00:00+01:00'
-  num_sunny_days: 4
-  factors:
-    East:
-      7: 1.00
-      8: 1.00
-      9: 1.00
-      10: 1.00
-      11: 0.81
-      12: 0.84
-      13: 0.88
-      14: 0.92
-      15: 0.94
-      16: 1.00
-      17: 1.00
-      18: 1.00
-    West:
-      7: 1.00
-      8: 1.00
-      9: 1.00
-      10: 1.00
-      11: 0.94
-      12: 0.93
-      13: 0.90
-      14: 0.87
-      15: 0.81
-      16: 0.83
-      17: 1.00
-      18: 1.00
-    South:
-      7: 1.00
-      8: 1.00
-      9: 1.00
-      10: 1.00
-      11: 0.94
-      12: 1.00
-      13: 1.00
-      14: 1.00
-      15: 0.95
-      16: 0.88
-      17: 1.00
-      18: 1.00
+  description: Per-string, per-hour shading factors (FSD §10). Neutral (no factors)
+    until relearned by the shading tracker from sunny-day observations with
+    ground-truth panel data.
+  factors: {}

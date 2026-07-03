@@ -483,11 +483,21 @@ def load_local_forecast(
     return extract_pv_weather(grib_files, lat, lon)
 
 
+# ICON's ASOB_S is NET shortwave at the surface (downward minus ground-reflected),
+# i.e. GHI * (1 - albedo). Dividing by (1 - ALBEDO) recovers the true GHI.
+GROUND_ALBEDO = 0.2
+
+
 def deaccumulate_avg(values: np.ndarray, hours: np.ndarray) -> np.ndarray:
-    """Convert running average to hourly values (vectorized).
+    """Convert running average to per-interval mean values (vectorized).
 
     MeteoSwiss radiation variables (ASOB_S, etc.) are time-mean values from hour 0.
-    Formula: hourly(h) = avg(h) * h - avg(h-1) * (h-1)
+    Formula: interval(h) = avg(h) * h - avg(h_prev) * h_prev
+
+    The first element is only the accumulation anchor (zero at h0; a meaningless
+    since-run-start average when the series starts mid-run, e.g. CH2 at h33) —
+    callers must drop it. Each remaining value is the mean over (h_prev, h] and
+    belongs at the interval MIDPOINT, not at h.
     """
     result = np.zeros_like(values, dtype=float)
     result[0] = values[0]
@@ -496,6 +506,22 @@ def deaccumulate_avg(values: np.ndarray, hours: np.ndarray) -> np.ndarray:
         prev_val = np.concatenate([[0], values[:-1]])
         result[1:] = values[1:] * hours[1:] - prev_val[1:] * prev_h[1:]
     return np.clip(result, 0, None)
+
+
+def radiation_to_midpoints(weather: pd.DataFrame, hours: np.ndarray) -> pd.DataFrame:
+    """Drop the de-accumulation anchor row and stamp rows at interval midpoints.
+
+    De-accumulated radiation values are means over (t_prev, t]; leaving them
+    stamped at the interval END lags the diurnal ramp by half an interval
+    (under-forecasts mornings, over-forecasts evenings). Temperature rides along
+    with a half-interval shift, which is negligible for its rate of change.
+    """
+    if len(weather) < 2:
+        return weather.iloc[0:0]
+    spans_h = np.diff(hours)
+    shifted = weather.iloc[1:].copy()
+    shifted.index = shifted.index - pd.to_timedelta(spans_h / 2.0, unit="h")
+    return shifted
 
 
 def extract_ensemble_weather(
@@ -659,15 +685,24 @@ def extract_ensemble_weather(
 
         logger.debug(f"Member {member}: forecast hours range {hours[0]:.0f} to {hours[-1]:.0f}")
 
-        # De-accumulate radiation variables (running averages -> hourly)
+        # De-accumulate radiation variables (running averages -> interval means)
+        has_radiation = False
         if 'asob_s' in df.columns:
-            weather['ghi'] = deaccumulate_avg(df['asob_s'].clip(lower=0).values, hours)
+            # ASOB_S is net shortwave; compensate ground reflection to get GHI
+            weather['ghi'] = (
+                deaccumulate_avg(df['asob_s'].clip(lower=0).values, hours)
+                / (1.0 - GROUND_ALBEDO)
+            )
+            has_radiation = True
 
         if 'aswdir_s' in df.columns:
+            # ASWDIR_S / ASWDIFD_S are downward components — no albedo compensation
             weather['dni'] = deaccumulate_avg(df['aswdir_s'].clip(lower=0).values, hours)
+            has_radiation = True
 
         if 'aswdifd_s' in df.columns:
             weather['dhi'] = deaccumulate_avg(df['aswdifd_s'].clip(lower=0).values, hours)
+            has_radiation = True
         if 't_2m' in df.columns:
             temp = df['t_2m']
             if temp.mean() > 100:
@@ -679,6 +714,9 @@ def extract_ensemble_weather(
             weather['wind_speed'] = np.abs(df['u_10m'])
         else:
             weather['wind_speed'] = 2.0
+
+        if has_radiation:
+            weather = radiation_to_midpoints(weather, hours)
 
         result[member] = weather
 

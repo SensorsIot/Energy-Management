@@ -192,6 +192,11 @@ class LocalFetcher:
         # Build weather DataFrame
         weather = pd.DataFrame(series_dict)
 
+        # Hourly-mean parameters (gre000h0 etc.) represent the hour ENDING at the
+        # stamp; shift to the interval midpoint so interpolation doesn't lag the
+        # diurnal ramp by half an hour.
+        weather.index = weather.index - pd.Timedelta(minutes=30)
+
         # Derive DNI from GHI - DHI (if DHI available)
         if "dhi" in weather.columns:
             weather["dni"] = (weather["ghi"] - weather["dhi"]).clip(lower=0)
