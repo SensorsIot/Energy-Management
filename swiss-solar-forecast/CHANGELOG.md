@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.0] - 2026-07-04
+
+### Added
+- Per-panel AC clipping for microinverter arrays (FSD §6.3). The Enphase South
+  inverter now caps each panel at its own `micro_ac_cap` (300 W) instead of
+  sharing one 1500 W aggregate cap, so a well-lit string clips while a poorly-lit
+  string on the same inverter keeps its headroom. This reproduces the observed
+  midday flat-top and, from the panel geometry alone, the steep 70° front panels
+  clip at low winter sun while the shallow 30° back panels clip at high summer
+  sun — no seasonal special-casing. Forecast and calibration share one
+  `pv_model.inverter_ac_power()` so they never disagree about the clip. String
+  inverters (Huawei EastWest) keep the aggregate cap.
+
 ## [1.6.1] - 2026-07-04
 
 ### Fixed

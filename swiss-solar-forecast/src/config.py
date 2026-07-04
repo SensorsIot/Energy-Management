@@ -88,6 +88,10 @@ class PVSystemConfig:
                     "name": inv_cfg["name"],
                     "max_power": inv_cfg["max_power"],
                     "efficiency": inv_cfg.get("efficiency", 0.85),
+                    # Per-panel AC cap for microinverter arrays (one micro per
+                    # panel). When set, each panel clips independently instead
+                    # of the strings sharing one aggregate inverter cap.
+                    "micro_ac_cap": inv_cfg.get("micro_ac_cap"),
                     "strings": [],
                     "total_dc_power": 0,
                 }

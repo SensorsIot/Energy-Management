@@ -157,6 +157,39 @@ def forecast_string_dc_power(
     return pd.Series(dc_values, index=times, name=string["name"])
 
 
+def inverter_ac_power(
+    string_dc: dict[str, pd.Series], inverter: dict
+) -> pd.Series:
+    """AC power from per-string DC, applying efficiency and the correct clip.
+
+    Two clip topologies, selected by config:
+
+    - **Microinverter array** (``micro_ac_cap`` set): one microinverter per
+      panel, each capping at ``micro_ac_cap`` W. Every panel clips
+      independently, so a well-lit string clips while a poorly-lit string on
+      the same inverter still has headroom — the steep front panels clip at low
+      winter sun, the shallow back panels at high summer sun, from the same
+      geometry. Clip is applied per panel (``dc / count``) then re-scaled.
+    - **String inverter** (default): the strings share one DC bus and clip once
+      on the summed AC at ``max_power``.
+
+    The forecast and the calibration clear-sky reference both call this, so the
+    two never disagree about the clip.
+    """
+    eff = inverter["efficiency"]
+    micro_cap = inverter.get("micro_ac_cap")
+    if micro_cap:
+        ac_total = None
+        for s in inverter["strings"]:
+            dc = string_dc[s["name"]]
+            count = s["count"]
+            per_panel_ac = np.clip((dc / count) * eff, 0, micro_cap) * count
+            ac_total = per_panel_ac if ac_total is None else ac_total + per_panel_ac
+        return ac_total
+    total_dc = sum(string_dc.values())
+    return np.clip(total_dc * eff, 0, inverter["max_power"])
+
+
 def forecast_inverter_power(
     weather: pd.DataFrame,
     inverter: dict,
@@ -173,15 +206,15 @@ def forecast_inverter_power(
     lon = inverter["longitude"]
     alt = inverter["altitude"]
     tz = inverter["timezone"]
-    max_power = inverter["max_power"]
-    efficiency = inverter["efficiency"]
 
-    results = {}
+    string_dc = {}
 
     # Calculate DC power for each string
     for string in inverter["strings"]:
         dc_power = forecast_string_dc_power(weather, string, lat, lon, alt, tz, calibration)
-        results[f"{string['name']}_dc"] = dc_power
+        string_dc[string["name"]] = dc_power
+
+    results = {f"{name}_dc": dc for name, dc in string_dc.items()}
 
     # Get index from first result
     index = list(results.values())[0].index
@@ -193,8 +226,8 @@ def forecast_inverter_power(
     dc_cols = [c for c in df.columns if c.endswith("_dc")]
     df["total_dc"] = df[dc_cols].sum(axis=1)
 
-    # AC power: apply efficiency and clip to max_power
-    df["ac_power"] = np.clip(df["total_dc"] * efficiency, 0, max_power)
+    # AC power: efficiency + clip (per-panel for microinverters, else aggregate)
+    df["ac_power"] = inverter_ac_power(string_dc, inverter)
 
     return df
 

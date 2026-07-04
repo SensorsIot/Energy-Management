@@ -197,7 +197,8 @@ plants:
           - { name: "East", azimuth: 103.3, tilt: 15, panel: "AXITEC455", count: 8 }
           - { name: "West", azimuth: 283.3, tilt: 15, panel: "AXITEC455", count: 9 }
       - name: "South"           # Enphase microinverters, one per panel, 300 W AC each
-        max_power: 1500         # 5 micros × 300 W
+        max_power: 1500         # aggregate (longterm KPI only); clip is per-panel
+        micro_ac_cap: 300       # per-panel AC clip — each micro caps independently
         efficiency: 0.98
         strings:
           - { name: "SouthFront",  azimuth: 193.3, tilt: 70, panel: "LONGI350", count: 3 }
@@ -208,9 +209,23 @@ plants:
 The two SouthBack panels sit on an adjustable mount; `tilt` reflects the current setting and is
 updated in the config when the mount is changed.
 
-**Target — per-panel AC clipping:** each Enphase microinverter clips its panel at 300 W AC. The
-model clips at inverter level only (`max_power`), which understates clipping when one panel would
-exceed 300 W while others are below. Check: `grep -n "max_power" swiss-solar-forecast/src/pv_model.py`.
+### 6.3 AC clipping topology
+
+Two clip models, selected per inverter, both applied by `pv_model.inverter_ac_power()`:
+
+- **Microinverter array** — an inverter with `micro_ac_cap` set (Enphase South, 300 W/panel). One
+  microinverter per panel, so each panel clips independently: AC = Σ over strings of
+  `count × min(per_panel_dc × efficiency, micro_ac_cap)`. A well-lit string clips while a
+  poorly-lit string on the same inverter keeps its headroom — the aggregate `max_power` is not a
+  clip here (it survives only as the longterm clip-hours KPI reference, §8.1).
+- **String inverter** — no `micro_ac_cap` (Huawei EastWest). The strings share one DC bus and clip
+  once on the summed AC at `max_power`.
+
+Because each panel clips on its own angle of incidence, the seasonal pattern falls out of the
+geometry with no special-casing: the steep 70° `SouthFront` panels clip at low winter sun (near-
+normal incidence on a steep tilt), while the shallow 30° `SouthBack` panels clip at high summer
+sun. The calibration clear-sky reference calls the same `inverter_ac_power()`, so forecast and
+calibration never disagree about the clip.
 
 ## 7. Configuration
 
@@ -316,9 +331,7 @@ For each ensemble member (11 for CH1, 21 for CH2):
 │   ├─► Transpose to plane-of-array (azimuth/tilt)
 │   ├─► Cell temperature (Faiman model)
 │   └─► DC power (PVWatts with γ coefficient)
-├─► Sum strings → inverter DC power
-├─► Apply inverter efficiency
-└─► Clip to max_power → inverter AC power
+├─► Per string: efficiency, then per-panel or aggregate clip → inverter AC power (§6.3)
 
 Stack members → array [members × time_steps] → percentiles P10 / P50 / P90
 ```
@@ -364,8 +377,9 @@ For each 15-minute interval of the past day:
    smooth) to salvage the clear spells of a partly-cloudy day.
 4. **Observation** — per string: `ratio = actual / clearsky_power` clamped to [0.1, 1.3], recorded
    with solar azimuth/elevation at the interval midpoint and the power fraction
-   `clearsky_power / rated_power`. Intervals where the string is clipping (inverter at
-   `max_power`) are excluded from `eff`/`gain` learning.
+   `clearsky_power / rated_power`. Clipping intervals are excluded from `eff`/`gain` learning —
+   Huawei when the string inverter is at `max_power`, South when the per-panel model (§6.3) loses
+   >2 % of its potential to the microinverter cap.
 
 ### 10.3 Shade map (infrastructure shading)
 
@@ -478,6 +492,15 @@ and the testing hub [`Harness/project/testing.md`](../../Harness/project/testing
 | Clipping exclusion | Clipped observations never disturb eff/gain | `test_calibration.py::test_clipping_excluded_from_eff_and_gain` |
 | Application | shade×eff×gain applied per timestep by sun position and power fraction; neutral calibration is the identity | `test_calibration.py::test_apply_calibration_*`, `::test_neutral_calibration_is_identity` |
 
+**Test cases (AC clipping topology, §6.3):**
+
+| Case | Assertion | Test |
+|------|-----------|------|
+| Per-panel clip | A microinverter array clips each panel at `micro_ac_cap`; a well-lit string clips while a poorly-lit string on the same inverter keeps headroom (aggregate cap would overstate output) | `test_pv_model.py::test_microinverter_clips_each_panel_independently` |
+| No false clip | All panels below the cap → no clipping | `test_pv_model.py::test_microinverter_no_clip_when_all_panels_below_cap` |
+| Aggregate clip | A string inverter (no `micro_ac_cap`) clips once on summed AC at `max_power` | `test_pv_model.py::test_string_inverter_uses_aggregate_cap` |
+| Efficiency order | Efficiency is applied before the per-panel cap | `test_pv_model.py::test_microinverter_applies_efficiency_before_cap` |
+
 ## Appendix A — Installed PV modules (ground truth)
 
 Reference data for the panel definitions in §6. All electrical values are manufacturer datasheet
@@ -518,6 +541,9 @@ revision M2.
 
 ## Changelog
 
+- 2026-07-04: §6.3 added — per-panel AC clipping for the Enphase microinverter array
+  (`micro_ac_cap`), replacing the aggregate-only clip; §10.2 clipping exclusion and the pipeline
+  diagram updated to match; AC-clipping test cases added.
 - 2026-07-03: §6 panel definitions replaced with datasheet ground truth (AXITEC / LONGi /
   Meyer Burger, corrected tilts); calibration values removed from panel data; Appendix A added.
 - 2026-06-29: FSD made self-contained — folded the full SwissSolarForecast spec (ICON/STAC pipeline,

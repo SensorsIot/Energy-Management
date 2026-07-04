@@ -60,7 +60,8 @@ plants:
             count: 9
 
       - name: "South"           # Enphase microinverters, one per panel, 300 W AC each
-        max_power: 1500         # 5 micros x 300 W
+        max_power: 1500         # 5 micros x 300 W (aggregate; longterm KPI only)
+        micro_ac_cap: 300       # per-panel AC clip — each micro caps independently
         efficiency: 0.97
         strings:
           - name: "SouthFront"

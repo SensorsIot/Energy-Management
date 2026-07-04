@@ -174,10 +174,16 @@ class CalibrationTracker:
                     }
         return specs
 
-    def clearsky_reference(self, index: pd.DatetimeIndex) -> pd.DataFrame:
+    def clearsky_reference(
+        self, index: pd.DatetimeIndex, return_clip: bool = False
+    ):
         """Clear-sky power per learnable unit with all corrections neutral.
 
-        East/West: string DC. South: inverter AC (efficiency + clip applied).
+        East/West: string DC. South: inverter AC (efficiency + per-panel clip,
+        via the same ``pv_model.inverter_ac_power`` the forecast uses). With
+        ``return_clip`` also returns, per ac_inverter unit, the fraction of
+        potential retained after clipping (1.0 = unclipped) so the observation
+        builder can flag clipped intervals.
         """
         from src import pv_model
 
@@ -189,23 +195,32 @@ class CalibrationTracker:
         loc = self.plants[0]["location"]
 
         out = {}
+        clip_frac = {}
         for name, spec in self._string_specs().items():
-            dc_total = None
+            string_dc = {}
             for s in spec["strings"]:
-                dc = pv_model.forecast_string_dc_power(
+                string_dc[s["name"]] = pv_model.forecast_string_dc_power(
                     weather, s,
                     loc["latitude"], loc["longitude"],
                     loc.get("altitude", 0), loc["timezone"],
                 )
-                dc_total = dc if dc_total is None else dc_total + dc
             if spec["kind"] == "ac_inverter":
                 inv = spec["inverter"]
-                out[name] = np.clip(
-                    dc_total.values * inv["efficiency"], 0, inv["max_power"]
-                )
+                clipped = pv_model.inverter_ac_power(string_dc, inv)
+                out[name] = clipped.values
+                unclipped = sum(string_dc.values()) * inv["efficiency"]
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    clip_frac[name] = np.where(
+                        unclipped.values > 0,
+                        clipped.values / unclipped.values,
+                        1.0,
+                    )
             else:
-                out[name] = dc_total.values
-        return pd.DataFrame(out, index=index)
+                out[name] = sum(string_dc.values()).values
+        ref = pd.DataFrame(out, index=index)
+        if return_clip:
+            return ref, pd.DataFrame(clip_frac, index=index)
+        return ref
 
     # ------------------------------------------------------------ actuals
 
@@ -260,8 +275,11 @@ class CalibrationTracker:
 
         # aggregateWindow stamps window ends; evaluate astronomy at midpoints
         midpoints = actuals.index - pd.Timedelta(minutes=7.5)
-        reference = self.clearsky_reference(pd.DatetimeIndex(midpoints))
+        reference, clip_frac = self.clearsky_reference(
+            pd.DatetimeIndex(midpoints), return_clip=True
+        )
         reference.index = actuals.index
+        clip_frac.index = actuals.index
         solpos = self.location.get_solarposition(pd.DatetimeIndex(midpoints))
         solpos.index = actuals.index
 
@@ -298,7 +316,9 @@ class CalibrationTracker:
                 rated = specs[unit]["rated"]
                 pf = min(1.0, ref / rated)
                 if specs[unit]["kind"] == "ac_inverter":
-                    clipping = ref >= CLIP_EXCLUDE_FRACTION * rated
+                    # Per-panel clip: flag when the modelled reference loses
+                    # >2% of its potential to the microinverter cap.
+                    clipping = float(clip_frac.loc[ts, unit]) < CLIP_EXCLUDE_FRACTION
                 else:
                     ew_ref = float(reference.loc[ts, "East"] + reference.loc[ts, "West"])
                     ew_cap = ew_inverter["max_power"] / ew_inverter["efficiency"]
