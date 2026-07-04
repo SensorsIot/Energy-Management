@@ -59,12 +59,3 @@ RUN printf '%s\n' \
     '    esac' \
     'fi' \
     >> /home/dev/.bashrc
-
-# Tmux UX: mouse (wheel scrolling), right-click pastes the tmux paste-buffer,
-# OSC52 syncs the paste-buffer with the host terminal's clipboard (Wezterm /
-# iTerm2 supported) so selections inside tmux flow to the host clipboard.
-RUN printf '%s\n' \
-    'set -g mouse on' \
-    'bind-key -n MouseDown3Pane paste-buffer' \
-    'set -g set-clipboard on' \
-    >> /home/dev/.tmux.conf
