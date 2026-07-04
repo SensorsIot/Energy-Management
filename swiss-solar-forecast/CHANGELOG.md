@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.7.1] - 2026-07-04
+
+### Changed
+- Enphase `micro_ac_cap` set to 308 W (measured per-panel clip ceiling; nameplate
+  is 300 W) — matches the observed ~1543 W five-panel aggregate flat-top.
+
 ## [1.7.0] - 2026-07-04
 
 ### Added

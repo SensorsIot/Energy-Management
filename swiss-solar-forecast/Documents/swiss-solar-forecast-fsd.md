@@ -198,7 +198,7 @@ plants:
           - { name: "West", azimuth: 283.3, tilt: 15, panel: "AXITEC455", count: 9 }
       - name: "South"           # Enphase microinverters, one per panel, 300 W AC each
         max_power: 1500         # aggregate (longterm KPI only); clip is per-panel
-        micro_ac_cap: 300       # per-panel AC clip — each micro caps independently
+        micro_ac_cap: 308       # per-panel AC clip — measured ~308 W/panel ceiling
         efficiency: 0.98
         strings:
           - { name: "SouthFront",  azimuth: 193.3, tilt: 70, panel: "LONGI350", count: 3 }
@@ -213,7 +213,8 @@ updated in the config when the mount is changed.
 
 Two clip models, selected per inverter, both applied by `pv_model.inverter_ac_power()`:
 
-- **Microinverter array** — an inverter with `micro_ac_cap` set (Enphase South, 300 W/panel). One
+- **Microinverter array** — an inverter with `micro_ac_cap` set (Enphase South, 308 W/panel — the
+  measured clip ceiling; nameplate is 300 W). One
   microinverter per panel, so each panel clips independently: AC = Σ over strings of
   `count × min(per_panel_dc × efficiency, micro_ac_cap)`. A well-lit string clips while a
   poorly-lit string on the same inverter keeps its headroom — the aggregate `max_power` is not a
