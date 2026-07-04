@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.6.1] - 2026-07-04
+
+### Fixed
+- Calibration sunny gate now judges clear sky from the sky, not the power
+  level: a clear day (stable high-sun midday ratio) records every interval, so
+  the shade map can learn whole-roof horizon shading that drops the system
+  ratio below the old 0.75 power floor. Non-clear days keep the smooth+high
+  per-interval fallback. `clear_sky_mask()` + tests (FSD §10.2).
+
+### Changed
+- FSD §10.8 shading table: documents the eastern-horizon whole-roof morning
+  obstruction and the front-row-shades-back-row inter-row shading on South.
+
 ## [1.6.0] - 2026-07-03
 
 ### Added

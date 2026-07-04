@@ -46,11 +46,36 @@ GAIN_REFERENCE_PF = (0.3, 0.8)
 GAIN_TIME_CONSTANT_DAYS = 7.0
 GAIN_ALERT_THRESHOLD = 0.93
 
-# Sunny gate (per 15-min interval)
-SUNNY_MIN_RATIO = 0.75
-SUNNY_MAX_ROLLING_STD = 0.05
+# Sunny gate
+SUNNY_MIN_RATIO = 0.75          # per-interval power floor (non-clear-day fallback only)
+SUNNY_MAX_ROLLING_STD = 0.05    # smoothness: clouds are jittery, clear sky is not
+CLEAR_DAY_MIN_RATIO = 0.80      # a clear day's midday (high-sun) ratio is stably this high
+MIDDAY_ELEVATION_DEG = 40.0     # "midday" = sun high enough to be unshaded
 RATIO_CLAMP = (0.1, 1.3)
 CLIP_EXCLUDE_FRACTION = 0.98
+
+
+def clear_sky_mask(total_ratio: "pd.Series", elevation: "pd.Series") -> "pd.Series":
+    """Boolean mask of intervals usable for calibration (clear sky, any shading).
+
+    Clear sky is judged from the SKY, not the power level: a day is clear when
+    its high-sun (unshaded) midday ratio is stably high. On a clear day every
+    interval is cloud-free, so low morning/evening ratios are fixed shading and
+    are ALL recorded — this is what lets the shade map learn whole-roof horizon
+    shading that drops the system ratio below the power floor. On non-clear days
+    fall back to admitting only smooth, high-ratio intervals (salvage clear
+    spells of a partly-cloudy day).
+    """
+    rolling_std = total_ratio.rolling(3, center=True, min_periods=2).std()
+    midday = total_ratio[elevation.values >= MIDDAY_ELEVATION_DEG]
+    day_clear = (
+        len(midday) >= 3
+        and float(midday.median()) >= CLEAR_DAY_MIN_RATIO
+        and float(midday.std()) < SUNNY_MAX_ROLLING_STD
+    )
+    if day_clear:
+        return pd.Series(True, index=total_ratio.index)
+    return (total_ratio > SUNNY_MIN_RATIO) & (rolling_std < SUNNY_MAX_ROLLING_STD)
 
 # Actual production sensors (HomeAssistant bucket). South is one AC sensor for
 # all five panels, so South is learned at inverter level and applied to its
@@ -251,8 +276,7 @@ class CalibrationTracker:
         with np.errstate(divide="ignore", invalid="ignore"):
             total_ratio = total_actual / total_ref
         total_ratio = total_ratio.replace([np.inf, -np.inf], np.nan)
-        rolling_std = total_ratio.rolling(3, center=True, min_periods=2).std()
-        sunny = (total_ratio > SUNNY_MIN_RATIO) & (rolling_std < SUNNY_MAX_ROLLING_STD)
+        sunny = clear_sky_mask(total_ratio, solpos["elevation"])
 
         # System-level clipping (Huawei AC cap) excludes eff/gain learning
         ew_inverter = specs.get("East", {}).get("inverter")

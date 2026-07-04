@@ -355,10 +355,13 @@ For each 15-minute interval of the past day:
 2. **Actuals** — East: `inverter_pv_1_power` (DC), West: `inverter_pv_2_power` (DC), South:
    `enphase_power` (AC, whole inverter — the five panels share one sensor, so South is learned at
    inverter level and applied to its strings uniformly).
-3. **Sunny gate** — an interval is usable when the whole-system ratio
-   `actual_total / clearsky_total` exceeds 0.75 **and** is locally smooth (rolling 3-interval
-   standard deviation of the ratio < 0.05). Clouds fail smoothness; fixed shading does not.
-   Per-interval gating lets partly-cloudy days contribute their clear intervals.
+3. **Sunny gate** — clear sky is judged from the *sky*, not the power level, so shaded-but-clear
+   intervals still count. A **day is clear** when its high-sun (elevation ≥ 40°, unshaded) midday
+   ratio is stably high (median ≥ 0.80, low variability). On a clear day **every** interval is
+   recorded — low morning/evening ratios are then fixed shading, not clouds, which is what lets the
+   shade map learn whole-roof horizon shading that drops the *system* ratio below any power floor.
+   On non-clear days the gate falls back to per-interval admission (ratio > 0.75 **and** locally
+   smooth) to salvage the clear spells of a partly-cloudy day.
 4. **Observation** — per string: `ratio = actual / clearsky_power` clamped to [0.1, 1.3], recorded
    with solar azimuth/elevation at the interval midpoint and the power fraction
    `clearsky_power / rated_power`. Intervals where the string is clipping (inverter at
@@ -410,9 +413,10 @@ South strings.
 
 | String | Azimuth | Tilt | Pattern |
 |--------|---------|------|---------|
-| East | 103.3° | 15° | Shaded in the morning (buildings to the east), clears by midday |
-| West | 283.3° | 15° | Clear in the morning, may shade in late afternoon |
-| South | 193.3° | 70° (front) / 30° (back, adjustable) | Back pair shaded in the morning **and** evening; mutual row-shading of the back pair by the front row at low sun is part of the same fixed geometry |
+| East | 103.3° | 15° | Whole roof shaded at low morning sun by an eastern horizon obstruction until the sun clears it (~07:30 in July); both roof strings suppressed together |
+| West | 283.3° | 15° | Same eastern-horizon suppression in the morning; may shade in late afternoon |
+| SouthFront | 193.3° | 70° | Sees only the sky above the horizon — no local obstacle |
+| SouthBack | 193.3° | 30° (adjustable) | Additionally shaded by the front row: the steep 70° front panels cast a shadow on the lower 30° back pair at low sun. The `enphase_power` sensor combines all five South panels, so this back-only shading is blended into the learned South correction (per-panel Enphase data is not exposed) |
 
 ## 11. Runtime behavior
 

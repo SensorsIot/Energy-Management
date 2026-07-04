@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.calibration import (
     EFF_NUM_BINS,
     CalibrationTracker,
+    clear_sky_mask,
     eff_bin_index,
     shade_bin_key,
 )
@@ -118,6 +119,27 @@ def test_apply_calibration_eff_by_power_fraction():
 
     assert abs(out[0] - 364.0 * 0.8) < 1e-6
     assert abs(out[1] - 1820.0) < 1e-6
+
+
+def test_clear_day_records_shaded_morning():
+    # A clear day: high stable midday ratio, but a shaded morning (low ratio).
+    # Every interval must be recorded, including the shaded morning ones — the
+    # regression that let whole-roof horizon shading get gated out.
+    elev = pd.Series([8, 15, 25, 40, 55, 60, 45, 20])
+    ratio = pd.Series([0.15, 0.30, 0.67, 1.0, 1.01, 0.99, 1.0, 0.6])
+    mask = clear_sky_mask(ratio, elev)
+    assert mask.all()                      # clear day → all intervals usable
+    assert mask.iloc[0]                    # the 0.15 shaded-morning interval too
+
+
+def test_cloudy_day_gated_to_smooth_high_intervals():
+    # No stable high midday (jittery, suppressed) → not a clear day → fall back
+    # to the smooth-and-high per-interval gate.
+    elev = pd.Series([40, 45, 50, 55, 50, 45])
+    ratio = pd.Series([0.9, 0.3, 0.85, 0.2, 0.8, 0.4])  # cloud jitter at high sun
+    mask = clear_sky_mask(ratio, elev)
+    assert not mask.all()
+    assert not mask.iloc[1]                # the 0.3 cloud dip is excluded
 
 
 def test_neutral_calibration_is_identity():
