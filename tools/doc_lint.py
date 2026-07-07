@@ -173,6 +173,10 @@ def collect_sentences(path, table):
     for lineno, text, exempt in read_lines_skip_code(path):
         if exempt:
             continue
+        if LINK_RE.search(text):
+            # Pointer / cross-reference line — a sentence that *contains* a link
+            # is the "link, don't restate" pattern working, not a restated fact.
+            continue
         for m in SENTENCE_RE.finditer(text):
             norm = re.sub(r"\s+", " ", m.group(0).strip().lower())
             if len(norm.split()) >= 8:

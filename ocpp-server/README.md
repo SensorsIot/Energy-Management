@@ -89,4 +89,4 @@ See [OCPP Server FSD](Documents/ocpp-server-fsd.md) for the full design, configu
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT License - See [LICENSE](../LICENSE).

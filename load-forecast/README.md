@@ -104,4 +104,4 @@ See [LoadForecast FSD](Documents/load-forecast-fsd.md) for the full design, conf
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT License - See [LICENSE](../LICENSE).

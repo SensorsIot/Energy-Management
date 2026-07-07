@@ -116,4 +116,4 @@ See [SwissSolarForecast FSD](Documents/swiss-solar-forecast-fsd.md) for the full
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT License - See [LICENSE](../LICENSE).

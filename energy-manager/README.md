@@ -135,4 +135,4 @@ See [EnergyManager FSD](Documents/energy-manager-fsd.md) for the full design, co
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT License - See [LICENSE](../LICENSE).
