@@ -512,10 +512,10 @@ Priority between topics matters only when two of them act on the same control en
 
 **Tier 2 — Battery charge-timing vs EV (mutually exclusive, day mode).** EV charging and shaving both want the PV surplus, so the choice is made **once per day** — a snapshot of the car at a fixed local hour (`shaving_decision_hour`, default 08:00), latched until the next midnight (FSD 4.2.3):
 
-- **Car day** — car below target, absent, or unknown at the decision hour: the EV owns the surplus, the home battery charges greedily, **T5 does not run**.
-- **Shaving day** — car connected and at/above target at the decision hour: **T5 runs**, holding the battery's headroom to shave the midday export peak.
+- **Car day** — EV below target (or SOC/target unknown) at the decision hour: the EV owns the surplus, the home battery charges greedily, **T5 does not run**.
+- **Shaving day** — EV at/above target (full) at the decision hour: **T5 runs**, holding the battery's headroom to shave the midday export peak. Fullness alone decides — the car need not be plugged in.
 
-**Departure trigger:** a shaving day downgrades to a car day (one-way) the moment the car disconnects or drops below target — see §4.2.3. The mode does **not** flip *into* shaving if the car merely reaches its target later in the afternoon (the peak is past by then). When it is a shaving day, T5 still applies its own B0 abundant-day gate per cycle.
+**Departure trigger:** a shaving day downgrades to a car day (one-way) the moment the EV drops below target ("below full") — see §4.2.3. The mode does **not** flip *into* shaving if the car merely refills later in the afternoon (the peak is past by then). When it is a shaving day, T5 still applies its own B0 abundant-day gate per cycle.
 
 ### Control vs. advisory
 
@@ -775,29 +775,46 @@ decided **once**, at a fixed local hour (`shaving_decision_hour`, default
 
 | Car at the decision hour | Day mode |
 |--------------------------|----------|
-| connected **AND** at/above target (`car_ready = on` **AND** `smart_battery_last_known >= smart_charging_max_last_known`) | **shaving day** |
-| below target, absent (or OCPP down), or car data unavailable | **car day** |
+| EV **full** — `smart_battery_last_known >= smart_charging_max_last_known` | **shaving day** |
+| EV below target, or car SOC/target unavailable | **car day** |
+
+> **Fullness is the sole criterion — connection is deliberately NOT checked.**
+> The EV can come and go at any time, so only its charge level decides: a full
+> car (parked here *or* away) will not need the surplus, whereas a car below
+> target will (now, or on its return), so the battery should bank the morning
+> surplus greedily. The last-known SOC (`smart_battery_last_known`) makes the
+> test valid whether or not the car is plugged in.
+>
+> In particular the premise does **not** read `binary_sensor.car_ready` (a full
+> car reports wallbox status `SuspendedEV`/`Finishing`, for which `car_ready` is
+> "off" — it would read a full car as absent and never arm a shaving day) nor
+> `binary_sensor.wallbox_connected` (the wallbox↔server WebSocket link, ≈always
+> on). Only `smart_battery_last_known` vs `smart_charging_max_last_known`.
 
 Before the decision hour the mode defaults to **car day**. The snapshot is
 taken once (the first 15-min tick at/after the decision hour) and then held,
 with **one one-way downgrade — the departure trigger** (`_car_departed()`): a
-shaving day reverts to a **car day** the moment its premise breaks — the car
-**disconnects** (`car_ready = off`) **or drops below target** ("below
-full", `smart_battery_last_known < smart_charging_max_last_known`). It then
+shaving day reverts to a **car day** the moment its premise breaks — the EV
+**drops below target** ("below full",
+`smart_battery_last_known < smart_charging_max_last_known`). It then
 stays a car day for the rest of the day and never re-arms shaving (a later
-full reconnect does not restore it). Rationale: a car that was full at 08:00
-but then leaves will almost always return needing energy. Continuing to shave
+refill does not restore it). Rationale: a car that was full at 08:00 but then
+drives off and drains will return needing energy. Continuing to shave
 **exports the morning surplus** (sold) and bets on refilling the battery from
 the midday peak — but a returning depleted car then **competes for that same
 peak surplus**, so whenever the combined demand (battery headroom + the car's
 deficit) exceeds the post-morning surplus, the exported morning energy is lost
 to the car for good. Charging greedily banks that surplus into the battery
 while the car is away and nothing competes, so it is available on the car's
-return (a real energy loss, not only a forecast bet). A connected car with unknown
-SOC/target is **not** treated as departed (the cached last-known SOC is held,
-Home-Installation §7.7, so a stale read keeps the shaving day rather than
-cancelling on missing data). The mode does **not** re-flip *into* shaving if the car merely reaches
-its target later in the afternoon (the midday peak is past by then).
+return (a real energy loss, not only a forecast bet). Because the departure
+trigger reads the **last-known** SOC — which tracks the car down as it drives,
+whether or not it is plugged in — it catches the drained car without any
+connection check, and a brief unplug/replug never ends the day. A car with
+**unknown** SOC/target is **not** treated as departed (the cached last-known
+SOC is held, Home-Installation §7.7, so a stale read keeps the shaving day
+rather than cancelling on missing data). The mode does **not** re-flip *into*
+shaving if the car merely refills later in the afternoon (the midday peak is
+past by then).
 
 The two top-level use cases follow from the day mode (`_charge_gate_active()`
 returns true only on a shaving day):
@@ -945,7 +962,16 @@ Test files: `energy-manager/tests/test_battery_optimizer.py`
 (`TestShouldChargeNow`) — sub-cases B1–B5 and the per-interval absorption
 cap; `energy-manager/tests/test_charge_gate.py` (`TestMarginalDayGate`) — the
 B0 marginal-day gate (fills-today, never-fills, empty-forecast-is-marginal,
-and end-to-end greedy-vs-shaving routing).
+and end-to-end greedy-vs-shaving routing); `test_charge_gate.py`
+(`TestDayModeDecision`) — the once-daily shave-vs-car-day latch and departure
+trigger. **Fullness (`smart_battery_last_known >= smart_charging_max_last_known`)
+is the sole criterion — connection is not checked**, so a full car arms a
+shaving day whether or not it is plugged in
+(`test_full_car_at_decision_is_shaving_day`); a car below target or with unknown
+SOC is a car day (`test_car_below_target_at_decision_is_car_day`,
+`test_car_full_soc_unknown_is_car_day`); the departure trigger fires only on the
+SOC dropping below target (`test_departure_below_target_flips_to_car_day`) and
+an unknown SOC is held, not a departure (`test_stale_car_soc_is_not_a_departure`).
 
 ---
 
@@ -2989,6 +3015,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.81: **Shaving day now keys on EV fullness alone — connection is no longer a criterion (Section 4.2.3).** The once-daily shave-vs-car-day snapshot required the car to be *connected* (it read `binary_sensor.car_ready`). But a full car reports wallbox status `SuspendedEV`/`Finishing`, for which `car_ready` is **off** (`CAR_READY_MAP` maps both to `False`), so a full car — the *exact* shaving-day premise — read as "no car" and latched a **car day**, charging the battery greedily all morning and exporting the whole midday peak instead of absorbing it. Observed live 2026-07-07: `soc=80 target=80` (full) → car_day; battery filled 39 %→97 % by 10:30 while ~6 kW was exported at the peak. Fix: the premise is now purely `smart_battery_last_known >= smart_charging_max_last_known` (`_car_is_full`), evaluated whether or not the car is plugged in — the EV can come and go, so only its charge level matters (a full car won't need the surplus; a car below target will, so bank the battery greedily). Both sides read the **last-known** sensors (`sensor.smart_battery_last_known` / `sensor.smart_charging_max_last_known`), **not** the volatile `sensor.smart_battery` — which goes `unavailable` when the car is **asleep** (telematics sleep). The cached last-known value stays valid across sleep because a sleeping car does not consume, whereas reading the volatile sensor would force `None` → car day and never shave; a car that is awake and driving still reports, so the departure trigger catches a draining car. The departure trigger (`_car_departed`) likewise fires only on the SOC dropping below target — which the last-known SOC catches as the car drives off and drains, so no connection check is needed and a brief unplug/replug no longer ends the day. `car_ready`/`wallbox_connected`/`wallbox_status` are no longer read for this decision. `TestDayModeDecision` rewired to drive SOC-vs-target only (new `test_full_car_at_decision_is_shaving_day`, `test_car_full_soc_unknown_is_car_day`, `test_reads_last_known_soc_not_volatile`; the removed disconnect-departure and wallbox-status cases are subsumed by the below-target trigger). 253 tests pass. (1.9.5 -> 1.9.6)
 
 - v2.80: **New OFF charging mode — a real user hard-stop (Section 4.3.4 / 4.3.5).** `input_select.ev_charging_mode` already offered an `off` option, but `run.py` treated any value other than `solar`/`immediate`/`cheap` as invalid and forced it back to `solar` on the next ~10 s cycle — so selecting `off` self-reverted (observed live 2026-07-02: `off` → `solar` in 0.5 s). `off` is now a first-class mode: a new `EVState.OFF` and a top-of-`step()` override hold the wallbox at 0 W from any state, ignoring surplus and tariff and giving the SUN2000 full battery control (as in IDLE). Unlike Immediate/Cheap it is **sticky** — never auto-reverted to `solar`; it persists until the user selects another mode (the auto-revert path is unchanged and still scoped to immediate/cheap). On entry to OFF the manual-charge budget is cleared. `run.py`'s mode-validity guard now accepts `off` (still resets genuinely-invalid values to `solar`). `sensor.ev_charge_status` publishes `off`. 6 new tests in `test_ev_state_machine.py` (`TestOffMode`). Note: `src/ev_goal_mode.py` remains dead code (the live path is `EVStateMachine`); not modified. (1.8.44 -> 1.8.45)
 

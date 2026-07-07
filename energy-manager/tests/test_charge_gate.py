@@ -2,10 +2,13 @@
 
 The shave-vs-car-day choice is decided once per day at shaving_decision_hour
 and latched (`_update_shaving_day_mode`); `_charge_gate_active()` is true only
-on a shaving day. The decision keys off actual car presence
-(binary_sensor.car_ready), NOT the wallbox↔server WebSocket link
-(binary_sensor.wallbox_connected, ~always "on" whenever the wallbox is
-powered).
+on a shaving day. The sole criterion is whether the EV is **full** — its SOC
+(`smart_battery_last_known`) at/above its charging target
+(`smart_charging_max_last_known`). Connection is deliberately NOT a criterion:
+the EV can come and go at any time, so only its charge level decides — a full
+car (here or away) won't need the surplus, while a car below target will (now
+or on return), so the battery banks greedily. The last-known SOC makes this
+valid whether or not the car is plugged in.
 """
 
 from __future__ import annotations
@@ -47,26 +50,23 @@ def manager():
 def _wire(
     manager,
     *,
-    car_ready: str,
-    wallbox_connected: str = "on",
     car_soc: float | None = None,
     target: float | None = None,
 ) -> None:
-    def _get_state(entity):
-        if entity == manager.car_ready_entity:
-            return {"state": car_ready}
-        if entity == manager.wallbox_connected_entity:
-            return {"state": wallbox_connected}
-        return {"state": "unknown"}
+    """Drive the shaving premise off the EV SOC vs target only.
+
+    Fullness (``car_soc >= target``) is the sole shave-vs-car-day criterion;
+    connection is not a factor (FSD 4.2.3). ``car_soc=None`` models an EV whose
+    SOC is unknown/unavailable (held as a stale read).
+    """
 
     def _sensor(entity):
-        if entity == manager.smart_car_soc_entity:
+        if entity == manager.car_soc_last_known_entity:
             return car_soc
         if entity == manager.car_charging_max_entity:
             return target
         return None
 
-    manager.ha_client.get_state.side_effect = _get_state
     manager.ha_client.get_sensor_value.side_effect = _sensor
 
 
@@ -79,100 +79,117 @@ class TestDayModeDecision:
     """The shave-vs-car-day choice is decided once per day at
     shaving_decision_hour and latched (FSD 4.2.3)."""
 
-    def test_car_absent_at_decision_is_car_day(self, manager) -> None:
-        # WS link up but no car plugged in → car day (battery charges greedily).
-        _wire(manager, car_ready="off", wallbox_connected="on")
+    def test_car_full_soc_unknown_is_car_day(self, manager) -> None:
+        # SOC unavailable (Smart integration down) at the latch → car day (safe).
+        _wire(manager, car_soc=None, target=80.0)
         manager._update_shaving_day_mode(_AT_DECISION)
         assert manager._shaving_day_mode == "car_day"
         assert manager._charge_gate_active() is False
 
     def test_car_below_target_at_decision_is_car_day(self, manager) -> None:
-        _wire(manager, car_ready="on", car_soc=50.0, target=80.0)
+        _wire(manager, car_soc=50.0, target=80.0)
         manager._update_shaving_day_mode(_AT_DECISION)
         assert manager._shaving_day_mode == "car_day"
         assert manager._charge_gate_active() is False
 
-    def test_car_connected_and_full_at_decision_is_shaving_day(self, manager) -> None:
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+    def test_full_car_at_decision_is_shaving_day(self, manager) -> None:
+        # Full car (SOC ≥ target) → shaving day, regardless of whether it is
+        # plugged in. This is the core premise; connection is not checked.
+        _wire(manager, car_soc=80.0, target=80.0)
         manager._update_shaving_day_mode(_AT_DECISION)
         assert manager._shaving_day_mode == "shaving_day"
         assert manager._charge_gate_active() is True
 
+    def test_full_car_over_target_is_shaving_day(self, manager) -> None:
+        _wire(manager, car_soc=90.0, target=80.0)
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "shaving_day"
+
+    def test_reads_last_known_soc_not_volatile(self, manager) -> None:
+        # The volatile sensor.smart_battery is unavailable (car asleep — a
+        # sleeping car doesn't consume, so last-known is still valid) but the
+        # last-known SOC is full → shaving day. Regression: the decision must
+        # read the last-known sensor, else a full sleeping car never shaves.
+        def _sensor(entity):
+            if entity == manager.smart_car_soc_entity:
+                return None  # volatile sensor unavailable (asleep)
+            if entity == manager.car_soc_last_known_entity:
+                return 80.0  # last-known held
+            if entity == manager.car_charging_max_entity:
+                return 80.0
+            return None
+
+        manager.ha_client.get_sensor_value.side_effect = _sensor
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "shaving_day"
+
     def test_before_decision_hour_defaults_car_day(self, manager) -> None:
         # Even a full car: before the decision hour nothing is committed yet.
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        _wire(manager, car_soc=80.0, target=80.0)
         manager._update_shaving_day_mode(_BEFORE_DECISION)
         assert manager._shaving_day_mode == "car_day"
         assert manager._shaving_decision_date is None
 
     def test_latch_holds_when_car_fills_later_same_day(self, manager) -> None:
         # At the decision hour the car still needs energy → car day …
-        _wire(manager, car_ready="on", car_soc=50.0, target=80.0)
+        _wire(manager, car_soc=50.0, target=80.0)
         manager._update_shaving_day_mode(_AT_DECISION)
         assert manager._shaving_day_mode == "car_day"
         # … later the car reaches its target, but the latch does NOT re-flip.
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        _wire(manager, car_soc=80.0, target=80.0)
         later = datetime(2026, 6, 7, 15, 0, tzinfo=UTC)  # 17:00 local
         manager._update_shaving_day_mode(later)
         assert manager._shaving_day_mode == "car_day"
 
     def test_decision_recomputed_next_day(self, manager) -> None:
-        _wire(manager, car_ready="off")
+        _wire(manager, car_soc=50.0, target=80.0)
         manager._update_shaving_day_mode(_AT_DECISION)
         assert manager._shaving_day_mode == "car_day"
         # Next day the car is full at the decision hour → shaving day.
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        _wire(manager, car_soc=80.0, target=80.0)
         next_day = datetime(2026, 6, 8, 10, 0, tzinfo=UTC)
         manager._update_shaving_day_mode(next_day)
         assert manager._shaving_day_mode == "shaving_day"
 
     # --- Departure trigger (FSD 4.2.3): a shaving day downgrades to a car day
-    # the moment the car disconnects or drops below target; one-way. ---
+    # the moment the EV drops below target ("no longer full"); one-way. ---
 
     _LATER = datetime(2026, 6, 7, 13, 0, tzinfo=UTC)  # 15:00 local, same day
     _LATER2 = datetime(2026, 6, 7, 16, 0, tzinfo=UTC)  # 18:00 local, same day
 
-    def test_departure_disconnect_flips_to_car_day(self, manager) -> None:
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+    def test_departure_below_target_flips_to_car_day(self, manager) -> None:
+        _wire(manager, car_soc=80.0, target=80.0)
         manager._update_shaving_day_mode(_AT_DECISION)
         assert manager._shaving_day_mode == "shaving_day"
-        # Car drives off → revert to car day for the rest of the day.
-        _wire(manager, car_ready="off")
+        # Car drove off and drained (last-known SOC now below target) → car day.
+        _wire(manager, car_soc=55.0, target=80.0)
         manager._update_shaving_day_mode(self._LATER)
         assert manager._shaving_day_mode == "car_day"
         assert manager._charge_gate_active() is False
 
-    def test_departure_below_target_flips_to_car_day(self, manager) -> None:
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
-        manager._update_shaving_day_mode(_AT_DECISION)
-        # Still plugged but no longer full (preconditioning / returned depleted).
-        _wire(manager, car_ready="on", car_soc=55.0, target=80.0)
-        manager._update_shaving_day_mode(self._LATER)
-        assert manager._shaving_day_mode == "car_day"
-
     def test_departure_is_one_way(self, manager) -> None:
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        _wire(manager, car_soc=80.0, target=80.0)
         manager._update_shaving_day_mode(_AT_DECISION)
-        _wire(manager, car_ready="off")
+        _wire(manager, car_soc=55.0, target=80.0)
         manager._update_shaving_day_mode(self._LATER)
         assert manager._shaving_day_mode == "car_day"
-        # Car returns full later → does NOT re-arm shaving.
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        # Car recharges to full later → does NOT re-arm shaving.
+        _wire(manager, car_soc=80.0, target=80.0)
         manager._update_shaving_day_mode(self._LATER2)
         assert manager._shaving_day_mode == "car_day"
 
     def test_shaving_day_holds_while_car_stays_full(self, manager) -> None:
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        _wire(manager, car_soc=80.0, target=80.0)
         manager._update_shaving_day_mode(_AT_DECISION)
         manager._update_shaving_day_mode(self._LATER)
         assert manager._shaving_day_mode == "shaving_day"
 
     def test_stale_car_soc_is_not_a_departure(self, manager) -> None:
-        # Connected & full at decision → shaving day.
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)
+        # Full at decision → shaving day.
+        _wire(manager, car_soc=80.0, target=80.0)
         manager._update_shaving_day_mode(_AT_DECISION)
-        # Smart integration goes stale: still connected but SOC unknown.
-        _wire(manager, car_ready="on", car_soc=None, target=80.0)
+        # Smart integration goes stale: SOC unknown. Held — not a departure.
+        _wire(manager, car_soc=None, target=80.0)
         manager._update_shaving_day_mode(self._LATER)
         assert manager._shaving_day_mode == "shaving_day"  # stale ≠ departed
 
@@ -217,7 +234,7 @@ class TestMarginalDayGate:
     def test_marginal_day_routes_to_greedy_charge(self, manager) -> None:
         """End-to-end: no car + marginal day → charge greedily at full power."""
         self._real_optimizer(manager)
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)  # full → shaving day
+        _wire(manager, car_soc=80.0, target=80.0)  # full → shaving day
         manager.ha_client.set_number.return_value = (True, None)
         now = datetime(2026, 6, 7, 16, 0, tzinfo=UTC)
         fc = _forecast(now, [50.0] * 24)  # marginal → never fills today
@@ -236,7 +253,7 @@ class TestMarginalDayGate:
         """End-to-end: no car + abundant day → gate passes to the water-fill
         (not the greedy 'marginal' path)."""
         self._real_optimizer(manager)
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)  # full → shaving day
+        _wire(manager, car_soc=80.0, target=80.0)  # full → shaving day
         manager.ha_client.set_number.return_value = (True, None)
         now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
         # Low surplus now, big peak later → fills today, water-fill defers now.
@@ -266,7 +283,7 @@ class TestMarginalDayGate:
     def test_charge_target_hold_defers(self, manager) -> None:
         """Topic 3 (FSD 4.2.4): at/above the charge target → hold (limit 0)."""
         self._real_optimizer(manager)
-        _wire(manager, car_ready="off")
+        _wire(manager, car_soc=50.0, target=80.0)  # car day
         manager.ha_client.set_number.return_value = (True, None)
         manager.charge_target_enabled = True
         manager._battery_target_soc = 50.0
@@ -284,7 +301,7 @@ class TestMarginalDayGate:
     def test_below_charge_target_does_not_hold(self, manager) -> None:
         """SOC below the charge target → normal logic runs (not a hold)."""
         self._real_optimizer(manager)
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)  # shaving day
+        _wire(manager, car_soc=80.0, target=80.0)  # shaving day
         manager.ha_client.set_number.return_value = (True, None)
         manager.charge_target_enabled = True
         manager._battery_target_soc = 90.0
@@ -298,7 +315,7 @@ class TestMarginalDayGate:
     def test_stale_forecast_routes_to_greedy(self, manager) -> None:
         """Fail-safe: a stale PV forecast → greedy charging, never shave."""
         self._real_optimizer(manager)
-        _wire(manager, car_ready="on", car_soc=80.0, target=80.0)  # shaving day
+        _wire(manager, car_soc=80.0, target=80.0)  # shaving day
         manager.ha_client.set_number.return_value = (True, None)
         manager._forecast_fresh = False
         now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)

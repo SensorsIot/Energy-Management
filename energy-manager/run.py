@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.5"
+__version__ = "1.9.6"
 
 import json
 import logging
@@ -42,6 +42,7 @@ SWISS_TZ = ZoneInfo("Europe/Zurich")
 
 # Adaptive SOC polling: 1 minute during charging, hourly otherwise
 CAR_SOC_CHARGING_INTERVAL_S = 60
+
 
 
 def swiss_time(dt: datetime) -> str:
@@ -677,54 +678,73 @@ class EnergyManager:
             )
             self.control_battery(discharge_allowed)
 
-    def _car_full_inputs(self):
-        """Read (car_present, car_soc, target) live from HA for the shaving premise."""
-        car_state = self.ha_client.get_state(self.car_ready_entity)
-        car_present = car_state is not None and car_state.get("state") == "on"
-        car_soc = self.ha_client.get_sensor_value(self.smart_car_soc_entity)
+    def _car_is_full(self):
+        """Return whether the EV is at/above its charging target (True/False/None).
+
+        The shave-vs-car-day choice depends **only** on whether the EV is full,
+        i.e. its SOC (`smart_battery_last_known`) is at/above its charging target
+        (`smart_charging_max_last_known`). Connection is deliberately **not** a
+        criterion (FSD 4.2.3): the EV can come and go at any time, so only its
+        charge level decides — a full car (parked here *or* away) will not need
+        the surplus, whereas a car below target will (now, or on its return), so
+        the battery should bank the morning surplus greedily. The last-known SOC
+        makes this valid whether or not the car is plugged in.
+
+        Both SOC and target are read from the **last-known** sensors
+        (`sensor.smart_battery_last_known`, `sensor.smart_charging_max_last_known`),
+        NOT the volatile `sensor.smart_battery` — the latter goes ``unavailable``
+        whenever the car is **asleep** (telematics sleep). The cached last-known
+        value stays valid across sleep because a sleeping car does not consume,
+        so a genuinely-full car is not misread as unknown → car day. (A car that
+        is awake and *driving* keeps reporting, so the last-known tracks down and
+        the departure trigger still catches a draining car.) Returns ``None``
+        only when even the last-known value is unavailable — then it neither
+        arms nor cancels a shaving day (§7.7).
+        """
+        car_soc = self.ha_client.get_sensor_value(self.car_soc_last_known_entity)
         target = self.ha_client.get_sensor_value(self.car_charging_max_entity)
-        return car_present, car_soc, target
+        if car_soc is None or target is None:
+            return None
+        return car_soc >= float(target)
 
     def _car_departed(self) -> bool:
         """Return True when a shaving day's premise no longer holds (departure trigger).
 
-        Fires when the car has **disconnected**, or is connected but its SOC
-        has dropped **below target** ("no longer full"). A connected car with
-        unknown SOC/target is NOT treated as departed — the cached last-known
-        SOC is held (§7.7), so a stale read keeps the shaving day rather than
-        cancelling it on missing data.
+        Fires when the EV is **no longer full** — its (last-known) SOC has
+        dropped below target. There is no connection check: a full car that
+        unplugs and drives off keeps the shaving day until its reported SOC
+        actually falls below target, and a brief unplug/replug never ends the
+        day. An unknown SOC/target is held (stale read), so a transient missing
+        read does not cancel the shaving day (the downgrade is one-way and
+        irreversible for the day, so it must not fire on noise). See FSD 4.2.3.
         """
-        car_present, car_soc, target = self._car_full_inputs()
-        if not car_present:
-            return True
-        if car_soc is not None and target is not None and car_soc < float(target):
-            return True
-        return False
+        return self._car_is_full() is False
 
     def _update_shaving_day_mode(self, now) -> None:
         """Decide the day's shaving mode at the configured hour; downgrade on departure.
 
         The shave-vs-car-day choice is a daily snapshot taken once at
-        shaving_decision_hour (Europe/Zurich): car connected AND at/above
-        target → shaving day; below target, absent, or unknown → car day
-        (FSD 4.2.3). Latched until the next local midnight, with one one-way
-        downgrade: a shaving day reverts to a car day the instant its premise
-        breaks — the **departure trigger**, `_car_departed()` (car disconnects
-        or drops below target) — and stays a car day for the rest of the day
-        (never re-arms shaving). Before the decision hour the default is car day.
+        shaving_decision_hour (Europe/Zurich): EV **full** (SOC at/above target)
+        → shaving day; below target or unknown → car day (FSD 4.2.3). Fullness
+        alone decides — connection is not a criterion. Latched until the next
+        local midnight, with one one-way downgrade: a shaving day reverts to a
+        car day the instant its premise breaks — the **departure trigger**,
+        `_car_departed()` (EV drops below target) — and stays a car day for the
+        rest of the day (never re-arms shaving). Before the decision hour the
+        default is car day.
         """
         local_now = now.astimezone(SWISS_TZ)
         today = local_now.date()
         if self._shaving_decision_date == today:
             # Latch committed today. Departure trigger: a shaving day drops to a
-            # car day as soon as the car leaves or is no longer full, so the
-            # battery stops holding headroom for an export peak whose surplus the
-            # returning car will need. One-way — a later full reconnect does not
-            # restore shaving (stability; matches the once-per-day philosophy).
+            # car day as soon as the car is no longer full, so the battery stops
+            # holding headroom for an export peak whose surplus the (now
+            # not-full) car will need. One-way — a later refill does not restore
+            # shaving (stability; matches the once-per-day philosophy).
             if self._shaving_day_mode == "shaving_day" and self._car_departed():
                 self._shaving_day_mode = "car_day"
                 logger.info(
-                    "Shaving day → car day: car departed or no longer full "
+                    "Shaving day → car day: EV no longer full "
                     "(departure trigger) — battery charges greedily for the rest of the day"
                 )
             return
@@ -733,22 +753,15 @@ class EnergyManager:
             return
         # First tick at/after the decision hour today → take the one-shot snapshot.
         self._shaving_decision_date = today
-        car_present, car_soc, target = self._car_full_inputs()
-        car_full = (
-            car_present
-            and car_soc is not None
-            and target is not None
-            and car_soc >= float(target)
-        )
+        car_full = self._car_is_full() is True
         self._shaving_day_mode = "shaving_day" if car_full else "car_day"
         logger.info(
-            "Shaving day-mode decided at %02d:00 → %s "
-            "(car_present=%s soc=%s target=%s)",
+            "Shaving day-mode decided at %02d:00 → %s (car_full=%s soc=%s target=%s)",
             self.shaving_decision_hour,
             self._shaving_day_mode,
-            car_present,
-            car_soc,
-            target,
+            car_full,
+            self.ha_client.get_sensor_value(self.car_soc_last_known_entity),
+            self.ha_client.get_sensor_value(self.car_charging_max_entity),
         )
 
     def _charge_gate_active(self) -> bool:
