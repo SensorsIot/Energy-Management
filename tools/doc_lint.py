@@ -15,7 +15,9 @@ doc roots and it checks the few things a doc reliably drifts on:
 
 It is intentionally forgiving: fenced code blocks are skipped, and content under an explicit
 `## Changelog`, `## Cleanup-notes`, `## Target`, or anything beneath an `Archive/` path is exempt
-(those are the sanctioned homes for dated / historical / not-yet-built material).
+(those are the sanctioned homes for dated / historical / not-yet-built material). Present-state and
+duplication rules also skip the Claude harness/skill trees under `.claude/` — a skill's reference
+material legitimately quotes the anti-patterns it governs; broken-link checking still applies there.
 
 Exit status is 0 when no errors are found, 1 otherwise — so it can gate a pre-commit hook.
 Warnings (duplication is a warning by default) do not fail the run unless --strict is given.
@@ -28,7 +30,6 @@ With no ROOT and no --files, it lints every tracked *.md under the current direc
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from collections import defaultdict
@@ -59,6 +60,24 @@ LINK_RE = re.compile(r"(?<!\!)\[[^\]]+\]\(([^)]+)\)")  # [text](target), not ima
 SENTENCE_RE = re.compile(r"[^.!?\n]{40,}?[.!?]")  # substantial sentences only
 
 
+def _git_tracked_md():
+    """Git-tracked *.md paths under cwd, or None when git is unavailable.
+
+    Honors .gitignore, so gitignored trees (e.g. the assistant's private
+    `.claude-data/` memory) are not treated as project documentation.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.md"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [Path(p) for p in out.split("\0") if p]
+
+
 def iter_md_files(roots, explicit):
     if explicit:
         for f in explicit:
@@ -66,6 +85,15 @@ def iter_md_files(roots, explicit):
             if p.suffix.lower() == ".md" and p.is_file():
                 yield p
         return
+    if not roots:
+        # Default: every git-tracked *.md under cwd (honors .gitignore).
+        tracked = _git_tracked_md()
+        if tracked is not None:
+            for p in tracked:
+                if any(part in {".git", "node_modules"} for part in p.parts):
+                    continue
+                yield p
+            return
     search = roots or [Path(".")]
     for root in search:
         root = Path(root)
@@ -93,9 +121,24 @@ def read_lines_skip_code(path):
         yield i, raw, exempt
 
 
+def _history_exempt(path):
+    """Paths whose present-state / duplication rules do not apply.
+
+    Archived docs (sanctioned home for historical material) and the Claude
+    harness/skill trees under `.claude/` — a skill's own reference material
+    (e.g. the present-state-scrub catalog) legitimately quotes the very
+    anti-patterns it teaches authors to avoid, so policing it is a false
+    positive. Broken-link checking still runs on these files.
+    """
+    if "archive" in str(path).lower():
+        return True
+    parts = {p.lower() for p in path.parts}
+    return ".claude" in parts or ".claude-data" in parts
+
+
 def check_present_state(path):
     findings = []
-    if "archive" in str(path).lower():
+    if _history_exempt(path):
         return findings
     for lineno, text, exempt in read_lines_skip_code(path):
         if exempt:
@@ -125,7 +168,7 @@ def check_links(path):
 
 
 def collect_sentences(path, table):
-    if "archive" in str(path).lower():
+    if _history_exempt(path):
         return
     for lineno, text, exempt in read_lines_skip_code(path):
         if exempt:
@@ -137,10 +180,14 @@ def collect_sentences(path, table):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("roots", nargs="*", help="doc roots to scan (default: *.md under cwd)")
     ap.add_argument("--files", nargs="*", default=None, help="lint exactly these files (for hooks)")
-    ap.add_argument("--strict", action="store_true", help="treat warnings (duplication) as failures")
+    ap.add_argument(
+        "--strict", action="store_true", help="treat warnings (duplication) as failures"
+    )
     ap.add_argument("--quiet", action="store_true", help="only print findings, no summary")
     args = ap.parse_args(argv)
 
@@ -158,12 +205,13 @@ def main(argv=None):
         collect_sentences(f, sentences)
 
     # duplication across files → warnings
-    for norm, locs in sentences.items():
+    for _norm, locs in sentences.items():
         distinct = {p for p, _ in locs}
         if len(distinct) > 1:
             where = ", ".join(f"{p}:{ln}" for p, ln in locs)
             findings.append((locs[0][0], locs[0][1], "warning", "duplication",
-                             f"same sentence in {len(distinct)} docs (link, don't restate) — {where}"))
+                             f"same sentence in {len(distinct)} docs (link, don't restate)"
+                             f" — {where}"))
 
     errors = [x for x in findings if x[2] == "error"]
     warnings = [x for x in findings if x[2] == "warning"]
@@ -171,7 +219,10 @@ def main(argv=None):
         print(f"{path}:{lineno}: {sev}: [{rule}] {msg}")
 
     if not args.quiet:
-        print(f"\ndoc_lint: {len(errors)} error(s), {len(warnings)} warning(s) across {len(files)} file(s)")
+        print(
+            f"\ndoc_lint: {len(errors)} error(s), {len(warnings)} warning(s) "
+            f"across {len(files)} file(s)"
+        )
     return 1 if errors or (args.strict and warnings) else 0
 
 

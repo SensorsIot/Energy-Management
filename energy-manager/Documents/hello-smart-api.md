@@ -71,7 +71,7 @@ Returns a **302 redirect chain** (two hops):
 
 Follow each redirect manually (disable auto-redirects). Extract `access_token` from the second hop's Location header query parameters.
 
-> **Note:** evcc and older documentation describe an implicit flow where `access_token` appears directly in the first redirect. As of 2026, Smart's OIDC server uses authorization code flow instead. The `FinalPage` endpoint on Smart's server performs the code-for-token exchange server-side and redirects to `MobileData` with the token. No client-side token endpoint call is needed.
+> **Note:** Smart's OIDC server uses the authorization code flow. The `FinalPage` endpoint on Smart's server performs the code-for-token exchange server-side and redirects to `MobileData` with the token — no client-side token endpoint call is needed. (Some third-party docs and evcc describe an implicit flow where `access_token` appears directly in the first redirect; that does not apply to this server.)
 
 ### Step 4: App Token Exchange
 
@@ -108,7 +108,7 @@ The `accessToken` and `userId` are used for all subsequent API calls.
 
 ## 2. Reading Vehicle Data
 
-### 2.1 API Version Routing (V1 vs V2)
+### 2.1 API Version Routing (V1 and V2)
 
 The Smart API has two base URLs. The correct one depends on the car model:
 
@@ -268,7 +268,7 @@ All in [evcc-io/evcc](https://github.com/evcc-io/evcc) repository:
 
 | File | Purpose |
 |------|---------|
-| `vehicle/smart/hello/identity.go` | Authentication flow (implicit OIDC only — broken as of 2026) |
+| `vehicle/smart/hello/identity.go` | Authentication flow (implicit OIDC only — broken against the current server) |
 | `vehicle/smart/hello/api.go` | API client (V1 only — no Smart #5 support) |
 | `vehicle/smart/hello/helper.go` | HMAC-SHA1 request signing |
 | `vehicle/smart/hello/provider.go` | Data extraction (SOC, range, charging status) |
