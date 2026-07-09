@@ -358,3 +358,51 @@ class ChargePointHandler(CP):
         response = await self.call(request)
         logger.info(f"TriggerMessage response: {response.status}")
         return response.status == "Accepted"
+
+    async def change_configuration(self, key: str, value: str) -> str:
+        """Set an OCPP configuration key on the wallbox.
+
+        Returns the raw status string (`Accepted`, `Rejected`, `RebootRequired`,
+        or `NotSupported`). The caller decides how to react — `Accepted` and
+        `RebootRequired` both mean the value was taken.
+        """
+        logger.info(f"Sending ChangeConfiguration: {key}={value}")
+        response = await self.call(call.ChangeConfiguration(key=key, value=value))
+        logger.info(f"ChangeConfiguration {key}={value} response: {response.status}")
+        return response.status
+
+    async def get_configuration(self, keys: list[str] | None = None) -> dict:
+        """Read OCPP configuration keys from the wallbox.
+
+        Returns a ``{key: value}`` dict for the keys the wallbox knows about
+        (keys it does not support are reported in ``unknown_key`` and omitted
+        from the result). Used to confirm feature support and to sync HA state
+        to the wallbox's actual configuration — the wallbox is the source of
+        truth.
+        """
+        request = call.GetConfiguration(key=keys) if keys else call.GetConfiguration()
+        response = await self.call(request)
+        result = {
+            item.get("key"): item.get("value")
+            for item in (getattr(response, "configuration_key", None) or [])
+        }
+        unknown = getattr(response, "unknown_key", None) or []
+        logger.info(
+            f"GetConfiguration: {result}"
+            + (f", unknown={unknown}" if unknown else "")
+        )
+        return result
+
+    async def unlock_connector(self) -> str:
+        """Release the socket lock now via UnlockConnector.
+
+        Returns the raw status string (`Unlocked`, `UnlockFailed`, or
+        `NotSupported`). Momentary action — frees a stuck cable — distinct from
+        the persistent `UnlockConnectorOnEVSideDisconnect` policy.
+        """
+        logger.info("Sending UnlockConnector")
+        response = await self.call(
+            call.UnlockConnector(connector_id=self.connector_id)
+        )
+        logger.info(f"UnlockConnector response: {response.status}")
+        return response.status

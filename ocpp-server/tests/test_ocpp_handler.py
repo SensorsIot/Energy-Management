@@ -1929,3 +1929,177 @@ class TestProxyCorrection:
         await asyncio.sleep(0)
         assert server._proxy_charging is False
         assert server._proxy_power_w() == 0.0
+
+
+class TestCableLockCommands:
+    """OCPP commands backing the cable lock/unlock switch."""
+
+    @pytest.mark.asyncio
+    async def test_change_configuration_sends_key_value(self, handler) -> None:
+        """change_configuration sends the key/value and returns the raw status."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            status = await handler.change_configuration(
+                "UnlockConnectorOnEVSideDisconnect", "false"
+            )
+            assert status == "Accepted"
+            req = mock_call.call_args[0][0]
+            assert req.key == "UnlockConnectorOnEVSideDisconnect"
+            assert req.value == "false"
+
+    @pytest.mark.asyncio
+    async def test_change_configuration_returns_notsupported(self, handler) -> None:
+        """A wallbox that lacks the key returns NotSupported, not a crash."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "NotSupported"})()
+            status = await handler.change_configuration("SomeKey", "true")
+            assert status == "NotSupported"
+
+    @pytest.mark.asyncio
+    async def test_get_configuration_parses_keys(self, handler) -> None:
+        """get_configuration returns a {key: value} dict from configuration_key."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type(
+                "R",
+                (),
+                {
+                    "configuration_key": [
+                        {"key": "UnlockConnectorOnEVSideDisconnect",
+                         "readonly": False, "value": "true"},
+                    ],
+                    "unknown_key": [],
+                },
+            )()
+            cfg = await handler.get_configuration(
+                ["UnlockConnectorOnEVSideDisconnect"]
+            )
+            assert cfg == {"UnlockConnectorOnEVSideDisconnect": "true"}
+            assert mock_call.call_args[0][0].key == [
+                "UnlockConnectorOnEVSideDisconnect"
+            ]
+
+    @pytest.mark.asyncio
+    async def test_get_configuration_omits_unknown_keys(self, handler) -> None:
+        """Keys the wallbox does not know are omitted (reported in unknown_key)."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type(
+                "R",
+                (),
+                {"configuration_key": [], "unknown_key": ["UnlockConnectorOnEVSideDisconnect"]},
+            )()
+            cfg = await handler.get_configuration(
+                ["UnlockConnectorOnEVSideDisconnect"]
+            )
+            assert cfg == {}
+
+    @pytest.mark.asyncio
+    async def test_unlock_connector_sends_connector_id(self, handler) -> None:
+        """unlock_connector targets connector 1 and returns the raw status."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Unlocked"})()
+            status = await handler.unlock_connector()
+            assert status == "Unlocked"
+            assert mock_call.call_args[0][0].connector_id == 1
+
+
+class TestCableLockSwitch:
+    """switch.wallbox_cable_lock: MQTT-discovery switch → ChangeConfiguration."""
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "test"})
+        srv.ha = AsyncMock()
+        cp = MagicMock()
+        cp.change_configuration = AsyncMock(return_value="Accepted")
+        cp.get_configuration = AsyncMock(return_value={})
+        srv.charge_point = cp
+        # _mqtt_client stays None → publish helpers no-op (no broker in tests)
+        return srv
+
+    @staticmethod
+    def _msg(payload: bytes, topic: str = "ocpp-server/cable_lock/set"):
+        m = MagicMock()
+        m.payload = payload
+        m.topic = topic
+        return m
+
+    def test_config_value_mapping_round_trip(self, server) -> None:
+        """LOCK↔false, UNLOCK↔true both directions."""
+        assert server._cable_lock_to_config_value("LOCK") == "false"
+        assert server._cable_lock_to_config_value("UNLOCK") == "true"
+        assert server._config_value_to_cable_lock("false") == "LOCK"
+        assert server._config_value_to_cable_lock("true") == "UNLOCK"
+        assert server._config_value_to_cable_lock("FALSE") == "LOCK"
+
+    def test_discovery_payload_entity_and_topics(self, server) -> None:
+        """Discovery config fixes the entity_id and the command/state topics."""
+        import json as _json
+
+        d = _json.loads(server._cable_lock_discovery_payload())
+        assert d["object_id"] == "wallbox_cable_lock"
+        assert d["command_topic"] == "ocpp-server/cable_lock/set"
+        assert d["state_topic"] == "ocpp-server/cable_lock/state"
+        assert d["payload_on"] == "LOCK" and d["state_on"] == "LOCK"
+
+    @pytest.mark.asyncio
+    async def test_lock_command_sets_config_false(self, server) -> None:
+        """LOCK → UnlockConnectorOnEVSideDisconnect=false, state follows."""
+        await server._handle_cable_lock_command(self._msg(b"LOCK"))
+        server.charge_point.change_configuration.assert_awaited_once_with(
+            "UnlockConnectorOnEVSideDisconnect", "false"
+        )
+        assert server._cable_lock_state == "LOCK"
+
+    @pytest.mark.asyncio
+    async def test_unlock_command_sets_config_true(self, server) -> None:
+        """UNLOCK → UnlockConnectorOnEVSideDisconnect=true, state follows."""
+        server._cable_lock_state = "LOCK"
+        await server._handle_cable_lock_command(self._msg(b"UNLOCK"))
+        server.charge_point.change_configuration.assert_awaited_once_with(
+            "UnlockConnectorOnEVSideDisconnect", "true"
+        )
+        assert server._cable_lock_state == "UNLOCK"
+
+    @pytest.mark.asyncio
+    async def test_unknown_command_ignored(self, server) -> None:
+        """A stray payload is ignored — no wallbox command sent."""
+        await server._handle_cable_lock_command(self._msg(b"MAYBE"))
+        server.charge_point.change_configuration.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejected_command_does_not_change_state(self, server) -> None:
+        """Wallbox Rejected → switch state stays put (reverts on next publish)."""
+        server._cable_lock_state = "UNLOCK"
+        server.charge_point.change_configuration = AsyncMock(return_value="Rejected")
+        await server._handle_cable_lock_command(self._msg(b"LOCK"))
+        assert server._cable_lock_state == "UNLOCK"
+
+    @pytest.mark.asyncio
+    async def test_offline_command_no_crash_keeps_state(self, server) -> None:
+        """Wallbox offline → no crash, state unchanged."""
+        server.charge_point = None
+        server._cable_lock_state = "UNLOCK"
+        await server._handle_cable_lock_command(self._msg(b"LOCK"))
+        assert server._cable_lock_state == "UNLOCK"
+
+    @pytest.mark.asyncio
+    async def test_sync_from_wallbox_locked(self, server) -> None:
+        """GetConfiguration false → switch shows LOCK."""
+        server.charge_point.get_configuration = AsyncMock(
+            return_value={"UnlockConnectorOnEVSideDisconnect": "false"}
+        )
+        await server._sync_cable_lock_from_wallbox()
+        assert server._cable_lock_state == "LOCK"
+
+    @pytest.mark.asyncio
+    async def test_sync_from_wallbox_unsupported_key_leaves_state(self, server) -> None:
+        """A wallbox that omits the key leaves the switch state unchanged."""
+        server._cable_lock_state = "UNLOCK"
+        server.charge_point.get_configuration = AsyncMock(return_value={})
+        await server._sync_cable_lock_from_wallbox()
+        assert server._cable_lock_state == "UNLOCK"

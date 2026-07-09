@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.62"
+__version__ = "0.9.67"
 
 import asyncio
 import json
@@ -61,6 +61,12 @@ STATUS_ENTITY_MAP = {
     "transaction": "sensor.wallbox_transaction",
     "phases": "sensor.wallbox_phases",
 }
+
+# OCPP configuration key that governs the socket cable lock. When "true" the
+# wallbox releases the cable as soon as the car is unplugged; when "false" it
+# stays locked in the wallbox (theft protection). This is the persistent
+# lock/unlock policy exposed to the user as switch.wallbox_cable_lock.
+CABLE_LOCK_CONFIG_KEY = "UnlockConnectorOnEVSideDisconnect"
 
 # Wallbox status → car_ready binary sensor mapping
 CAR_READY_MAP = {
@@ -230,6 +236,18 @@ class OCPPServer:
         self._last_mqtt_power: float = (
             0.0  # re-publish periodically to prevent staleness
         )
+
+        # Cable-lock switch (switch.wallbox_cable_lock) exposed to HA via MQTT
+        # discovery on the same broker HA already uses. "LOCK" keeps the cable
+        # held after the car is unplugged; "UNLOCK" releases it — see
+        # CABLE_LOCK_CONFIG_KEY. The wallbox is the source of truth: the switch
+        # is synced from GetConfiguration on every (re)connect.
+        self._cable_lock_cmd_topic = "ocpp-server/cable_lock/set"
+        self._cable_lock_state_topic = "ocpp-server/cable_lock/state"
+        self._cable_lock_discovery_topic = (
+            "homeassistant/switch/ocpp_wallbox_cable_lock/config"
+        )
+        self._cable_lock_state = "UNLOCK"  # safe default: never trap the cable
         # Proxy correction: while we are commanding the car to charge, feed the
         # ESP32 Modbus proxy the COMMANDED power (not the measured MeterValues),
         # so the SUN2000 sees the load the instant charging is commanded.
@@ -342,11 +360,21 @@ class OCPPServer:
                         f"MQTT connected to {self._mqtt_host}:{self._mqtt_port}, "
                         f"topic={self._mqtt_topic}"
                     )
-                    # Re-publish last known power every 10s to prevent
-                    # Modbus Proxy staleness (30s timeout on ESP32)
-                    while self.running:
-                        await asyncio.sleep(10)
-                        await self._publish_mqtt_power(self._last_mqtt_power)
+                    # Announce the cable-lock switch (HA MQTT discovery), restore
+                    # its last-known state, and listen for user commands.
+                    await client.subscribe(self._cable_lock_cmd_topic)
+                    await self._publish_cable_lock_discovery()
+                    await self._publish_cable_lock_state()
+                    # Re-publish last known power every 10s (Modbus Proxy 30s
+                    # staleness timeout on the ESP32) — runs alongside the
+                    # command listener below.
+                    republish = asyncio.create_task(self._mqtt_power_republish_loop())
+                    try:
+                        async for message in client.messages:
+                            if str(message.topic) == self._cable_lock_cmd_topic:
+                                await self._handle_cable_lock_command(message)
+                    finally:
+                        republish.cancel()
             except aiomqtt.MqttError as e:
                 self._mqtt_client = None
                 if self.running:
@@ -371,6 +399,151 @@ class OCPPServer:
             logger.debug(f"MQTT publish {self._mqtt_topic}: {power_w}W")
         except Exception as e:
             logger.warning(f"MQTT publish failed: {e}")
+
+    async def _mqtt_power_republish_loop(self) -> None:
+        """Re-publish last-known wallbox power every 10s (proxy staleness guard)."""
+        while self.running:
+            await asyncio.sleep(10)
+            await self._publish_mqtt_power(self._last_mqtt_power)
+
+    # ---- Cable-lock switch (switch.wallbox_cable_lock) -------------------------
+
+    @staticmethod
+    def _cable_lock_to_config_value(state: str) -> str:
+        """Map a switch state to the UnlockConnectorOnEVSideDisconnect value.
+
+        LOCK → "false" (keep the cable held after the car is unplugged);
+        UNLOCK → "true" (release the cable on EV-side disconnect).
+        """
+        return "false" if state == "LOCK" else "true"
+
+    @staticmethod
+    def _config_value_to_cable_lock(value: str) -> str:
+        """Inverse of _cable_lock_to_config_value — parse the wallbox's value."""
+        return "LOCK" if str(value).strip().lower() in ("false", "0", "no") else "UNLOCK"
+
+    def _cable_lock_discovery_payload(self) -> str:
+        """HA MQTT-discovery config for switch.wallbox_cable_lock (retained)."""
+        return json.dumps(
+            {
+                "name": "Wallbox Cable Lock",
+                "unique_id": "ocpp_wallbox_cable_lock",
+                "object_id": "wallbox_cable_lock",
+                "command_topic": self._cable_lock_cmd_topic,
+                "state_topic": self._cable_lock_state_topic,
+                "payload_on": "LOCK",
+                "payload_off": "UNLOCK",
+                "state_on": "LOCK",
+                "state_off": "UNLOCK",
+                "icon": "mdi:ev-plug-type2",
+                "device": {
+                    "identifiers": ["ocpp_wallbox"],
+                    "name": "OCPP Wallbox",
+                    "manufacturer": "AcTec",
+                    "model": "EV-AC22K",
+                },
+            }
+        )
+
+    async def _publish_cable_lock_discovery(self) -> None:
+        """Publish the retained MQTT-discovery config so HA creates the switch."""
+        if self._mqtt_client is None:
+            return
+        try:
+            await self._mqtt_client.publish(
+                self._cable_lock_discovery_topic,
+                self._cable_lock_discovery_payload(),
+                retain=True,
+            )
+            logger.info("Published cable-lock MQTT discovery config")
+        except Exception as e:
+            logger.warning(f"Cable-lock discovery publish failed: {e}")
+
+    async def _publish_cable_lock_state(self) -> None:
+        """Publish the current cable-lock state (retained) so HA reflects it."""
+        if self._mqtt_client is None:
+            return
+        try:
+            await self._mqtt_client.publish(
+                self._cable_lock_state_topic, self._cable_lock_state, retain=True
+            )
+        except Exception as e:
+            logger.warning(f"Cable-lock state publish failed: {e}")
+
+    async def _handle_cable_lock_command(self, message) -> None:
+        """Handle a LOCK/UNLOCK command from HA (MQTT command topic)."""
+        try:
+            payload = message.payload.decode().strip().upper()
+        except (AttributeError, UnicodeDecodeError):
+            logger.warning("Cable-lock: undecodable command payload, ignoring")
+            return
+        if payload not in ("LOCK", "UNLOCK"):
+            logger.warning(f"Cable-lock: ignoring unknown command {payload!r}")
+            return
+        await self._apply_cable_lock(payload)
+
+    async def _apply_cable_lock(self, state: str) -> None:
+        """Apply a lock/unlock request to the wallbox and reflect it back to HA.
+
+        On success the switch state follows the request; on rejection or while
+        the wallbox is offline the switch is re-published at its last-known
+        state so the dashboard toggle snaps back instead of lying.
+        """
+        if not self.charge_point:
+            logger.warning(
+                f"Cable-lock: wallbox offline, cannot apply {state} — "
+                f"reverting switch to {self._cable_lock_state}"
+            )
+            await self._publish_cable_lock_state()
+            return
+        value = self._cable_lock_to_config_value(state)
+        try:
+            status = await self.charge_point.change_configuration(
+                CABLE_LOCK_CONFIG_KEY, value
+            )
+        except Exception as e:
+            logger.error(f"Cable-lock: ChangeConfiguration failed: {e}")
+            await self._publish_cable_lock_state()
+            return
+        if status in ("Accepted", "RebootRequired"):
+            self._cable_lock_state = state
+            logger.info(
+                f"Cable {'locked' if state == 'LOCK' else 'unlocked'} "
+                f"({CABLE_LOCK_CONFIG_KEY}={value}, {status})"
+            )
+        else:
+            logger.warning(
+                f"Cable-lock {state} rejected by wallbox ({status}) — reverting"
+            )
+        await self._publish_cable_lock_state()
+
+    async def _sync_cable_lock_from_wallbox(self) -> None:
+        """Sync the switch to the wallbox's actual UnlockConnectorOnEVSideDisconnect.
+
+        Runs on every (re)connect. Also the diagnostic that confirms the AcTec
+        supports the key — an unsupported key is reported and the switch is
+        left as-is (toggling it will have no effect).
+        """
+        if not self.charge_point:
+            return
+        try:
+            cfg = await self.charge_point.get_configuration([CABLE_LOCK_CONFIG_KEY])
+        except Exception as e:
+            logger.warning(f"Cable-lock: GetConfiguration failed: {e}")
+            return
+        value = cfg.get(CABLE_LOCK_CONFIG_KEY)
+        if value is None:
+            logger.warning(
+                f"Cable-lock: wallbox does not report {CABLE_LOCK_CONFIG_KEY} — "
+                f"the switch will have no effect"
+            )
+            return
+        self._cable_lock_state = self._config_value_to_cable_lock(value)
+        logger.info(
+            f"Cable-lock synced from wallbox: {CABLE_LOCK_CONFIG_KEY}={value} "
+            f"→ {self._cable_lock_state}"
+        )
+        await self._publish_cable_lock_state()
 
     # Statuses where the car is definitively not drawing — stop the correction.
     _PROXY_STOP_STATUSES = {"SuspendedEV", "Finishing", "Available"}
@@ -951,6 +1124,10 @@ class OCPPServer:
         self._setup_complete.set()
         await self._update_car_ready()
         logger.info("Post-connect setup complete")
+
+        # Sync the cable-lock switch to the wallbox's actual configuration
+        # (also confirms the AcTec supports UnlockConnectorOnEVSideDisconnect).
+        await self._sync_cable_lock_from_wallbox()
 
         # Apply current HA power limit immediately (don't wait for change)
         await self._apply_current_power_limit()

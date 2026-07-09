@@ -146,6 +146,9 @@ The wallbox reports its state via OCPP `StatusNotification`. These states drive 
 | `SetChargingProfile` | Power limit changed, or before RemoteStart |
 | `RemoteStartTransaction` | After SetChargingProfile, when no active transaction |
 | `TriggerMessage` (MeterValues) | On connect (sync state) |
+| `ChangeConfiguration` | Cable-lock switch toggled — sets `UnlockConnectorOnEVSideDisconnect` (§3.6.7) |
+| `GetConfiguration` | On connect — reads `UnlockConnectorOnEVSideDisconnect` to sync the cable-lock switch (§3.6.7) |
+| `UnlockConnector` | Momentary socket release (available; not bound to the persistent cable-lock policy) |
 
 **Not used:** `RemoteStopTransaction` (causes Finishing), `Reset` (causes reboot + stale Finishing).
 
@@ -361,6 +364,29 @@ value, but it lags — ~60 s cadence and a slow post-command ramp — so the pub
 
 The measured MeterValues also drive the `sensor.wallbox_power` HA entity (display).
 
+#### 3.6.7 Cable lock control (user)
+
+`switch.wallbox_cable_lock` is a user-facing lock/unlock toggle for the socket cable, mirroring the
+AcTec app's cable lock. It maps to the OCPP configuration key `UnlockConnectorOnEVSideDisconnect` — a
+persistent policy stored in the wallbox:
+
+| Switch | `UnlockConnectorOnEVSideDisconnect` | Behaviour |
+|--------|:-----------------------------------:|-----------|
+| **on** (locked) | `false` | Cable stays held in the wallbox after the car is unplugged (theft protection) |
+| **off** (unlocked) | `true` | Wallbox releases the cable when the car is unplugged |
+
+**Exposure.** The switch is published to HA by **MQTT discovery** on the same broker used for the
+Modbus-proxy feed (`mqtt_host`), not the Supervisor REST API — MQTT discovery gives HA a natively
+toggleable entity. Discovery config is retained at `homeassistant/switch/ocpp_wallbox_cable_lock/config`
+(`object_id` fixes the entity to `switch.wallbox_cable_lock`); command topic `ocpp-server/cable_lock/set`
+(payloads `LOCK` / `UNLOCK`); retained state topic `ocpp-server/cable_lock/state`.
+
+**Source of truth is the wallbox.** On every (re)connect the server reads the key via
+`GetConfiguration` and publishes the matching switch state. A toggle sends `ChangeConfiguration`; on
+`Accepted` / `RebootRequired` the state follows, otherwise (rejected, or wallbox offline) the switch
+re-publishes its last-known state so the dashboard snaps back. If the wallbox does not report the key
+the switch has no effect and the condition is logged.
+
 ## 4. EARU Breaker Hardware
 
 | Component | Chip | Function |
@@ -516,6 +542,7 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-12 | Reconnect after server restart | StopTransaction(PowerLoss), previous session closed |
 | TC-13 | Full charge cycle | Start → Charge → Pause → Resume → Stop |
 | TC-14 | HA restart with active wallbox | Entities re-registered, state re-synced |
+| TC-15 | Cable-lock switch toggled (§3.6.7) | `LOCK`→`ChangeConfiguration(UnlockConnectorOnEVSideDisconnect, false)`, `UNLOCK`→`true`; state follows on Accepted, reverts on reject/offline; `GetConfiguration` on connect syncs the switch |
 
 ### 8.1 Security test cases
 
@@ -582,6 +609,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.17 | 2026-07-09 | **Cable lock/unlock switch (§3.6.7).** New user-facing `switch.wallbox_cable_lock` mirrors the AcTec app's cable lock, mapping to the persistent OCPP key `UnlockConnectorOnEVSideDisconnect` (on=locked/`false`, off=unlocked/`true`). Exposed via MQTT discovery on `mqtt_host` (natively toggleable, unlike the REST state entities); command `ocpp-server/cable_lock/set`, retained state `ocpp-server/cable_lock/state`. `GetConfiguration` on every connect syncs the switch to the wallbox (source of truth); a toggle sends `ChangeConfiguration` and reverts on reject/offline. New OCPP commands `change_configuration`/`get_configuration`/`unlock_connector`; §3.3 outgoing table + TC-15. ocpp-server 0.9.67 (also reconciles run.py `__version__` 0.9.62→0.9.67); tests 103 → 117 (`TestCableLockCommands`, `TestCableLockSwitch`). |
 | 1.0–1.9 | 2026-02-10–12 | Initial FSD through AcTec wallbox verification |
 | 2.0–2.4 | 2026-02-12–16 | Post-connect setup, throttle, integer amps, HA restart recovery |
 | 2.5–2.7 | 2026-02-17 | Phase switching safety (dual gate), 0W bypass, EnergyManager contract |
