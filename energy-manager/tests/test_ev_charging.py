@@ -248,3 +248,62 @@ class TestTargetGate:
         )
         assert candidates == [5727, 5117, 4354, 3962]
         assert "step-up allowed" in reason
+
+
+# --- single-phase power stepping (cable phase detection) ---
+
+from src.ev_charging import (  # noqa: E402
+    POWER_STEPS_1P,
+    POWER_STEPS_3P,
+    power_steps_for_phases,
+)
+
+
+class TestPowerStepsForPhases:
+    def test_single_phase_selects_1p_table(self) -> None:
+        assert power_steps_for_phases(1) == POWER_STEPS_1P
+
+    def test_three_phase_selects_3p_table(self) -> None:
+        assert power_steps_for_phases(3) == POWER_STEPS_3P
+
+    def test_default_is_three_phase(self) -> None:
+        # Unknown/other phase counts fall back to the 3-phase table.
+        assert power_steps_for_phases(0) == POWER_STEPS_3P
+
+    def test_1p_table_spans_single_phase_range(self) -> None:
+        # 6A..16A at 230 W/A → 1380..3680 W (the published 1φ range).
+        assert POWER_STEPS_1P[0] == 1380
+        assert POWER_STEPS_1P[-1] == 3680
+
+
+class TestSnapSinglePhase:
+    def test_snaps_within_single_phase_range(self) -> None:
+        # 2500 W surplus on 1φ → 2300 W step (10A), not 0 (3φ min is 3962).
+        step = snap_to_power_step(2500, POWER_STEPS_1P[0], POWER_STEPS_1P[-1],
+                                  steps=POWER_STEPS_1P)
+        assert step == 2300
+
+    def test_below_all_1p_steps_returns_min(self) -> None:
+        step = snap_to_power_step(1000, POWER_STEPS_1P[0], POWER_STEPS_1P[-1],
+                                  steps=POWER_STEPS_1P)
+        assert step == 1380
+
+    def test_above_all_1p_steps_returns_max(self) -> None:
+        step = snap_to_power_step(9000, POWER_STEPS_1P[0], POWER_STEPS_1P[-1],
+                                  steps=POWER_STEPS_1P)
+        assert step == 3680
+
+    def test_3p_table_would_return_zero_for_single_phase_range(self) -> None:
+        # The old bug: 3φ steps snapped into the 1φ range yield no valid step.
+        assert snap_to_power_step(2500, 1380, 3680) == 0
+
+
+class TestBuildSolarCandidatesSinglePhase:
+    def test_step_up_uses_1p_steps(self) -> None:
+        # candidate 2300 (10A), protected → step up to 2530 (11A) on 1φ.
+        cands, _ = build_solar_candidates(
+            candidate_power=2300, threshold=1380, step_up_allowed=True,
+            target_reachable=True, steps=POWER_STEPS_1P,
+        )
+        assert 2530 in cands
+        assert all(c in POWER_STEPS_1P for c in cands)

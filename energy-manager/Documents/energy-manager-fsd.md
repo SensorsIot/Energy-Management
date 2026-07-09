@@ -1268,19 +1268,23 @@ Lives on `EVBatteryOptimizer`. Returns whether the **peak** home-battery SOC rea
 
 #### Amp-step conversion (plumbing)
 
-The wallbox only charges at integer amp levels. The energy-manager picks from a discrete set of **M-Bus calibrated power steps** -- the actual power delivered at each amp level, measured via M-Bus ground truth:
+The wallbox only charges at integer amp levels. The energy-manager picks from a discrete set of **M-Bus calibrated power steps** -- the actual power delivered at each amp level. **The step table is phase-specific** and chosen from the OCPP server's detected cable phase count (`sensor.wallbox_phases`, ocpp-server FSD §3.6.4.1), because the wallbox draws only the connected phases:
 
-| Amps | Delivered power (M-Bus W) |
-|-----:|--------------------------:|
-| 6 | 3962 |
-| 7 | 4354 |
-| 8 | 5117 |
-| 9 | 5727 |
-| 10 | 6288 |
-| 11 | 7034 |
-| 12 | 7624 |
+| Amps | 3-phase (M-Bus W) | 1-phase (M-Bus W) |
+|-----:|------------------:|------------------:|
+| 6 | 3962 | 1380 |
+| 7 | 4354 | 1610 |
+| 8 | 5117 | 1840 |
+| 9 | 5727 | 2070 |
+| 10 | 6288 | 2300 |
+| 11 | 7034 | 2530 |
+| 12 | 7624 | 2760 |
+| 13 | — | 2990 |
+| 14 | — | 3220 |
+| 15 | — | 3450 |
+| 16 | — | 3680 |
 
-These differ from the nominal `amps x 230 V x 3` because real grid voltage is ~220 V. Using M-Bus values keeps the energy-manager's energy accounting (battery protection, surplus) aligned with what the wallbox actually delivers. `snap_to_power_step(surplus)` returns the highest step <= surplus (Rule 2); Rule 3's step-up tries the next step above. The OCPP server converts watts -> integer amps with a calibrated divisor `round(power_w / 637)` (safe range [612, 662]).
+`POWER_STEPS_3P` is the 2026-03-04 M-Bus sweep (6–12 A); `POWER_STEPS_1P` is 230 W/A from live single-phase MeterValues (2026-07-09, 6–16 A). Using the wrong table breaks single-phase charging: the 3-phase steps all start at 3962 W, above the 1φ maximum (3680 W), so `snap_to_power_step` finds no valid step and the car cannot modulate. `power_steps_for_phases(phases)` selects the table; `snap_to_power_step(surplus, steps=…)` returns the highest step <= surplus (Rule 2), Rule 3's step-up tries the next step above. The OCPP server converts watts -> integer amps with a phase-specific divisor (`round(power_w / 637)` 3φ, `round(power_w / 230)` 1φ), capped at `max_current_a` (ocpp-server FSD §7.2).
 
 #### Self-correction and rate limiting (plumbing)
 
@@ -3015,6 +3019,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.82: **Solar power-step table is now phase-aware — single-phase charging steps correctly (Section 4.3.7).** The step table `POWER_STEPS_3P` = [3962…7624] is 3-phase M-Bus ground truth, all values ≥ 3962 W. With a **single-phase charging cable** (the wallbox draws only L1, so the max is 3680 W / 16 A), `snap_to_power_step` found no step within the 1φ range and the step-up path even overrode the dynamic range with `POWER_STEPS_3P[0]/[-1]` (3962–7624 W), commanding e.g. 4354 W — which the OCPP server turned into ~19 A on one phase (over the 16 A limit) and could not modulate down. New `POWER_STEPS_1P` = [1380…3680] (230 W/A from live single-phase MeterValues, 6–16 A) and `power_steps_for_phases(phases)` select the table from the OCPP server's detected cable phase count (`sensor.wallbox_phases`, ocpp-server §3.6.4.1). `snap_to_power_step` / `build_solar_candidates` take a `steps=` arg (default 3φ, backward-compatible); the solar path threads the selected table through the candidate, step-up, snap-down and `ev_step_offset` logic. Pairs with ocpp-server 0.9.71 (1φ divisor 230 + `max_current_a` amp cap). New tests: `TestPowerStepsForPhases`, `TestSnapSinglePhase`, `TestBuildSolarCandidatesSinglePhase`. (1.9.6 -> 1.9.7)
 
 - v2.81: **Shaving day now keys on EV fullness alone — connection is no longer a criterion (Section 4.2.3).** The once-daily shave-vs-car-day snapshot required the car to be *connected* (it read `binary_sensor.car_ready`). But a full car reports wallbox status `SuspendedEV`/`Finishing`, for which `car_ready` is **off** (`CAR_READY_MAP` maps both to `False`), so a full car — the *exact* shaving-day premise — read as "no car" and latched a **car day**, charging the battery greedily all morning and exporting the whole midday peak instead of absorbing it. Observed live 2026-07-07: `soc=80 target=80` (full) → car_day; battery filled 39 %→97 % by 10:30 while ~6 kW was exported at the peak. Fix: the premise is now purely `smart_battery_last_known >= smart_charging_max_last_known` (`_car_is_full`), evaluated whether or not the car is plugged in — the EV can come and go, so only its charge level matters (a full car won't need the surplus; a car below target will, so bank the battery greedily). Both sides read the **last-known** sensors (`sensor.smart_battery_last_known` / `sensor.smart_charging_max_last_known`), **not** the volatile `sensor.smart_battery` — which goes `unavailable` when the car is **asleep** (telematics sleep). The cached last-known value stays valid across sleep because a sleeping car does not consume, whereas reading the volatile sensor would force `None` → car day and never shave; a car that is awake and driving still reports, so the departure trigger catches a draining car. The departure trigger (`_car_departed`) likewise fires only on the SOC dropping below target — which the last-known SOC catches as the car drives off and drains, so no connection check is needed and a brief unplug/replug no longer ends the day. `car_ready`/`wallbox_connected`/`wallbox_status` are no longer read for this decision. `TestDayModeDecision` rewired to drive SOC-vs-target only (new `test_full_car_at_decision_is_shaving_day`, `test_car_full_soc_unknown_is_car_day`, `test_reads_last_known_soc_not_volatile`; the removed disconnect-departure and wallbox-status cases are subsumed by the below-target trigger). 253 tests pass. (1.9.5 -> 1.9.6)
 

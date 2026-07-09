@@ -23,6 +23,18 @@ _PHASE_GAP_HI = 4140  # three-phase minimum (W)
 # 6A=3962, 7A=4354, 8A=5117, 9A=5727, 10A=6288, 11A=7034, 12A=7624
 POWER_STEPS_3P = [3962, 4354, 5117, 5727, 6288, 7034, 7624]
 
+# Valid single-phase power steps — 230 W/A (live single-phase MeterValues,
+# 2026-07-09, ~230 W/A linear through origin), 6A..16A. The wallbox draws only
+# the connected phase, so these are ~1/3 of the 3-phase watts at the same amp
+# and cover the whole 1φ range (1380–3680 W). Which table applies is chosen from
+# the OCPP server's detected phase count (`sensor.wallbox_phases`).
+POWER_STEPS_1P = [1380, 1610, 1840, 2070, 2300, 2530, 2760, 2990, 3220, 3450, 3680]
+
+
+def power_steps_for_phases(phases: int) -> list[int]:
+    """Return the power-step table for the connected cable's phase count."""
+    return POWER_STEPS_1P if phases == 1 else POWER_STEPS_3P
+
 
 @dataclass
 class EVChargingResult:
@@ -82,15 +94,17 @@ def snap_to_power_step(
     surplus_w: float,
     min_power_w: float = 3962,
     max_power_w: float = 7624,
+    steps: list[int] | None = None,
 ) -> int:
     """Snap surplus to the best discrete power step within [min, max].
 
-    Picks highest step ≤ surplus from POWER_STEPS_3P.
+    Picks highest step ≤ surplus from `steps` (default: the 3-phase table).
     If surplus is below all steps, returns the minimum step
     (battery covers the difference).
     Returns 0 only if no step fits within [min, max].
     """
-    valid = [s for s in POWER_STEPS_3P if min_power_w <= s <= max_power_w]
+    steps = steps if steps is not None else POWER_STEPS_3P
+    valid = [s for s in steps if min_power_w <= s <= max_power_w]
     if not valid:
         return 0
     # Highest step that fits within surplus
@@ -106,6 +120,7 @@ def build_solar_candidates(
     threshold: float,
     step_up_allowed: bool,
     target_reachable: bool = True,
+    steps: list[int] | None = None,
 ) -> tuple[list[int], str]:
     """Decide solar-mode power-step candidates (Topics 1 & 2).
 
@@ -134,11 +149,12 @@ def build_solar_candidates(
     Returns (candidates, gate_reason) where candidates is the ordered list
     passed to the home-battery safety loop.
     """
+    steps = steps if steps is not None else POWER_STEPS_3P
     if not target_reachable:
         return [], "battery won't reach charge target → car yields surplus to battery"
     if step_up_allowed:
         snap_up = [
-            s for s in POWER_STEPS_3P
+            s for s in steps
             if s > candidate_power and s >= threshold
         ]
         snap_up_step = [snap_up[0]] if snap_up else []
@@ -147,7 +163,7 @@ def build_solar_candidates(
         snap_up_step = []
         gate_reason = "not protected → stay at/below surplus (preserve battery)"
     snap_down = [
-        s for s in reversed(POWER_STEPS_3P)
+        s for s in reversed(steps)
         if s <= candidate_power and s >= threshold
     ]
     return snap_up_step + snap_down, gate_reason

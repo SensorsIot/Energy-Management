@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.6"
+__version__ = "1.9.7"
 
 import json
 import logging
@@ -29,7 +29,7 @@ from src.ev_state_machine import EVStateMachine, EVInputs, EVState
 from src.ev_charging import (
     build_solar_candidates,
     snap_to_power_step,
-    POWER_STEPS_3P,
+    power_steps_for_phases,
 )
 from src.influxdb_writer import SimulationWriter
 from src.integration_observer import CycleSnapshot, IntegrationObserver
@@ -1448,6 +1448,14 @@ class EnergyManager:
             ev_min_power = int(dyn_min) if dyn_min and dyn_min > 0 else self.ev_min_power_w
             ev_max_power = int(dyn_max) if dyn_max and dyn_max > 0 else self.ev_max_power_w
 
+            # Cable phase count from the OCPP server (sensor.wallbox_phases): a
+            # single-phase cable uses the 1φ power-step table (230 W/A, 1380–3680W)
+            # instead of the 3φ table (which starts at 3962W, above the 1φ max).
+            wallbox_phases = self.ha_client.get_sensor_value("sensor.wallbox_phases")
+            power_steps = power_steps_for_phases(
+                int(wallbox_phases) if wallbox_phases else 3
+            )
+
             # Wallbox available = car_ready binary sensor from OCPP server
             car_ready_state = self.ha_client.get_state(self.car_ready_entity)
             wallbox_available = car_ready_state is not None and car_ready_state.get("state") == "on"
@@ -1528,8 +1536,9 @@ class EnergyManager:
                 elif battery_soc >= 100 and surplus_power >= threshold and pv_power > 0:
                     ev_charging_power_w = snap_to_power_step(
                         surplus_power,
-                        POWER_STEPS_3P[0],
-                        POWER_STEPS_3P[-1],
+                        power_steps[0],
+                        power_steps[-1],
+                        steps=power_steps,
                     )
                     ev_charging_source = "battery_full"
                     ev_source_reason = (
@@ -1562,9 +1571,11 @@ class EnergyManager:
                         self._battery_target_soc,
                     )
                 )
-                ev_min_power = POWER_STEPS_3P[0]
-                ev_max_power = POWER_STEPS_3P[-1]
-                candidate_power = snap_to_power_step(surplus_power, ev_min_power, ev_max_power)
+                ev_min_power = power_steps[0]
+                ev_max_power = power_steps[-1]
+                candidate_power = snap_to_power_step(
+                    surplus_power, ev_min_power, ev_max_power, steps=power_steps
+                )
                 # Step-up gate (Topic 2, FSD 4.3.7): step one amp level above
                 # surplus (draining the gap from the home battery) only while the
                 # battery is still protected from buying over 48 h
@@ -1588,6 +1599,7 @@ class EnergyManager:
                         and battery_soc >= self.no_buy_floor_percent
                     ),
                     target_reachable=battery_will_be_full,
+                    steps=power_steps,
                 )
 
                 # Rule 5 (FSD 4.3.6) is the home-battery gate: it decides whether
@@ -1604,9 +1616,9 @@ class EnergyManager:
                 ev_safe = bool(candidates)
                 if candidates:
                     ev_charging_power_w = candidates[0]
-                    ev_step_offset = POWER_STEPS_3P.index(
+                    ev_step_offset = power_steps.index(
                         ev_charging_power_w
-                    ) - POWER_STEPS_3P.index(candidate_power)
+                    ) - power_steps.index(candidate_power)
                     if ev_charging_power_w > candidate_power:
                         detail = f", snap-up {candidate_power}→{ev_charging_power_w}W"
                     elif ev_charging_power_w < candidate_power:
