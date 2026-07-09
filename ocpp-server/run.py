@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.67"
+__version__ = "0.9.68"
 
 import asyncio
 import json
@@ -436,12 +436,6 @@ class OCPPServer:
                 "state_on": "LOCK",
                 "state_off": "UNLOCK",
                 "icon": "mdi:ev-plug-type2",
-                "device": {
-                    "identifiers": ["ocpp_wallbox"],
-                    "name": "OCPP Wallbox",
-                    "manufacturer": "AcTec",
-                    "model": "EV-AC22K",
-                },
             }
         )
 
