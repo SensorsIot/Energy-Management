@@ -530,15 +530,17 @@ The corrected power is published to `sensor.wallbox_power` as an integer (rounde
 The energy-manager sends demand values in M-Bus watts (the actual power delivered at each amp level). The OCPP server converts these to integer amps using a calibrated divisor:
 
 ```
-limit_a = round(power_w / divisor)     divisor = 637 (3φ) | 212 (1φ) | 425 (2φ)
+limit_a = min(round(power_w / divisor), max_current_a)   divisor = 637 (3φ) | 230 (1φ)
 ```
 
-The divisor 637 is the midpoint of the safe range [612, 662], derived from the 3-phase M-Bus
-calibration sweep. **The wallbox applies the amp limit per phase**, so the divisor scales with the
-phase count reported by cable detection (§3.6.4.1): `divisor = 637 / 3 × phases`. A single-phase cable
-therefore uses ÷212, so a commanded 3000 W → 14 A on L1 (~3220 W) instead of ÷637 → 5 A (~1150 W).
-Each M-Bus power value maps to the correct integer amp (3-phase sweep shown), without relying on the
-wallbox's internal flooring:
+**The wallbox applies the amp limit per phase**, so the divisor is **measured per phase count**
+(not derived from one another) and selected by cable detection (§3.6.4.1): 637 for 3φ (midpoint of
+safe range [612, 662], 3-phase sweep below), **230 for 1φ** (live single-phase MeterValues,
+2026-07-09, ~230 W/A linear through origin — a single-phase load draws more per amp than one leg of a
+3φ load, so ÷637/3 = 212 would under-read). A single-phase 3000 W → 13 A (~3000 W) instead of ÷637 →
+5 A (~1150 W). The result is **hard-capped at `max_current_a`** (16 A): the wallbox does not enforce
+the configured maximum itself (a 1φ cable was seen drawing ~19 A from a 21 A profile), so the server
+caps it (SEC-07). Each M-Bus power value maps to the correct integer amp (3-phase sweep shown):
 
 | M-Bus W | W / 637 | round() | Correct A |
 |--------:|--------:|--------:|----------:|
@@ -641,6 +643,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.19 | 2026-07-09 | **Single-phase divisor + amp cap (§7.2).** Live single-phase charging revealed two faults: (1) the 1φ watts→amps divisor (0.9.70 used a derived 637/3 = 212) is wrong — live MeterValues show single-phase is **~230 W/A** (a 1φ load draws more per amp than one leg of a 3φ load), so 1φ divisor is now the measured **230**; (2) the wallbox does **not** enforce `max_current_a` — a 1φ cable drew **~19 A** from a 21 A profile (4413 W, over the 16 A / 3680 W config) — so `set_charging_power` now **caps `limit_a` at `max_current_a`** (SEC-07). `ChargePointHandler` gains `max_current_a`. ocpp-server 0.9.71; tests 130 → 131. NB EnergyManager's solar step table is separately made phase-aware (its FSD). |
 | 3.18 | 2026-07-09 | **Cable phase detection (§3.6.4.1).** In `three_phase` mode the server now measures the connected cable's active phase count from per-phase `Current.Import` in MeterValues (≥0.5 A/phase, gated on ≥400 W total) instead of assuming 3. Root cause: a single-phase charging cable draws L1 only, but the server reported `phases=3`, commanded 3-phase amps (so the car drew ~⅓ of the intended watts), and applied the 3φ-calibrated meter correction — under-reporting `wallbox_power` ~14% (1492 W raw → 1278 W). The detected count now drives `sensor.wallbox_phases`, the published power range, the watts→amps divisor (phase-aware `_demand_divisor`: 3φ ÷637, 1φ ÷212 — §7.2), and the meter correction (3φ linear; 1φ/2φ returns the raw wallbox power — §7.1). Re-detects on cable swap, and the detected count persists in `sensor.wallbox_phases` and is restored on startup so a single-phase cable is not stuck behind the 3-phase minimum (bootstrap deadlock, §3.6.4.1). New `active_phases` + detection in `on_meter_values`; `_on_phases_detected` + startup restore in run.py; TC-16. ocpp-server 0.9.70; tests 117 → 130 (`TestPhaseDetection`, `TestServerPhaseAdoption`). |
 | 3.17 | 2026-07-09 | **Cable lock/unlock switch (§3.6.7).** New user-facing `switch.wallbox_cable_lock` mirrors the AcTec app's cable lock, mapping to the persistent OCPP key `UnlockConnectorOnEVSideDisconnect` (on=locked/`false`, off=unlocked/`true`). Exposed via MQTT discovery on `mqtt_host` (natively toggleable, unlike the REST state entities); command `ocpp-server/cable_lock/set`, retained state `ocpp-server/cable_lock/state`. `GetConfiguration` on every connect syncs the switch to the wallbox (source of truth); a toggle sends `ChangeConfiguration` and reverts on reject/offline. New OCPP commands `change_configuration`/`get_configuration`/`unlock_connector`; §3.3 outgoing table + TC-15. The discovery config carries no `device` block so the entity is `switch.wallbox_cable_lock` (matching the other deviceless wallbox entities), not a device-prefixed id. Live-verified on the AcTec: `GetConfiguration` returns the key, `ChangeConfiguration` accepted. ocpp-server 0.9.68 (also reconciles run.py `__version__` 0.9.62→0.9.68); tests 103 → 117 (`TestCableLockCommands`, `TestCableLockSwitch`). |
 | 1.0–1.9 | 2026-02-10–12 | Initial FSD through AcTec wallbox verification |

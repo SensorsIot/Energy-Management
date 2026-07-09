@@ -45,11 +45,14 @@ class ChargePointHandler(CP):
     METER_OFFSET = -286.0
 
     # Demand calibration: W→A divisor so round(mbus_w / DEMAND_DIVISOR) = correct amps.
-    # Midpoint of safe range [612, 662] from 2026-03-04 M-Bus calibration sweep (3φ).
-    # The wallbox applies the amp limit PER PHASE, so the watts→amps divisor scales
-    # with the phase count: 3φ = DEMAND_DIVISOR, 1φ ≈ DEMAND_DIVISOR/3 (see
-    # _demand_divisor). Without this a single-phase cable draws ~1/3 the commanded W.
+    # The wallbox applies the amp limit PER PHASE, so the divisor is phase-specific
+    # (see _demand_divisor). Both are measured, not derived from each other:
+    #   3φ = 637 — midpoint of safe range [612, 662], 2026-03-04 M-Bus sweep.
+    #   1φ = 230 — from live single-phase OCPP MeterValues (2026-07-09, ~230 W/A,
+    #              linear through origin). NOT 637/3=212: single-phase draws more
+    #              per amp than one leg of a 3φ load.
     DEMAND_DIVISOR = 637
+    DEMAND_DIVISOR_1P = 230
 
     # Phase detection from MeterValues: a phase counts as "drawing" when its current
     # is at/above PHASE_ACTIVE_MIN_A, evaluated only once the total draw is meaningful
@@ -60,10 +63,19 @@ class ChargePointHandler(CP):
     PHASE_DETECT_MIN_TOTAL_W = 400
 
     def __init__(
-        self, id: str, connection, on_status_change: Callable | None = None
+        self,
+        id: str,
+        connection,
+        on_status_change: Callable | None = None,
+        max_current_a: int = 16,
     ) -> None:
         super().__init__(id, connection)
         self.on_status_change = on_status_change
+        # Hard ceiling on the per-phase amp limit sent to the wallbox. The
+        # wallbox does not enforce the configured maximum itself (a single-phase
+        # cable was observed drawing ~19 A from a 21 A profile), so the server
+        # caps it — otherwise an over-command over-draws the phase (SEC-07).
+        self.max_current_a = max_current_a
         self.current_status = ChargePointStatus.available
         self.current_power_w = 0
         self.session_energy_wh = 0
@@ -337,12 +349,14 @@ class ChargePointHandler(CP):
     def _demand_divisor(self, num_phases: int) -> int:
         """Watts→amps divisor for the requested phase count.
 
-        The wallbox applies the amp limit per phase, so the divisor scales with
-        the phase count off the 3φ-calibrated DEMAND_DIVISOR (3φ → 637, 1φ → 212).
+        Each phase count has its own measured divisor (3φ → 637, 1φ → 230); a
+        2φ draw interpolates between them (rare / transitional).
         """
         if num_phases >= 3:
             return self.DEMAND_DIVISOR
-        return round(self.DEMAND_DIVISOR / 3 * max(1, num_phases))
+        if num_phases <= 1:
+            return self.DEMAND_DIVISOR_1P
+        return round((self.DEMAND_DIVISOR_1P + self.DEMAND_DIVISOR) / 2)
 
     async def set_charging_power(self, power_w: float, num_phases: int = 3):
         """Set charging power limit via SetChargingProfile.
@@ -358,6 +372,13 @@ class ChargePointHandler(CP):
         limit_w = max(0, power_w)
         divisor = self._demand_divisor(num_phases)
         limit_a = round(limit_w / divisor) if limit_w > 0 else 0
+        # Hard cap at the configured maximum — the wallbox does not enforce it.
+        capped_a = min(limit_a, self.max_current_a)
+        if capped_a != limit_a:
+            logger.info(
+                f"Clamping {limit_a}A → {capped_a}A (max_current_a={self.max_current_a})"
+            )
+        limit_a = capped_a
 
         logger.info(
             f"Setting charging power: {limit_w:.0f}W → {limit_a}A "

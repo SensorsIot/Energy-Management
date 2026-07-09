@@ -2191,22 +2191,34 @@ class TestPhaseDetection:
         expected = handler.METER_SCALE * 4800 + handler.METER_OFFSET
         assert handler._correct_meter_power(4800, active_phases=3) == expected
 
-    def test_demand_divisor_scales_with_phases(self, handler) -> None:
-        """Divisor is 637 for 3φ, ~212 for 1φ, ~425 for 2φ."""
+    def test_demand_divisor_per_phase(self, handler) -> None:
+        """Divisor is measured per phase count: 637 (3φ), 230 (1φ), ~434 (2φ)."""
         assert handler._demand_divisor(3) == 637
-        assert handler._demand_divisor(1) == round(637 / 3)   # 212
-        assert handler._demand_divisor(2) == round(637 / 3 * 2)  # 425
+        assert handler._demand_divisor(1) == 230
+        assert handler._demand_divisor(2) == round((230 + 637) / 2)  # 434
 
     @pytest.mark.asyncio
     async def test_single_phase_amps_from_watts(self, handler) -> None:
-        """1φ: 3000 W → round(3000/212)=14 A, numberPhases=1."""
+        """1φ: 3000 W → round(3000/230)=13 A, numberPhases=1."""
         with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
             mock_call.return_value = type("R", (), {"status": "Accepted"})()
             await handler.set_charging_power(3000, num_phases=1)
             period = (mock_call.call_args[0][0].cs_charging_profiles
                       ["charging_schedule"]["charging_schedule_period"][0])
-            assert period["limit"] == 14
+            assert period["limit"] == 13
             assert period["number_phases"] == 1
+
+    @pytest.mark.asyncio
+    async def test_amps_clamped_to_max_current(self, mock_connection) -> None:
+        """A command above the configured max is capped (wallbox doesn't enforce it)."""
+        h = ChargePointHandler("t", mock_connection, max_current_a=16)
+        with patch.object(h, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            # 4354 W 1φ → round(4354/230)=19 A → clamped to 16 A
+            await h.set_charging_power(4354, num_phases=1)
+            period = (mock_call.call_args[0][0].cs_charging_profiles
+                      ["charging_schedule"]["charging_schedule_period"][0])
+            assert period["limit"] == 16
 
 
 class TestServerPhaseAdoption:
