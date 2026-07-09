@@ -50,6 +50,14 @@ restart.
   rebuild via HA Supervisor (`ha addons rebuild`).
 - **Inspect time-series / dashboards** — InfluxDB and Grafana, reached via the `remote-connections`
   skill.
+- **Lock / unlock the wallbox cable** — the **Kabel** button on the Amazon-Fire dashboard
+  (`lovelace-amazonfire`, *Overwiew* view, between *Waschen* and *all Off*) toggles
+  `switch.wallbox_cable_lock`: on = locked (green→orange icon), off = unlocked. Mechanism and states
+  are specified in [`ocpp-server` FSD §3.6.7](ocpp-server/Documents/ocpp-server-fsd.md#367-cable-lock-control-user).
+  The setting is a **policy applied at unplug time** — flipping it does not move the lock on a
+  currently-plugged car; it decides whether the wallbox releases the cable the next time the car is
+  unplugged. The switch reflects the wallbox's real setting (re-read on every reconnect); if the
+  wallbox is offline the toggle snaps back.
 
 ## Monitoring
 
