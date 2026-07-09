@@ -38,12 +38,26 @@ class ChargePointHandler(CP):
     # slightly export-biased across the charging range. Anchored on the 4.5 kW steady
     # point (M-Bus ≈ +85 W) and the 7 kW steady sample (≈ −130 W).
     # Prior wallbox-only fit (2026-03-04 sweep 6–14 A): 0.962115 * raw + 105.6.
+    # The correction is 3-phase-calibrated (its anchors are multi-kW 3φ points), so it
+    # is only applied when 3 phases are drawing; a single-phase draw would be biased
+    # low by the −286 W offset, so 1φ/2φ reports the wallbox's own measured power.
     METER_SCALE = 1.048
     METER_OFFSET = -286.0
 
     # Demand calibration: W→A divisor so round(mbus_w / DEMAND_DIVISOR) = correct amps.
-    # Midpoint of safe range [612, 662] from 2026-03-04 M-Bus calibration sweep.
+    # Midpoint of safe range [612, 662] from 2026-03-04 M-Bus calibration sweep (3φ).
+    # The wallbox applies the amp limit PER PHASE, so the watts→amps divisor scales
+    # with the phase count: 3φ = DEMAND_DIVISOR, 1φ ≈ DEMAND_DIVISOR/3 (see
+    # _demand_divisor). Without this a single-phase cable draws ~1/3 the commanded W.
     DEMAND_DIVISOR = 637
+
+    # Phase detection from MeterValues: a phase counts as "drawing" when its current
+    # is at/above PHASE_ACTIVE_MIN_A, evaluated only once the total draw is meaningful
+    # (PHASE_DETECT_MIN_TOTAL_W) so ramp/idle noise cannot misdetect. The 0.5 A floor
+    # matches the BL0942 phase-switch safety threshold and still separates a 3φ cable
+    # (≥0.6 A/phase at ~400 W total) from a 1φ cable (L1 only).
+    PHASE_ACTIVE_MIN_A = 0.5
+    PHASE_DETECT_MIN_TOTAL_W = 400
 
     def __init__(
         self, id: str, connection, on_status_change: Callable | None = None
@@ -64,6 +78,9 @@ class ChargePointHandler(CP):
             0  # monotonic timestamp of last MeterValues
         )
         self.meter_values_event = asyncio.Event()
+        # Phases actually drawing current (detected from MeterValues). Defaults to
+        # 3 until the first meaningful draw reveals the connected cable's phases.
+        self.active_phases = 3
 
     # ========== Incoming messages from wallbox ==========
 
@@ -145,6 +162,7 @@ class ChargePointHandler(CP):
 
         total_power = 0.0
         has_power_measurand = False
+        phase_current: dict[str, float] = {}  # per-phase current for phase detection
         for mv in meter_value:
             # Reject stale MeterValues based on wallbox timestamp
             mv_timestamp = mv.get("timestamp")
@@ -201,8 +219,25 @@ class ChargePointHandler(CP):
                     self.session_energy_wh = value
                     if self.on_status_change:
                         self.on_status_change("energy_wh", value)
+                elif "Current" in measurand:
+                    phase = sampled.get("phase")
+                    if phase and value >= 0:
+                        phase_current[phase] = value
 
-        total_power = self._correct_meter_power(total_power)
+        # Detect how many phases the connected cable is drawing on. Only trust the
+        # count once the total draw is meaningful, so idle/ramp noise never flaps it.
+        if has_power_measurand and total_power >= self.PHASE_DETECT_MIN_TOTAL_W and phase_current:
+            active = sum(1 for a in phase_current.values() if a >= self.PHASE_ACTIVE_MIN_A)
+            if active in (1, 2, 3) and active != self.active_phases:
+                logger.info(
+                    f"Phase detection: {self.active_phases} → {active} active "
+                    f"(per-phase A: {phase_current})"
+                )
+                self.active_phases = active
+                if self.on_status_change:
+                    self.on_status_change("phases_active", active)
+
+        total_power = self._correct_meter_power(total_power, self.active_phases)
 
         self.last_meter_values_time = time.monotonic()
         self.meter_values_event.set()
@@ -284,21 +319,36 @@ class ChargePointHandler(CP):
 
     # ========== Outgoing commands to wallbox ==========
 
-    def _correct_meter_power(self, raw_w: float) -> float:
+    def _correct_meter_power(self, raw_w: float, active_phases: int = 3) -> float:
         """Correct OCPP MeterValues power using linear regression.
 
-        corrected = METER_SCALE * raw + METER_OFFSET
-        Returns raw value unchanged when not charging (raw <= 0).
+        corrected = METER_SCALE * raw + METER_OFFSET when 3 phases are drawing.
+        The regression is anchored on multi-kW 3φ points, so for a single- (or
+        two-) phase draw the −286 W offset would bias the reading low; there the
+        wallbox's own measured power is returned unchanged. Returns raw value
+        unchanged when not charging (raw <= 0).
         """
         if raw_w <= 0:
             return raw_w
+        if active_phases < 3:
+            return raw_w
         return self.METER_SCALE * raw_w + self.METER_OFFSET
+
+    def _demand_divisor(self, num_phases: int) -> int:
+        """Watts→amps divisor for the requested phase count.
+
+        The wallbox applies the amp limit per phase, so the divisor scales with
+        the phase count off the 3φ-calibrated DEMAND_DIVISOR (3φ → 637, 1φ → 212).
+        """
+        if num_phases >= 3:
+            return self.DEMAND_DIVISOR
+        return round(self.DEMAND_DIVISOR / 3 * max(1, num_phases))
 
     async def set_charging_power(self, power_w: float, num_phases: int = 3):
         """Set charging power limit via SetChargingProfile.
 
-        Converts M-Bus watts to integer amps using calibrated divisor,
-        then sends via OCPP 1.6 chargingRateUnit=A.
+        Converts M-Bus watts to integer amps using the phase-aware calibrated
+        divisor, then sends via OCPP 1.6 chargingRateUnit=A.
 
         Args:
             power_w: Target power in watts (M-Bus scale)
@@ -306,11 +356,12 @@ class ChargePointHandler(CP):
 
         """
         limit_w = max(0, power_w)
-        limit_a = round(limit_w / self.DEMAND_DIVISOR) if limit_w > 0 else 0
+        divisor = self._demand_divisor(num_phases)
+        limit_a = round(limit_w / divisor) if limit_w > 0 else 0
 
         logger.info(
             f"Setting charging power: {limit_w:.0f}W → {limit_a}A "
-            f"({num_phases}-phase)"
+            f"({num_phases}-phase, ÷{divisor})"
         )
 
         request = call.SetChargingProfile(

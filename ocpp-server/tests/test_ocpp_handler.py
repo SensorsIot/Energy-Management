@@ -2103,3 +2103,148 @@ class TestCableLockSwitch:
         server.charge_point.get_configuration = AsyncMock(return_value={})
         await server._sync_cable_lock_from_wallbox()
         assert server._cable_lock_state == "UNLOCK"
+
+
+def _mv_sample(measurand, value, phase=None, unit=None):
+    d = {"measurand": measurand, "value": str(value), "context": "Sample.Periodic"}
+    if phase:
+        d["phase"] = phase
+    if unit:
+        d["unit"] = unit
+    return d
+
+
+def _phase_mv(l1_w, l2_w, l3_w, l1_a, l2_a, l3_a):
+    """Build a MeterValues payload with per-phase power + current (no timestamp)."""
+    return [{"sampled_value": [
+        _mv_sample("Power.Active.Import", l1_w, "L1", "W"),
+        _mv_sample("Power.Active.Import", l2_w, "L2", "W"),
+        _mv_sample("Power.Active.Import", l3_w, "L3", "W"),
+        _mv_sample("Current.Import", l1_a, "L1", "A"),
+        _mv_sample("Current.Import", l2_a, "L2", "A"),
+        _mv_sample("Current.Import", l3_a, "L3", "A"),
+    ]}]
+
+
+class TestPhaseDetection:
+    """Detect the connected cable's phase count from MeterValues (1φ vs 3φ)."""
+
+    @pytest.mark.asyncio
+    async def test_single_phase_cable_detected(self, mock_connection) -> None:
+        """L1-only draw → active_phases=1 and a phases_active callback."""
+        cb = MagicMock()
+        h = ChargePointHandler("t", mock_connection, on_status_change=cb)
+        h.transaction_id = 1
+        h.current_status = "Charging"
+        await h.on_meter_values(connector_id=1,
+                                meter_value=_phase_mv(1492, 0, 0, 6.5, 0.0, 0.0))
+        assert h.active_phases == 1
+        cb.assert_any_call("phases_active", 1)
+
+    @pytest.mark.asyncio
+    async def test_three_phase_cable_stays_three(self, mock_connection) -> None:
+        """All three phases drawing → active_phases stays 3, no phase callback."""
+        cb = MagicMock()
+        h = ChargePointHandler("t", mock_connection, on_status_change=cb)
+        h.transaction_id = 1
+        h.current_status = "Charging"
+        await h.on_meter_values(connector_id=1,
+                                meter_value=_phase_mv(1600, 1600, 1600, 7.0, 7.0, 7.0))
+        assert h.active_phases == 3
+        assert ("phases_active", 3) not in [c.args for c in cb.call_args_list]
+
+    @pytest.mark.asyncio
+    async def test_switch_back_to_three_phase(self, mock_connection) -> None:
+        """After a 1φ session, a 3φ cable is re-detected → active_phases=3."""
+        cb = MagicMock()
+        h = ChargePointHandler("t", mock_connection, on_status_change=cb)
+        h.transaction_id = 1
+        h.current_status = "Charging"
+        await h.on_meter_values(connector_id=1,
+                                meter_value=_phase_mv(1492, 0, 0, 6.5, 0.0, 0.0))
+        assert h.active_phases == 1
+        await h.on_meter_values(connector_id=1,
+                                meter_value=_phase_mv(1600, 1600, 1600, 7.0, 7.0, 7.0))
+        assert h.active_phases == 3
+        cb.assert_any_call("phases_active", 3)
+
+    @pytest.mark.asyncio
+    async def test_low_draw_does_not_flap(self, mock_connection) -> None:
+        """Below the total-power gate, phase count is not updated."""
+        cb = MagicMock()
+        h = ChargePointHandler("t", mock_connection, on_status_change=cb)
+        h.transaction_id = 1
+        h.current_status = "Charging"
+        # 300 W total single-phase — below PHASE_DETECT_MIN_TOTAL_W (400)
+        await h.on_meter_values(connector_id=1,
+                                meter_value=_phase_mv(300, 0, 0, 1.3, 0.0, 0.0))
+        assert h.active_phases == 3  # unchanged default
+        assert ("phases_active", 1) not in [c.args for c in cb.call_args_list]
+
+    def test_correction_identity_single_phase(self, handler) -> None:
+        """1φ draw returns the wallbox's raw measured power (no 3φ offset)."""
+        assert handler._correct_meter_power(1492, active_phases=1) == 1492
+        assert handler._correct_meter_power(1492, active_phases=2) == 1492
+
+    def test_correction_linear_three_phase(self, handler) -> None:
+        """3φ draw applies the linear regression."""
+        expected = handler.METER_SCALE * 4800 + handler.METER_OFFSET
+        assert handler._correct_meter_power(4800, active_phases=3) == expected
+
+    def test_demand_divisor_scales_with_phases(self, handler) -> None:
+        """Divisor is 637 for 3φ, ~212 for 1φ, ~425 for 2φ."""
+        assert handler._demand_divisor(3) == 637
+        assert handler._demand_divisor(1) == round(637 / 3)   # 212
+        assert handler._demand_divisor(2) == round(637 / 3 * 2)  # 425
+
+    @pytest.mark.asyncio
+    async def test_single_phase_amps_from_watts(self, handler) -> None:
+        """1φ: 3000 W → round(3000/212)=14 A, numberPhases=1."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            await handler.set_charging_power(3000, num_phases=1)
+            period = (mock_call.call_args[0][0].cs_charging_profiles
+                      ["charging_schedule"]["charging_schedule_period"][0])
+            assert period["limit"] == 14
+            assert period["number_phases"] == 1
+
+
+class TestServerPhaseAdoption:
+    """Server adopts the detected phase count in three_phase mode."""
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+        srv = OCPPServer({"wallbox_id": "test"})  # wallbox_type defaults three_phase
+        srv.ha = AsyncMock()
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_adopts_single_phase(self, server) -> None:
+        server._current_phases = 3
+        server._on_phases_detected(1)
+        await asyncio.sleep(0)
+        assert server._current_phases == 1
+
+    @pytest.mark.asyncio
+    async def test_adopts_back_to_three(self, server) -> None:
+        server._current_phases = 1
+        server._on_phases_detected(3)
+        await asyncio.sleep(0)
+        assert server._current_phases == 3
+
+    @pytest.mark.asyncio
+    async def test_status_change_routes_phases_active(self, server) -> None:
+        server._current_phases = 3
+        server._on_status_change("phases_active", 1)
+        await asyncio.sleep(0)
+        assert server._current_phases == 1
+
+    def test_universal_mode_ignores_detection(self, server) -> None:
+        server.wallbox_type = "universal"
+        server._current_phases = 3
+        server._on_phases_detected(1)
+        assert server._current_phases == 3  # relay/wallbox owns phases, not detection

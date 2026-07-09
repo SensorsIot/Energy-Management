@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.68"
+__version__ = "0.9.69"
 
 import asyncio
 import json
@@ -590,6 +590,10 @@ class OCPPServer:
 
     def _on_status_change(self, key: str, value) -> None:
         """Handle a wallbox status change: update HA entity and MQTT."""
+        if key == "phases_active":
+            self._on_phases_detected(int(value))
+            return
+
         entity_id = STATUS_ENTITY_MAP.get(key)
         if not entity_id:
             logger.debug(f"No entity mapping for status key: {key}")
@@ -653,6 +657,28 @@ class OCPPServer:
                     self._cloud_poll_task.cancel()
                     self._cloud_poll_task = None
                 self._synthesized_suspended_ev = False
+
+    def _on_phases_detected(self, detected: int) -> None:
+        """React to the cable's actual phase count measured from MeterValues.
+
+        In `three_phase` mode the server has no relay to switch, so the connected
+        cable alone decides the phase count. Adopting the detected count keeps the
+        published phase count, power range (§3.6.1) and watts→amps conversion
+        honest — a single-phase cable draws ~1/3 the commanded watts otherwise. In
+        `external_breaker`/`universal` modes the relay/wallbox owns the phase
+        count, so detection is informational only and not adopted here.
+        """
+        if self.wallbox_type != "three_phase":
+            return
+        if detected not in (1, 3) or detected == self._current_phases:
+            return
+        logger.info(
+            f"Cable phase count changed: {self._current_phases} → {detected} "
+            f"(measured from MeterValues) — re-publishing range/limits"
+        )
+        self._current_phases = detected
+        asyncio.ensure_future(self.ha.set_state("sensor.wallbox_phases", detected))
+        asyncio.ensure_future(self._publish_power_limits())
 
     async def _abort_phase_switch(self, reason: str) -> None:
         """Abort phase switch: disable single-phase, restore previous profile."""

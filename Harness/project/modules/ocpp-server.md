@@ -35,6 +35,6 @@ ocpp-server/
 
 ## Tests
 
-The unit tests live in `tests/test_ocpp_handler.py`; the test-case specifications (TC-01…TC-15)
+The unit tests live in `tests/test_ocpp_handler.py`; the test-case specifications (TC-01…TC-16)
 are acceptance criteria in the FSD §8. Run via the project test command
 (see [`../build-and-release.md`](../build-and-release.md)).
