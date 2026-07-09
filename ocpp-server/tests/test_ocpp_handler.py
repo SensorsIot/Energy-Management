@@ -2248,3 +2248,11 @@ class TestServerPhaseAdoption:
         server._current_phases = 3
         server._on_phases_detected(1)
         assert server._current_phases == 3  # relay/wallbox owns phases, not detection
+
+    @pytest.mark.asyncio
+    async def test_detection_persists_phase_to_sensor(self, server) -> None:
+        """Detected count is written to sensor.wallbox_phases (survives restart)."""
+        server._current_phases = 3
+        server._on_phases_detected(1)
+        await asyncio.sleep(0)
+        server.ha.set_state.assert_any_await("sensor.wallbox_phases", 1)

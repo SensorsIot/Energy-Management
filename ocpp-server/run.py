@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.69"
+__version__ = "0.9.70"
 
 import asyncio
 import json
@@ -1145,6 +1145,12 @@ class OCPPServer:
         await self._update_car_ready()
         logger.info("Post-connect setup complete")
 
+        # Seed the handler's active-phase count from the restored value so the
+        # meter correction is phase-correct from the first MeterValues frame
+        # (detection then re-confirms/updates it live).
+        if self.charge_point and self._current_phases in (1, 3):
+            self.charge_point.active_phases = self._current_phases
+
         # Sync the cable-lock switch to the wallbox's actual configuration
         # (also confirms the AcTec supports UnlockConnectorOnEVSideDisconnect).
         await self._sync_cable_lock_from_wallbox()
@@ -1259,6 +1265,18 @@ class OCPPServer:
                 f"Phase switch entity: {self.phase_switch_entity}, "
                 f"relay={relay_state}, phases={self._current_phases}"
             )
+        elif self.wallbox_type == "three_phase":
+            # Restore the last-detected cable phase count (it persists in the HA
+            # sensor across restarts). Without this a single-phase cable is stuck
+            # behind the published 3-phase minimum: EnergyManager won't start a
+            # charge from moderate surplus, so the car never draws and detection
+            # (§3.6.4.1) can never re-confirm single-phase — a bootstrap deadlock.
+            persisted = await self.ha.get_state("sensor.wallbox_phases")
+            if persisted in ("1", "3"):
+                self._current_phases = int(persisted)
+                logger.info(
+                    f"Restored cable phase count from HA: {self._current_phases}φ"
+                )
 
         # Publish initial min/max power limits based on current phase count
         await self._publish_power_limits()
