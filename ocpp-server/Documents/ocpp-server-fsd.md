@@ -303,6 +303,14 @@ single-phase cable published behind the 3-phase minimum (4140 W) would never be 
 from moderate surplus, so it could never draw and be re-detected. Restoring the last-known count
 publishes the single-phase range up front so charging can start and detection re-confirms it.
 
+**`wallbox_phases` (measured) vs `single_phase_supported` (config) — not the same thing.**
+`sensor.wallbox_phases` is the **live measured** phase count of the connected cable (this detection).
+`binary_sensor.wallbox_single_phase_supported` is a **static config flag** derived from `wallbox_type`
+(`on` only for `external_breaker`/`universal`), i.e. *"does the server switch phases?"* — it is **off**
+for a fixed `three_phase` wallbox even while a single-phase cable is charging (`wallbox_phases = 1`).
+The two are not contradictory: one is the wallbox's switching capability, the other is the cable in
+use right now. On a dashboard, label that binary sensor "Phase switching", not "Single phase".
+
 The remainder of this section describes the `external_breaker` flow (the only mode where the server actively switches phases). Consumer sends power; server decides phases.
 
 **Power ranges** (6A min, 16A max, 230V):
