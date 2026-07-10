@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.7"
+__version__ = "1.9.8"
 
 import json
 import logging
@@ -30,6 +30,7 @@ from src.ev_charging import (
     build_solar_candidates,
     snap_to_power_step,
     power_steps_for_phases,
+    solar_start_threshold,
 )
 from src.influxdb_writer import SimulationWriter
 from src.integration_observer import CycleSnapshot, IntegrationObserver
@@ -1452,9 +1453,8 @@ class EnergyManager:
             # single-phase cable uses the 1φ power-step table (230 W/A, 1380–3680W)
             # instead of the 3φ table (which starts at 3962W, above the 1φ max).
             wallbox_phases = self.ha_client.get_sensor_value("sensor.wallbox_phases")
-            power_steps = power_steps_for_phases(
-                int(wallbox_phases) if wallbox_phases else 3
-            )
+            ev_phases = int(wallbox_phases) if wallbox_phases else 3
+            power_steps = power_steps_for_phases(ev_phases)
 
             # Wallbox available = car_ready binary sensor from OCPP server
             car_ready_state = self.ha_client.get_state(self.car_ready_entity)
@@ -1510,8 +1510,11 @@ class EnergyManager:
             # solar-surplus charging.
             ev_step_offset: int | None = None
             if ev_mode == "solar":
-                threshold = (
-                    self.ha_client.get_sensor_value(self.ev_min_solar_power_entity) or ev_min_power
+                # 1φ ignores ev_min_solar_power (see solar_start_threshold).
+                threshold = solar_start_threshold(
+                    ev_phases,
+                    self.ha_client.get_sensor_value(self.ev_min_solar_power_entity),
+                    ev_min_power,
                 )
                 ev_threshold = threshold
 

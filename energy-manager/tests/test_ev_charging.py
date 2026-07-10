@@ -256,6 +256,7 @@ from src.ev_charging import (  # noqa: E402
     POWER_STEPS_1P,
     POWER_STEPS_3P,
     power_steps_for_phases,
+    solar_start_threshold,
 )
 
 
@@ -307,3 +308,17 @@ class TestBuildSolarCandidatesSinglePhase:
         )
         assert 2530 in cands
         assert all(c in POWER_STEPS_1P for c in cands)
+
+
+class TestSolarStartThreshold:
+    def test_single_phase_ignores_min_solar_uses_wallbox_min(self) -> None:
+        # 1φ: ev_min_solar_power (3000) ignored → wallbox min (1380).
+        assert solar_start_threshold(1, 3000, 1380) == 1380
+
+    def test_three_phase_honors_min_solar(self) -> None:
+        assert solar_start_threshold(3, 3000, 4140) == 3000
+
+    def test_three_phase_falls_back_to_wallbox_min(self) -> None:
+        # Missing/zero ev_min_solar_power → wallbox min.
+        assert solar_start_threshold(3, None, 4140) == 4140
+        assert solar_start_threshold(3, 0, 4140) == 4140

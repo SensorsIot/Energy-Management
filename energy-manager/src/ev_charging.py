@@ -36,6 +36,23 @@ def power_steps_for_phases(phases: int) -> list[int]:
     return POWER_STEPS_1P if phases == 1 else POWER_STEPS_3P
 
 
+def solar_start_threshold(
+    phases: int,
+    ev_min_solar_power: float | None,
+    wallbox_min_power: float,
+) -> float:
+    """Minimum surplus (W) required to start solar charging.
+
+    Single-phase power is inherently small (max 3680 W / 16 A), so the
+    `ev_min_solar_power` "don't bother below X" gate — sized for 3-phase, where
+    the minimum is already 4140 W — is **not honored in 1φ mode**; there we
+    charge from the wallbox minimum (6 A) so the whole 1φ range is usable.
+    """
+    if phases == 1:
+        return wallbox_min_power
+    return ev_min_solar_power or wallbox_min_power
+
+
 @dataclass
 class EVChargingResult:
     """Result of EV charging power calculation."""
