@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.8"
+__version__ = "1.9.9"
 
 import json
 import logging
@@ -757,7 +757,9 @@ class EnergyManager:
         car_full = self._car_is_full() is True
         self._shaving_day_mode = "shaving_day" if car_full else "car_day"
         logger.info(
-            "Shaving day-mode decided at %02d:00 → %s (car_full=%s soc=%s target=%s)",
+            "Shaving day-mode decided at %s (decision hour %02d:00) → "
+            "%s (car_full=%s soc=%s target=%s)",
+            local_now.strftime("%H:%M"),
             self.shaving_decision_hour,
             self._shaving_day_mode,
             car_full,
