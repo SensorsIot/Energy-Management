@@ -294,7 +294,12 @@ class TestMarginalDayGate:
 
         assert manager._charge_action == "deferred"
         assert "charge target" in manager._charge_reason
-        manager.ha_client.set_number.assert_called_once_with(
+        # Ceiling mirrors the target (clamped to the register's 90% min); the
+        # software power limit holds at 0 behind it.
+        manager.ha_client.set_number.assert_any_call(
+            manager.end_of_charge_soc_entity, 90.0, max_retries=5
+        )
+        manager.ha_client.set_number.assert_any_call(
             manager.charge_control_entity, 0, max_retries=5
         )
 
@@ -328,3 +333,78 @@ class TestMarginalDayGate:
         manager.ha_client.set_number.assert_called_once_with(
             manager.charge_control_entity, manager.charge_max_w, max_retries=5
         )
+
+
+class TestSocCeiling:
+    """Topic 3 longevity cap enforced via the inverter's native end-of-charge
+    SOC register (FSD 4.2.4). Mirroring the charge target onto it makes the
+    inverter hard-stop charging at the target, so the battery can't overshoot
+    on the 15-min power-limit lag or trickle up from PV surplus."""
+
+    def test_ceiling_clamped_and_written_on_change(self, manager) -> None:
+        manager.ha_client.set_number.return_value = (True, None)
+        manager._apply_soc_ceiling(90.0)
+        manager.ha_client.set_number.assert_called_once_with(
+            manager.end_of_charge_soc_entity, 90.0, max_retries=5
+        )
+        assert manager._last_soc_ceiling == 90.0
+
+    def test_ceiling_write_skipped_when_unchanged(self, manager) -> None:
+        manager.ha_client.set_number.return_value = (True, None)
+        manager._apply_soc_ceiling(90.0)
+        manager.ha_client.set_number.reset_mock()
+        manager._apply_soc_ceiling(90.0)
+        manager.ha_client.set_number.assert_not_called()
+
+    def test_ceiling_clamped_to_register_min(self, manager) -> None:
+        # The register accepts only 90-100%; a (hypothetical) sub-90 target is
+        # clamped up to 90 so the write is always valid.
+        manager.ha_client.set_number.return_value = (True, None)
+        manager._apply_soc_ceiling(80.0)
+        manager.ha_client.set_number.assert_called_once_with(
+            manager.end_of_charge_soc_entity, 90.0, max_retries=5
+        )
+
+    def test_enabled_mirrors_target_onto_register(self, manager) -> None:
+        _wire(manager, car_soc=50.0, target=80.0)  # car day
+        manager.ha_client.set_number.return_value = (True, None)
+        manager.charge_target_enabled = True
+        manager._battery_target_soc = 90.0
+        now = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)
+        fc = _forecast(now, [3000.0] * 40)
+
+        manager.control_battery_charge(50.0, fc, fc, now)
+
+        manager.ha_client.set_number.assert_any_call(
+            manager.end_of_charge_soc_entity, 90.0, max_retries=5
+        )
+        assert manager._last_soc_ceiling == 90.0
+
+    def test_disabled_leaves_register_untouched(self, manager) -> None:
+        # Feature off and EM never lowered the register → don't clobber it.
+        _wire(manager, car_soc=50.0, target=80.0)
+        manager.ha_client.set_number.return_value = (True, None)
+        manager.charge_target_enabled = False
+        now = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)
+        fc = _forecast(now, [3000.0] * 40)
+
+        manager.control_battery_charge(50.0, fc, fc, now)
+
+        for call in manager.ha_client.set_number.call_args_list:
+            assert call.args[0] != manager.end_of_charge_soc_entity
+
+    def test_disabled_releases_ceiling_once_if_previously_set(self, manager) -> None:
+        # Feature turned off after EM had capped → release to 100% once.
+        _wire(manager, car_soc=50.0, target=80.0)
+        manager.ha_client.set_number.return_value = (True, None)
+        manager.charge_target_enabled = False
+        manager._last_soc_ceiling = 90.0
+        now = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)
+        fc = _forecast(now, [3000.0] * 40)
+
+        manager.control_battery_charge(50.0, fc, fc, now)
+
+        manager.ha_client.set_number.assert_any_call(
+            manager.end_of_charge_soc_entity, 100.0, max_retries=5
+        )
+        assert manager._last_soc_ceiling == 100.0

@@ -455,7 +455,7 @@ is optimized, *for which entity*, on *what criteria*, with *what output*.
 |--------|--------------|------|---------|----------------|---------|---------|
 | **Home battery** | Discharge blocking (battery protection) | Keep enough SOC to cover the expensive tariff window (and the EV) instead of dumping it early | Allow / block discharge | `number.battery_maximum_discharging_power` (`max`/`0`) | 15 min | 4.2.2 |
 | **Home battery** | Export-peak-shaving charge control | Defer PV charging so the battery's headroom absorbs the midday **export** peak at a gentle, capped rate (less clipping, longer battery life) | Allow / defer charging | `number.battery_maximum_charging_power` (`charge_shaving_power_w`/`0`) | 15 min | 4.2.3 |
-| **Home battery** | Dynamic charge target (longevity) | Charge only to the SOC needed to survive the next days (worst-case PV), not 100% — less LFP dwell at high SOC; full charge for BMS calibration 7 days after the last >= 99% (rolling) | Hold at target SOC | `number.battery_maximum_charging_power` (`0` at/above target) | 15 min | 4.2.4 |
+| **Home battery** | Dynamic charge target (longevity) | Charge only to the SOC needed to survive the next days (worst-case PV), not 100% — less LFP dwell at high SOC; full charge for BMS calibration 7 days after the last >= 99% (rolling) | Cap at target SOC | `number.battery_end_of_charge_soc` (= target, hard cap) + `number.battery_maximum_charging_power` (`0` at/above target) | 15 min | 4.2.4 |
 | **EV (car)** | Solar-surplus charging | Maximize solar self-consumption into the car without draining the home battery | Wallbox charge power (amp step) | `number.wallbox_power_limit` (via REST `set_sensor_state`) | 10 s | 4.3.6-4.3.7 |
 | **EV (car)** | Cheap / immediate charging (manual modes) | Reach the user's target SOC by a kWh budget + SOC stop | Wallbox power + discharge block | `number.wallbox_power_limit` & `_discharge_blocked_by_ev` | 10 s | 4.3.4–4.3.6 |
 | **Appliance (washer)** | Run-now signal | Advise when a high-power appliance can run on solar without forcing grid import | green / orange / red | `sensor.appliance_signal` (**advisory — no actuation**) | 15 min | 4.4 |
@@ -506,7 +506,7 @@ Priority between topics matters only when two of them act on the same control en
 
 | Topic | Control entity | Action |
 |-------|----------------|--------|
-| **T3** — Charge Ceiling | `number.battery_maximum_charging_power` | charge power 0 when SOC >= `battery_target_soc` |
+| **T3** — Charge Ceiling | `number.battery_end_of_charge_soc` + `number.battery_maximum_charging_power` | SOC ceiling = `battery_target_soc` (hard cap); charge power 0 when SOC >= target |
 | **T4** — Discharge | `number.battery_maximum_discharging_power` | block discharge during cheap hours when it cuts expensive-hours import |
 | **T6** — Appliance Signal | `sensor.appliance_signal` | advisory only |
 
@@ -574,6 +574,7 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | `discharge_control_entity` | `number.battery_maximum_discharging_power` | Discharge control output |
 | `charge_shaving_power_w` | `2500` | Charge power while shaving the export peak (Section 4.2.3) |
 | `charge_control_entity` | `number.battery_maximum_charging_power` | Charge control output (Section 4.2.3) |
+| `end_of_charge_soc_entity` | `number.battery_end_of_charge_soc` | SOC-ceiling output — the Topic 3 hard cap (Section 4.2.4) |
 
 **YAML `ev_charging` — safety-rule floor (independent from `battery.reserve_percent`):**
 
@@ -977,7 +978,7 @@ an unknown SOC is held, not a departure (`test_stale_car_soc_is_not_a_departure`
 
 ### 4.2.4 Charge Ceiling -- Longevity (Topic 3)
 
-Limits how high the home battery charges, sparing the LFP from high-SOC dwell. Acts on `battery.charge_control_entity` (`number.battery_maximum_charging_power`). Re-evaluated every 15 min. Off by default (`charge_target_enabled`).
+Limits how high the home battery charges, sparing the LFP from high-SOC dwell. Enforced on two inverter outputs: the native end-of-charge SOC ceiling (`battery.end_of_charge_soc_entity`, `number.battery_end_of_charge_soc`) is the real-time hard cap, backed by the charge-power limit (`battery.charge_control_entity`, `number.battery_maximum_charging_power`). Re-evaluated every 15 min. Off by default (`charge_target_enabled`).
 
 | # | Rule | Condition | Action |
 |---|------|-----------|--------|
@@ -989,7 +990,9 @@ Limits how high the home battery charges, sparing the LFP from high-SOC dwell. A
 
 `battery_target_soc` is enforced **only** by the charge control. It is **not** threaded into the discharge/EV SOC forecast -- those read the natural charge-to-100 trajectory (the EV's wallbox-off question, Section 4.3.6). Because the target is sized on worst-case p10 PV, the held battery still stays >= `no_buy_floor_percent` (above the EV floor and the discharge reserve), so the natural forecast the other topics read remains safe.
 
-The "last full" timestamp is read from SOC history (InfluxDB: most recent point with SOC >= 99) -- no persisted state. The inverter's native `number.battery_end_of_charge_soc` is not used (accepts only 90-100 %); the ceiling is enforced in software via the charge-power entity.
+The "last full" timestamp is read from SOC history (InfluxDB: most recent point with SOC >= 99) -- no persisted state.
+
+**Enforcement.** Every 15 min the target is mirrored onto the inverter's native end-of-charge SOC register (`battery.end_of_charge_soc_entity`), which hard-stops charging at that SOC in real time — no 15-min control lag, and PV surplus cannot trickle the battery past it. The register accepts only 90-100 %, exactly the range of `battery_target_soc` (floored to `charge_target_min` >= 90), so it always fits; a 100 % target means "no cap". The charge-power limit (`0` at/above target, Rule 1) backs it and drives the dashboard `charge_action`. When `charge_target_enabled` is off EM does **not** own the SOC register — it leaves it untouched, and releases it to 100 % only when its own last-written ceiling is below 100 % (a cap left in place by the feature is cleared; a register EM never wrote is not clobbered).
 
 #### Configuration
 
@@ -1000,6 +1003,7 @@ The "last full" timestamp is read from SOC history (InfluxDB: most recent point 
 | `battery.charge_target_horizon_h` | `48` | Survival look-ahead |
 | `battery.charge_target_full_interval_days` | `7` | Days after the last >= 99 % SOC to force a 100 % calibration charge |
 | `battery.charge_target_min` | `90` | Floor on the target — always charge to at least this SOC, even when the survival need is lower |
+| `battery.end_of_charge_soc_entity` | `number.battery_end_of_charge_soc` | Inverter's native end-of-charge SOC ceiling — the real-time hard cap |
 
 Survival floor = `battery.no_buy_floor_percent` (shared, 20 %); target floor = `battery.charge_target_min` (90 %).
 
@@ -3019,6 +3023,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.85: **Topic 3 longevity cap now enforced by the inverter's native end-of-charge SOC register, not just the software power limit (Section 4.2.4).** The old cap wrote `number.battery_maximum_charging_power = 0` once the battery reached `battery_target_soc`. Two gaps let the battery overshoot the 90 % longevity target — verified live 2026-07-17, where it reached 100 %: (1) the power limit is written on the 15-min battery cycle, so the battery kept charging at ~5 kW for up to ~15 min after crossing the target (90 % → ~96 % before the limit landed); (2) a 0 W charge-power limit does not stop DC PV surplus trickling the battery up to the inverter's own SOC cutoff, which sat at 100 %. EM now mirrors `battery_target_soc` onto `number.battery_end_of_charge_soc` every cycle, so the inverter hard-stops charging at the target in real time. The register accepts 90-100 %, exactly the range of the floored target, so it always fits; a 100 % target means "no cap". The power limit is kept as a backing control and drives the dashboard action. When `charge_target_enabled` is off EM leaves the register untouched, releasing it to 100 % only if it had previously lowered it. New `end_of_charge_soc_entity` config key; new `_apply_soc_ceiling`; new `TestSocCeiling`. (1.9.9 -> 1.9.10)
 
 - v2.84: **Shaving day-mode decision log now reports the actual decision time.** The once-daily shave-vs-car-day snapshot (Section 4.2.3) is evaluated on the 15-minute battery-control cycle, so the first tick at/after `shaving_decision_hour` lands up to 15 min past the hour (e.g. 08:12 for an 08:00 hour). The log line previously printed the configured hour (`decided at 08:00`), which misrepresented when the snapshot was taken; it now prints the real local time plus the configured hour: `decided at 08:12 (decision hour 08:00)`. Behaviour and the 15-minute cadence are unchanged. (1.9.8 -> 1.9.9)
 

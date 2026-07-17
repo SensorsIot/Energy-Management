@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.9"
+__version__ = "1.9.10"
 
 import json
 import logging
@@ -153,6 +153,14 @@ class EnergyManager:
         self.charge_control_entity = battery_opts.get(
             "charge_control_entity", "number.battery_maximum_charging_power"
         )
+        # Inverter's native end-of-charge SOC ceiling. Mirroring the charge
+        # target onto it makes the inverter itself hard-stop charging at the
+        # target in real time (no 15-min control lag, no PV trickle past it),
+        # so the Topic 3 longevity cap holds. The register accepts 90-100%;
+        # the charge target is floored to 90 so it always fits. See FSD 4.2.4.
+        self.end_of_charge_soc_entity = battery_opts.get(
+            "end_of_charge_soc_entity", "number.battery_end_of_charge_soc"
+        )
         self.charge_max_w = battery_opts.get("max_charge_w", 5000)
         # Charge power used while shaving the export peak (use case B). Lower
         # than max_charge_w on purpose: a gentler C-rate is easier on the
@@ -185,6 +193,7 @@ class EnergyManager:
         # Tracks power, not a bool, so a use-case A→B transition (max→shaving
         # power) is still detected even though "charging" stays true.
         self._last_charge_power_w: int | None = None
+        self._last_soc_ceiling: float | None = None
         # Battery decision reasoning, published to sensor.battery_decision
         # for the dashboard (FSD 4.6.4). Recorded by control_battery_charge.
         self.battery_decision_entity = battery_opts.get(
@@ -790,11 +799,22 @@ class EnergyManager:
         Records the decision (use case / action / reason) on self for
         publication to sensor.battery_decision (FSD 4.6.4).
         """
-        # Topic 3 longevity (FSD 4.2.4): hold once the battery has charged to the
-        # dynamic target (lowest SOC that stays protected over 48 h). Enforced in
-        # software (limit 0) because the inverter's native max-SOC accepts only
-        # 90-100%. When disabled or at the 100% calibration/fail-safe target this
-        # never fires. Re-evaluated every 15 min.
+        # Topic 3 longevity (FSD 4.2.4): mirror the dynamic charge target (lowest
+        # SOC that stays protected over 48 h) onto the inverter's native
+        # end-of-charge SOC ceiling, so the inverter hard-stops charging at the
+        # target in real time — no 15-min control lag, and PV surplus can't
+        # trickle the battery past it. When the cap is disabled EM does not own
+        # the register: it leaves it untouched, only releasing it to 100% once if
+        # EM itself had previously lowered it (feature turned off mid-run).
+        if self.charge_target_enabled:
+            self._apply_soc_ceiling(self._battery_target_soc)
+        elif self._last_soc_ceiling is not None and self._last_soc_ceiling < 100.0:
+            self._apply_soc_ceiling(100.0)
+
+        # The software power limit (limit 0) still backs the ceiling and drives
+        # the dashboard action. Holds once the battery reaches the target. When
+        # disabled or at the 100% fail-safe target this never fires. Re-evaluated
+        # every 15 min.
         if self.charge_target_enabled and current_soc >= self._battery_target_soc:
             self._charge_use_case = "B"
             self._charge_action = "deferred"
@@ -1045,6 +1065,37 @@ class EnergyManager:
             )
             return
         self._last_charge_power_w = target
+
+    def _apply_soc_ceiling(self, target_soc: float) -> None:
+        """Mirror the charge target onto the inverter's end-of-charge SOC.
+
+        The inverter hard-stops charging at this SOC in real time, so the
+        longevity cap (FSD 4.2.4) holds without the 15-min lag of the power
+        limit and without PV trickling the battery past it. The register
+        accepts 90-100%; the charge target is floored to 90 so it always fits
+        (a target above 100 is impossible, 100 means "no cap"). Writes only on
+        change.
+        """
+        ceiling = round(max(90.0, min(100.0, float(target_soc))), 1)
+        if ceiling == self._last_soc_ceiling:
+            return
+        logger.info(
+            f"Inverter end-of-charge SOC → {self.end_of_charge_soc_entity}={ceiling}%"
+        )
+        success, error_msg = self.ha_client.set_number(
+            self.end_of_charge_soc_entity, ceiling, max_retries=5
+        )
+        if not success:
+            logger.error(f"Failed to set end-of-charge SOC: {error_msg}")
+            notify_error(
+                title="Battery SOC Ceiling Failed",
+                message=(
+                    f"Failed to set {self.end_of_charge_soc_entity} to "
+                    f"{ceiling}% after 5 attempts.\nError: {error_msg}"
+                ),
+            )
+            return
+        self._last_soc_ceiling = ceiling
 
     def publish_battery_decision(self, decision, current_soc: float) -> None:
         """Publish combined battery reasoning to sensor.battery_decision.
