@@ -47,7 +47,7 @@ One row per add-on that owns its own FSD beside its code. This is the overview's
 | Component | FSD (WHAT) | Test cases (WHAT) | Owns |
 |---|---|---|---|
 | `energy-manager` | [`energy-manager/Documents/energy-manager-fsd.md`](energy-manager/Documents/energy-manager-fsd.md) | [Chapter 6](energy-manager/Documents/energy-manager-fsd.md#chapter-6-test-cases) | Battery optimizer, EV charging, appliance signals. Includes the Smart-car API contract (`energy-manager/Documents/hello-smart-api.md`). |
-| `load-forecast` | [`load-forecast/Documents/load-forecast-fsd.md`](load-forecast/Documents/load-forecast-fsd.md) | [§14](load-forecast/Documents/load-forecast-fsd.md#14-tests-and-validation) *(no code yet)* | Statistical load prediction (P10/P50/P90 per 15-min). |
+| `load-forecast` | [`load-forecast/Documents/load-forecast-fsd.md`](load-forecast/Documents/load-forecast-fsd.md) | [§14](load-forecast/Documents/load-forecast-fsd.md#14-tests-and-validation) | Statistical load prediction (P10/P50/P90 per 15-min). |
 | `swiss-solar-forecast` | [`swiss-solar-forecast/Documents/swiss-solar-forecast-fsd.md`](swiss-solar-forecast/Documents/swiss-solar-forecast-fsd.md) | [§16](swiss-solar-forecast/Documents/swiss-solar-forecast-fsd.md#16-tests-and-validation) | PV production forecast (ICON weather + pvlib model). |
 | `ocpp-server` | [`ocpp-server/Documents/ocpp-server-fsd.md`](ocpp-server/Documents/ocpp-server-fsd.md) | [§8](ocpp-server/Documents/ocpp-server-fsd.md#8-test-cases) | OCPP 1.6j wallbox server; publishes HA entities. |
 

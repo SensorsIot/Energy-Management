@@ -10,7 +10,7 @@ Household energy optimizer for PV self-consumption, battery discharge control, E
 ## Features
 
 - **Battery Discharge Control**: Blocks discharge during cheap tariff hours when the PV forecast is insufficient, so stored energy covers expensive-hour consumption
-- **EV Charging (3 modes)**: Solar surplus with a 48-h min-SOC safety rule, immediate, and cheap-tariff. Immediate and cheap stop automatically when the user-set target SOC or computed kWh budget is reached.
+- **EV Charging (3 modes)**: Solar surplus, immediate, and cheap-tariff. Solar mode gives the home battery priority to reach its daily target; immediate and cheap stop automatically when the user-set target SOC or computed kWh budget is reached.
 - **Appliance Signal**: Traffic-light signal (GREEN/ORANGE/RED) indicating whether to run high-power appliances
 - **Smart Car SOC**: Reads EV battery level from the Hello Smart API and publishes as a HA sensor
 - **SOC Simulation**: Forward-looking battery state-of-charge simulation using PV and load forecasts
@@ -18,8 +18,8 @@ Household energy optimizer for PV self-consumption, battery discharge control, E
 
 ## How It Works
 
-1. **Every 15 minutes**: fetches PV and load forecasts from InfluxDB, simulates home-battery SOC forward, decides whether to block discharge, computes the appliance signal, and primes the EV safety cache
-2. **Every 10 seconds**: reads live `sensor.surplus_power` (PV − house_load), evaluates the EV charging rule, and sets the wallbox power limit. The 48-h safety gate reads the cached SOC forecast rather than re-querying InfluxDB every cycle
+1. **Every 15 minutes**: fetches PV and load forecasts from InfluxDB, simulates home-battery SOC forward, decides whether to block discharge, computes the appliance signal, and updates the forecast-based EV strategy inputs
+2. **Every 10 seconds**: reads live `sensor.surplus_power` (PV − house_load), evaluates the EV charging rule, and sets the wallbox power limit. The 48-hour minimum-SOC forecast constrains upward power steps but is not a may-charge veto; a separate live forecast check pauses the car when the home battery cannot reach its daily target
 3. **Adaptive Smart car SOC polling**: every 60 s while charging, immediately on car connection or mode change, every 60 min otherwise. The authenticated client is cached (2 requests per cached poll vs 6 for full re-auth)
 
 ## Installation
@@ -56,16 +56,12 @@ ev_charging:
   enabled: true
   min_power_w: 1400        # 1-phase 6A
   max_power_w: 11000       # 3-phase 16A
-  reserve_percent: 20      # EV safety floor (independent of battery.reserve_percent)
 ```
 
-EV safety rule: charging is allowed only while the home-battery SOC forecast stays
-≥ `ev_charging.reserve_percent` across the next 48 h (with the candidate EV load
-subtracted). The check re-runs every 15 min — if the forecast drops below the
-floor, EV charging stops immediately and the battery (now EV-free) rides the
-remaining forecast back up. Set this **higher** than `battery.reserve_percent`:
-the nightly discharge gate defends the last sliver of battery; this gate keeps
-a buffer for house consumption before diverting surplus to the car.
+The 48-hour minimum-SOC forecast does not disable solar charging. Solar mode starts when surplus is
+available and the home battery can still reach its computed daily target. The controller may use
+the home battery as a buffer for the wallbox's coarse current steps only while both current and
+forecast SOC stay above `battery.no_buy_floor_percent`.
 
 ### Sensors
 
@@ -83,7 +79,7 @@ Control via `input_select.ev_charging_mode`:
 
 | Mode | Behavior |
 |------|----------|
-| **solar** | Follow `sensor.surplus_power` (PV − house_load). EV runs only while the 48-h min home-battery SOC forecast stays ≥ `ev_charging.reserve_percent` (default 20 %). No target-SOC cap — runs until the car is full or surplus drops out. |
+| **solar** | Charge from available solar surplus while the home battery can still reach its computed daily target. The 48-hour SOC floor constrains upward power steps but is not itself a may-charge veto. No EV target-SOC cap — runs until the car is full, surplus drops out, or home-battery priority pauses it. |
 | **immediate** | Charge at `input_number.ev_manual_power` regardless of tariff. Stops at the target SOC (see Manual Charge). |
 | **cheap** | Charge at `input_number.ev_manual_power` during cheap tariff, 0 W during expensive. Stops at the target SOC (see Manual Charge). |
 

@@ -11,7 +11,7 @@ Swiss PV power forecast using MeteoSwiss ICON ensemble data with pvlib.
 
 - **Ensemble Forecasts**: Uses 11 ensemble members from ICON-CH1/CH2 for uncertainty quantification
 - **P10/P50/P90 Percentiles**: Provides pessimistic, median, and optimistic power forecasts
-- **Hybrid Model**: Combines ICON-CH1 (1km, 33h) and ICON-CH2 (2.1km, 48h) for optimal accuracy
+- **Hybrid Model**: Combines ICON-CH1 (1 km, 33 h) with the longer-range ICON-CH2 model; the add-on downloads CH2 through hour 60 to maintain at least 48 hours of usable coverage
 - **Per-Inverter Forecasts**: Supports multiple plants, inverters, and string configurations
 - **Adaptive Shading Correction**: Learns per-string shading patterns from sunny day observations
 - **15-Minute Resolution**: Aligned timestamps for MPC/optimization integration

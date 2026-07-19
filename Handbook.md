@@ -41,8 +41,8 @@ The add-on config split (secrets vs YAML) is build-side — see
 Editor → restart.
 
 **After updates:** the add-on updates automatically (if enabled); the user config is never modified.
-Check `/config/<addon>.yaml.example` for new options, add the ones you want to your user config, and
-restart.
+Check `/addon_configs/<slug>/<addon>.yaml.example` for new options, add the ones you want to the
+sibling user config, and restart.
 
 ## Routine operations
 - **Deploy an add-on update** — bump the add-on version (see

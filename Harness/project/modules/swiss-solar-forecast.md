@@ -46,16 +46,16 @@ Primary modules:
 
 ## Source files
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `run.py` | 386 | Entry point, scheduler initialization |
-| `src/icon_fetcher.py` | 466 | STAC API client, GRIB download |
-| `src/grib_parser.py` | 840 | GRIB parsing, grid handling |
-| `src/pv_model.py` | 338 | pvlib PV power calculations |
-| `src/influxdb_writer.py` | 405 | InfluxDB forecast writer |
-| `src/scheduler.py` | 202 | APScheduler wrapper |
-| `src/config.py` | 146 | PV configuration loader |
-| `src/notifications.py` | 135 | Telegram notifications |
+| File | Purpose |
+|------|---------|
+| `run.py` | Entry point, scheduler initialization |
+| `src/icon_fetcher.py` | STAC API client, GRIB download |
+| `src/grib_parser.py` | GRIB parsing, grid handling |
+| `src/pv_model.py` | pvlib PV power calculations |
+| `src/influxdb_writer.py` | Forecast writes |
+| `src/scheduler.py` | APScheduler wrapper |
+| `src/config.py` | PV configuration loader |
+| `src/notifications.py` | Telegram notifications |
 
 ## Dependencies
 

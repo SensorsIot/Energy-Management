@@ -76,17 +76,16 @@ Home Assistant add-ons for energy forecasting and optimization.
 
 3. **Configure**
 
-   Each add-on requires a user configuration file in `/config/`:
-   - `/config/swiss-solar-forecast.yaml`
-   - `/config/load-forecast.yaml`
-   - `/config/energy-manager.yaml`
-   - OCPP Server is configured from the add-on Configuration tab
+   Enter secrets such as `influxdb_token` in each add-on's **Configuration** tab. Configure
+   OCPP Server entirely there. The other add-ons keep non-secret settings in files exposed to
+   Home Assistant as:
 
-   At minimum, each needs the InfluxDB token:
-   ```yaml
-   influxdb:
-     token: "your-influxdb-token"
-   ```
+   - `/addon_configs/swiss-solar-forecast/swiss-solar-forecast.yaml`
+   - `/addon_configs/load-forecast/load-forecast.yaml`
+   - `/addon_configs/energy-manager/energy-manager.yaml`
+
+   On first start, each add-on creates its user file and refreshes a sibling `.yaml.example`
+   containing the current available options.
 
 ## Requirements
 
@@ -118,7 +117,11 @@ InfluxDB (pv_forecast + load_forecast) → Optimization → Battery/EV/Appliance
 Wallbox → OCPP Server add-on → Home Assistant wallbox entities
 ```
 
-**EV solar charging** uses closed-loop grid meter feedback (`excess = -grid_power + wallbox_power`) to determine available power for the EV. Solar mode is always active — when there is genuine solar excess being exported to the grid, the EV captures it. The battery gets first priority via SUN2000's zero-export control. Battery protection status (forecast SOC at 21:00) is still computed and published to the dashboard for monitoring, but does not block solar charging.
+**EV solar charging** uses live solar surplus to determine available power for the EV. The home
+battery gets priority: charging is permitted only while the live forecast says the battery can
+still reach its computed daily target. The separate 48-hour minimum-SOC forecast is published for
+monitoring and constrains only upward wallbox steps that would draw a small gap from the battery;
+it is not itself a may-charge veto.
 
 **Battery discharge blocking** uses two independent flags combined with OR logic. The battery optimizer blocks discharge when the SOC forecast is too low (protection flag), and the EV controller blocks discharge when the wallbox is actively charging in immediate or cheap mode (EV flag). This prevents SUN2000 from draining the battery to cover wallbox power that appears as household load via the DTSU correction path.
 

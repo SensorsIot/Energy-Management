@@ -46,7 +46,7 @@ All options are in the add-on **Configuration tab**:
 | `min_current_a` | `6` | Minimum charging current (A) |
 | `max_current_a` | `16` | Maximum charging current (A) |
 | `phase_switch_entity` | `""` | HA switch entity for EARU relay (empty = disabled) |
-| `single_phase_supported` | `false` | Wallbox supports 1-phase charging |
+| `wallbox_type` | `three_phase` | `three_phase`, `external_breaker`, or `universal`; determines phase-switching behavior and the derived single-phase capability |
 | `power_update_interval_s` | `60` | Throttle interval (s) — immediate if last change >60s ago |
 | `mqtt_host` | `192.168.0.203` | MQTT broker host (optional) |
 | `mqtt_port` | `1883` | MQTT broker port (optional) |
@@ -69,7 +69,7 @@ All options are in the add-on **Configuration tab**:
 | Entity | Description |
 |--------|-------------|
 | `binary_sensor.wallbox_connected` | WebSocket connection to wallbox |
-| `binary_sensor.wallbox_single_phase_supported` | Config flag for phase selection |
+| `binary_sensor.wallbox_single_phase_supported` | Derived capability flag (`on` for `external_breaker` and `universal`) |
 
 ### Controls (written by EnergyManager)
 

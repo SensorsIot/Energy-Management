@@ -464,7 +464,7 @@ Operator dashboard queries are OPERATE — see [`Handbook.md` → Dashboards & q
 ## 15. Failure handling
 
 - Missing weather files are logged and skipped.
-- Existing forecast points are overwritten by timestamp/tag identity, not deleted first.
+- Forecast writes replace points with the same timestamp and tag set; they do not run a delete first.
 - A missing InfluxDB token logs a warning and prevents writes.
 - Notification failures never stop forecast calculation.
 - Shading and accuracy features fail independently of core forecast generation.

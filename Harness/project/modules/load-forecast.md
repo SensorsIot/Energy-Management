@@ -29,11 +29,11 @@ Primary modules:
 
 ## Source files
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `run.py` | 192 | Entry point, scheduler loop |
-| `src/load_predictor.py` | 183 | Statistical forecasting algorithm |
-| `src/influxdb_writer.py` | 140 | InfluxDB forecast writer |
+| File | Purpose |
+|------|---------|
+| `run.py` | Entry point, scheduler loop |
+| `src/load_predictor.py` | Statistical forecasting algorithm |
+| `src/influxdb_writer.py` | InfluxDB forecast writer |
 
 ## Dependencies
 
