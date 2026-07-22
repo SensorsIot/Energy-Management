@@ -2078,6 +2078,25 @@ Wallbox -> MeterValues (OCPP) -> OCPP Server -> MQTT topic "wallbox" (every 10s)
 
 The ESP32 Modbus Proxy adds wallbox power to the DTSU meter reading so the SUN2000 sees actual grid demand including the wallbox (which is wired outside the DTSU measurement loop).
 
+### 4.7.5 M-Bus Staleness Alert
+
+The M-Bus grid reading (`mbus_grid_power` — the EBL smart meter via the external gPlug reader) feeds
+**reporting and observability only**: the grid-export dashboard attribute, energy-flow accounting,
+and the integration-test observer. EV and battery control run on `surplus_power` (PV − house load),
+**not** on this signal. `_read_grid_power()` treats the reading as fresh only when its `last_updated`
+age is under 20 s and otherwise falls back silently to the DTSU meter (`dtsu_grid_power`), so a
+reader failure that stops M-Bus updates entirely degrades reporting unseen.
+
+A watchdog (`src/mbus_watchdog.py`, `MbusWatchdog`) is fed the freshness of every grid read and
+sends a **one-shot Telegram warning** once the M-Bus meter has been **continuously stale for
+`mbus_stale_alert_seconds`** (default 300 s), naming the entity, the elapsed stale time, and that
+reporting is degraded while control is unaffected. Brief gaps (the ordinary 20 s fallback) never
+alert. When the meter resumes publishing fresh readings, a single **info** recovery notice is sent
+and the watchdog rearms for the next episode.
+
+The stale timer is in-process: an add-on restart re-arms detection, so a still-dead meter re-alerts
+within `mbus_stale_alert_seconds` of restart.
+
 # Chapter 5: Forecast Accuracy Tracking
 
 ## 5.1 Purpose
@@ -2632,6 +2651,7 @@ Integration tests verify cross-module behavior — interactions between EV charg
 |----|-------------|-------|----------|--------|
 | IT-STALE-01 | Stale M-Bus reading falls back to DTSU | Mock M-Bus `last_updated` > 20 s ago | `_read_grid_power()` returns DTSU value | 🔮 Future — requires HA client mock |
 | IT-STALE-02 | Both meters stale → safe default | Both sensors return None | EV power set to 0 (pause) | 🔮 Future — requires HA client mock |
+| IT-STALE-03 | Prolonged M-Bus staleness alerts once, recovers once (4.7.5) | Feed `MbusWatchdog` fresh/stale/recovered edges | One `stale` edge past `mbus_stale_alert_seconds`, one `recovered` edge on return; brief gaps silent | ✅ `test_mbus_watchdog.py` |
 | IT-TIME-01 | Scheduler fires at 15-min boundaries | APScheduler mock with time steps | `run_optimization` called at :00, :15, :30, :45 | 🔮 Future — requires scheduler mock |
 | IT-TIME-02 | EV loop runs at 10 s interval | APScheduler mock | `control_ev_charging` called every 10 s | 🔮 Future — requires scheduler mock |
 
@@ -2782,6 +2802,7 @@ sensors:
   surplus_power: "sensor.surplus_power"
   mbus_grid_power: "sensor.grid_power"            # EBL smart meter via gPlug M-Bus (preferred, < 20s)
   dtsu_grid_power: "sensor.power_meter_active_power"  # Huawei DTSU666-H at inverter (fallback)
+  mbus_stale_alert_seconds: 300                   # Telegram alert if M-Bus stale this long (FSD 4.7.5)
 
 ev_charging:
   enabled: true

@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.10"
+__version__ = "1.9.11"
 
 import json
 import logging
@@ -35,7 +35,8 @@ from src.ev_charging import (
 from src.influxdb_writer import SimulationWriter
 from src.integration_observer import CycleSnapshot, IntegrationObserver
 from src.flows_daily import FlowsDaily
-from src.notifications import init_telegram, notify_error
+from src.mbus_watchdog import MbusWatchdog
+from src.notifications import init_telegram, notify_error, notify_info, notify_warning
 from src.sanity import validate_power_readings
 
 # Swiss timezone for display
@@ -294,6 +295,10 @@ class EnergyManager:
         self.dtsu_grid_power_entity = sensors_opts.get(
             "dtsu_grid_power", "sensor.power_meter_active_power"
         )
+        # M-Bus staleness watchdog (FSD 4.7.5): alert once the grid meter has been
+        # continuously stale for this long. Brief gaps use the silent DTSU fallback.
+        self.mbus_stale_alert_seconds = sensors_opts.get("mbus_stale_alert_seconds", 300)
+        self._mbus_watchdog = MbusWatchdog(alert_after_s=self.mbus_stale_alert_seconds)
         self.wallbox_power_entity = ev_opts.get("wallbox_power_entity", "sensor.wallbox_power")
         self.wallbox_connected_entity = ev_opts.get(
             "wallbox_connected_entity", "binary_sensor.wallbox_connected"
@@ -1413,18 +1418,52 @@ class EnergyManager:
             logger.error(f"Failed to calculate appliance signal: {e}")
 
     def _read_grid_power(self) -> float:
-        """Read grid power, preferring M-Bus smart meter if fresh (<20s)."""
+        """Read grid power, preferring M-Bus smart meter if fresh (<20s).
+
+        Prolonged M-Bus staleness (reader/firmware failure) triggers a Telegram
+        alert via the watchdog (FSD 4.7.5); the control loop meanwhile falls back
+        to the DTSU meter as before.
+        """
+        mbus_value: float | None = None
         state = self.ha_client.get_state(self.mbus_grid_power_entity)
         if state:
             try:
                 updated = datetime.fromisoformat(state["last_updated"])
                 age = (datetime.now(UTC) - updated).total_seconds()
                 if age < 20:
-                    return float(state["state"])
-                logger.debug(f"M-Bus stale ({age:.0f}s), falling back to DTSU")
+                    mbus_value = float(state["state"])
+                else:
+                    logger.debug(f"M-Bus stale ({age:.0f}s), falling back to DTSU")
             except (ValueError, KeyError):
                 pass
+        self._watch_mbus_freshness(mbus_value is not None)
+        if mbus_value is not None:
+            return mbus_value
         return self.ha_client.get_sensor_value(self.dtsu_grid_power_entity) or 0
+
+    def _watch_mbus_freshness(self, fresh: bool) -> None:
+        """Alert on prolonged M-Bus staleness via Telegram (FSD 4.7.5)."""
+        now_ts = datetime.now(UTC).timestamp()
+        edge = self._mbus_watchdog.update(fresh, now_ts)
+        if edge == "stale":
+            stale_min = self._mbus_watchdog.stale_seconds(now_ts) / 60
+            logger.warning(
+                f"M-Bus grid meter {self.mbus_grid_power_entity} stale for "
+                f"{stale_min:.0f} min — alerting, using DTSU fallback"
+            )
+            notify_warning(
+                "M-Bus grid meter stale",
+                f"{self.mbus_grid_power_entity} has published no fresh reading for "
+                f"{stale_min:.0f} min. Grid/energy reporting is degraded; EV and "
+                f"battery control are unaffected (they run on PV−load surplus). "
+                f"Check the gPlug M-Bus reader.",
+            )
+        elif edge == "recovered":
+            logger.info(f"M-Bus grid meter {self.mbus_grid_power_entity} recovered")
+            notify_info(
+                "M-Bus grid meter recovered",
+                f"{self.mbus_grid_power_entity} is publishing fresh readings again.",
+            )
 
     def _extra_load_percent(self, extra_load_wh: float) -> float:
         """Convert extra load in Wh to SOC percentage of battery capacity."""

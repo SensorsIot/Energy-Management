@@ -75,6 +75,15 @@ It runs entirely in HA (production) — no external host, script, or cron — an
 per-episode cooldown. Adjust the thresholds by editing the automation; test-fire with
 `automation.trigger` on `automation.grid_correction_watchdog`.
 
+**M-Bus staleness alert** — the energy-manager add-on sends a Telegram warning when the M-Bus grid
+meter (`sensor.grid_power`, external gPlug reader) stops publishing fresh readings for longer than
+`mbus_stale_alert_seconds` (default 300 s), and a recovery notice when it returns. This reading
+feeds grid/energy **reporting** only (EV and battery control run on PV−load surplus), so a dead
+reader would otherwise pass silently. Tune the
+threshold via the add-on's `sensors.mbus_stale_alert_seconds` option; it uses the add-on's own
+`telegram_bot_token` / `telegram_chat_id` (not the HA `telegram_bot` service). Behaviour is specified
+in [`energy-manager` FSD §4.7.5](energy-manager/Documents/energy-manager-fsd.md#475-m-bus-staleness-alert).
+
 ## Dashboards & queries
 
 Grafana queries operators use to visualize each add-on's output. Behaviour/schemas these read are
