@@ -44,16 +44,18 @@ RUN echo 'cd /workspaces/Energy-Management 2>/dev/null' >> /home/dev/.bashrc
 # SSH login, so any bashrc lines after it never run for the SSH-login shell.
 RUN echo 'export LANG=C.UTF-8' >> /home/dev/.bashrc
 # Per-user npm prefix on PATH so claude (installed into ~/.npm-global/bin by
-# postCreate) and the superclaude alias resolve. MUST come before the tmux guard
-# below: the guard execs tmux, so bashrc lines after it never run on SSH login.
-RUN echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> /home/dev/.bashrc
+# postCreate) and the superclaude alias resolve. Set as image ENV, not appended
+# to .bashrc: Debian's .bashrc returns early for non-interactive shells, so a
+# PATH export there is invisible to `ssh <host> claude ...`, cron and scripts.
+# ENV applies to every shell, interactive or not.
+ENV PATH="/home/dev/.npm-global/bin:${PATH}"
 
 # Persistent claude session: interactive SSH logins auto-attach a tmux session
 # "main" running claude, so it survives disconnects (reconnect = continue).
 # Skips non-interactive shells, shells already in tmux, VS Code terminals, and
 # any login while ~/.no-tmux exists (escape hatch).
-# claude is installed at ~/.local/bin (native installer) and reachable on PATH
-# via ~/.profile + the .bashrc PATH export above.
+# claude is installed into ~/.npm-global/bin by postCreate and reachable on PATH
+# via the ENV PATH above.
 RUN printf '%s\n' \
     '' \
     '# --- Persistent claude session (auto-attach tmux on interactive SSH) ---' \
