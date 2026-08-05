@@ -9,6 +9,56 @@ Host access — SSH, InfluxDB, Grafana, Home Assistant, Docker — is driven by 
 skill, which holds the connection details and where credentials are loaded from. Secrets live in the
 environment, never in the repo.
 
+### WiFi access point (devolo)
+
+The WiFi serving the cellar — including the gPlug smart-meter reader — is a **devolo dLAN 2400
+WiFi ac**. There are two powerline nodes and **only one has a radio**:
+
+| Host | IP | Role |
+|---|---|---|
+| `devolo-635` | `192.168.0.12` | **The access point.** OpenWrt (Chaos Calmer 15.05.1, IPQ40xx) with a ubus JSON-RPC API. Radios: `ath0` = 2.4 GHz `private-2G`, `ath1` = 5 GHz `Smart-5G` |
+| `devolo-494` | `192.168.0.9` | Powerline **Domain Master** (*Magic 2 LAN 1-1*), LAN only — **no radio** |
+
+Backhaul from the AP to the router runs over powerline on the cellar mains.
+
+#### Read a client's signal as the AP sees it
+
+This answers "is this an uplink or a downlink problem?" — the question a client's own RSSI
+cannot settle on its own.
+
+```bash
+NULL=00000000000000000000000000000000
+SID=$(curl -s -X POST http://192.168.0.12/ubus -H 'Content-Type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"call\",\"params\":[\"$NULL\",\"session\",\"login\",{\"username\":\"root\",\"password\":\"YOUR_DEVOLO_PASSWORD\"}]}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['result'][1]['ubus_rpc_session'])")
+
+curl -s -X POST http://192.168.0.12/ubus -H 'Content-Type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"call\",\"params\":[\"$SID\",\"iwinfo\",\"assoclist\",{\"device\":\"ath0\"}]}"
+```
+
+Each station returns `signal` (dBm **as heard by the AP**), `noise`, `inactive` (ms since its last
+frame) and `rx`/`tx` rates. Compare that against the RSSI the client reports for itself: the two
+measure **opposite directions**, and treating one as if it described both sends you after the wrong
+fix — e.g. raising a client's transmit power when it is the downlink that is weak.
+
+Radio state: `iwinfo info ath0`. Full settings: `uci get wireless` over the same session.
+
+#### Gotchas
+
+- Radios are **`ath0`/`ath1`**, not `wlan0`. A wrong device name returns a bare `[4]` (NOT_FOUND),
+  which reads like a permission failure but is not. Enumerate with `iwinfo devices` first.
+- The vendor `api` object (including `WifiConnectedStationsGet`) is **ACL-denied even with a valid
+  session**. Use `iwinfo`.
+- Fetch the web UI with `curl --compressed`. Responses are gzip; read raw, they look like binary
+  noise and invite the wrong conclusion about what the device exposes.
+- `http://192.168.0.9/assets/data.cfl` is an **unauthenticated** key=value dump
+  (`AUTHREQUIRED=N`) — powerline topology, node names and model IDs, no login needed.
+- **Do not run `iwinfo scan` or `WifiNeighborAPsGet` casually.** On an AP-mode radio these scan
+  off-channel and can briefly drop associated clients — including the device you are diagnosing.
+
+Per the policy above, the AP password is **not stored in this repo** (which is public). Substitute
+it for `YOUR_DEVOLO_PASSWORD` from the environment or your password manager.
+
 ## Installation
 
 Prerequisites: Home Assistant OS or Supervised install; InfluxDB 2.x with buckets configured;
