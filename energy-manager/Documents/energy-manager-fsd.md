@@ -1256,12 +1256,18 @@ The EV can sit either side of the live surplus:
 | **1** | **Available steps** | phase config (1-phase / 3-phase) | the discrete amp ladder; the 3680-4140 W phase gap is a dead zone. *Plumbing -- not a decision.* |
 | **2** | **Default: step at/below surplus** | always | the **highest step <= surplus** (`PV - house_load`). Remainder charges the home battery or is exported. Never pulls from the battery. |
 | **3** | **Step up** | home battery **full** **OR** (`battery_min_soc_48h` >= `battery.no_buy_floor_percent` **AND** current SOC >= `battery.no_buy_floor_percent`) | use the **next step above surplus**; the home battery covers the small gap. |
+| **4** | **No-gain suppression** | the **p10** forecast reaches **both** targets by end of today: home-battery peak SOC >= `battery_target_soc` **AND** car end-of-day SOC >= its car-side target | **veto Rule 3** — stay at/below surplus. |
 
-Power = Rule 2's step, bumped one step by Rule 3 when allowed. We never match surplus exactly -- Rule 2 always lands on a discrete step *under* surplus; Rule 3 optionally bumps to the one *over*.
+Power = Rule 2's step, bumped one step by Rule 3 when allowed and Rule 4 does not veto. We never match surplus exactly -- Rule 2 always lands on a discrete step *under* surplus; Rule 3 optionally bumps to the one *over*.
 
 **Notes**
 
 - Rule 3 gates the **only** step that drains the home battery (one amp level above surplus). It requires `battery_min_soc_48h` >= `no_buy_floor_percent` **and** the **instantaneous** SOC >= `no_buy_floor_percent`. The 48 h forecast alone reads optimistically high while the car is actively draining the real battery (observed 2026-06-23: SOC 12 %, forecast 29 %, step-up still firing), so the instantaneous condition is what actually stops step-up from draining the battery below the floor. Steps *at or below* surplus never drain the battery and need no such guard.
+- **Rule 4** asks whether step-up *buys* anything. When the day fills the home battery **and** the car by evening either way, the step-up step changes only the **route**: the same kWh reaches the car either directly from PV or via a charge/discharge cycle of the home battery, which costs the round-trip loss. Both end states are identical, so the lossy route is vetoed. Rule 4 only ever *removes* the draining step, so it can never endanger the battery.
+- Rule 4 reads the **p10 PV / p50 load** forecast — the same conservative pair as the charge target (Section 4.2.4) and the shaving fill check (Section 4.2.3). Suppression must hold on a *low*-PV outcome, not merely a median one: a p50 day that under-delivers would leave the car short with the faster step already forgone.
+- The battery side of Rule 4 tests the simulated **peak** SOC, not the end-of-day value — the battery legitimately discharges into the evening after reaching its target. The car side tests the **end-of-day** value; the car curve is monotonic non-decreasing, so that is also its peak.
+- Rule 4 **fails open** (no suppression — Rule 3 governs alone) whenever the signal cannot be computed: no car SOC, no car-side target, smart-car integration disabled, or a stale/empty forecast. Suppressing on an unreliable signal would slow the car on a day that needed the extra step.
+- Rule 4 is evaluated on the 15-min cycle and cached for the 10-s EV loop, published as `step_up_suppressed` / `step_up_suppressed_reason` on `sensor.ev_target_power`. It shares one allocation model with the car SOC forecast curve (Section 4.3.9) — house battery first up to `battery_target_soc`, overflow to the car at `charge_efficiency`, deficits drain the house only — run on p10 for the gate and on p50 for the published curve.
 - The chosen step's offset from the surplus-snapped level is published as the `ev_step_offset` attribute on `sensor.ev_target_power` (+n stepped up / -n stepped down / null when not solar-charging).
 
 #### `will_battery_hit_full()` -- dashboard (15-min)
@@ -1762,6 +1768,9 @@ the structured fields below; `reason` is kept for logs, not rendered:
 | `shaving_day_mode` | Topic 5 day-mode latch: `shaving_day` or `car_day` (4.2.3) — drives the day-mode context line |
 | `car_target_time` | Forecast time the car reaches its target SOC (ISO-UTC, else `null`) — drives the ETA line |
 | `car_target_soc` | Car's target SOC from `sensor.smart_charging_max_last_known` (%) |
+| `car_eod_soc_forecast` | Forecast car SOC at end of today on the p50 curve (%) |
+| `step_up_suppressed` | Topic 2 Rule 4 active — step-up vetoed because p10 fills both battery and car by evening (4.3.7) |
+| `step_up_suppressed_reason` | The p10 battery-peak and car-EOD figures behind `step_up_suppressed` |
 | `ev_safe` | `check_ev_safe` passed — EV allowed this cycle |
 | `battery_min_soc_forecast_48h` | Min forecast home-battery SOC over next 48 h, EV load subtracted (%) |
 | `battery_min_soc_floor` | Floor used by the EV step-up guard (= `battery.no_buy_floor_percent`) |
@@ -2527,8 +2536,11 @@ cd energy-manager && python -m pytest tests/test_ev_state_machine.py -v
 | EV-15 | Home-battery target gates charging | SOLAR mode: surplus above threshold but the live forecast cannot reach `battery_target_soc` → `ev_charging_power_w=0`; the 48-hour floor remains dashboard/step-up state and is not the stop reason |
 | EV-16 | Battery full, low excess | SOLAR with 1-phase min_power_w — captures every watt |
 | EV-17 | Select `off` while solar-charging | Wallbox → 0 W, `sensor.ev_charge_status` = `off`; mode stays `off` (no revert to `solar`) even with surplus present |
-| EV-17 | Cheap tariff toggles | CHEAP state: charges at max during cheap, pauses during expensive, no state change |
-| EV-18 | Car reaches target SOC | Returns to IDLE from any charging state |
+| EV-18 | Cheap tariff toggles | CHEAP state: charges at max during cheap, pauses during expensive, no state change |
+| EV-19 | Car reaches target SOC | Returns to IDLE from any charging state |
+| EV-20 | Step-up suppressed when both fill (Rule 4) | SOLAR mode, battery above the floor (Rule 3 would allow step-up), and the p10 forecast reaches `battery_target_soc` **and** the car target by end of today → `ev_step_offset` <= 0, `step_up_suppressed=true`; the car keeps charging at the step at/below surplus |
+| EV-21 | Step-up restored when the car falls short | Same as EV-20 but the p10 car end-of-day SOC is below its target → `step_up_suppressed=false`, step-up available again |
+| EV-22 | Suppression fails open | Car SOC or car-side target unavailable, or the forecast is stale → `step_up_suppressed=false` (Rule 3 governs alone) |
 
 ---
 
@@ -2632,12 +2644,59 @@ Tests the `snap_to_power_step()`, `calculate_ev_power()`, and `resolve_phase_gap
 | `test_cloud_fluctuation_battery_not_full` | 20 excess values oscillating in gap (3750–4130 W) | All snap to 3680 W, zero phase switches |
 | `test_cloud_fluctuation_battery_full` | Same series, battery full | All snap to 4140 W, zero phase switches |
 
+#### `build_solar_candidates()` — Step-Up Suppression (Rule 4, Section 4.3.7)
+
+| Test | Description | Expected |
+|------|-------------|----------|
+| `test_both_full_suppresses_step_up` | Rule 3 allows step-up, both targets reached under p10 | Step-up step dropped; snap-down candidates kept |
+| `test_default_off_preserves_step_up` | Flag omitted (signal not computable) | Step-up present — unchanged behaviour |
+| `test_suppression_does_not_block_charging` | Suppression active | Car still charges at/below surplus |
+| `test_suppression_is_redundant_when_already_unprotected` | Below the no-buy floor | Identical candidates with and without suppression |
+| `test_target_gate_still_wins_over_suppression` | Battery cannot reach its target | No candidates at all (Topic 1 Rule 4) |
+
+#### `simulate_house_and_car()` — Shared Allocation Model
+
+| Test | Description | Expected |
+|------|-------------|----------|
+| `test_house_fills_before_car` | Surplus within house headroom | All to house; car unchanged |
+| `test_overflow_past_target_goes_to_car` | Surplus beyond `battery_target_soc` | Overflow raises car SOC |
+| `test_efficiency_applied_to_car_only` | `charge_efficiency` < 1 | Applied to the car share only |
+| `test_deficit_drains_house_not_car` | Negative net energy | House drains; car unchanged |
+| `test_house_never_goes_negative` | Deficit exceeds stored energy | House clamps at 0 |
+| `test_car_soc_is_monotonic_and_capped_at_100` | Long surplus run | Non-decreasing, capped at 100 % |
+| `test_house_ceiling_is_the_target_not_capacity` | Target below capacity | House stops at the target |
+
 **Run tests:**
 ```bash
 cd energy-manager && python -m pytest tests/test_ev_charging.py -v
 ```
 
-**All 20 tests passing** (as of v1.6.80)
+---
+
+## 6.5a Step-Up Suppression Signal Tests
+
+Test file: `energy-manager/tests/test_step_up_suppression.py`
+
+Tests `_evaluate_both_full_by_evening()` — the 15-min p10 evaluation backing Topic 2 Rule 4 (Section 4.3.7).
+
+| Test | Description | Expected |
+|------|-------------|----------|
+| `test_both_reach_targets_suppresses` | p10 fills battery to target and car to its target | `_both_full_by_evening=True` |
+| `test_car_short_keeps_step_up` | Battery reaches target, car short | `False`, reason names the car |
+| `test_battery_short_keeps_step_up` | Battery short of `battery_target_soc` | `False` |
+| `test_battery_peak_not_eod_counts` | Targets met midday, evening deficit drains the house | `True` — peak counts, not end-of-day |
+| `test_periods_after_midnight_are_ignored` | Large surplus lands after today's Swiss midnight | `False` — tomorrow's sun does not count |
+| `test_stale_forecast` | Forecast heartbeat stale | `False` (fails open) |
+| `test_empty_forecast` / `test_none_forecast` | No p10 frame | `False` |
+| `test_no_house_soc` | House SOC unavailable | `False` |
+| `test_car_disabled` | Smart-car integration disabled | `False` |
+| `test_car_soc_unknown` | Car SOC unreadable (live and cached) | `False` |
+| `test_car_target_unreadable` | Car-side target unparseable | `False` |
+
+**Run tests:**
+```bash
+cd energy-manager && python -m pytest tests/test_step_up_suppression.py -v
+```
 
 ---
 
@@ -3042,6 +3101,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.86: **Topic 2 Rule 4 — no step-up when the p10 forecast fills both the home battery and the car by evening (Section 4.3.7).** Step-up (one amp level above surplus) draws the gap from the home battery, so on a strong day it routes energy PV → battery → car instead of PV → car and pays the round-trip loss for an identical end state: the car reaches its target either way, just marginally later. Observed live 2026-08-06 — battery 78 % (target 90 %, forecast full at 12:15), car 71 % (target 80 %, forecast reached 13:45), surplus ~4.9 kW, yet the manager held the wallbox one step above surplus at 5117 W and discharged the battery at ~300–500 W for hours. New Rule 4 vetoes Rule 3 when the **p10 PV / p50 load** forecast reaches `battery_target_soc` (simulated **peak**, since the battery discharges into the evening) **and** the car's end-of-day SOC reaches its car-side target. p10 rather than p50 because suppression must survive a low-PV outcome. Fails **open** — a missing car SOC/target, disabled smart-car integration, or a stale/empty forecast leaves Rule 3 governing alone. Evaluated on the 15-min cycle (`_evaluate_both_full_by_evening`), cached for the 10-s EV loop, published as `step_up_suppressed` / `step_up_suppressed_reason` on `sensor.ev_target_power`. The car SOC forecast's allocation model is extracted as `simulate_house_and_car()` and now backs both the p50 dashboard curve and the p10 gate. New `TestStepUpSuppression`, `TestSimulateHouseAndCar`, `test_step_up_suppression.py`; EV-20…EV-22. 302 tests pass. (1.9.11 -> 1.9.12)
 
 - v2.85: **Topic 3 longevity cap now enforced by the inverter's native end-of-charge SOC register, not just the software power limit (Section 4.2.4).** The old cap wrote `number.battery_maximum_charging_power = 0` once the battery reached `battery_target_soc`. Two gaps let the battery overshoot the 90 % longevity target — verified live 2026-07-17, where it reached 100 %: (1) the power limit is written on the 15-min battery cycle, so the battery kept charging at ~5 kW for up to ~15 min after crossing the target (90 % → ~96 % before the limit landed); (2) a 0 W charge-power limit does not stop DC PV surplus trickling the battery up to the inverter's own SOC cutoff, which sat at 100 %. EM now mirrors `battery_target_soc` onto `number.battery_end_of_charge_soc` every cycle, so the inverter hard-stops charging at the target in real time. The register accepts 90-100 %, exactly the range of the floored target, so it always fits; a 100 % target means "no cap". The power limit is kept as a backing control and drives the dashboard action. When `charge_target_enabled` is off EM leaves the register untouched, releasing it to 100 % only if it had previously lowered it. New `end_of_charge_soc_entity` config key; new `_apply_soc_ceiling`; new `TestSocCeiling`. (1.9.9 -> 1.9.10)
 

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, UTC
+
+import pytest
+
 from src.ev_charging import (
     build_solar_candidates,
     calculate_ev_power,
     resolve_phase_gap,
+    simulate_house_and_car,
     snap_to_power_step,
 )
 
@@ -212,6 +217,122 @@ class TestBuildSolarCandidates:
         )
         # snap-down from 7A: [4354, 3962], no 5117 snap-up
         assert candidates == [4354, 3962]
+
+
+class TestStepUpSuppression:
+    """Topic 2 step-up suppression (FSD 4.3.7): when the conservative p10
+    forecast already fills BOTH the home battery and the car by evening,
+    stepping up gains nothing and only pays the battery's round-trip loss."""
+
+    def test_both_full_suppresses_step_up(self) -> None:
+        candidates, reason = build_solar_candidates(
+            candidate_power=5117,
+            threshold=3500,
+            step_up_allowed=True,
+            both_full_by_evening=True,
+        )
+        assert candidates == [5117, 4354, 3962]
+        assert 5727 not in candidates
+        assert "round-trip" in reason
+
+    def test_default_off_preserves_step_up(self) -> None:
+        """Omitting the flag (e.g. signal not computable) → unchanged behaviour."""
+        candidates, reason = build_solar_candidates(
+            candidate_power=5117,
+            threshold=3500,
+            step_up_allowed=True,
+        )
+        assert candidates == [5727, 5117, 4354, 3962]
+        assert "step-up allowed" in reason
+
+    def test_suppression_does_not_block_charging(self) -> None:
+        """The car keeps charging at/below surplus — only the drain step goes."""
+        candidates, _ = build_solar_candidates(
+            candidate_power=4354,
+            threshold=3500,
+            step_up_allowed=True,
+            both_full_by_evening=True,
+        )
+        assert candidates == [4354, 3962]
+
+    def test_suppression_is_redundant_when_already_unprotected(self) -> None:
+        """Below the floor the step-up is already gone; suppression is a no-op."""
+        suppressed, _ = build_solar_candidates(
+            candidate_power=5117, threshold=3500,
+            step_up_allowed=False, both_full_by_evening=True,
+        )
+        unsuppressed, _ = build_solar_candidates(
+            candidate_power=5117, threshold=3500,
+            step_up_allowed=False, both_full_by_evening=False,
+        )
+        assert suppressed == unsuppressed == [5117, 4354, 3962]
+
+    def test_target_gate_still_wins_over_suppression(self) -> None:
+        """Battery can't reach target → no charging at all, regardless."""
+        candidates, reason = build_solar_candidates(
+            candidate_power=5117,
+            threshold=3500,
+            step_up_allowed=True,
+            target_reachable=False,
+            both_full_by_evening=True,
+        )
+        assert candidates == []
+        assert "charge target" in reason
+
+
+class TestSimulateHouseAndCar:
+    """The shared allocation model behind the p50 dashboard curve and the p10
+    step-up suppression gate: house battery first (to its target), overflow to
+    the car, deficits drain the house only."""
+
+    @staticmethod
+    def _steps(values_wh: list[float]) -> list[tuple[datetime, float]]:
+        base = datetime(2026, 8, 6, 6, 0, tzinfo=UTC)
+        return [(base + timedelta(minutes=15 * i), v) for i, v in enumerate(values_wh)]
+
+    def _run(self, values_wh, **kw):
+        defaults = dict(
+            house_kwh=5.0, house_cap_kwh=10.0, house_ceil_kwh=9.0,
+            car_soc_pct=50.0, car_capacity_kwh=50.0, car_efficiency=1.0,
+        )
+        return list(simulate_house_and_car(self._steps(values_wh), **{**defaults, **kw}))
+
+    def test_house_fills_before_car(self) -> None:
+        # 2 kWh surplus, house has 4 kWh headroom → all to house, car unchanged.
+        (_, house_kwh, car_pct), = self._run([2000])
+        assert house_kwh == pytest.approx(7.0)
+        assert car_pct == pytest.approx(50.0)
+
+    def test_overflow_past_target_goes_to_car(self) -> None:
+        # 6 kWh surplus, 4 kWh headroom → 2 kWh overflows to the car (+4% of 50 kWh).
+        (_, house_kwh, car_pct), = self._run([6000])
+        assert house_kwh == pytest.approx(9.0)
+        assert car_pct == pytest.approx(54.0)
+
+    def test_efficiency_applied_to_car_only(self) -> None:
+        (_, _, car_pct), = self._run([6000], car_efficiency=0.9)
+        assert car_pct == pytest.approx(50.0 + 2.0 * 0.9 / 50 * 100)
+
+    def test_deficit_drains_house_not_car(self) -> None:
+        (_, house_kwh, car_pct), = self._run([-2000])
+        assert house_kwh == pytest.approx(3.0)
+        assert car_pct == pytest.approx(50.0)
+
+    def test_house_never_goes_negative(self) -> None:
+        (_, house_kwh, _), = self._run([-9000])
+        assert house_kwh == pytest.approx(0.0)
+
+    def test_car_soc_is_monotonic_and_capped_at_100(self) -> None:
+        pts = self._run([9000] * 20, house_ceil_kwh=5.0)
+        car = [p[2] for p in pts]
+        assert car == sorted(car)
+        assert car[-1] == pytest.approx(100.0)
+
+    def test_house_ceiling_is_the_target_not_capacity(self) -> None:
+        # Ceiling 9 kWh < capacity 10 kWh: the house stops at the target and the
+        # rest overflows, which is what makes the car reachable before 100%.
+        pts = self._run([1000] * 10)
+        assert max(p[1] for p in pts) == pytest.approx(9.0)
 
 
 class TestTargetGate:

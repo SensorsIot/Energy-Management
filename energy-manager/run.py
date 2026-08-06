@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.11"
+__version__ = "1.9.12"
 
 import json
 import logging
@@ -28,6 +28,7 @@ from src.ev_battery import EVBatteryOptimizer
 from src.ev_state_machine import EVStateMachine, EVInputs, EVState
 from src.ev_charging import (
     build_solar_candidates,
+    simulate_house_and_car,
     snap_to_power_step,
     power_steps_for_phases,
     solar_start_threshold,
@@ -350,12 +351,17 @@ class EnergyManager:
         self._last_mode_error_notified: str | None = None
         self._ev_safe: bool = False
         self._battery_min_soc_forecast: float = 0.0
-        # End-of-day (today, Europe/Zurich) car SOC forecast — refreshed
-        # every 15 min by write_energy_balance(). Used by the EV control
-        # loop to decide whether the snap-up step (which drains the home
-        # battery) is needed to reach the EV target. None = no forecast
-        # yet (startup) or smart_car disabled → keep current snap-up.
+        # End-of-day (today, Europe/Zurich) car SOC forecast on the p50
+        # forecast — refreshed every 15 min by write_energy_balance(),
+        # published for the dashboard. None = no forecast yet (startup) or
+        # smart_car disabled.
         self.ev_soc_forecast_eod_today: float | None = None
+        # Topic 2 step-up suppression (Section 4.3.7): do the home battery AND
+        # the car both reach their targets by end of today under the p10 (low)
+        # PV forecast? Recomputed every 15 min, read by the 10-s EV loop.
+        # False until first evaluation (safe default: existing gate applies).
+        self._both_full_by_evening: bool = False
+        self._both_full_reason: str = "not evaluated"
         # Forecast-based "car reaches target SOC at" prediction (solar-aware,
         # from the car SOC forecast in write_energy_balance). ISO-UTC string of
         # the first forecast timestamp where car SOC ≥ target, plus the target
@@ -471,6 +477,87 @@ class EnergyManager:
         )
         return None
 
+    @staticmethod
+    def _forecast_net_steps(forecast):
+        """Yield (utc_timestamp, net_energy_wh) per forecast period."""
+        for t in forecast.index:
+            ts = t if t.tzinfo else t.replace(tzinfo=UTC)
+            yield ts, float(forecast.loc[t].get("net_energy_wh", 0))
+
+    def _evaluate_both_full_by_evening(self, gate_forecast, house_soc: float | None) -> None:
+        """Cache the Topic 2 step-up suppression signal (FSD 4.3.7).
+
+        True when the **conservative p10** forecast says the home battery *and*
+        the car both reach their targets by end of today. Step-up then gains
+        nothing (the car lands at the same SOC either way) and only pays the
+        home battery's round-trip loss, so it is suppressed.
+
+        Fails **open** (False → step-up keeps its existing floor-based gate)
+        whenever the signal cannot be computed: no car, no SOC, no car target,
+        or an empty/stale forecast. Suppressing on a guess could slow the car on
+        a day that actually needed the extra step.
+        """
+        self._both_full_by_evening = False
+        self._both_full_reason = "not evaluated"
+
+        if gate_forecast is None or gate_forecast.empty or not self._forecast_fresh:
+            self._both_full_reason = "no fresh p10 forecast"
+            return
+        if not self.smart_car_enabled or house_soc is None or self.smart_car_capacity_kwh <= 0:
+            self._both_full_reason = "car sim unavailable"
+            return
+
+        car_soc = self._read_car_soc_with_fallback()
+        raw_target = self.ha_client.get_sensor_value(self.car_charging_max_entity)
+        try:
+            car_target = float(raw_target) if raw_target is not None else None
+        except (TypeError, ValueError):
+            car_target = None
+        if car_soc is None or car_target is None:
+            self._both_full_reason = "car SOC/target unknown"
+            return
+
+        house_cap_kwh = self.capacity_wh / 1000
+        eod_today_utc = (
+            datetime.now(SWISS_TZ)
+            .replace(hour=23, minute=59, second=59, microsecond=0)
+            .astimezone(UTC)
+        )
+        # Peak house SOC, not end-of-day: the battery legitimately discharges
+        # into the evening after reaching its target, so an EOD reading would
+        # under-report a target it did reach. The car curve is monotonic, so its
+        # EOD value is its peak.
+        house_peak_pct = 0.0
+        car_eod_pct: float | None = None
+        for ts, house_kwh, car_pct in simulate_house_and_car(
+            self._forecast_net_steps(gate_forecast),
+            house_kwh=max(0.0, min(house_cap_kwh, house_soc / 100 * house_cap_kwh)),
+            house_cap_kwh=house_cap_kwh,
+            house_ceil_kwh=self._battery_target_soc / 100.0 * house_cap_kwh,
+            car_soc_pct=car_soc,
+            car_capacity_kwh=self.smart_car_capacity_kwh,
+            car_efficiency=self.smart_car_charge_efficiency,
+        ):
+            if ts > eod_today_utc:
+                break
+            house_peak_pct = max(house_peak_pct, house_kwh / house_cap_kwh * 100)
+            car_eod_pct = car_pct
+
+        if car_eod_pct is None:
+            self._both_full_reason = "p10 forecast has no periods before midnight"
+            return
+
+        battery_ok = house_peak_pct >= self._battery_target_soc
+        car_ok = car_eod_pct >= car_target
+        self._both_full_by_evening = battery_ok and car_ok
+        self._both_full_reason = (
+            f"p10: battery peak {house_peak_pct:.0f}%/{self._battery_target_soc:.0f}% "
+            f"({'ok' if battery_ok else 'short'}), "
+            f"car EOD {car_eod_pct:.0f}%/{car_target:.0f}% "
+            f"({'ok' if car_ok else 'short'})"
+        )
+        logger.info(f"Step-up suppression: {self._both_full_by_evening} — {self._both_full_reason}")
+
     def write_energy_balance(self, forecast, house_soc: float | None = None) -> None:
         """Write energy balance + car SOC forecast to InfluxDB.
 
@@ -501,7 +588,6 @@ class EnergyManager:
             # The house battery fills only to its dynamic charge target (FSD
             # 4.2.4); surplus past the target overflows to the car (or exports).
             house_ceil_kwh = self._battery_target_soc / 100.0 * house_cap_kwh
-            car_kwh_added = 0.0
             raw_target = self.ha_client.get_sensor_value(self.car_charging_max_entity)
             try:
                 target_soc = float(raw_target) if raw_target is not None else None
@@ -519,9 +605,24 @@ class EnergyManager:
         )
         eod_car_soc_pct: float | None = None
 
+        car_curve: list[float] = []
+        if sim_car:
+            car_curve = [
+                car_pct
+                for _ts, _house_kwh, car_pct in simulate_house_and_car(
+                    self._forecast_net_steps(forecast),
+                    house_kwh=house_kwh,
+                    house_cap_kwh=house_cap_kwh,
+                    house_ceil_kwh=house_ceil_kwh,
+                    car_soc_pct=car_soc,
+                    car_capacity_kwh=self.smart_car_capacity_kwh,
+                    car_efficiency=self.smart_car_charge_efficiency,
+                )
+            ]
+
         points = []
         cumulative_wh = 0.0
-        for t in forecast.index:
+        for i, t in enumerate(forecast.index):
             ts = t if t.tzinfo else t.replace(tzinfo=UTC)
             row = forecast.loc[t]
 
@@ -539,19 +640,7 @@ class EnergyManager:
             )
 
             if sim_car:
-                net_kwh = net_wh / 1000
-                if net_kwh >= 0:
-                    headroom = max(0.0, house_ceil_kwh - house_kwh)
-                    to_house = min(net_kwh, headroom)
-                    house_kwh += to_house
-                    overflow = net_kwh - to_house
-                    car_kwh_added += overflow * self.smart_car_charge_efficiency
-                else:
-                    house_kwh = max(0.0, house_kwh + net_kwh)
-                car_soc_pct = min(
-                    100.0,
-                    car_soc + car_kwh_added / self.smart_car_capacity_kwh * 100,
-                )
+                car_soc_pct = car_curve[i]
                 point = point.field("car_soc_percent", float(car_soc_pct))
                 if ts <= eod_today_utc:
                     eod_car_soc_pct = float(car_soc_pct)
@@ -564,9 +653,9 @@ class EnergyManager:
 
             points.append(point)
 
-        # Publish EOD forecast for the EV control loop's snap-up gate.
-        # None if no car forecast was computed this run (e.g. car_soc
-        # unavailable) — gate then falls back to current snap-up behavior.
+        # Published for the dashboard. The Topic 2 step-up suppression gate
+        # (FSD 4.3.7) does NOT read this p50 curve — it re-runs the same
+        # simulation on the conservative p10 forecast (_evaluate_both_full_by_evening).
         self.ev_soc_forecast_eod_today = eod_car_soc_pct
         self.ev_soc_forecast_full_time = car_full_time
         self.ev_soc_forecast_target_soc = target_soc
@@ -1318,6 +1407,10 @@ class EnergyManager:
                 )
             # Write energy balance + car SOC forecast for visualization
             self.write_energy_balance(forecast, house_soc=current_soc)
+            # Topic 2 step-up suppression (FSD 4.3.7) — same simulation, but on
+            # the conservative p10 forecast: only skip step-up when even a low-PV
+            # day still fills both the battery and the car by evening.
+            self._evaluate_both_full_by_evening(gate_forecast, current_soc)
             self.write_decision(decision, current_soc)
 
             # Control battery (protection flag — combined with EV flag)
@@ -1695,6 +1788,7 @@ class EnergyManager:
                     ),
                     target_reachable=battery_will_be_full,
                     steps=power_steps,
+                    both_full_by_evening=self._both_full_by_evening,
                 )
 
                 # Rule 5 (FSD 4.3.6) is the home-battery gate: it decides whether
@@ -1972,6 +2066,9 @@ class EnergyManager:
                     "shaving_day_mode": self._shaving_day_mode,
                     "car_target_time": self.ev_soc_forecast_full_time,
                     "car_target_soc": self.ev_soc_forecast_target_soc,
+                    "car_eod_soc_forecast": self.ev_soc_forecast_eod_today,
+                    "step_up_suppressed": self._both_full_by_evening,
+                    "step_up_suppressed_reason": self._both_full_reason,
                     "ev_safe": self._ev_safe,
                     "threshold_w": ev_threshold,
                     "surplus_power_w": surplus_power,

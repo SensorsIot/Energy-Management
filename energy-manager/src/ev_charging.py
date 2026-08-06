@@ -12,7 +12,9 @@ Phase-gap handling:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -132,12 +134,54 @@ def snap_to_power_step(
     return valid[0]
 
 
+def simulate_house_and_car(
+    steps_wh: Iterable[tuple[datetime, float]],
+    *,
+    house_kwh: float,
+    house_cap_kwh: float,
+    house_ceil_kwh: float,
+    car_soc_pct: float,
+    car_capacity_kwh: float,
+    car_efficiency: float,
+) -> Iterator[tuple[datetime, float, float]]:
+    """Allocate forecast net energy to the house battery, then the car.
+
+    The house battery is a buffer with priority: surplus first refills it up to
+    `house_ceil_kwh` (its dynamic charge target, FSD 4.2.4); the overflow past
+    that goes to the car at `car_efficiency`. Deficits drain the house battery
+    only — the car is never discharged.
+
+    Yields `(timestamp, house_kwh, car_soc_pct)` per forecast step so callers can
+    both write the curve (Section 4.3.9) and read its end-of-day value (the
+    Topic 2 step-up suppression gate, Section 4.3.7) from one implementation.
+    Car SOC is monotonic non-decreasing, so the last point at or before a cutoff
+    is that cutoff's value.
+    """
+    car_kwh_added = 0.0
+    for ts, net_wh in steps_wh:
+        net_kwh = net_wh / 1000
+        if net_kwh >= 0:
+            headroom = max(0.0, house_ceil_kwh - house_kwh)
+            to_house = min(net_kwh, headroom)
+            house_kwh += to_house
+            car_kwh_added += (net_kwh - to_house) * car_efficiency
+        else:
+            house_kwh = max(0.0, house_kwh + net_kwh)
+        house_kwh = min(house_kwh, house_cap_kwh)
+        yield (
+            ts,
+            house_kwh,
+            min(100.0, car_soc_pct + car_kwh_added / car_capacity_kwh * 100),
+        )
+
+
 def build_solar_candidates(
     candidate_power: int,
     threshold: float,
     step_up_allowed: bool,
     target_reachable: bool = True,
     steps: list[int] | None = None,
+    both_full_by_evening: bool = False,
 ) -> tuple[list[int], str]:
     """Decide solar-mode power-step candidates (Topics 1 & 2).
 
@@ -163,13 +207,26 @@ def build_solar_candidates(
       condition matters because the 48 h forecast excludes the wallbox load and so
       reads optimistically high while the car is draining the real battery.)
 
+    `both_full_by_evening` suppresses step-up even when it is permitted: when the
+    **conservative p10** forecast says the home battery *and* the car both reach
+    their targets by the end of today, stepping up buys nothing — the car ends the
+    day at the same SOC either way — while routing the gap through the home battery
+    pays a round-trip loss. Step-up is then pointless, so stay at/below surplus and
+    let the surplus reach the car directly. Overridden by nothing: it only ever
+    *removes* the draining step, so it cannot endanger the battery.
+
     Returns (candidates, gate_reason) where candidates is the ordered list
     passed to the home-battery safety loop.
     """
     steps = steps if steps is not None else POWER_STEPS_3P
     if not target_reachable:
         return [], "battery won't reach charge target → car yields surplus to battery"
-    if step_up_allowed:
+    if both_full_by_evening:
+        snap_up_step = []
+        gate_reason = (
+            "battery & car both full by evening (p10) → no step-up (avoid round-trip loss)"
+        )
+    elif step_up_allowed:
         snap_up = [
             s for s in steps
             if s > candidate_power and s >= threshold
