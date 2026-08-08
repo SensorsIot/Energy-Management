@@ -140,8 +140,6 @@ def simulate_house_and_car(
     house_kwh: float,
     house_cap_kwh: float,
     house_ceil_kwh: float,
-    car_soc_pct: float,
-    car_capacity_kwh: float,
     car_efficiency: float,
 ) -> Iterator[tuple[datetime, float, float]]:
     """Allocate forecast net energy to the house battery, then the car.
@@ -151,11 +149,14 @@ def simulate_house_and_car(
     that goes to the car at `car_efficiency`. Deficits drain the house battery
     only — the car is never discharged.
 
-    Yields `(timestamp, house_kwh, car_soc_pct)` per forecast step so callers can
-    both write the curve (Section 4.3.9) and read its end-of-day value (the
-    Topic 2 step-up suppression gate, Section 4.3.7) from one implementation.
-    Car SOC is monotonic non-decreasing, so the last point at or before a cutoff
-    is that cutoff's value.
+    Yields `(timestamp, house_kwh, car_kwh_added)` per forecast step, where
+    `car_kwh_added` is the cumulative energy delivered to the car so far. It is
+    reported as **energy, not SOC**, because the split depends only on the house
+    battery: the same curve therefore applies to any car SOC, which is what lets
+    the step-up suppression gate (Section 4.3.7) re-evaluate against a *live*
+    car SOC between the 15-min simulation runs. Callers convert with their own
+    SOC and capacity. Both outputs are monotonic over a surplus run, so the last
+    point at or before a cutoff is that cutoff's value.
     """
     car_kwh_added = 0.0
     for ts, net_wh in steps_wh:
@@ -168,11 +169,7 @@ def simulate_house_and_car(
         else:
             house_kwh = max(0.0, house_kwh + net_kwh)
         house_kwh = min(house_kwh, house_cap_kwh)
-        yield (
-            ts,
-            house_kwh,
-            min(100.0, car_soc_pct + car_kwh_added / car_capacity_kwh * 100),
-        )
+        yield ts, house_kwh, car_kwh_added
 
 
 def build_solar_candidates(

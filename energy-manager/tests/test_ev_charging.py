@@ -283,7 +283,10 @@ class TestStepUpSuppression:
 class TestSimulateHouseAndCar:
     """The shared allocation model behind the p50 dashboard curve and the p10
     step-up suppression gate: house battery first (to its target), overflow to
-    the car, deficits drain the house only."""
+    the car, deficits drain the house only.
+
+    It reports the car side as **energy**, not SOC — that independence from the
+    starting car SOC is what lets the gate re-check a live SOC between runs."""
 
     @staticmethod
     def _steps(values_wh: list[float]) -> list[tuple[datetime, float]]:
@@ -292,41 +295,47 @@ class TestSimulateHouseAndCar:
 
     def _run(self, values_wh, **kw):
         defaults = dict(
-            house_kwh=5.0, house_cap_kwh=10.0, house_ceil_kwh=9.0,
-            car_soc_pct=50.0, car_capacity_kwh=50.0, car_efficiency=1.0,
+            house_kwh=5.0, house_cap_kwh=10.0, house_ceil_kwh=9.0, car_efficiency=1.0,
         )
         return list(simulate_house_and_car(self._steps(values_wh), **{**defaults, **kw}))
 
     def test_house_fills_before_car(self) -> None:
-        # 2 kWh surplus, house has 4 kWh headroom → all to house, car unchanged.
-        (_, house_kwh, car_pct), = self._run([2000])
+        # 2 kWh surplus, house has 4 kWh headroom → all to house, car gets none.
+        (_, house_kwh, car_kwh), = self._run([2000])
         assert house_kwh == pytest.approx(7.0)
-        assert car_pct == pytest.approx(50.0)
+        assert car_kwh == pytest.approx(0.0)
 
     def test_overflow_past_target_goes_to_car(self) -> None:
-        # 6 kWh surplus, 4 kWh headroom → 2 kWh overflows to the car (+4% of 50 kWh).
-        (_, house_kwh, car_pct), = self._run([6000])
+        # 6 kWh surplus, 4 kWh headroom → 2 kWh overflows to the car.
+        (_, house_kwh, car_kwh), = self._run([6000])
         assert house_kwh == pytest.approx(9.0)
-        assert car_pct == pytest.approx(54.0)
+        assert car_kwh == pytest.approx(2.0)
 
     def test_efficiency_applied_to_car_only(self) -> None:
-        (_, _, car_pct), = self._run([6000], car_efficiency=0.9)
-        assert car_pct == pytest.approx(50.0 + 2.0 * 0.9 / 50 * 100)
+        (_, house_kwh, car_kwh), = self._run([6000], car_efficiency=0.9)
+        assert house_kwh == pytest.approx(9.0)
+        assert car_kwh == pytest.approx(1.8)
 
     def test_deficit_drains_house_not_car(self) -> None:
-        (_, house_kwh, car_pct), = self._run([-2000])
+        (_, house_kwh, car_kwh), = self._run([-2000])
         assert house_kwh == pytest.approx(3.0)
-        assert car_pct == pytest.approx(50.0)
+        assert car_kwh == pytest.approx(0.0)
 
     def test_house_never_goes_negative(self) -> None:
         (_, house_kwh, _), = self._run([-9000])
         assert house_kwh == pytest.approx(0.0)
 
-    def test_car_soc_is_monotonic_and_capped_at_100(self) -> None:
+    def test_car_energy_is_monotonic(self) -> None:
         pts = self._run([9000] * 20, house_ceil_kwh=5.0)
         car = [p[2] for p in pts]
         assert car == sorted(car)
-        assert car[-1] == pytest.approx(100.0)
+        assert car[-1] > 0
+
+    def test_car_energy_is_independent_of_starting_car_soc(self) -> None:
+        """The whole point: no car-SOC input, so one run serves any live SOC."""
+        a = [p[2] for p in self._run([6000] * 4)]
+        b = [p[2] for p in self._run([6000] * 4)]
+        assert a == b
 
     def test_house_ceiling_is_the_target_not_capacity(self) -> None:
         # Ceiling 9 kWh < capacity 10 kWh: the house stops at the target and the
