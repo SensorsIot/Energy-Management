@@ -1981,9 +1981,17 @@ styles:
 
 ## 4.7 Error Handling and Notifications
 
-### 4.7.1 Battery Control Retry Logic
+### 4.7.1 Inverter Register Writes
 
-When controlling the battery via Home Assistant, the system implements retry logic to handle transient communication failures:
+All three home-battery control entities — `number.battery_maximum_discharging_power` (Section 4.2.2), `number.battery_maximum_charging_power` (Section 4.2.3), and `number.battery_end_of_charge_soc` (Section 4.2.4) — are Huawei inverter holding registers, and every write costs a flash-erase cycle. Writes are therefore minimised at the single choke point all three control paths pass through, so no call site can bypass the rule.
+
+**A value is written only when the register does not already hold it.** The live entity state is read first and the call reports success without sending anything when the reading already matches the target within 0.01. Reading is free: it is served from the Home Assistant state machine, not a Modbus round trip.
+
+This guard is independent of each control path's own change-gate (`last_discharge_allowed`, `_last_charge_power_w`, `_last_soc_ceiling`). Those caches live in memory only, so after an add-on restart they are empty and cannot suppress the first write of each cycle; the register read catches those no-ops instead.
+
+**An unreadable register fails open** — the write proceeds. A missing entity, an `unknown`/`unavailable` state, or a failed read must not strand the register at whatever it happens to hold.
+
+**Retries never multiply writes.** Before every re-post the register is re-read, and a reading that already matches the target reports success without a second write. A response lost after Home Assistant accepted the call therefore costs one register write, not up to five.
 
 **Retry Configuration:**
 - Maximum attempts: 5
@@ -1994,10 +2002,12 @@ When controlling the battery via Home Assistant, the system implements retry log
 
 | Error Type | Behavior |
 |------------|----------|
-| Timeout | Retry after delay |
-| Connection Error | Retry after delay |
-| HTTP Error | Retry after delay |
+| Timeout | Re-read register, then retry after delay |
+| Connection Error | Re-read register, then retry after delay |
+| HTTP Error | Re-read register, then retry after delay |
 | No HA Token | Fail immediately (no retry) |
+
+Test cases: Section 6.8.
 
 ### 4.7.2 Telegram Notifications
 
@@ -2021,7 +2031,10 @@ The battery may not be in the expected state!
 ```
 control_battery(discharge_allowed)
     |
+    +-- Read register -> already at target -> done (no write)
+    |
     +-- Attempt 1 -> Fail -> Wait 2s
+    +-- Re-read -> at target -> done (write landed, response lost)
     +-- Attempt 2 -> Fail -> Wait 2s
     +-- Attempt 3 -> Fail -> Wait 2s
     +-- Attempt 4 -> Fail -> Wait 2s
@@ -2822,6 +2835,48 @@ Report version: **3** (bumped when test definitions change — invalidates stale
 
 ---
 
+## 6.8 Inverter Register Write Tests
+
+Test file: `energy-manager/tests/test_inverter_writes.py`
+
+Tests the no-op write suppression on the Huawei inverter registers (Section 4.7.1), enforced in `HAClient.set_number` — the single choke point for all three control entities.
+
+#### No-op suppression
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_unchanged_value_sends_no_write` | Register already holds the target | Entity reads 5000, target 5000 | Returns success, **no POST sent** |
+| `test_changed_value_is_written` | Register holds a different value | Entity reads 5000, target 0 | Exactly one POST with `value=0` |
+| `test_float_noise_counts_as_unchanged` | Difference below tolerance is noise | Entity reads 90.0, target 90.000001 | No POST sent |
+| `test_real_change_just_above_tolerance_is_written` | Difference above tolerance is a change | Entity reads 90.0, target 90.1 | Exactly one POST |
+
+#### Fail-open on an unreadable register
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_unparseable_state_still_writes` | State cannot be parsed as a number | Entity reads `unavailable` / `unknown` | Write proceeds (one POST) |
+| `test_read_failure_still_writes` | The read itself fails | `get_state` raises ConnectionError | Write proceeds (one POST) |
+
+#### Retries do not multiply writes
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_lost_response_is_not_reposted` | HA accepted the call, response lost | POST times out; re-read shows target | Returns success, **POST count = 1** |
+| `test_genuine_failure_still_retries_and_reports` | Register really is not at target | POST times out; re-read unchanged | Returns failure, POST count = `max_retries` |
+
+#### Restart amplification
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_cold_cache_does_not_rewrite_unchanged_register` | Add-on restart with empty in-memory cache | `_last_charge_power_w is None`, register already at 5000 W | No POST sent; cache seeded to 5000 |
+
+**Run tests:**
+```bash
+cd energy-manager && python -m pytest tests/test_inverter_writes.py -v
+```
+
+---
+
 # Appendix A: Operations (installation, dashboards, troubleshooting)
 
 Operator procedures — installation, the pre-built Grafana dashboard, and troubleshooting — are
@@ -3116,6 +3171,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.89: **Unchanged values are never written to the Huawei inverter registers (Section 4.7.1).** The three home-battery control entities are inverter holding registers and every write costs a flash-erase cycle, but two paths sent values the register already held. (1) The change-gates that suppress repeat writes (`last_discharge_allowed`, `_last_charge_power_w`, `_last_soc_ceiling`) live in memory only, so every add-on restart re-wrote the charge-power and SOC-ceiling registers blind — observed live 2026-08-08, where the startup cycle wrote `maximum_charging_power = 5000` onto a register already at 5000. (2) `set_number` re-posted on a lost response, so one logical change could cost up to 5 writes when Home Assistant had already accepted the call. `HAClient.set_number` — the single choke point all three control paths pass through — now reads the entity first and returns success without sending anything when the value already matches (tolerance 0.01), and re-reads before every retry so a landed write is never re-posted. An unreadable register (missing, `unknown`, `unavailable`, failed read) fails open and is written. Measured baseline over the 60 days before the change: 3.8 writes/day on `maximum_charging_power`, 1.1 on `maximum_discharging_power`, 0.25 on `end_of_charge_soc`. New `test_inverter_writes.py` (10 cases), Section 6.8. 320 tests pass. (1.9.13 -> 1.9.14)
 
 - v2.88: **Topic 2 Rule 4 now evaluates on the 10-s loop against the live car SOC and target (Section 4.3.7).** Rule 4 cached a boolean verdict on the 15-min cycle, so a mid-cycle change to the car's charge limit left the gate wrong for up to 15 minutes. Observed live 2026-08-08: the car's limit went 80 % → 100 % at 15:11 while the cached verdict still read `car EOD 94%/80% (ok)` from the 15:05 run, holding the wallbox one step below surplus (4354 W instead of 5117 W) until the 15:20 cycle released it — the car needed the extra step, since p10 only reached 92 % against the new 100 % target. `simulate_house_and_car()` now reports the car side as **cumulative energy** instead of a pre-clamped SOC, which makes it independent of the starting SOC; the 15-min run caches `_battery_full_by_evening` and `_car_kwh_by_eod`, and the new `_step_up_suppressed()` combines them with the live SOC/target on every 10-s EV cycle — reusing the values Topic 1 Rule 2 already reads, so no extra HA calls. Fail-open now covers both cadences (no cached simulation, or a missing live SOC/target). The p50 dashboard curve converts energy → SOC at the call site, unchanged. New `TestLiveCheck`, `TestLiveCheckFailsOpen`, `TestFifteenMinuteSimulation`; `TestSimulateHouseAndCar` rewritten for the energy contract. 310 tests pass. (1.9.12 -> 1.9.13)
 

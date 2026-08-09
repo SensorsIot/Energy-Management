@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 class HAClient:
     """Home Assistant API client."""
 
+    # Largest difference still counted as "the register already holds this value".
+    # The number entities carry whole W / 0.1 % steps, so anything below this is
+    # float noise, not a real change.
+    WRITE_TOLERANCE = 0.01
+
     def __init__(
         self,
         url: str = "http://supervisor/core",
@@ -105,6 +110,24 @@ class HAClient:
             logger.error(f"Failed to parse state for {entity_id}: {e}")
             return None
 
+    def _already_at(self, entity_id: str, value: float) -> bool:
+        """Whether the entity already holds `value` (within WRITE_TOLERANCE).
+
+        False when the value cannot be read, so an unreadable entity is written
+        rather than silently skipped. Parses the state here instead of through
+        `get_number_value` so an `unavailable` register — routine while the
+        Huawei integration reconnects — logs at debug, not error.
+        """
+        state = self.get_state(entity_id)
+        if not state:
+            return False
+        try:
+            current = float(state["state"])
+        except (ValueError, KeyError, TypeError):
+            logger.debug(f"{entity_id} not readable as a number — writing anyway")
+            return False
+        return abs(current - value) <= self.WRITE_TOLERANCE
+
     def set_number(
         self,
         entity_id: str,
@@ -112,7 +135,22 @@ class HAClient:
         max_retries: int = 5,
         retry_delay: float = 2.0,
     ) -> tuple[bool, str]:
-        """Set a number entity value with retry logic.
+        """Set a number entity value, skipping no-op writes, with retry logic.
+
+        Every one of these entities is a Huawei inverter holding register, and
+        each write costs a flash-erase cycle. So an unchanged value is never
+        sent: the live entity state is read first and the call short-circuits
+        when it already matches (FSD 4.7.1). Reading is free — it is served
+        from the HA state machine, not a Modbus round trip.
+
+        The same read guards the retry loop: a lost response after HA already
+        accepted the call would otherwise turn one logical change into up to
+        `max_retries` register writes, so every retry re-reads first and treats
+        an already-correct value as success.
+
+        A value that cannot be read (entity missing, `unknown`, `unavailable`)
+        fails open — the write proceeds, because refusing to write on a read
+        failure would strand the register at whatever it holds.
 
         Args:
             entity_id: The entity to set
@@ -130,6 +168,10 @@ class HAClient:
         if not self.token:
             return False, "No HA token available"
 
+        if self._already_at(entity_id, value):
+            logger.debug(f"{entity_id} already at {value} — no write sent")
+            return True, ""
+
         url = self._api_url("/services/number/set_value")
         data = {
             "entity_id": entity_id,
@@ -138,6 +180,14 @@ class HAClient:
 
         last_error = ""
         for attempt in range(1, max_retries + 1):
+            # Before every re-post, check whether the previous attempt actually
+            # landed and only its response was lost.
+            if attempt > 1 and self._already_at(entity_id, value):
+                logger.info(
+                    f"{entity_id} reached {value} despite '{last_error}' — "
+                    f"not re-sending"
+                )
+                return True, ""
             try:
                 logger.debug(f"POST {url} with {data} (attempt {attempt}/{max_retries})")
                 response = requests.post(
