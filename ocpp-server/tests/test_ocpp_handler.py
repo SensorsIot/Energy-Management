@@ -75,7 +75,7 @@ class TestMeterValues:
         # Power is only accepted during an active transaction
         handler.transaction_id = 1
 
-        # OCPP reports 7000W → corrected = 1.048 * 7000 - 286 = 7050.0
+        # OCPP reports 7000W → corrected via the measured linear regression
         await handler.on_meter_values(
             connector_id=1,
             meter_value=[
@@ -87,7 +87,7 @@ class TestMeterValues:
             ],
         )
 
-        expected = 1.048 * 7000 - 286.0
+        expected = handler.METER_SCALE * 7000 + handler.METER_OFFSET
         assert handler.current_power_w == pytest.approx(expected, abs=0.1)
         callback.assert_called_once()
         assert callback.call_args[0][0] == "power_w"
@@ -95,23 +95,36 @@ class TestMeterValues:
 
     @pytest.mark.asyncio
     async def test_energy_meter_value(self, mock_connection) -> None:
-        """Energy meter value should update session_energy_wh."""
+        """Energy is accumulated from register increments, not mirrored.
+
+        The register is cumulative, so the first reading of a session only
+        establishes the baseline (0 Wh delivered so far); the second contributes
+        its corrected increment.
+        """
         callback = MagicMock()
         handler = ChargePointHandler("test", mock_connection, on_status_change=callback)
 
-        await handler.on_meter_values(
-            connector_id=1,
-            meter_value=[
-                {
-                    "sampled_value": [
-                        {"measurand": "Energy.Active.Import.Register", "value": "5000"}
-                    ]
-                }
-            ],
-        )
+        async def report(wh: str) -> None:
+            await handler.on_meter_values(
+                connector_id=1,
+                meter_value=[
+                    {
+                        "sampled_value": [
+                            {"measurand": "Energy.Active.Import.Register", "value": wh}
+                        ]
+                    }
+                ],
+            )
 
-        assert handler.session_energy_wh == 5000
-        callback.assert_called_with("energy_wh", 5000)
+        await report("5000")
+        assert handler.session_energy_wh == 0
+        callback.assert_called_with("energy_wh", 0)
+
+        await report("6000")
+        # +1000 Wh raw over a negligible interval → scale only, offset ~0
+        assert handler.session_energy_wh == pytest.approx(
+            handler.METER_SCALE * 1000, abs=5
+        )
 
     @pytest.mark.asyncio
     async def test_energy_only_message_preserves_power(self, mock_connection) -> None:
@@ -143,10 +156,10 @@ class TestMeterValues:
 
         # Power must be preserved — not zeroed
         assert handler.current_power_w == 3940
-        # Energy should still be updated
-        assert handler.session_energy_wh == 49890
+        # Energy still updates; first register reading establishes the baseline
+        assert handler.session_energy_wh == 0
         # Callback should only have been called for energy, not power
-        callback.assert_called_once_with("energy_wh", 49890)
+        callback.assert_called_once_with("energy_wh", 0)
 
 
 class TestSecurityInputValidation:
@@ -191,7 +204,7 @@ class TestSecurityInputValidation:
                 ]}
             ],
         )
-        expected = 1.048 * 7000 - 286.0
+        expected = handler.METER_SCALE * 7000 + handler.METER_OFFSET
         assert handler.current_power_w == pytest.approx(expected, abs=0.1)
 
     @pytest.mark.asyncio
@@ -2190,6 +2203,55 @@ class TestPhaseDetection:
         """3φ draw applies the linear regression."""
         expected = handler.METER_SCALE * 4800 + handler.METER_OFFSET
         assert handler._correct_meter_power(4800, active_phases=3) == expected
+
+    def test_correction_matches_night_anchors(self, handler) -> None:
+        """Reproduces the 2026-08-02 night-baseline calibration anchors.
+
+        Measured against the stable night house load: raw 11315 W → 11475 W
+        (two 11 kW nights agreeing to 3 W) and raw 4027 W → 4019 W (4 kW night).
+        """
+        assert handler._correct_meter_power(11315, active_phases=3) == pytest.approx(
+            11475, abs=15
+        )
+        assert handler._correct_meter_power(4027, active_phases=3) == pytest.approx(
+            4019, abs=15
+        )
+
+    def test_energy_accumulates_corrected(self, handler, monkeypatch) -> None:
+        """Energy is corrected on the same scale as power.
+
+        METER_OFFSET is a power, so it contributes only once integrated over the
+        interval: dE = SCALE * dE_raw + OFFSET * dt_hours.
+        """
+        t = [1000.0]
+        monkeypatch.setattr("src.ocpp_handler.time.monotonic", lambda: t[0])
+        handler._accumulate_energy(0, active_phases=3)  # session start
+        assert handler.session_energy_wh == 0.0
+        t[0] += 3600.0  # one hour later
+        handler._accumulate_energy(11000, active_phases=3)
+        expected = handler.METER_SCALE * 11000 + handler.METER_OFFSET * 1.0
+        assert handler.session_energy_wh == pytest.approx(expected)
+
+    def test_energy_single_phase_uncorrected(self, handler, monkeypatch) -> None:
+        """1φ accumulates the raw increment (correction is 3φ-calibrated)."""
+        t = [1000.0]
+        monkeypatch.setattr("src.ocpp_handler.time.monotonic", lambda: t[0])
+        handler._accumulate_energy(0, active_phases=1)
+        t[0] += 3600.0
+        handler._accumulate_energy(2300, active_phases=1)
+        assert handler.session_energy_wh == pytest.approx(2300)
+
+    def test_energy_register_reset_restarts_session(self, handler, monkeypatch) -> None:
+        """A backwards register means the wallbox restarted the transaction."""
+        t = [1000.0]
+        monkeypatch.setattr("src.ocpp_handler.time.monotonic", lambda: t[0])
+        handler._accumulate_energy(0, active_phases=3)
+        t[0] += 3600.0
+        handler._accumulate_energy(11000, active_phases=3)
+        assert handler.session_energy_wh > 0
+        t[0] += 60.0
+        handler._accumulate_energy(50, active_phases=3)  # register went backwards
+        assert handler.session_energy_wh == 0.0
 
     def test_demand_divisor_per_phase(self, handler) -> None:
         """Divisor is measured per phase count: 637 (3φ), 230 (1φ), ~434 (2φ)."""

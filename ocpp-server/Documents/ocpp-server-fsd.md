@@ -490,46 +490,71 @@ AcTec always reports `SuspendedEVSE` regardless of whether the charger or car in
 
 Logging goes to both the console (s6/journal, wiped on restart) and a rotating file on the add-on's `addon_config` volume (`/config/ocpp-server.log`, host path `/addon_configs/<slug>/ocpp-server.log`) so connection events survive restarts for post-mortem. The directory is overridable via the `OCPP_LOG_DIR` env var; file logging is skipped gracefully if the path is unwritable.
 
-## 7. Meter Power Correction
+## 7. Meter Correction
 
-### 7.1 Linear Regression (v0.9.46)
+### 7.1 Linear Regression
 
 OCPP MeterValues are corrected at source in `on_meter_values()` using a single linear formula:
 
 ```
-corrected = 1.048 × raw − 286      (recalibrated 2026-07-02, full-system grid match)
+corrected = 1.023 × raw − 101
 ```
 
 **Applies only when 3 phases are drawing.** The fit is anchored on multi-kW 3-phase points, so its
-−286 W offset biases a single-phase draw low (e.g. a 1492 W L1-only draw would report ~1278 W). When
-cable phase detection (§3.6.4.1) sees fewer than 3 active phases, `sensor.wallbox_power` reports the
-wallbox's own measured power unchanged. A single-phase correction is not separately calibrated.
+−101 W offset biases a single-phase draw low. When cable phase detection (§3.6.4.1) sees fewer than
+3 active phases, both power and energy pass through unchanged. A single-phase correction is not
+separately calibrated.
 
-**Recalibrated 2026-07-02 for full-system grid match.** The original wallbox-only fit
-(`0.962115 × raw + 105.6`, 2026-03-04 sweep 6–14 A, max residual ≈ 33 W) made the wallbox's own
-meter track M-Bus, but with the corrected value driving the Modbus-proxy DTSU (§3.6.6) the resulting
-grid tracked M-Bus only near ~4.5 kW and drifted to ~130 W **import** at 7 kW — a residual **~9 %/W**
-slope in `Huawei_corrected − M-Bus`, measured across a live 4.3–7 kW solar charge. The gain was
-raised (0.962 → 1.048) with a compensating offset (−286) to absorb that slope, so the corrected DTSU
-— and thus the grid — stays flat and slightly export-biased (~+80 W target) across the charging
-range. The fit is anchored on the steady 4.5 kW point (M-Bus ≈ +85 W) and the steady 7 kW sample
-(≈ −130 W). This shifts `sensor.wallbox_power` (display + EnergyManager surplus calc) away from the
-wallbox-only sweep value, but **not** the kWh charge budget, which reads the separate OCPP energy
-register (uncorrected). The values below are from the original 6–14 A sweep (historical reference).
+**Both power and energy carry the correction.** `sensor.wallbox_power` and `sensor.wallbox_energy`
+are on the same scale, so any consumer may compare them — including the EnergyManager kWh charge
+budget (energy-manager FSD §4.3.5.1), which reads `sensor.wallbox_energy`.
 
-| Amps | OCPP W | M-Bus W (actual) | Error W |
-|-----:|-------:|-----------------:|--------:|
-|    6 |   3999 |             3962 |     -37 |
-|    7 |   4438 |             4354 |     -84 |
-|    8 |   5175 |             5117 |     -58 |
-|    9 |   5829 |             5727 |    -102 |
-|   10 |   6447 |             6288 |    -159 |
-|   11 |   7211 |             7034 |    -177 |
-|   12 |   7848 |             7624 |    -224 |
-|   13 |   8520 |             8303 |    -217 |
-|   14 |   9245 |             9029 |    -216 |
+Energy needs different handling from power, because the OCPP `Energy.Active.Import.Register` is
+**cumulative** while `METER_OFFSET` is a **power**. The offset only becomes an energy once integrated
+over the interval it applied to, so `_accumulate_energy()` corrects each register increment and sums
+them:
 
-15A/16A excluded (solar noise during measurement).
+```
+dE_true = METER_SCALE × dE_raw + METER_OFFSET × dt_hours
+```
+
+A register that goes backwards means the wallbox restarted the transaction; the session restarts from
+zero. `on_start_transaction` also resets the accumulator, so a wallbox that carried its register
+across sessions cannot leak the previous total.
+
+#### Calibration method
+
+The coefficients are measured against the **night house baseline**. At night the house load is stable
+(280 W median, IQR 245–327 W, n = 7492 five-minute samples over six months), so with the wallbox the
+only variable load:
+
+```
+true wallbox power = (site load while charging) − (site load idle)
+site load          = PV − grid_power − battery_charge_discharge_power
+```
+
+Samples are taken after 23:00 local, from charging→idle transitions, so household evening activity is
+excluded.
+
+**The reference meter is `sensor.grid_power` — the gPlug utility smart meter (MQTT).** This choice is
+load-bearing: the wallbox is wired *outside* the DTSU loop and the Modbus proxy (§3.6.6) injects
+`METER_SCALE·raw + METER_OFFSET` plus a +200 W export bias into the DTSU. Calibrating against
+`sensor.power_meter_active_power` (the Huawei's view of the corrected DTSU) would therefore measure
+the correction against itself. The gPlug meter is the physical revenue meter and sits outside that
+loop.
+
+The dedicated M-Bus wallbox meter reports the OCPP register as reading **high** (at 6 A: raw 3999 W
+vs M-Bus 3962 W), which is the opposite sign to the utility meter. The utility meter is authoritative
+— it is what the household is billed on, and it is what the grid-balancing control loop must satisfy.
+
+| Anchor | Raw W | True W |
+|---|------:|-------:|
+| 4 kW night | 4027 | 4019 |
+| 11 kW nights (two, agreeing to 3 W) | 11315 | 11475 |
+
+The 11 kW point is precise to ±0.3 %. The **slope/offset split rests on the single 4 kW anchor**, so
+the low-power end is the weak part of the fit; a night sweep at 6/8/10/12/16 A against the same
+baseline resolves it.
 
 The corrected power is published to `sensor.wallbox_power` as an integer (rounded for display).
 
@@ -651,6 +676,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.20 | 2026-08-02 | **Meter correction recalibrated against the utility meter, and applied to energy (§7.1).** Coefficients moved to `1.023 × raw − 101`, measured against the gPlug utility smart meter (`sensor.grid_power`) using the stable night house baseline (280 W median, n=7492): two 11 kW charging→idle transitions after 23:00 agreeing to 3 W (raw 11315 W → true 11475 W) plus one 4 kW night (raw 4027 W → true 4019 W). The reference meter matters — the wallbox sits outside the DTSU loop and the Modbus proxy injects the correction into the DTSU, so calibrating against `sensor.power_meter_active_power` would measure the correction against itself. The dedicated M-Bus wallbox meter disagrees in sign; the utility meter is authoritative. Separately, `session_energy_wh` was assigned **raw** while only power was corrected, so `sensor.wallbox_power` and `sensor.wallbox_energy` sat on different scales; `_accumulate_energy()` now corrects register increments (`METER_SCALE·dE_raw + METER_OFFSET·dt_h` — the offset is a power, so it only becomes an energy once integrated) and resets on transaction start or a backwards register. Known weakness: the slope/offset split rests on the single 4 kW anchor. ocpp-server 0.9.72; tests 125 → 129. |
 | 3.19 | 2026-07-09 | **Single-phase divisor + amp cap (§7.2).** Live single-phase charging revealed two faults: (1) the 1φ watts→amps divisor (0.9.70 used a derived 637/3 = 212) is wrong — live MeterValues show single-phase is **~230 W/A** (a 1φ load draws more per amp than one leg of a 3φ load), so 1φ divisor is now the measured **230**; (2) the wallbox does **not** enforce `max_current_a` — a 1φ cable drew **~19 A** from a 21 A profile (4413 W, over the 16 A / 3680 W config) — so `set_charging_power` now **caps `limit_a` at `max_current_a`** (SEC-07). `ChargePointHandler` gains `max_current_a`. ocpp-server 0.9.71; tests 130 → 131. NB EnergyManager's solar step table is separately made phase-aware (its FSD). |
 | 3.18 | 2026-07-09 | **Cable phase detection (§3.6.4.1).** In `three_phase` mode the server now measures the connected cable's active phase count from per-phase `Current.Import` in MeterValues (≥0.5 A/phase, gated on ≥400 W total) instead of assuming 3. Root cause: a single-phase charging cable draws L1 only, but the server reported `phases=3`, commanded 3-phase amps (so the car drew ~⅓ of the intended watts), and applied the 3φ-calibrated meter correction — under-reporting `wallbox_power` ~14% (1492 W raw → 1278 W). The detected count now drives `sensor.wallbox_phases`, the published power range, the watts→amps divisor (phase-aware `_demand_divisor`: 3φ ÷637, 1φ ÷212 — §7.2), and the meter correction (3φ linear; 1φ/2φ returns the raw wallbox power — §7.1). Re-detects on cable swap, and the detected count persists in `sensor.wallbox_phases` and is restored on startup so a single-phase cable is not stuck behind the 3-phase minimum (bootstrap deadlock, §3.6.4.1). New `active_phases` + detection in `on_meter_values`; `_on_phases_detected` + startup restore in run.py; TC-16. ocpp-server 0.9.70; tests 117 → 130 (`TestPhaseDetection`, `TestServerPhaseAdoption`). |
 | 3.17 | 2026-07-09 | **Cable lock/unlock switch (§3.6.7).** New user-facing `switch.wallbox_cable_lock` mirrors the AcTec app's cable lock, mapping to the persistent OCPP key `UnlockConnectorOnEVSideDisconnect` (on=locked/`false`, off=unlocked/`true`). Exposed via MQTT discovery on `mqtt_host` (natively toggleable, unlike the REST state entities); command `ocpp-server/cable_lock/set`, retained state `ocpp-server/cable_lock/state`. `GetConfiguration` on every connect syncs the switch to the wallbox (source of truth); a toggle sends `ChangeConfiguration` and reverts on reject/offline. New OCPP commands `change_configuration`/`get_configuration`/`unlock_connector`; §3.3 outgoing table + TC-15. The discovery config carries no `device` block so the entity is `switch.wallbox_cable_lock` (matching the other deviceless wallbox entities), not a device-prefixed id. Live-verified on the AcTec: `GetConfiguration` returns the key, `ChangeConfiguration` accepted. ocpp-server 0.9.68 (also reconciles run.py `__version__` 0.9.62→0.9.68); tests 103 → 117 (`TestCableLockCommands`, `TestCableLockSwitch`). |

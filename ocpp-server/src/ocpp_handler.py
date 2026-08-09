@@ -31,18 +31,28 @@ class ChargePointHandler(CP):
     """
 
     # Linear meter correction: corrected = METER_SCALE * raw + METER_OFFSET
-    # Recalibrated 2026-07-02 for full-system grid match: the Huawei-corrected DTSU
-    # tracked M-Bus well at ~4.5 kW but drifted to ~130 W import at 7 kW (a residual
-    # ~9 %/W slope in Huawei − M-Bus, measured across a 4.3–7 kW solar charge). The
-    # gain absorbs that slope so the corrected DTSU (and thus the grid) stays flat and
-    # slightly export-biased across the charging range. Anchored on the 4.5 kW steady
-    # point (M-Bus ≈ +85 W) and the 7 kW steady sample (≈ −130 W).
-    # Prior wallbox-only fit (2026-03-04 sweep 6–14 A): 0.962115 * raw + 105.6.
+    # Recalibrated 2026-08-02 against the night house baseline. At night the house
+    # is stable (280 W median, IQR 245–327, n=7492 five-minute samples over 6
+    # months), so with the wallbox the only variable load,
+    #   (site load charging) − (site load idle) = true wallbox power,
+    # where site load = PV − grid_power − battery_charge_discharge_power. This uses
+    # only the grid and battery meters, so it is independent of both the wallbox's
+    # own meter and the derived house_load_power (which would be circular).
+    # Anchors — two 11 kW charging→idle transitions after 23:00 local, agreeing to
+    # 3 W, plus one 4 kW night:
+    #   2026-03-20 00:50   raw  4027 W → true  4019 W
+    #   2026-04-12 04:25 } raw 11315 W → true 11475 W
+    #   2026-05-17 23:30 }
+    # The 11 kW point is solid (±0.3 %); the slope/offset split rests on the single
+    # 4 kW night, so the low-power end is the weak part of this fit.
+    # Prior fits: 1.048 * raw − 286 (2026-07-02, daytime grid match — 0.8 % high at
+    # 11 kW and ~2 % low at 4 kW against the night measurement); 0.962115 * raw +
+    # 105.6 (2026-03-04 sweep 6–14 A).
     # The correction is 3-phase-calibrated (its anchors are multi-kW 3φ points), so it
     # is only applied when 3 phases are drawing; a single-phase draw would be biased
-    # low by the −286 W offset, so 1φ/2φ reports the wallbox's own measured power.
-    METER_SCALE = 1.048
-    METER_OFFSET = -286.0
+    # low by the −101 W offset, so 1φ/2φ reports the wallbox's own measured power.
+    METER_SCALE = 1.023
+    METER_OFFSET = -101.0
 
     # Demand calibration: W→A divisor so round(mbus_w / DEMAND_DIVISOR) = correct amps.
     # The wallbox applies the amp limit PER PHASE, so the divisor is phase-specific
@@ -79,6 +89,11 @@ class ChargePointHandler(CP):
         self.current_status = ChargePointStatus.available
         self.current_power_w = 0
         self.session_energy_wh = 0
+        # Corrected session energy is accumulated from raw-register increments
+        # (see _accumulate_energy): METER_OFFSET is a power, so it only becomes
+        # an energy once integrated over the interval it applied to.
+        self._raw_energy_wh: float | None = None
+        self._raw_energy_time: float | None = None
         self.connector_id = 1
         self.transaction_id: int | None = None
         self._transaction_counter = 0
@@ -174,6 +189,7 @@ class ChargePointHandler(CP):
 
         total_power = 0.0
         has_power_measurand = False
+        raw_energy_wh: float | None = None
         phase_current: dict[str, float] = {}  # per-phase current for phase detection
         for mv in meter_value:
             # Reject stale MeterValues based on wallbox timestamp
@@ -228,9 +244,7 @@ class ChargePointHandler(CP):
                     if value < 0:
                         logger.warning(f"MeterValues: dropped negative energy {value}Wh")
                         continue
-                    self.session_energy_wh = value
-                    if self.on_status_change:
-                        self.on_status_change("energy_wh", value)
+                    raw_energy_wh = value
                 elif "Current" in measurand:
                     phase = sampled.get("phase")
                     if phase and value >= 0:
@@ -250,6 +264,13 @@ class ChargePointHandler(CP):
                     self.on_status_change("phases_active", active)
 
         total_power = self._correct_meter_power(total_power, self.active_phases)
+
+        # Energy must be corrected on the same scale as power, or the two sensors
+        # disagree (they did, for months: power corrected, energy raw).
+        if raw_energy_wh is not None:
+            self._accumulate_energy(raw_energy_wh, self.active_phases)
+            if self.on_status_change:
+                self.on_status_change("energy_wh", self.session_energy_wh)
 
         self.last_meter_values_time = time.monotonic()
         self.meter_values_event.set()
@@ -289,6 +310,12 @@ class ChargePointHandler(CP):
         self._transaction_counter += 1
         self.transaction_id = self._transaction_counter
         self.transaction_started_event.set()
+        # New session — restart the corrected-energy accumulator. The register
+        # reset is also caught in _accumulate_energy, but a wallbox that carries
+        # its register across sessions would otherwise leak the previous total.
+        self.session_energy_wh = 0.0
+        self._raw_energy_wh = None
+        self._raw_energy_time = None
         logger.info(
             f"Transaction started: id={self.transaction_id}, connector={connector_id}"
         )
@@ -345,6 +372,42 @@ class ChargePointHandler(CP):
         if active_phases < 3:
             return raw_w
         return self.METER_SCALE * raw_w + self.METER_OFFSET
+
+    def _accumulate_energy(self, raw_wh: float, active_phases: int = 3) -> None:
+        """Accumulate corrected session energy from raw-register increments.
+
+        The register is cumulative, so the correction cannot be applied to it
+        directly: METER_SCALE is a ratio (safe on any quantity) but METER_OFFSET
+        is a *power*, and only becomes an energy once integrated over the interval
+        it applied to. So each increment is corrected as
+
+            dE_true = METER_SCALE * dE_raw + METER_OFFSET * dt_hours
+
+        and summed. Correction is applied on the same terms as the power path
+        (3 phases only); a 1φ/2φ draw accumulates the raw increment unchanged.
+
+        A register that goes backwards means the wallbox restarted the transaction,
+        so the session restarts from zero.
+        """
+        now = time.monotonic()
+        prev_wh, prev_t = self._raw_energy_wh, self._raw_energy_time
+        self._raw_energy_wh, self._raw_energy_time = raw_wh, now
+
+        if prev_wh is None or prev_t is None or raw_wh < prev_wh:
+            # First reading of a session, or the register reset — restart.
+            self.session_energy_wh = 0.0
+            return
+
+        d_raw = raw_wh - prev_wh
+        if d_raw <= 0:
+            return
+        if active_phases < 3:
+            self.session_energy_wh += d_raw
+            return
+        dt_h = max(0.0, now - prev_t) / 3600.0
+        self.session_energy_wh = max(
+            0.0, self.session_energy_wh + self.METER_SCALE * d_raw + self.METER_OFFSET * dt_h
+        )
 
     def _demand_divisor(self, num_phases: int) -> int:
         """Watts→amps divisor for the requested phase count.
