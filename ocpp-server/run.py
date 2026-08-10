@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.73"
+__version__ = "0.9.74"
 
 import asyncio
 import json
@@ -263,6 +263,16 @@ class OCPPServer:
         self._last_measured_time: float = 0.0      # monotonic time of last measured update
         self._last_phase_switch_time: float = 0.0
         self.PHASE_SWITCH_LOCK_S = 300  # 5-minute time lock after phase switch
+
+        # Wallbox response deadlines and settle delays. Named so they can be
+        # read in one place and so tests can shrink them — a test that drives
+        # the post-connect or start path otherwise waits these out in real
+        # wall-clock time. Production values are unchanged; only tests override.
+        self.POST_CONNECT_TIMEOUT_S = 30      # first message (Boot/Status/Heartbeat)
+        self.METER_SYNC_TIMEOUT_S = 10        # MeterValues after reconnect
+        self.TRANSACTION_START_TIMEOUT_S = 15  # StartTransaction after RemoteStart
+        self.PROFILE_SETTLE_S = 3             # let the profile apply before RemoteStart
+        self.PHASE_RELAY_SETTLE_S = 3         # let the phase relay settle
 
         # Track last-seen control states for change detection
         self._last_power_limit: str | None = None
@@ -812,7 +822,7 @@ class OCPPServer:
             return
 
         # Step 6: Wait for relay to settle
-        await asyncio.sleep(3)
+        await asyncio.sleep(self.PHASE_RELAY_SETTLE_S)
 
         # Step 7: Update state
         self._current_phases = target_phases
@@ -963,20 +973,21 @@ class OCPPServer:
             await self.charge_point.set_charging_power(
                 power_w, num_phases=self._current_phases, force=force
             )
-            await asyncio.sleep(3)
+            await asyncio.sleep(self.PROFILE_SETTLE_S)
             self.charge_point.transaction_started_event.clear()
             ok = await self.charge_point.remote_start()
             if ok:
                 try:
                     await asyncio.wait_for(
                         self.charge_point.transaction_started_event.wait(),
-                        timeout=15,
+                        timeout=self.TRANSACTION_START_TIMEOUT_S,
                     )
                     self._reset_start_backoff()
                 except TimeoutError:
                     self._start_retry_count += 1
                     logger.warning(
-                        f"StartTransaction not received after 15s — backing off "
+                        f"StartTransaction not received after "
+                        f"{self.TRANSACTION_START_TIMEOUT_S}s — backing off "
                         f"{self._current_start_backoff}s before the next attempt"
                     )
                     return
@@ -1164,7 +1175,9 @@ class OCPPServer:
         status = asyncio.create_task(self.charge_point.status_event.wait())
         heartbeat = asyncio.create_task(self.charge_point.heartbeat_event.wait())
         done, pending = await asyncio.wait(
-            {boot, status, heartbeat}, timeout=30, return_when=asyncio.FIRST_COMPLETED
+            {boot, status, heartbeat},
+            timeout=self.POST_CONNECT_TIMEOUT_S,
+            return_when=asyncio.FIRST_COMPLETED,
         )
         for t in pending:
             t.cancel()
@@ -1178,7 +1191,10 @@ class OCPPServer:
                 which.append("heartbeat")
             logger.info(f"Post-connect: wallbox ready ({', '.join(which)} received)")
         else:
-            logger.warning("Post-connect: no message from wallbox after 30s, giving up")
+            logger.warning(
+                f"Post-connect: no message from wallbox after "
+                f"{self.POST_CONNECT_TIMEOUT_S}s, giving up"
+            )
             return
 
         if not self.charge_point:
@@ -1196,12 +1212,14 @@ class OCPPServer:
             if hasattr(self.charge_point, "meter_values_event"):
                 try:
                     await asyncio.wait_for(
-                        self.charge_point.meter_values_event.wait(), timeout=10
+                        self.charge_point.meter_values_event.wait(),
+                        timeout=self.METER_SYNC_TIMEOUT_S,
                     )
                     logger.info("Post-connect: MeterValues received for inner sync")
                 except TimeoutError:
                     logger.warning(
-                        "Post-connect: MeterValues timeout (10s), continuing anyway"
+                        f"Post-connect: MeterValues timeout "
+                        f"({self.METER_SYNC_TIMEOUT_S}s), continuing anyway"
                     )
         elif ws in CAR_PRESENT:
             logger.info(

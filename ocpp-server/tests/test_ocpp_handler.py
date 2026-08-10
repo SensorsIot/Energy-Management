@@ -31,6 +31,78 @@ def handler(mock_connection):
     return ChargePointHandler("test_wallbox", mock_connection)
 
 
+@pytest.fixture(autouse=True)
+def fast_wallbox_deadlines(monkeypatch, request):
+    """Shrink the wallbox response deadlines for the duration of the test run.
+
+    The post-connect and start paths wait on real deadlines (30 s for the first
+    message, 10 s for MeterValues, 15 s for StartTransaction, 3 s settles). A
+    test driving those paths waits them out in wall-clock time — that alone was
+    236 of the suite's 246 seconds.
+
+    The ocpp library's own `response_timeout` (default 30 s) is shrunk too: a
+    handler built on a mock connection never gets a CALL answered, so anything
+    reaching `self.call()` — `get_configuration` during post-connect, say —
+    blocks for the full 30 s.
+
+    Production values are unchanged; they are shrunk only inside this process.
+    """
+    if "real_deadlines" in request.keywords:
+        # Opt out: a test asserting the shipped values must see the real ones.
+        yield
+        return
+
+    for mod in ("aiomqtt", "aiohttp", "websockets"):
+        if mod not in sys.modules:
+            sys.modules[mod] = MagicMock()
+    from run import OCPPServer
+
+    original_init = OCPPServer.__init__
+
+    def init_with_short_deadlines(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self.POST_CONNECT_TIMEOUT_S = 0.01
+        self.METER_SYNC_TIMEOUT_S = 0.01
+        self.TRANSACTION_START_TIMEOUT_S = 0.01
+        self.PROFILE_SETTLE_S = 0
+        self.PHASE_RELAY_SETTLE_S = 0
+
+    monkeypatch.setattr(OCPPServer, "__init__", init_with_short_deadlines)
+
+    original_cp_init = ChargePointHandler.__init__
+
+    def cp_init_with_short_timeout(self, *args, **kwargs):
+        original_cp_init(self, *args, **kwargs)
+        self._response_timeout = 0.01
+
+    monkeypatch.setattr(ChargePointHandler, "__init__", cp_init_with_short_timeout)
+    yield
+
+
+class TestShippedDeadlines:
+    """The deployed wallbox deadlines are what they are meant to be.
+
+    The wallbox does not talk often, so these must stay generous — an
+    aggressive value produces false "not received" warnings and abandoned
+    start attempts. Tests shrink them in-process; this pins what ships.
+    """
+
+    @pytest.mark.real_deadlines
+    def test_production_values(self) -> None:
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "test"})
+        assert srv.POST_CONNECT_TIMEOUT_S == 30
+        assert srv.METER_SYNC_TIMEOUT_S == 10
+        assert srv.TRANSACTION_START_TIMEOUT_S == 15
+        assert srv.PROFILE_SETTLE_S == 3
+        assert srv.PHASE_RELAY_SETTLE_S == 3
+        assert srv.power_update_interval_s == 60
+
+
 class TestBootNotification:
     """Tests for BootNotification handling."""
 

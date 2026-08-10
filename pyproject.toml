@@ -26,3 +26,8 @@ ignore = [
 # Tests use fixtures and ad-hoc helpers; docstring rules add noise without value.
 "**/tests/**" = ["D"]
 "**/test_*.py" = ["D"]
+
+[tool.pytest.ini_options]
+markers = [
+    "real_deadlines: opt out of the shrunk wallbox deadlines and see the shipped values",
+]
