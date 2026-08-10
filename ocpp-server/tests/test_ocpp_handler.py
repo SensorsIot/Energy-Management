@@ -408,7 +408,7 @@ class TestThrottle:
 
         # Only 5000W was sent
         server.charge_point.set_charging_power.assert_called_once_with(
-            5000.0, num_phases=3
+            5000.0, num_phases=3, force=False
         )
         assert server._pending_power_w is None
 
@@ -436,7 +436,7 @@ class TestThrottle:
         await server._send_power_to_wallbox(0.0)
 
         server.charge_point.set_charging_power.assert_called_once_with(
-            0.0, num_phases=3
+            0.0, num_phases=3, force=False
         )
         # Pending queue cleared by _send_power_to_wallbox
         assert server._pending_power_w is None
@@ -503,7 +503,7 @@ class TestThrottle:
         server.charge_point.current_power_w = 5000
         await server._send_power_to_wallbox(0.0)
         assert server.charge_point.set_charging_power.call_count == 1
-        server.charge_point.set_charging_power.assert_called_with(0.0, num_phases=3)
+        server.charge_point.set_charging_power.assert_called_with(0.0, num_phases=3, force=False)
 
         # >0W within interval — queued (not sent)
         server._last_change_at = time.monotonic()
@@ -524,7 +524,7 @@ class TestThrottle:
         # >0W — sent immediately (interval elapsed)
         await server._send_power_to_wallbox(5000.0)
         assert server.charge_point.set_charging_power.call_count == 1
-        server.charge_point.set_charging_power.assert_called_with(5000.0, num_phases=3)
+        server.charge_point.set_charging_power.assert_called_with(5000.0, num_phases=3, force=False)
 
         # 0W within interval — sent immediately (bypass)
         server._last_change_at = time.monotonic()
@@ -844,7 +844,7 @@ class TestResendOnSuspendedEVSE:
         await server._send_power_to_wallbox(server._last_sent_power_w)
 
         server.charge_point.set_charging_power.assert_called_once_with(
-            5000.0, num_phases=3
+            5000.0, num_phases=3, force=False
         )
 
     @pytest.mark.asyncio
@@ -1093,7 +1093,7 @@ class TestGapHandling:
         server._current_phases = 1
         await server._send_power_to_wallbox(3900.0)
         server.charge_point.set_charging_power.assert_called_once_with(
-            3680, num_phases=1
+            3680, num_phases=1, force=False
         )
 
     @pytest.mark.asyncio
@@ -1102,7 +1102,7 @@ class TestGapHandling:
         server._current_phases = 3
         await server._send_power_to_wallbox(3900.0)
         server.charge_point.set_charging_power.assert_called_once_with(
-            4140, num_phases=3
+            4140, num_phases=3, force=False
         )
 
     @pytest.mark.asyncio
@@ -1111,7 +1111,7 @@ class TestGapHandling:
         server._current_phases = 1
         await server._send_power_to_wallbox(3680.0)
         server.charge_point.set_charging_power.assert_called_once_with(
-            3680.0, num_phases=1
+            3680.0, num_phases=1, force=False
         )
 
     @pytest.mark.asyncio
@@ -1120,7 +1120,7 @@ class TestGapHandling:
         server._current_phases = 3
         await server._send_power_to_wallbox(4140.0)
         server.charge_point.set_charging_power.assert_called_once_with(
-            4140.0, num_phases=3
+            4140.0, num_phases=3, force=False
         )
 
 
@@ -1168,7 +1168,7 @@ class TestPhaseTimeLock:
         await server._send_power_to_wallbox(5000.0)
 
         server.charge_point.set_charging_power.assert_called_once_with(
-            3680, num_phases=1
+            3680, num_phases=1, force=False
         )
         # No relay call (phase switch skipped)
         relay_calls = [
@@ -1185,7 +1185,7 @@ class TestPhaseTimeLock:
         await server._send_power_to_wallbox(3000.0)
 
         server.charge_point.set_charging_power.assert_called_once_with(
-            4140, num_phases=3
+            4140, num_phases=3, force=False
         )
 
     @pytest.mark.asyncio
@@ -1518,7 +1518,7 @@ class TestThreePhaseOnly:
         await server._send_power_to_wallbox(5000.0)
 
         server.charge_point.set_charging_power.assert_awaited_with(
-            5000.0, num_phases=3
+            5000.0, num_phases=3, force=False
         )
 
     @pytest.mark.asyncio
@@ -2330,3 +2330,176 @@ class TestServerPhaseAdoption:
         server._on_phases_detected(1)
         await asyncio.sleep(0)
         server.ha.set_state.assert_any_await("sensor.wallbox_phases", 1)
+
+
+class TestProfileDedup:
+    """No duplicate SetChargingProfile writes (FSD 3.5.1).
+
+    Every profile is a write to the wallbox's non-volatile store, so an
+    unchanged command is not sent. The comparison is on the integer amps
+    actually commanded, not the requested watts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_identical_watts_sent_once(self, handler) -> None:
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            assert await handler.set_charging_power(6288, 3) is True
+            assert await handler.set_charging_power(6288, 3) is True
+            assert mock_call.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_different_watts_same_amps_sent_once(self, handler) -> None:
+        """The EEPROM case: 4354 W and 4400 W are both 7 A."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            await handler.set_charging_power(4354, 3)
+            await handler.set_charging_power(4400, 3)
+            assert round(4354 / 637) == round(4400 / 637) == 7
+            assert mock_call.call_count == 1, "same amps must not be re-written"
+
+    @pytest.mark.asyncio
+    async def test_different_amps_are_sent(self, handler) -> None:
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            await handler.set_charging_power(4354, 3)   # 7A
+            await handler.set_charging_power(5117, 3)   # 8A
+            assert mock_call.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_phase_change_is_a_new_profile(self, handler) -> None:
+        """Same amps on a different phase count is a different command."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            await handler.set_charging_power(4459, 3)   # 7A, 3-phase
+            await handler.set_charging_power(1610, 1)   # 7A, 1-phase
+            assert mock_call.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_force_resends_identical_profile(self, handler) -> None:
+        """SuspendedEVSE recovery nudges the wallbox with a deliberate duplicate."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            await handler.set_charging_power(6288, 3)
+            await handler.set_charging_power(6288, 3, force=True)
+            assert mock_call.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_rejected_profile_is_not_remembered(self, handler) -> None:
+        """A profile the wallbox refused must be retried, not deduped away."""
+        with patch.object(handler, "call", new_callable=AsyncMock) as mock_call:
+            mock_call.return_value = type("R", (), {"status": "Rejected"})()
+            assert await handler.set_charging_power(6288, 3) is False
+            mock_call.return_value = type("R", (), {"status": "Accepted"})()
+            assert await handler.set_charging_power(6288, 3) is True
+            assert mock_call.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_fresh_connection_reasserts(self, mock_connection) -> None:
+        """A reconnect re-sends: the server cannot know what the wallbox kept."""
+        h1 = ChargePointHandler("wb", mock_connection)
+        h2 = ChargePointHandler("wb", mock_connection)
+        for h in (h1, h2):
+            with patch.object(h, "call", new_callable=AsyncMock) as mock_call:
+                mock_call.return_value = type("R", (), {"status": "Accepted"})()
+                await h.set_charging_power(6288, 3)
+                assert mock_call.call_count == 1
+
+
+async def _timeout_closing_coro(coro, timeout=None):
+    """Stand-in for asyncio.wait_for that times out without leaking the coroutine.
+
+    A plain AsyncMock side_effect drops the coroutine it was handed unawaited,
+    which surfaces as a RuntimeWarning at garbage-collection time.
+    """
+    coro.close()
+    raise TimeoutError
+
+
+class TestStartBackoff:
+    """One start attempt, then back off (FSD 3.5.1).
+
+    A car in Preparing does not start because the profile changed, so power
+    limit changes must not each fire a fresh RemoteStartTransaction.
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "test", "power_update_interval_s": 60})
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = MagicMock()
+        cp.transaction_id = None          # no session — the start path
+        cp.current_power_w = 0
+        cp.current_status = "Preparing"
+        cp.set_charging_power = AsyncMock()
+        cp.remote_start = AsyncMock(return_value=True)
+        cp.transaction_started_event = MagicMock()
+        # Wallbox accepts RemoteStart but never sends StartTransaction
+        cp.transaction_started_event.wait = AsyncMock(side_effect=asyncio.TimeoutError)
+        srv.charge_point = cp
+        srv._phase_switching_disabled = True
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_allowed(self, server) -> None:
+        assert server._start_attempt_due() is True
+
+    @pytest.mark.asyncio
+    async def test_second_change_does_not_retry(self, server) -> None:
+        """The observed pathology: 3 RemoteStarts in 2 minutes."""
+        with patch("asyncio.sleep", new_callable=AsyncMock), patch(
+            "asyncio.wait_for", _timeout_closing_coro
+        ):
+            await server._send_power_to_wallbox(4354.0)
+            await server._send_power_to_wallbox(5117.0)
+            await server._send_power_to_wallbox(4354.0)
+        assert server.charge_point.remote_start.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_after_backoff_expires(self, server) -> None:
+        with patch("asyncio.sleep", new_callable=AsyncMock), patch(
+            "asyncio.wait_for", _timeout_closing_coro
+        ):
+            await server._send_power_to_wallbox(4354.0)
+            server._last_start_attempt_at = time.monotonic() - 3600
+            await server._send_power_to_wallbox(4354.0)
+        assert server.charge_point.remote_start.await_count == 2
+
+    def test_backoff_escalates(self, server) -> None:
+        server._start_retry_count = 0
+        assert server._current_start_backoff == 60
+        server._start_retry_count = 1
+        assert server._current_start_backoff == 300
+        server._start_retry_count = 2
+        assert server._current_start_backoff == 900
+        server._start_retry_count = 9
+        assert server._current_start_backoff == 900, "capped"
+
+    @pytest.mark.asyncio
+    async def test_unplug_resets_backoff(self, server) -> None:
+        """A new car deserves an immediate attempt, not the old car's back-off."""
+        server._last_start_attempt_at = time.monotonic()
+        server._start_retry_count = 2
+        server._on_status_change("status", "Available")
+        await asyncio.sleep(0)  # let the ensure_future side effects run
+        assert server._start_attempt_due() is True
+        assert server._start_retry_count == 0
+
+    @pytest.mark.asyncio
+    async def test_active_transaction_bypasses_backoff(self, server) -> None:
+        """With a session running, power updates are ordinary profile writes."""
+        server.charge_point.transaction_id = 1
+        server._last_start_attempt_at = time.monotonic()
+        await server._send_power_to_wallbox(5117.0)
+        server.charge_point.set_charging_power.assert_awaited_with(
+            5117.0, num_phases=3, force=False
+        )
+        server.charge_point.remote_start.assert_not_awaited()

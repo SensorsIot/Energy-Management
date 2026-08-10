@@ -94,6 +94,10 @@ class ChargePointHandler(CP):
         # an energy once integrated over the interval it applied to.
         self._raw_energy_wh: float | None = None
         self._raw_energy_time: float | None = None
+        # Last (limit_a, num_phases) the wallbox accepted, so an identical
+        # profile is never re-written (FSD 3.5.1). Per-connection: a reconnect
+        # re-asserts, since the server cannot know what the wallbox retained.
+        self._last_profile: tuple[int, int] | None = None
         self.connector_id = 1
         self.transaction_id: int | None = None
         self._transaction_counter = 0
@@ -421,15 +425,26 @@ class ChargePointHandler(CP):
             return self.DEMAND_DIVISOR_1P
         return round((self.DEMAND_DIVISOR_1P + self.DEMAND_DIVISOR) / 2)
 
-    async def set_charging_power(self, power_w: float, num_phases: int = 3):
+    async def set_charging_power(
+        self, power_w: float, num_phases: int = 3, force: bool = False
+    ):
         """Set charging power limit via SetChargingProfile.
 
         Converts M-Bus watts to integer amps using the phase-aware calibrated
         divisor, then sends via OCPP 1.6 chargingRateUnit=A.
 
+        Every profile is a write to the wallbox's non-volatile store, so an
+        unchanged command is not sent (FSD 3.5.1). The comparison is on the
+        integer amps and phase count actually commanded, not the requested
+        watts: the wallbox floors watts to whole amps, so 4354 W and 4400 W are
+        both 7 A and the second would be a duplicate write.
+
         Args:
             power_w: Target power in watts (M-Bus scale)
             num_phases: Number of phases (1 or 3)
+            force: Re-send even if the wallbox already holds this profile. The
+                SuspendedEVSE recovery (FSD 5.4) needs this — nudging a stuck
+                wallbox means re-sending the same profile deliberately.
 
         """
         limit_w = max(0, power_w)
@@ -442,6 +457,13 @@ class ChargePointHandler(CP):
                 f"Clamping {limit_a}A → {capped_a}A (max_current_a={self.max_current_a})"
             )
         limit_a = capped_a
+
+        profile = (limit_a, num_phases)
+        if not force and profile == self._last_profile:
+            logger.debug(
+                f"Wallbox already at {limit_a}A ({num_phases}-phase) — no profile sent"
+            )
+            return True
 
         logger.info(
             f"Setting charging power: {limit_w:.0f}W → {limit_a}A "
@@ -470,7 +492,10 @@ class ChargePointHandler(CP):
 
         response = await self.call(request)
         logger.info(f"SetChargingProfile response: {response.status}")
-        return response.status == "Accepted"
+        accepted = response.status == "Accepted"
+        if accepted:
+            self._last_profile = profile
+        return accepted
 
     async def remote_start(self, id_tag: str = "EnergyManager"):
         """Start charging remotely."""

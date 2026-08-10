@@ -191,6 +191,37 @@ Transactions are fully automatic — EnergyManager only sets `number.wallbox_pow
 - One transaction at a time
 - On disconnect: transaction cleared, entities updated
 
+#### 3.5.1 Write Economy
+
+Every `SetChargingProfile` is a write to the wallbox's non-volatile store, so the server sends the
+minimum number of commands that still holds the wallbox at the requested power. Three rules, applied
+in order.
+
+**No duplicate profiles.** A profile is sent only when the command actually differs from the one the
+wallbox already holds. The comparison is on the **integer amps and phase count actually commanded**,
+not on the requested watts: the wallbox floors watts to whole amps (§7.2), so 4354 W and 4400 W are
+both `7 A` and the second is a duplicate. `set_charging_power` compares `(limit_a, num_phases)`
+against the last accepted profile and returns success without sending when they match. The last
+accepted profile is per-connection state — a reconnect re-asserts the profile, since the server
+cannot know what the wallbox retained.
+
+A caller may set `force` to re-send an identical profile deliberately. The SuspendedEVSE recovery
+(§5.4) needs this: nudging a stuck wallbox means re-sending the *same* profile on purpose.
+
+**At most one power change per minute.** Changes to `number.wallbox_power_limit` are queued in
+`_pending_power_w` and sent when `power_update_interval_s` (default 60 s) has elapsed **since the
+last send** — not since the last change. Measuring from the last change lets a
+steady stream of sub-interval changes starve the queue indefinitely, so the queued value is never
+delivered. A pause (`0 W`) bypasses the throttle entirely; it is safety-critical and is never delayed.
+
+**No start attempts while the car is not charging.** When power is requested and no transaction is
+active, the server makes **one** start attempt (the §3.5 start sequence). If the wallbox does not
+answer with `StartTransaction`, further power-limit changes do **not** trigger new attempts — a car
+sitting in `Preparing` is not going to start because the profile changed. Retries follow an
+escalating back-off (60 s, 300 s, 900 s), and the back-off resets when a transaction starts or the
+connector returns to `Available` (car unplugged). Once a transaction is active, power changes are
+ordinary profile updates and are governed by the two rules above.
+
 ### 3.6 External Interface
 
 The OCPP server exposes HA entities as its external interface. All OCPP details, phase switching, transactions, and device quirks are hidden.
@@ -605,6 +636,18 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-09 | Phase switch safety | 0A → wait status → verify BL0942 < 0.5A → toggle relay |
 | TC-10 | Rapid power changes (<60s) | Only last value sent when interval expires |
 | TC-11 | 0W during throttle | Sent immediately, queue cleared |
+| TC-20 | Same watts requested twice | One SetChargingProfile; second suppressed |
+| TC-21 | Different watts, same amps (4354 W / 4400 W → 7 A) | One SetChargingProfile; the second is a duplicate write |
+| TC-22 | Different amps (4354 W → 7 A, 5117 W → 8 A) | Two SetChargingProfile |
+| TC-23 | Same amps, different phase count | Two SetChargingProfile (different command) |
+| TC-24 | `force=True` on an identical profile | Sent — SuspendedEVSE recovery (§5.4) needs the duplicate |
+| TC-25 | Profile rejected, then requested again | Re-sent; a refused profile is not remembered |
+| TC-26 | Fresh connection, same profile as before | Sent — the server cannot know what the wallbox retained |
+| TC-27 | Power changes while car will not start | One RemoteStartTransaction, not one per change |
+| TC-28 | Start back-off elapsed, power still requested | A second RemoteStartTransaction |
+| TC-29 | Back-off escalation | 60 s → 300 s → 900 s, capped at 900 s |
+| TC-30 | Car unplugged (`Available`) after failed starts | Back-off reset; next plug-in attempts immediately |
+| TC-31 | Power change with an active transaction | Profile update only, back-off not consulted |
 | TC-12 | Reconnect after server restart | StopTransaction(PowerLoss), previous session closed |
 | TC-13 | Full charge cycle | Start → Charge → Pause → Resume → Stop |
 | TC-14 | HA restart with active wallbox | Entities re-registered, state re-synced |
@@ -676,6 +719,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.21 | 2026-08-10 | **Write economy on SetChargingProfile (§3.5.1).** Every profile is a write to the wallbox's non-volatile store, and three paths were spending them for nothing. (1) **Duplicate profiles.** Change detection compared HA state *strings*, and nothing compared the command actually sent, so `"4354.0"` vs `"4354"` re-sent, and — the costly case — different watts that floor to the same amps re-sent (the wallbox floors watts to whole amps, so 4354 W and 4400 W are both `7 A`). `set_charging_power` now compares `(limit_a, num_phases)` against the last **accepted** profile and returns success without sending when they match; a rejected profile is not remembered, and the state is per-connection so a reconnect re-asserts. A `force` flag preserves the SuspendedEVSE recovery (§5.4), which re-sends an identical profile deliberately. (2) **Throttle measured from the wrong event.** `_last_change_at` was reset on *every* change including throttled ones, so the interval measured the gap between changes, not since the last send — a steady stream of sub-interval changes starved the queue and the pending value was never delivered (only the 60 s reconciliation rescued it). Now timed from `_last_sent_at`; `0 W` still bypasses. (3) **A start attempt per power change.** Each change re-entered the start path and fired a fresh `RemoteStartTransaction` — three in two minutes on 2026-08-09 against a car in `Preparing` that was never going to start. Now one attempt, then an escalating back-off (60/300/900 s), reset on transaction start or `Available`. TC-20…TC-31. ocpp-server 0.9.73. |
 | 3.20 | 2026-08-02 | **Meter correction recalibrated against the utility meter, and applied to energy (§7.1).** Coefficients moved to `1.023 × raw − 101`, measured against the gPlug utility smart meter (`sensor.grid_power`) using the stable night house baseline (280 W median, n=7492): two 11 kW charging→idle transitions after 23:00 agreeing to 3 W (raw 11315 W → true 11475 W) plus one 4 kW night (raw 4027 W → true 4019 W). The reference meter matters — the wallbox sits outside the DTSU loop and the Modbus proxy injects the correction into the DTSU, so calibrating against `sensor.power_meter_active_power` would measure the correction against itself. The dedicated M-Bus wallbox meter disagrees in sign; the utility meter is authoritative. Separately, `session_energy_wh` was assigned **raw** while only power was corrected, so `sensor.wallbox_power` and `sensor.wallbox_energy` sat on different scales; `_accumulate_energy()` now corrects register increments (`METER_SCALE·dE_raw + METER_OFFSET·dt_h` — the offset is a power, so it only becomes an energy once integrated) and resets on transaction start or a backwards register. Known weakness: the slope/offset split rests on the single 4 kW anchor. ocpp-server 0.9.72; tests 125 → 129. |
 | 3.19 | 2026-07-09 | **Single-phase divisor + amp cap (§7.2).** Live single-phase charging revealed two faults: (1) the 1φ watts→amps divisor (0.9.70 used a derived 637/3 = 212) is wrong — live MeterValues show single-phase is **~230 W/A** (a 1φ load draws more per amp than one leg of a 3φ load), so 1φ divisor is now the measured **230**; (2) the wallbox does **not** enforce `max_current_a` — a 1φ cable drew **~19 A** from a 21 A profile (4413 W, over the 16 A / 3680 W config) — so `set_charging_power` now **caps `limit_a` at `max_current_a`** (SEC-07). `ChargePointHandler` gains `max_current_a`. ocpp-server 0.9.71; tests 130 → 131. NB EnergyManager's solar step table is separately made phase-aware (its FSD). |
 | 3.18 | 2026-07-09 | **Cable phase detection (§3.6.4.1).** In `three_phase` mode the server now measures the connected cable's active phase count from per-phase `Current.Import` in MeterValues (≥0.5 A/phase, gated on ≥400 W total) instead of assuming 3. Root cause: a single-phase charging cable draws L1 only, but the server reported `phases=3`, commanded 3-phase amps (so the car drew ~⅓ of the intended watts), and applied the 3φ-calibrated meter correction — under-reporting `wallbox_power` ~14% (1492 W raw → 1278 W). The detected count now drives `sensor.wallbox_phases`, the published power range, the watts→amps divisor (phase-aware `_demand_divisor`: 3φ ÷637, 1φ ÷212 — §7.2), and the meter correction (3φ linear; 1φ/2φ returns the raw wallbox power — §7.1). Re-detects on cable swap, and the detected count persists in `sensor.wallbox_phases` and is restored on startup so a single-phase cable is not stuck behind the 3-phase minimum (bootstrap deadlock, §3.6.4.1). New `active_phases` + detection in `on_meter_values`; `_on_phases_detected` + startup restore in run.py; TC-16. ocpp-server 0.9.70; tests 117 → 130 (`TestPhaseDetection`, `TestServerPhaseAdoption`). |

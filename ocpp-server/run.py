@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.72"
+__version__ = "0.9.73"
 
 import asyncio
 import json
@@ -267,9 +267,20 @@ class OCPPServer:
         # Track last-seen control states for change detection
         self._last_power_limit: str | None = None
 
-        # Throttle state for SetChargingProfile rate-limiting
-        self._last_change_at: float = 0.0  # When value last changed
+        # Throttle state for SetChargingProfile rate-limiting (FSD 3.5.1).
+        # Measured from the last SEND, not the last change: measuring from the
+        # last change lets a steady stream of sub-interval changes keep
+        # resetting the timer, so the queued value never gets delivered.
+        self._last_change_at: float = 0.0  # When value last changed (SuspendedEVSE resend)
+        self._last_sent_at: float = 0.0  # When a profile was last transmitted
         self._pending_power_w: float | None = None
+
+        # One start attempt, then back off (FSD 3.5.1). A car sitting in
+        # Preparing does not start because the profile changed, so further
+        # power-limit changes must not each fire a fresh RemoteStartTransaction.
+        self._last_start_attempt_at: float = 0.0
+        self._start_retry_count: int = 0
+        self.START_BACKOFF_INTERVALS = [60, 300, 900]
 
         # Escalating re-send intervals for SuspendedEVSE
         self._resend_retry_count: int = 0
@@ -293,6 +304,28 @@ class OCPPServer:
         await self.ha.set_state("sensor.wallbox_min_power_w", min_w)
         await self.ha.set_state("sensor.wallbox_max_power_w", max_w)
         logger.info(f"Power limits: {min_w}–{max_w}W ({self._current_phases}-phase)")
+
+    @property
+    def _current_start_backoff(self) -> int:
+        """Back-off before the next start attempt, escalating per failed try."""
+        idx = min(self._start_retry_count, len(self.START_BACKOFF_INTERVALS) - 1)
+        return self.START_BACKOFF_INTERVALS[idx]
+
+    def _start_attempt_due(self) -> bool:
+        """Whether a RemoteStartTransaction attempt is allowed now (FSD 3.5.1).
+
+        The first attempt after a reset is always allowed; subsequent ones only
+        once the escalating back-off has elapsed.
+        """
+        if self._last_start_attempt_at == 0.0:
+            return True
+        since = time.monotonic() - self._last_start_attempt_at
+        return since >= self._current_start_backoff
+
+    def _reset_start_backoff(self) -> None:
+        """Clear the start back-off (transaction started, or car unplugged)."""
+        self._last_start_attempt_at = 0.0
+        self._start_retry_count = 0
 
     @property
     def _current_resend_interval(self) -> int:
@@ -643,6 +676,12 @@ class OCPPServer:
             if value != "SuspendedEVSE":
                 self._resend_retry_count = 0
 
+            # Car unplugged — the next plug-in deserves an immediate start
+            # attempt, not the back-off left over from the previous car
+            # (FSD 3.5.1).
+            if value == "Available":
+                self._reset_start_backoff()
+
             # SuspendedEV cloud correction: start/stop polling
             if value == "SuspendedEVSE" and self._last_sent_power_w > 0:
                 if self._cloud_charging_entity and (
@@ -829,11 +868,18 @@ class OCPPServer:
             self._last_power_limit = power_state
             await self._send_power_to_wallbox(power_w)
 
-    async def _send_power_to_wallbox(self, power_w: float) -> None:
+    async def _send_power_to_wallbox(self, power_w: float, force: bool = False) -> None:
         """Send power limit to wallbox (phase switching, auto-start, SetChargingProfile).
 
         This method contains the actual wallbox communication logic,
         extracted from _watch_controls so it can be gated by the throttle.
+
+        Args:
+            power_w: Target power in watts.
+            force: Re-send even if the wallbox already holds this profile — for
+                the SuspendedEVSE recovery, which nudges a stuck wallbox with a
+                deliberate duplicate (FSD 3.5.1 / 5.4).
+
         """
         if not self.charge_point:
             logger.warning("No wallbox connected, ignoring power limit")
@@ -900,10 +946,22 @@ class OCPPServer:
             power_w = 0
 
         if power_w > 0 and self.charge_point.transaction_id is None:
-            # No transaction yet — send profile first, then start
-            logger.info("No active transaction, setting profile then starting")
+            # No transaction yet — one start attempt, then back off (FSD 3.5.1).
+            if not self._start_attempt_due():
+                since = time.monotonic() - self._last_start_attempt_at
+                logger.debug(
+                    f"Start back-off: {since:.0f}s since last attempt "
+                    f"(retry {self._start_retry_count}, "
+                    f"interval {self._current_start_backoff}s) — not retrying"
+                )
+                return
+            logger.info(
+                f"No active transaction, setting profile then starting "
+                f"(attempt {self._start_retry_count + 1})"
+            )
+            self._last_start_attempt_at = time.monotonic()
             await self.charge_point.set_charging_power(
-                power_w, num_phases=self._current_phases
+                power_w, num_phases=self._current_phases, force=force
             )
             await asyncio.sleep(3)
             self.charge_point.transaction_started_event.clear()
@@ -914,15 +972,21 @@ class OCPPServer:
                         self.charge_point.transaction_started_event.wait(),
                         timeout=15,
                     )
+                    self._reset_start_backoff()
                 except TimeoutError:
-                    logger.warning("StartTransaction not received after 15s")
+                    self._start_retry_count += 1
+                    logger.warning(
+                        f"StartTransaction not received after 15s — backing off "
+                        f"{self._current_start_backoff}s before the next attempt"
+                    )
                     return
             else:
+                self._start_retry_count += 1
                 logger.warning("RemoteStartTransaction not accepted")
         else:
             # Transaction active (or pausing) — just update profile
             await self.charge_point.set_charging_power(
-                power_w, num_phases=self._current_phases
+                power_w, num_phases=self._current_phases, force=force
             )
 
         # When pausing (0W), reset reported power immediately
@@ -934,6 +998,7 @@ class OCPPServer:
 
         self._pending_power_w = None
         self._last_sent_power_w = power_w
+        self._last_sent_at = time.monotonic()
 
         # Drive the proxy correction from the command itself, immediately:
         # - >0 while the car is already in a charging session (Charging /
@@ -1005,32 +1070,34 @@ class OCPPServer:
                     if prev is not None:
                         try:
                             power_w = float(power_state)
-                            since_last_change = time.monotonic() - self._last_change_at
                             self._last_change_at = time.monotonic()
+                            since_last_send = time.monotonic() - self._last_sent_at
                             if (
                                 power_w == 0
-                                or since_last_change >= self.power_update_interval_s
+                                or since_last_send >= self.power_update_interval_s
                             ):
                                 # 0W (pause) bypasses throttle — safety-critical
                                 logger.info(
                                     f"Power limit changed to {power_w}W (sending immediately, "
-                        f"{since_last_change:.0f}s since last change)"
+                        f"{since_last_send:.0f}s since last send)"
                                 )
                                 await self._send_power_to_wallbox(power_w)
                             else:
                                 # Rapid change — queue, send when interval expires
                                 logger.info(
                                     f"Power limit changed to {power_w}W (throttled, "
-                        f"{since_last_change:.0f}s since last change)"
+                        f"{since_last_send:.0f}s since last send)"
                                 )
                                 self._pending_power_w = power_w
                         except ValueError:
                             logger.warning(f"Invalid power limit value: {power_state}")
 
-                # Send throttled value when interval expires
+                # Send throttled value when the interval since the last SEND expires.
+                # Timing off the last send (not the last change) is what stops a
+                # steady stream of sub-interval changes from starving the queue.
                 if self._pending_power_w is not None:
-                    since_last_change = time.monotonic() - self._last_change_at
-                    if since_last_change >= self.power_update_interval_s:
+                    since_last_send = time.monotonic() - self._last_sent_at
+                    if since_last_send >= self.power_update_interval_s:
                         power_w = self._pending_power_w
                         await self._send_power_to_wallbox(power_w)
 
@@ -1069,7 +1136,9 @@ class OCPPServer:
                             f"(retry {self._resend_retry_count}, "
                             f"interval {self._current_resend_interval}s)"
                         )
-                        await self._send_power_to_wallbox(self._last_sent_power_w)
+                        await self._send_power_to_wallbox(
+                            self._last_sent_power_w, force=True
+                        )
                         self._resend_retry_count += 1
                         self._last_change_at = time.monotonic()
 
