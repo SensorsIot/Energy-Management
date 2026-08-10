@@ -18,6 +18,7 @@ cd "$(dirname "$0")/.."
 # name:path — path is what pytest is pointed at.
 SUITES=(
   "energy-manager:energy-manager/tests"
+  "load-forecast:load-forecast/tests"
   "ocpp-server:ocpp-server/tests"
   "swiss-solar-forecast:swiss-solar-forecast"
 )

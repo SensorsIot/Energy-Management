@@ -194,9 +194,69 @@ from recent hours; calendar-event integration; machine-learning models (LSTM, XG
 ## 14. Tests and validation
 
 Test approach and invocation are HOW — see [`Harness/project/modules/load-forecast.md`](../../Harness/project/modules/load-forecast.md)
-and the testing hub [`Harness/project/testing.md`](../../Harness/project/testing.md). No test code exists yet (gap).
+and the testing hub [`Harness/project/testing.md`](../../Harness/project/testing.md).
+
+Test file: `load-forecast/tests/test_load_predictor.py`. `build_profile` and `generate_forecast`
+take and return DataFrames, so the algorithm in Section 4 is tested directly; only
+`load_historical_data` touches InfluxDB.
+
+### Slot mapping (Section 4)
+
+| Test | Conditions | Expected |
+|------|------------|----------|
+| `test_slot_boundaries` | 00:00, 00:14, 00:15, 12:00, 23:45, 23:59 local | Slots 0, 0, 1, 48, 95, 95 |
+| `test_all_96_slots` | One sample in every quarter hour | 96 slots, index 0…95 |
+
+### Percentiles (Section 4)
+
+| Test | Conditions | Expected |
+|------|------------|----------|
+| `test_known_distribution` | Values 0…100 step 10 in one slot | P10 = 10, P50 = 50, P90 = 90, count = 11 |
+| `test_ordering_holds` | Mixed values across two slots | P10 <= P50 <= P90 for every slot |
+| `test_slots_are_independent` | 1000 W at 07:00, 100 W at 07:15 | Slot 28 = 1000 W, slot 29 = 100 W |
+
+### Forecast shape (Section 4)
+
+| Test | Conditions | Expected |
+|------|------------|----------|
+| `test_horizon_length` | horizon 120 h / 48 h | 480 / 192 points |
+| `test_start_aligned_down_to_quarter` | Start 09:07:43 UTC | First point 09:00:00 UTC |
+| `test_index_is_utc_and_quarter_hourly` | Any horizon | Index UTC, 15-minute spacing |
+
+### Local-time seam (Section 4)
+
+Profile slots are built in local time; the forecast index is UTC.
+
+| Test | Conditions | Expected |
+|------|------------|----------|
+| `test_utc_timestamp_reads_the_local_slot` | Only 08:00 local populated, read 06:00 UTC (CEST) | Returns the 08:00 local value |
+
+### Sparse and empty history
+
+A slot with no history falls back to the median across populated slots. An **empty** history is
+refused: it must fail loudly rather than emit a forecast of NaNs, which would be written to InfluxDB
+and consumed by EnergyManager.
+
+| Test | Conditions | Expected |
+|------|------------|----------|
+| `test_missing_slot_uses_median_fallback` | Slots 0 and 48 populated, read an empty slot | Median of the populated slots, no NaN |
+| `test_build_profile_refuses_empty` | Empty history frame | `ValueError` |
+| `test_generate_forecast_refuses_empty_profile` | Empty profile assigned directly | `ValueError` |
+| `test_generate_forecast_refuses_unbuilt_profile` | `build_profile` never called | `ValueError` |
+| `test_default_is_the_current_entity` | Default constructor | `load_entity == "house_load_power"` |
 
 ## Changelog
+
+- 2026-08-10: **Test suite added (Section 14) and the empty-history NaN path fixed.** The add-on had
+  no test code. Two defects surfaced while writing it: (1) `load_historical_data` tested
+  `result.empty` **before** `dropna()`, so a query returning rows of all-null values emptied out
+  afterwards, reached `build_profile` empty, produced an empty profile, and every forecast point fell
+  through to `profile["p10"].median()` — NaN on an empty frame. The result was a full-length forecast
+  of NaNs written to InfluxDB and consumed by EnergyManager. Emptiness is now re-checked after
+  `dropna()`, `build_profile` refuses an empty history, and `generate_forecast` refuses an empty
+  profile. (2) The `LoadPredictor.load_entity` default was still `load_power`, the name retired on
+  2026-02-27; `run.py` passes the correct `house_load_power`, so production was unaffected, but the
+  stale default would silently reproduce that outage for any other caller. 19 tests. Version 1.2.9.
 
 - 2026-06-29: FSD made self-contained — folded the full LoadForecast spec (algorithm, data source,
   output schema, configuration, limitations) in from the combined system FSD (since split into

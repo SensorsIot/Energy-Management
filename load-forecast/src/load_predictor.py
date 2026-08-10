@@ -26,7 +26,7 @@ class LoadPredictor:
         token: str,
         org: str,
         source_bucket: str = "HomeAssistant",
-        load_entity: str = "load_power",
+        load_entity: str = "house_load_power",
         history_days: int = 90,
         local_timezone: str = "Europe/Zurich",
     ) -> None:
@@ -84,6 +84,13 @@ class LoadPredictor:
 
         df = df.set_index("time")
         df = df.dropna()
+        # Checked again after dropna: rows of all-null values pass the
+        # `result.empty` test above and only empty out here.
+        if df.empty:
+            raise ValueError(
+                f"No usable data for entity {self.load_entity} "
+                f"(query returned rows, but all values were null)"
+            )
 
         logger.info(f"Loaded {len(df)} data points (converted to {self.local_timezone})")
         return df
@@ -94,6 +101,12 @@ class LoadPredictor:
         Groups all historical data by 15-minute slot (0-95) and
         calculates percentiles for each slot.
         """
+        if df.empty:
+            raise ValueError(
+                "Cannot build a load profile from an empty history — "
+                "refusing to emit a forecast of NaNs"
+            )
+
         df = df.copy()
         df["slot"] = df.index.hour * 4 + df.index.minute // 15  # 96 slots per day
 
@@ -137,6 +150,10 @@ class LoadPredictor:
         """
         if self.profile is None:
             raise ValueError("Profile not built. Call build_profile() first.")
+        if self.profile.empty:
+            raise ValueError(
+                "Load profile is empty — refusing to emit a forecast of NaNs"
+            )
 
         # Align start time to 15-min boundary in UTC
         if start_time is None:
