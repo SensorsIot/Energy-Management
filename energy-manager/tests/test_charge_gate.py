@@ -335,6 +335,107 @@ class TestMarginalDayGate:
         )
 
 
+class TestReserveFloor:
+    """BR reserve floor (FSD 4.2.3): on a shaving day the water-fill may not
+    defer the battery below `charge_shaving_reserve_soc`. Shaving bets the
+    morning surplus on a midday peak that may not arrive; the floor is what
+    that bet may not risk. Runs after B0, before the water-fill.
+    """
+
+    def _real_optimizer(self, manager) -> None:
+        manager.optimizer = BatteryOptimizer(capacity_wh=10000, max_charge_w=5000)
+
+    def _abundant_morning(self, now: datetime) -> pd.DataFrame:
+        """Low surplus now, big peak later → abundant day the water-fill defers."""
+        return _forecast(now, [200.0] + [3000.0] * 40 + [200.0] * 23)
+
+    def test_below_floor_charges_instead_of_deferring(self, manager) -> None:
+        """The live 2026-08-24 case: 1% SOC on an abundant shaving morning.
+        Without the floor the water-fill defers (surplus 200 Wh << L=3000 Wh)."""
+        self._real_optimizer(manager)
+        _wire(manager, car_soc=80.0, target=80.0)  # full → shaving day
+        manager.ha_client.set_number.return_value = (True, None)
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+
+        fc = self._abundant_morning(now)
+
+        manager.control_battery_charge(1.0, fc, fc, now)
+
+        assert manager._charge_use_case == "B"
+        assert manager._charge_action == "charging"
+        assert "reserve floor" in manager._charge_reason
+        # Banked at the gentle shaving power, not the greedy max.
+        manager.ha_client.set_number.assert_any_call(
+            manager.charge_control_entity, manager.charge_shaving_power_w, max_retries=5
+        )
+        assert manager._last_charge_power_w == manager.charge_shaving_power_w
+
+    def test_at_floor_hands_back_to_the_water_fill(self, manager) -> None:
+        """At/above the floor the deferral resumes — the rest of the headroom
+        is still held for the peak."""
+        self._real_optimizer(manager)
+        _wire(manager, car_soc=80.0, target=80.0)
+        manager.ha_client.set_number.return_value = (True, None)
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+
+        fc = self._abundant_morning(now)
+
+        manager.control_battery_charge(manager.charge_shaving_reserve_soc, fc, fc, now)
+
+        assert manager._charge_action == "deferred"
+        assert "reserve floor" not in manager._charge_reason
+        assert manager._last_charge_power_w == 0
+
+    def test_floor_of_zero_disables_it(self, manager) -> None:
+        """Floor 0 → pure water-fill, even on an empty battery."""
+        self._real_optimizer(manager)
+        _wire(manager, car_soc=80.0, target=80.0)
+        manager.ha_client.set_number.return_value = (True, None)
+        manager.charge_shaving_reserve_soc = 0.0
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+
+        fc = self._abundant_morning(now)
+
+        manager.control_battery_charge(1.0, fc, fc, now)
+
+        assert manager._charge_action == "deferred"
+        assert "reserve floor" not in manager._charge_reason
+
+    def test_charge_target_hold_still_wins(self, manager) -> None:
+        """Ordering: the Topic 3 hold (4.2.4) is checked first, so a target
+        below the floor stops charging rather than the floor overriding it."""
+        self._real_optimizer(manager)
+        _wire(manager, car_soc=80.0, target=80.0)
+        manager.ha_client.set_number.return_value = (True, None)
+        manager.charge_target_enabled = True
+        manager._battery_target_soc = 10.0  # below the 20% floor
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+
+        fc = self._abundant_morning(now)
+
+        manager.control_battery_charge(15.0, fc, fc, now)
+
+        assert manager._charge_action == "deferred"
+        assert "charge target" in manager._charge_reason
+
+    def test_car_day_unaffected_by_the_floor(self, manager) -> None:
+        """Use case A already charges greedily — the floor never downgrades it
+        to the gentler shaving power."""
+        self._real_optimizer(manager)
+        _wire(manager, car_soc=50.0, target=80.0)  # needs energy → car day
+        manager.ha_client.set_number.return_value = (True, None)
+        now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
+
+        fc = self._abundant_morning(now)
+
+        manager.control_battery_charge(1.0, fc, fc, now)
+
+        assert manager._charge_use_case == "A"
+        manager.ha_client.set_number.assert_called_once_with(
+            manager.charge_control_entity, manager.charge_max_w, max_retries=5
+        )
+
+
 class TestSocCeiling:
     """Topic 3 longevity cap enforced via the inverter's native end-of-charge
     SOC register (FSD 4.2.4). Mirroring the charge target onto it makes the

@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.14"
+__version__ = "1.9.15"
 
 import json
 import logging
@@ -169,6 +169,13 @@ class EnergyManager:
         # battery and spreads absorption across more intervals → flatter
         # feed-in. Use case A (car present) still releases to max_charge_w.
         self.charge_shaving_power_w = battery_opts.get("charge_shaving_power_w", 2500)
+        # BR reserve floor (FSD 4.2.3): the SOC the battery reaches before the
+        # water-fill may defer it at all. Shaving bets the morning surplus on a
+        # midday peak that may not arrive; the floor bounds that bet's downside
+        # and keeps the pack off the bottom of its range on a shaving day.
+        self.charge_shaving_reserve_soc = float(
+            battery_opts.get("charge_shaving_reserve_soc", 20.0)
+        )
         # B0 fill-margin: only shave when the day's (conservative p10) surplus
         # comfortably exceeds the headroom, not merely fills it. A day that only
         # just fills (or fills near sunset) has no real export peak to clip, so
@@ -995,6 +1002,23 @@ class EnergyManager:
             self._apply_charge_control(True, self._charge_reason)
             return
 
+        # BR reserve floor: shaving may never leave the battery sitting empty.
+        # Below the floor the deferral is suspended and the surplus is banked
+        # at the shaving power, because a shaving day is a *bet* that the
+        # midday peak arrives — the floor is what that bet may not risk. Above
+        # it the water-fill resumes and the rest of the headroom is still held
+        # for the peak. Stateless like the water-fill: re-read from the actual
+        # SOC each tick, no latch.
+        if current_soc < self.charge_shaving_reserve_soc:
+            self._charge_action = "charging"
+            self._charge_reason = (
+                f"SOC {current_soc:.0f}% below reserve floor "
+                f"{self.charge_shaving_reserve_soc:.0f}% → bank the surplus "
+                f"before shaving"
+            )
+            self._apply_charge_control(True, self._charge_reason, self.charge_shaving_power_w)
+            return
+
         # Build the rest-of-today (Europe/Zurich) per-interval surplus curve
         # from the forecast. net_energy_wh = PV − load per 15 min = export.
         eod = (
@@ -1270,6 +1294,7 @@ class EnergyManager:
                 "battery_target_reason": self._charge_target_reason,
                 "shaving_day_mode": self._shaving_day_mode,
                 "shaving_decision_hour": self.shaving_decision_hour,
+                "charge_reserve_soc": round(self.charge_shaving_reserve_soc),
                 # Forecast — when does the home battery reach 100% today
                 "battery_will_be_full": battery_will_be_full,
                 "battery_full_time": battery_full_time,

@@ -42,6 +42,13 @@ battery:
   # and spreads absorption over more intervals → flatter feed-in. Use case A
   # (car connected & not full) still releases to max_charge_w.
   charge_shaving_power_w: 2500
+  # Reserve floor (BR): the minimum SOC the battery reaches before shaving is
+  # allowed to defer it at all. A shaving day bets the morning surplus on a
+  # midday peak that may not arrive; below this SOC the bet is off and the
+  # surplus is banked at charge_shaving_power_w. Above it the water-fill
+  # resumes and the rest of the headroom is held for the peak. Set to 0 to
+  # disable the floor (pure water-fill). See FSD 4.2.3 BR.
+  charge_shaving_reserve_soc: 20
   # Marginal-day gate (B0): shaving only runs on an abundant day — one where
   # the battery is forecast to reach full today even under a conservative,
   # low-production estimate (p10 PV vs p50 load). On a marginal shoulder-season

@@ -573,6 +573,7 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | `soc_entity` | `sensor.battery_state_of_capacity` | Current SOC readback |
 | `discharge_control_entity` | `number.battery_maximum_discharging_power` | Discharge control output |
 | `charge_shaving_power_w` | `2500` | Charge power while shaving the export peak (Section 4.2.3) |
+| `charge_shaving_reserve_soc` | `20` | Reserve floor shaving may not defer below (Section 4.2.3) |
 | `charge_control_entity` | `number.battery_maximum_charging_power` | Charge control output (Section 4.2.3) |
 | `end_of_charge_soc_entity` | `number.battery_end_of_charge_soc` | SOC-ceiling output — the Topic 3 hard cap (Section 4.2.4) |
 | `no_buy_floor_percent` | 20 | Shared floor for EV step-up and battery charge-target protection (Sections 4.2.4, 4.3.7) |
@@ -857,9 +858,34 @@ never pushes the predicted fill later). A battery already full now counts as
 empty/unavailable conservative forecast is treated as marginal (charge
 greedily — never defer blindly).
 
+#### Use case BR — reserve floor (run *after* B0, *before* the water-fill)
+
+Shaving spends the morning surplus on a **bet** that the midday export peak
+arrives. `charge_shaving_reserve_soc` (default 20 %) is the part of that bet
+the battery does not stake: below this SOC the deferral is suspended and the
+surplus is banked at `charge_shaving_power_w`.
+
+- **`current_soc < charge_shaving_reserve_soc`** → charge at
+  `charge_shaving_power_w`; `action = charging`, reason `SOC N% below reserve
+  floor M% → bank the surplus before shaving`.
+- **`current_soc ≥ charge_shaving_reserve_soc`** → fall through to the
+  water-fill, which holds the *remaining* headroom for the peak.
+
+The floor caps the loss when the bet is wrong (a peak that clouds out after
+B0 passed on the p10 forecast) and keeps the pack off the bottom of its range
+on a shaving day. It is **stateless** like the water-fill — re-read from the
+actual SOC each tick, no latch — so it re-arms if evening discharge takes the
+battery back below the floor. `0` disables it (pure water-fill).
+
+Ordering: the Topic 3 charge-target hold (4.2.4) is evaluated **before** the
+floor, so a charge target below the floor still stops charging — the floor
+raises the shaving minimum, it never overrides the longevity ceiling. Use
+case A (car day) is unaffected: it already releases to `max_charge_w`.
+
 #### Use case B — sub-cases (water-fill decision)
 
-Reached only on an abundant day (B0 = yes). `should_charge_now()` decides
+Reached only on an abundant day (B0 = yes) at or above the reserve floor (BR).
+`should_charge_now()` decides
 ON/OFF each tick. It is a
 **water-fill**: take the highest-surplus 15-min intervals of the rest of
 today until their *absorbed* energy fills the battery headroom; the surplus
@@ -934,6 +960,7 @@ shaving power) is still detected even though charging stays on.
 |-----|---------|---------|
 | `battery.charge_control_entity` | `number.battery_maximum_charging_power` | Control output (use case A & B) |
 | `battery.charge_shaving_power_w` | `2500` | Charge limit while shaving the peak (use case B) — gentle C-rate |
+| `battery.charge_shaving_reserve_soc` | `20` | BR reserve floor: minimum SOC reached before the water-fill may defer (`0` disables) |
 | `battery.max_charge_w` | `5000` | Charge limit when use case A releases, or on a marginal day (B0) |
 | `battery.charge_shaving_fill_margin` | `1.2` | B0 fill-margin: shave only if the day's surplus exceeds headroom by this factor |
 | `battery.shaving_decision_hour` | `8` | Local hour (Europe/Zurich) at which the day mode (car day vs shaving day) is decided and latched |
@@ -941,7 +968,11 @@ shaving power) is still detected even though charging stays on.
 
 The marginal-day gate (B0) gates on whether the battery fills today under the
 conservative p10-PV forecast, with the p10/p50 uncertainty band as the safety
-margin. Two additional safeguards make it robust to a bad forecast:
+margin. Three additional safeguards make it robust to a bad forecast:
+
+- **Reserve floor** (`charge_shaving_reserve_soc`): the battery is never
+  deferred below this SOC, so a day that passes B0 and then under-delivers
+  still leaves a usable reserve banked (see use case BR).
 
 - **Fill-margin** (`charge_shaving_fill_margin`): the rest-of-today surplus
   must exceed the headroom by this factor (default 1.2 = 20 %), not merely
@@ -962,6 +993,13 @@ Test files: `energy-manager/tests/test_battery_optimizer.py`
 cap; `energy-manager/tests/test_charge_gate.py` (`TestMarginalDayGate`) — the
 B0 marginal-day gate (fills-today, never-fills, empty-forecast-is-marginal,
 and end-to-end greedy-vs-shaving routing); `test_charge_gate.py`
+(`TestReserveFloor`) — the BR floor: an empty battery on an abundant shaving
+morning charges at the shaving power instead of deferring
+(`test_below_floor_charges_instead_of_deferring`), at the floor the water-fill
+resumes (`test_at_floor_hands_back_to_the_water_fill`), `0` disables it
+(`test_floor_of_zero_disables_it`), the Topic 3 hold is still evaluated first
+(`test_charge_target_hold_still_wins`), and use case A keeps its greedy release
+(`test_car_day_unaffected_by_the_floor`); `test_charge_gate.py`
 (`TestDayModeDecision`) — the once-daily shave-vs-car-day latch and departure
 trigger. **Fullness (`smart_battery_last_known >= smart_charging_max_last_known`)
 is the sole criterion — connection is not checked**, so a full car arms a
@@ -1808,6 +1846,7 @@ cycle. State string: `discharge=on|off charge=<action>`.
 | `battery_target_reason` | Human-readable target explanation (e.g. `floored to 80% (survival need only 59%)`; logs/debug, not rendered) |
 | `shaving_day_mode` | Topic 5 day-mode latch: `shaving_day` or `car_day` (4.2.3) |
 | `shaving_decision_hour` | Local hour the day-mode latch is decided (default 8) |
+| `charge_reserve_soc` | BR reserve floor (%) below which shaving does not defer (4.2.3) |
 | `battery_will_be_full` | Forecast: does peak SOC reach the target today? (`null` if forecast unavailable) |
 | `battery_full_time` | Forecast time the home battery first reaches the target today (`HH:MM` local, else `null`) |
 | `battery_peak_soc` | Forecast peak home-battery SOC today (%) |
@@ -3171,6 +3210,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.90: **Export-peak shaving now charges to a reserve floor before it defers (Section 4.2.3).** A shaving day stakes the whole morning surplus on a midday export peak, with only the B0 marginal-day gate (p10 PV) protecting the bet — so a battery that ended the night empty stayed empty all morning while PV was exported. Observed live 2026-08-24: the 08:05 latch read the car full (SOC 80 % = its own limit) → shaving day, wrote `maximum_charging_power = 0` at 1 % SOC, and held it there with ~1.2 kW of surplus flowing to the grid (`surplus now 308Wh, headroom 8900Wh → defer`). New sub-case **BR**, evaluated after B0 and before the water-fill: below `charge_shaving_reserve_soc` (new config key, default 20 %) the deferral is suspended and the surplus is banked at `charge_shaving_power_w`; at or above it the water-fill resumes and holds the remaining headroom for the peak. Stateless like the water-fill — no latch, re-read from the actual SOC each tick — so evening discharge below the floor re-arms it. `0` disables it. The Topic 3 charge-target hold (4.2.4) is still evaluated first, so the floor never lifts the battery past a lower longevity ceiling, and use case A keeps its greedy `max_charge_w` release. `sensor.battery_decision` gains `charge_reserve_soc`. New `TestReserveFloor` (5 cases) in `test_charge_gate.py`. 325 tests pass. (1.9.14 -> 1.9.15)
 
 - v2.89: **Unchanged values are never written to the Huawei inverter registers (Section 4.7.1).** The three home-battery control entities are inverter holding registers and every write costs a flash-erase cycle, but two paths sent values the register already held. (1) The change-gates that suppress repeat writes (`last_discharge_allowed`, `_last_charge_power_w`, `_last_soc_ceiling`) live in memory only, so every add-on restart re-wrote the charge-power and SOC-ceiling registers blind — observed live 2026-08-08, where the startup cycle wrote `maximum_charging_power = 5000` onto a register already at 5000. (2) `set_number` re-posted on a lost response, so one logical change could cost up to 5 writes when Home Assistant had already accepted the call. `HAClient.set_number` — the single choke point all three control paths pass through — now reads the entity first and returns success without sending anything when the value already matches (tolerance 0.01), and re-reads before every retry so a landed write is never re-posted. An unreadable register (missing, `unknown`, `unavailable`, failed read) fails open and is written. Measured baseline over the 60 days before the change: 3.8 writes/day on `maximum_charging_power`, 1.1 on `maximum_discharging_power`, 0.25 on `end_of_charge_soc`. New `test_inverter_writes.py` (10 cases), Section 6.8. 320 tests pass. (1.9.13 -> 1.9.14)
 
