@@ -51,7 +51,8 @@ battery:
   # Reserve floor (BR): the minimum SOC the battery reaches before shaving is
   # allowed to defer it at all. A shaving day bets the morning surplus on a
   # midday peak that may not arrive; below this SOC the bet is off and the
-  # surplus is banked at charge_shaving_power_w. Above it the water-fill
+  # surplus is banked at max_charge_w (full power — the fast fill matters more
+  # than the gentle C-rate down here). Above it the water-fill
   # resumes and the rest of the headroom is held for the peak. Set to 0 to
   # disable the floor (pure water-fill). See FSD 4.2.3 BR.
   charge_shaving_reserve_soc: 20

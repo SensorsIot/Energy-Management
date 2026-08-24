@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.17"
+__version__ = "1.9.18"
 
 import json
 import logging
@@ -1029,19 +1029,20 @@ class EnergyManager:
 
         # BR reserve floor: shaving may never leave the battery sitting empty.
         # Below the floor the deferral is suspended and the surplus is banked
-        # at the shaving power, because a shaving day is a *bet* that the
-        # midday peak arrives — the floor is what that bet may not risk. Above
-        # it the water-fill resumes and the rest of the headroom is still held
-        # for the peak. Stateless like the water-fill: re-read from the actual
-        # SOC each tick, no latch.
+        # at max_charge_w, because a shaving day is a *bet* that the midday
+        # peak arrives — the floor is what that bet may not risk, so it is
+        # taken at full power rather than the gentle shaving rate. Above the
+        # floor the water-fill resumes and the rest of the headroom is still
+        # held for the peak. Stateless like the water-fill: re-read from the
+        # actual SOC each tick, no latch.
         if current_soc < self.charge_shaving_reserve_soc:
             self._charge_action = "charging"
             self._charge_reason = (
                 f"SOC {current_soc:.0f}% below reserve floor "
                 f"{self.charge_shaving_reserve_soc:.0f}% → bank the surplus "
-                f"before shaving"
+                f"greedily before shaving"
             )
-            self._apply_charge_control(True, self._charge_reason, self.charge_shaving_power_w)
+            self._apply_charge_control(True, self._charge_reason)
             return
 
         # Build the rest-of-today (Europe/Zurich) per-interval surplus curve

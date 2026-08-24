@@ -876,11 +876,14 @@ greedily — never defer blindly).
 Shaving spends the morning surplus on a **bet** that the midday export peak
 arrives. `charge_shaving_reserve_soc` (default 20 %) is the part of that bet
 the battery does not stake: below this SOC the deferral is suspended and the
-surplus is banked at `charge_shaving_power_w`.
+surplus is banked at `max_charge_w`.
 
-- **`current_soc < charge_shaving_reserve_soc`** → charge at
-  `charge_shaving_power_w`; `action = charging`, reason `SOC N% below reserve
-  floor M% → bank the surplus before shaving`.
+- **`current_soc < charge_shaving_reserve_soc`** → charge at `max_charge_w`;
+  `action = charging`, reason `SOC N% below reserve floor M% → bank the surplus
+  greedily before shaving`. Full power, not `charge_shaving_power_w`: below the
+  floor the fast fill outweighs the gentle C-rate the rest of use case B uses,
+  and capping at the shaving rate exports surplus while the battery is nearly
+  empty.
 - **`current_soc ≥ charge_shaving_reserve_soc`** → fall through to the
   water-fill, which holds the *remaining* headroom for the peak.
 
@@ -974,8 +977,8 @@ shaving power) is still detected even though charging stays on.
 | `battery.charge_shaving_enabled` | `true` | Master switch for the whole shaving path (`false` → greedy `max_charge_w` every cycle) |
 | `battery.charge_control_entity` | `number.battery_maximum_charging_power` | Control output (use case A & B) |
 | `battery.charge_shaving_power_w` | `2500` | Charge limit while shaving the peak (use case B) — gentle C-rate |
-| `battery.charge_shaving_reserve_soc` | `20` | BR reserve floor: minimum SOC reached before the water-fill may defer (`0` disables) |
-| `battery.max_charge_w` | `5000` | Charge limit when use case A releases, or on a marginal day (B0) |
+| `battery.charge_shaving_reserve_soc` | `20` | BR reserve floor: minimum SOC reached at `max_charge_w` before the water-fill may defer (`0` disables) |
+| `battery.max_charge_w` | `5000` | Charge limit when use case A releases, on a marginal day (B0), or below the reserve floor (BR) |
 | `battery.charge_shaving_fill_margin` | `1.2` | B0 fill-margin: shave only if the day's surplus exceeds headroom by this factor |
 | `battery.shaving_decision_hour` | `8` | Local hour (Europe/Zurich) at which the day mode (car day vs shaving day) is decided and latched |
 | `battery.forecast_max_age_minutes` | `120` | Fail-safe: shave only if the PV forecast heartbeat is fresher than this |
@@ -1015,7 +1018,7 @@ against a stale mode (`test_disabled_gate_is_false_even_if_mode_says_shaving`),
 it is on by default (`test_enabled_by_default`), and the Topic 3 charge target
 still applies (`test_disabled_does_not_disable_the_charge_target`);
 `test_charge_gate.py` (`TestReserveFloor`) — the BR floor: an empty battery on an abundant shaving
-morning charges at the shaving power instead of deferring
+morning charges at `max_charge_w` instead of deferring
 (`test_below_floor_charges_instead_of_deferring`), at the floor the water-fill
 resumes (`test_at_floor_hands_back_to_the_water_fill`), `0` disables it
 (`test_floor_of_zero_disables_it`), the Topic 3 hold is still evaluated first
@@ -3248,6 +3251,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.93: **The BR reserve floor charges at full power (Section 4.2.3).** The floor banked its surplus at `charge_shaving_power_w` (2500 W), which is the right C-rate for the water-fill but the wrong one below the floor: observed live 2026-08-24 at 6 % SOC with ~3.4 kW of surplus, the 2500 W cap exported ~950 W while the battery was nearly empty. The floor now releases to `max_charge_w` like the other two greedy paths (use case A and the B0 marginal day), so the reserve is banked as fast as the surplus allows; the gentle shaving rate still governs everything above the floor. Reason string reads `... → bank the surplus greedily before shaving`. (1.9.17 -> 1.9.18)
 
 - v2.92: **The M-Bus grid reader has an on/off switch (Section 4.7.5).** The reader was always in service, so a meter known to be out of order still ran the staleness watchdog — and because the stale timer is in-process, every add-on restart re-armed it and sent another Telegram warning 5 minutes later. New `sensors.mbus_enabled` (default `true`): with it `false`, `_read_grid_power()` returns the DTSU reading directly, never reads `mbus_grid_power`, and never feeds the watchdog, so no staleness or recovery notice is sent. Reporting is unchanged from a stale-M-Bus day, since the DTSU fallback already supplied that value. Read at startup — a change needs an add-on restart. New `TestReaderDisabled` (5 cases) in `test_mbus_watchdog.py`; IT-STALE-04. 335 tests pass. (1.9.16 -> 1.9.17)
 

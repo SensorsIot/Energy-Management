@@ -429,11 +429,12 @@ class TestReserveFloor:
         assert manager._charge_use_case == "B"
         assert manager._charge_action == "charging"
         assert "reserve floor" in manager._charge_reason
-        # Banked at the gentle shaving power, not the greedy max.
+        # Banked at full power — below the floor the fast fill outweighs the
+        # gentle C-rate the rest of use case B uses.
         manager.ha_client.set_number.assert_any_call(
-            manager.charge_control_entity, manager.charge_shaving_power_w, max_retries=5
+            manager.charge_control_entity, manager.charge_max_w, max_retries=5
         )
-        assert manager._last_charge_power_w == manager.charge_shaving_power_w
+        assert manager._last_charge_power_w == manager.charge_max_w
 
     def test_at_floor_hands_back_to_the_water_fill(self, manager) -> None:
         """At/above the floor the deferral resumes — the rest of the headroom
