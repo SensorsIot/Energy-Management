@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.15"
+__version__ = "1.9.16"
 
 import json
 import logging
@@ -164,6 +164,12 @@ class EnergyManager:
             "end_of_charge_soc_entity", "number.battery_end_of_charge_soc"
         )
         self.charge_max_w = battery_opts.get("max_charge_w", 5000)
+        # Master switch for the whole Topic 5 path (FSD 4.2.3). False disables
+        # the day-mode latch, the B0 gate, the BR floor and the water-fill in
+        # one place (`_charge_gate_active`); every cycle then takes the use
+        # case A greedy release. The Topic 3 charge target (4.2.4) is a
+        # separate feature with its own switch and is unaffected.
+        self.charge_shaving_enabled = bool(battery_opts.get("charge_shaving_enabled", True))
         # Charge power used while shaving the export peak (use case B). Lower
         # than max_charge_w on purpose: a gentler C-rate is easier on the
         # battery and spreads absorption across more intervals → flatter
@@ -867,7 +873,14 @@ class EnergyManager:
         `_car_departed()` (EV drops below target) — and stays a car day for the
         rest of the day (never re-arms shaving). Before the decision hour the
         default is car day.
+
+        With shaving disabled there is no snapshot to take: the mode is held at
+        car day so the day-mode context published to the dashboard matches what
+        the battery actually does (charge greedily).
         """
+        if not self.charge_shaving_enabled:
+            self._shaving_day_mode = "car_day"
+            return
         local_now = now.astimezone(SWISS_TZ)
         today = local_now.date()
         if self._shaving_decision_date == today:
@@ -904,11 +917,14 @@ class EnergyManager:
     def _charge_gate_active(self) -> bool:
         """Return True when export-peak-shaving may manage charging today.
 
-        True only on a shaving day — the once-daily mode decided at
-        shaving_decision_hour (car connected & full). On a car day the EV
-        owns the surplus and the battery charges greedily. See FSD 4.2.3.
+        True only when shaving is enabled and today is a shaving day — the
+        once-daily mode decided at shaving_decision_hour (car connected &
+        full). On a car day the EV owns the surplus and the battery charges
+        greedily. This is the single point that turns the whole Topic 5 path
+        (day-mode latch, B0 gate, BR floor, water-fill) on and off; with it
+        false every cycle takes the use case A greedy release. See FSD 4.2.3.
         """
-        return self._shaving_day_mode == "shaving_day"
+        return self.charge_shaving_enabled and self._shaving_day_mode == "shaving_day"
 
     def control_battery_charge(self, current_soc: float, forecast, gate_forecast, now) -> None:
         """Defer battery charging to shave the export peak (FSD 4.2.3).
@@ -959,12 +975,15 @@ class EnergyManager:
         if not self._charge_gate_active():
             # Use case A — car day: the EV owns the surplus (now or later);
             # the battery charges greedily so a late top-up never starves it.
+            # Shaving disabled lands here too, every cycle.
             self._charge_use_case = "A"
             self._charge_action = "released"
             self._charge_reason = (
-                "car day — EV owns the surplus, battery charges greedily"
+                "shaving disabled — battery charges greedily"
+                if not self.charge_shaving_enabled
+                else "car day — EV owns the surplus, battery charges greedily"
             )
-            self._apply_charge_control(True, "car day — charge released")
+            self._apply_charge_control(True, self._charge_reason)
             return
 
         # Use case B — shaving day: no EV load expected today → defer to shave
@@ -1294,6 +1313,7 @@ class EnergyManager:
                 "battery_target_reason": self._charge_target_reason,
                 "shaving_day_mode": self._shaving_day_mode,
                 "shaving_decision_hour": self.shaving_decision_hour,
+                "charge_shaving_enabled": self.charge_shaving_enabled,
                 "charge_reserve_soc": round(self.charge_shaving_reserve_soc),
                 # Forecast — when does the home battery reach 100% today
                 "battery_will_be_full": battery_will_be_full,

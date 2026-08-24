@@ -335,6 +335,71 @@ class TestMarginalDayGate:
         )
 
 
+class TestShavingDisabled:
+    """`charge_shaving_enabled: false` (FSD 4.2.3) is the single switch for the
+    whole Topic 5 path — day-mode latch, B0 gate, BR floor and water-fill all
+    sit behind `_charge_gate_active()`. Off → use case A every cycle.
+    """
+
+    def _real_optimizer(self, manager) -> None:
+        manager.optimizer = BatteryOptimizer(capacity_wh=10000, max_charge_w=5000)
+
+    def test_disabled_charges_greedily_on_a_shaving_day(self, manager) -> None:
+        """A full car on an abundant day would shave; disabled it charges."""
+        self._real_optimizer(manager)
+        _wire(manager, car_soc=80.0, target=80.0)  # full → would be a shaving day
+        manager.ha_client.set_number.return_value = (True, None)
+        manager.charge_shaving_enabled = False
+        now = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)  # past the decision hour
+        fc = _forecast(now, [200.0] + [3000.0] * 40)
+
+        manager.control_battery_charge(50.0, fc, fc, now)
+
+        assert manager._charge_use_case == "A"
+        assert manager._charge_action == "released"
+        assert "shaving disabled" in manager._charge_reason
+        manager.ha_client.set_number.assert_called_once_with(
+            manager.charge_control_entity, manager.charge_max_w, max_retries=5
+        )
+
+    def test_disabled_never_latches_a_shaving_day(self, manager) -> None:
+        """No snapshot is taken, so the published day mode matches behaviour."""
+        manager.charge_shaving_enabled = False
+        _wire(manager, car_soc=80.0, target=80.0)
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "car_day"
+        assert manager._shaving_decision_date is None
+        assert manager._charge_gate_active() is False
+
+    def test_disabled_gate_is_false_even_if_mode_says_shaving(self, manager) -> None:
+        """The switch is authoritative at the gate, not only at the latch."""
+        manager.charge_shaving_enabled = False
+        manager._shaving_day_mode = "shaving_day"
+        assert manager._charge_gate_active() is False
+
+    def test_enabled_by_default(self, manager) -> None:
+        assert manager.charge_shaving_enabled is True
+
+    def test_disabled_does_not_disable_the_charge_target(self, manager) -> None:
+        """Topic 3 (4.2.4) is a separate feature — it still holds at target."""
+        self._real_optimizer(manager)
+        _wire(manager, car_soc=80.0, target=80.0)
+        manager.ha_client.set_number.return_value = (True, None)
+        manager.charge_shaving_enabled = False
+        manager.charge_target_enabled = True
+        manager._battery_target_soc = 90.0
+        now = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)
+        fc = _forecast(now, [3000.0] * 40)
+
+        manager.control_battery_charge(95.0, fc, fc, now)  # at/above target
+
+        assert manager._charge_action == "deferred"
+        assert "charge target" in manager._charge_reason
+        manager.ha_client.set_number.assert_any_call(
+            manager.charge_control_entity, 0, max_retries=5
+        )
+
+
 class TestReserveFloor:
     """BR reserve floor (FSD 4.2.3): on a shaving day the water-fill may not
     defer the battery below `charge_shaving_reserve_soc`. Shaving bets the

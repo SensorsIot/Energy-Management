@@ -572,6 +572,7 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | `discharge_efficiency` | 0.95 | Simulator (discharge branch) |
 | `soc_entity` | `sensor.battery_state_of_capacity` | Current SOC readback |
 | `discharge_control_entity` | `number.battery_maximum_discharging_power` | Discharge control output |
+| `charge_shaving_enabled` | `true` | Master switch for export-peak shaving (Section 4.2.3) |
 | `charge_shaving_power_w` | `2500` | Charge power while shaving the export peak (Section 4.2.3) |
 | `charge_shaving_reserve_soc` | `20` | Reserve floor shaving may not defer below (Section 4.2.3) |
 | `charge_control_entity` | `number.battery_maximum_charging_power` | Charge control output (Section 4.2.3) |
@@ -824,10 +825,22 @@ returns true only on a shaving day):
 | **A** | **EV owns the surplus** | car day | Charge **released** — the EV claims the surplus (now or on a later top-up); the battery charges greedily so a late charge never starves it. Shaving stays out of the way. | `max_charge_w` |
 | **B** | **Export-peak shaving** | shaving day | Defer/allow charging per the water-fill below, so the battery's headroom absorbs the export peak at a gentle, capped rate. | `0` or `charge_shaving_power_w` |
 
-The feature is **always on** — there is no enable/disable switch. The gate
-logic itself guarantees charging is never left stuck off: use case A and the
-B0 marginal-day gate both release to `max_charge_w`, and within use case B
-the limit is only ever `0` (deferring) or `charge_shaving_power_w` (charging).
+`charge_shaving_enabled` (default `true`) is the master switch for the whole
+path. It is enforced in `_charge_gate_active()` — the single point the
+day-mode latch, the B0 gate, the BR floor and the water-fill all sit behind —
+so `false` takes the use case A greedy release on **every** cycle, and no
+shaving state is computed or latched (`shaving_day_mode` stays `car_day`). The
+key is read at startup, so a change takes effect on the next add-on restart.
+
+Turning shaving off does **not** release the charge register: energy-manager
+still writes `max_charge_w` each cycle, and the Topic 3 dynamic charge target
+(4.2.4, its own `charge_target_enabled` switch) is evaluated *before* the gate
+and still caps charging at `battery_target_soc`.
+
+Whatever the switch, the gate logic guarantees charging is never left stuck
+off: use case A and the B0 marginal-day gate both release to `max_charge_w`,
+and within use case B the limit is only ever `0` (deferring) or
+`charge_shaving_power_w` (charging).
 
 #### Use case B0 — marginal-day gate (run *before* the water-fill)
 
@@ -958,6 +971,7 @@ shaving power) is still detected even though charging stays on.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
+| `battery.charge_shaving_enabled` | `true` | Master switch for the whole shaving path (`false` → greedy `max_charge_w` every cycle) |
 | `battery.charge_control_entity` | `number.battery_maximum_charging_power` | Control output (use case A & B) |
 | `battery.charge_shaving_power_w` | `2500` | Charge limit while shaving the peak (use case B) — gentle C-rate |
 | `battery.charge_shaving_reserve_soc` | `20` | BR reserve floor: minimum SOC reached before the water-fill may defer (`0` disables) |
@@ -993,7 +1007,14 @@ Test files: `energy-manager/tests/test_battery_optimizer.py`
 cap; `energy-manager/tests/test_charge_gate.py` (`TestMarginalDayGate`) — the
 B0 marginal-day gate (fills-today, never-fills, empty-forecast-is-marginal,
 and end-to-end greedy-vs-shaving routing); `test_charge_gate.py`
-(`TestReserveFloor`) — the BR floor: an empty battery on an abundant shaving
+(`TestShavingDisabled`) — the `charge_shaving_enabled` master switch: off
+routes a would-be shaving day to the greedy release
+(`test_disabled_charges_greedily_on_a_shaving_day`), no day mode is latched
+(`test_disabled_never_latches_a_shaving_day`), the gate is authoritative even
+against a stale mode (`test_disabled_gate_is_false_even_if_mode_says_shaving`),
+it is on by default (`test_enabled_by_default`), and the Topic 3 charge target
+still applies (`test_disabled_does_not_disable_the_charge_target`);
+`test_charge_gate.py` (`TestReserveFloor`) — the BR floor: an empty battery on an abundant shaving
 morning charges at the shaving power instead of deferring
 (`test_below_floor_charges_instead_of_deferring`), at the floor the water-fill
 resumes (`test_at_floor_hands_back_to_the_water_fill`), `0` disables it
@@ -1846,6 +1867,7 @@ cycle. State string: `discharge=on|off charge=<action>`.
 | `battery_target_reason` | Human-readable target explanation (e.g. `floored to 80% (survival need only 59%)`; logs/debug, not rendered) |
 | `shaving_day_mode` | Topic 5 day-mode latch: `shaving_day` or `car_day` (4.2.3) |
 | `shaving_decision_hour` | Local hour the day-mode latch is decided (default 8) |
+| `charge_shaving_enabled` | Whether export-peak shaving is active at all (4.2.3) |
 | `charge_reserve_soc` | BR reserve floor (%) below which shaving does not defer (4.2.3) |
 | `battery_will_be_full` | Forecast: does peak SOC reach the target today? (`null` if forecast unavailable) |
 | `battery_full_time` | Forecast time the home battery first reaches the target today (`HH:MM` local, else `null`) |
@@ -3210,6 +3232,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.91: **Export-peak shaving has a single on/off switch (Section 4.2.3).** The feature was unconditional, so turning it off meant editing code. New `battery.charge_shaving_enabled` (default `true`), enforced in `_charge_gate_active()` — the one point the day-mode latch, the B0 marginal gate, the BR reserve floor and the water-fill all sit behind. `false` takes the use case A greedy release to `max_charge_w` on every cycle and skips the daily snapshot entirely, so `shaving_day_mode` stays `car_day` and the dashboard context line matches what the battery does. The switch is checked at both the latch and the gate, so a stale mode cannot re-enable it. Read at startup — a change needs an add-on restart. Scope is Topic 5 only: energy-manager still owns the charge register (writing `max_charge_w`), and the Topic 3 dynamic charge target (Section 4.2.4, `charge_target_enabled`) is evaluated before the gate and still caps charging at `battery_target_soc`. `sensor.battery_decision` gains `charge_shaving_enabled`. New `TestShavingDisabled` (5 cases). 330 tests pass. (1.9.15 -> 1.9.16)
 
 - v2.90: **Export-peak shaving now charges to a reserve floor before it defers (Section 4.2.3).** A shaving day stakes the whole morning surplus on a midday export peak, with only the B0 marginal-day gate (p10 PV) protecting the bet — so a battery that ended the night empty stayed empty all morning while PV was exported. Observed live 2026-08-24: the 08:05 latch read the car full (SOC 80 % = its own limit) → shaving day, wrote `maximum_charging_power = 0` at 1 % SOC, and held it there with ~1.2 kW of surplus flowing to the grid (`surplus now 308Wh, headroom 8900Wh → defer`). New sub-case **BR**, evaluated after B0 and before the water-fill: below `charge_shaving_reserve_soc` (new config key, default 20 %) the deferral is suspended and the surplus is banked at `charge_shaving_power_w`; at or above it the water-fill resumes and holds the remaining headroom for the peak. Stateless like the water-fill — no latch, re-read from the actual SOC each tick — so evening discharge below the floor re-arms it. `0` disables it. The Topic 3 charge-target hold (4.2.4) is still evaluated first, so the floor never lifts the battery past a lower longevity ceiling, and use case A keeps its greedy `max_charge_w` release. `sensor.battery_decision` gains `charge_reserve_soc`. New `TestReserveFloor` (5 cases) in `test_charge_gate.py`. 325 tests pass. (1.9.14 -> 1.9.15)
 

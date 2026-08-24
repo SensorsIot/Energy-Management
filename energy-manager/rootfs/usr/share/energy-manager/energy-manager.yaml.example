@@ -36,7 +36,13 @@ battery:
   discharge_control_entity: "number.battery_maximum_discharging_power"
   # Export-peak shaving: defer battery charging so its headroom absorbs
   # the midday export peak (only when the car is disconnected or full).
-  # Re-evaluated every 15 min. Always on — no enable/disable switch. See FSD 4.2.3.
+  # Re-evaluated every 15 min. See FSD 4.2.3.
+  # Master switch for the whole shaving path (day-mode latch, B0 gate, BR
+  # reserve floor, water-fill). false → the battery charges greedily at
+  # max_charge_w every cycle. Read at startup, so changing it needs an add-on
+  # restart. The Topic 3 charge target (charge_target_enabled, FSD 4.2.4) is a
+  # separate feature and still caps charging at battery_target_soc.
+  charge_shaving_enabled: true
   # Charge power (W) used while shaving the export peak (use case B). Lower
   # than max_charge_w on purpose: a gentler C-rate is easier on the battery
   # and spreads absorption over more intervals → flatter feed-in. Use case A
