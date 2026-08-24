@@ -108,6 +108,12 @@ appliances:
 sensors:
   pv_power: "sensor.solar_pv_total_ac_power"
   load_power: "sensor.load_power"
+  # Master switch for the M-Bus grid meter (FSD 4.7.5). false takes the reader
+  # out of service entirely: the entity is never read, the staleness watchdog
+  # never runs, and every grid read comes from the DTSU meter. Set this while
+  # the gPlug reader is knowingly out so a dead meter stops alerting on every
+  # add-on restart. Read at startup — a change needs a restart.
+  mbus_enabled: true
   mbus_grid_power: "sensor.grid_power"            # EBL smart meter via gPlug M-Bus
   dtsu_grid_power: "sensor.power_meter_active_power"  # Huawei DTSU666-H at inverter
   appliance_signal: "sensor.appliance_signal"

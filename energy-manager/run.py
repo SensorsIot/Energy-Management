@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.16"
+__version__ = "1.9.17"
 
 import json
 import logging
@@ -305,6 +305,12 @@ class EnergyManager:
         self.ev_charging_enabled = ev_opts.get("enabled", False)
         self.ev_min_power_w = ev_opts.get("min_power_w", 1400)
         self.ev_max_power_w = ev_opts.get("max_power_w", 11000)
+        # Master switch for the M-Bus grid meter (FSD 4.7.5). False takes the
+        # reader out of service entirely: the entity is never read, the
+        # staleness watchdog never runs, and every grid read comes from the
+        # DTSU meter. Set this while the gPlug reader is knowingly out so a
+        # dead meter does not alert on every restart.
+        self.mbus_enabled = bool(sensors_opts.get("mbus_enabled", True))
         self.mbus_grid_power_entity = sensors_opts.get("mbus_grid_power", "sensor.grid_power")
         self.dtsu_grid_power_entity = sensors_opts.get(
             "dtsu_grid_power", "sensor.power_meter_active_power"
@@ -1584,8 +1590,11 @@ class EnergyManager:
 
         Prolonged M-Bus staleness (reader/firmware failure) triggers a Telegram
         alert via the watchdog (FSD 4.7.5); the control loop meanwhile falls back
-        to the DTSU meter as before.
+        to the DTSU meter as before. With the reader disabled the M-Bus side is
+        skipped outright — no read, no watchdog, no alert.
         """
+        if not self.mbus_enabled:
+            return self.ha_client.get_sensor_value(self.dtsu_grid_power_entity) or 0
         mbus_value: float | None = None
         state = self.ha_client.get_state(self.mbus_grid_power_entity)
         if state:

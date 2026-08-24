@@ -2181,6 +2181,20 @@ and the watchdog rearms for the next episode.
 The stale timer is in-process: an add-on restart re-arms detection, so a still-dead meter re-alerts
 within `mbus_stale_alert_seconds` of restart.
 
+`mbus_enabled` (default `true`) takes the reader **out of service** entirely. With it `false`,
+`_read_grid_power()` never reads `mbus_grid_power`, the watchdog is never fed, no staleness or
+recovery notice is ever sent, and every grid read comes from the DTSU meter — the same value the
+fallback already supplies, so reporting is unchanged from a stale-M-Bus day. It is the switch to set
+while the gPlug reader is knowingly out, so a meter that is *expected* to be dead stops alerting on
+every add-on restart. Read at startup, so a change takes effect on the next restart.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `sensors.mbus_enabled` | `true` | Master switch for the M-Bus reader (`false` → DTSU only, watchdog off) |
+| `sensors.mbus_grid_power` | `sensor.grid_power` | M-Bus meter entity |
+| `sensors.dtsu_grid_power` | `sensor.power_meter_active_power` | Fallback meter entity |
+| `sensors.mbus_stale_alert_seconds` | `300` | Continuous staleness before the one-shot alert |
+
 # Chapter 5: Forecast Accuracy Tracking
 
 ## 5.1 Purpose
@@ -2800,6 +2814,7 @@ Integration tests verify cross-module behavior — interactions between EV charg
 | IT-STALE-01 | Stale M-Bus reading falls back to DTSU | Mock M-Bus `last_updated` > 20 s ago | `_read_grid_power()` returns DTSU value | 🔮 Future — requires HA client mock |
 | IT-STALE-02 | Both meters stale → safe default | Both sensors return None | EV power set to 0 (pause) | 🔮 Future — requires HA client mock |
 | IT-STALE-03 | Prolonged M-Bus staleness alerts once, recovers once (4.7.5) | Feed `MbusWatchdog` fresh/stale/recovered edges | One `stale` edge past `mbus_stale_alert_seconds`, one `recovered` edge on return; brief gaps silent | ✅ `test_mbus_watchdog.py` |
+| IT-STALE-04 | A disabled M-Bus reader never reads and never alerts (4.7.5) | `mbus_enabled: false`, then repeated `_read_grid_power()` | The M-Bus entity is never read, the watchdog is never fed, the DTSU value is returned | ✅ `test_mbus_watchdog.py` (`TestReaderDisabled`) |
 | IT-TIME-01 | Scheduler fires at 15-min boundaries | APScheduler mock with time steps | `run_optimization` called at :00, :15, :30, :45 | 🔮 Future — requires scheduler mock |
 | IT-TIME-02 | EV loop runs at 10 s interval | APScheduler mock | `control_ev_charging` called every 10 s | 🔮 Future — requires scheduler mock |
 
@@ -2992,6 +3007,7 @@ sensors:
   surplus_power: "sensor.surplus_power"
   mbus_grid_power: "sensor.grid_power"            # EBL smart meter via gPlug M-Bus (preferred, < 20s)
   dtsu_grid_power: "sensor.power_meter_active_power"  # Huawei DTSU666-H at inverter (fallback)
+  mbus_enabled: true                              # Master switch for the M-Bus reader (FSD 4.7.5)
   mbus_stale_alert_seconds: 300                   # Telegram alert if M-Bus stale this long (FSD 4.7.5)
 
 ev_charging:
@@ -3232,6 +3248,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.92: **The M-Bus grid reader has an on/off switch (Section 4.7.5).** The reader was always in service, so a meter known to be out of order still ran the staleness watchdog — and because the stale timer is in-process, every add-on restart re-armed it and sent another Telegram warning 5 minutes later. New `sensors.mbus_enabled` (default `true`): with it `false`, `_read_grid_power()` returns the DTSU reading directly, never reads `mbus_grid_power`, and never feeds the watchdog, so no staleness or recovery notice is sent. Reporting is unchanged from a stale-M-Bus day, since the DTSU fallback already supplied that value. Read at startup — a change needs an add-on restart. New `TestReaderDisabled` (5 cases) in `test_mbus_watchdog.py`; IT-STALE-04. 335 tests pass. (1.9.16 -> 1.9.17)
 
 - v2.91: **Export-peak shaving has a single on/off switch (Section 4.2.3).** The feature was unconditional, so turning it off meant editing code. New `battery.charge_shaving_enabled` (default `true`), enforced in `_charge_gate_active()` — the one point the day-mode latch, the B0 marginal gate, the BR reserve floor and the water-fill all sit behind. `false` takes the use case A greedy release to `max_charge_w` on every cycle and skips the daily snapshot entirely, so `shaving_day_mode` stays `car_day` and the dashboard context line matches what the battery does. The switch is checked at both the latch and the gate, so a stale mode cannot re-enable it. Read at startup — a change needs an add-on restart. Scope is Topic 5 only: energy-manager still owns the charge register (writing `max_charge_w`), and the Topic 3 dynamic charge target (Section 4.2.4, `charge_target_enabled`) is evaluated before the gate and still caps charging at `battery_target_soc`. `sensor.battery_decision` gains `charge_shaving_enabled`. New `TestShavingDisabled` (5 cases). 330 tests pass. (1.9.15 -> 1.9.16)
 
