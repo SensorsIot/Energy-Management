@@ -107,6 +107,32 @@ class TestTypes:
         assert isinstance(manager.charge_shaving_reserve_soc, float)
 
 
+class TestEmptySections:
+    """A YAML section whose entries are all commented out parses as None.
+
+    `options.get("settings", {})` only defaults when the key is ABSENT, so a
+    present-but-empty section returned None and crashed the add-on at startup.
+    """
+
+    def test_null_section_does_not_crash(self) -> None:
+        options = {"settings": None, "battery": None, "sensors": None}
+        assert (options.get("settings") or {}).get("shaving_enabled") is None
+
+    def test_shipped_template_settings_block_is_empty(self) -> None:
+        """The shipped example ships `settings:` with every entry commented."""
+        import pathlib
+
+        import yaml
+
+        example = (
+            pathlib.Path(__file__).parent.parent
+            / "rootfs/usr/share/energy-manager/energy-manager.yaml.example"
+        )
+        parsed = yaml.safe_load(example.read_text())
+        assert "settings" in parsed
+        assert parsed["settings"] is None
+
+
 class TestOptionalBool:
     """`get_optional_bool` is what makes 'absent' distinguishable from 'off'."""
 

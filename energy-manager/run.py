@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.18"
+__version__ = "1.9.23"
 
 import json
 import logging
@@ -95,7 +95,7 @@ class EnergyManager:
         self.options = options
 
         # Initialize InfluxDB components
-        influx_opts = options.get("influxdb", {})
+        influx_opts = options.get("influxdb") or {}
         influx_token = influx_opts.get("token", "")
 
         self.forecast_reader = ForecastReader(
@@ -118,15 +118,15 @@ class EnergyManager:
         self.write_api = None
 
         # Home Assistant client
-        ha_opts = options.get("home_assistant", {})
+        ha_opts = options.get("home_assistant") or {}
         self.ha_client = HAClient(
             url=ha_opts.get("url", "http://supervisor/core"),
             token=ha_opts.get("token"),
         )
 
         # Battery optimizer
-        battery_opts = options.get("battery", {})
-        tariff_opts = options.get("tariff", {})
+        battery_opts = options.get("battery") or {}
+        tariff_opts = options.get("tariff") or {}
 
         self.optimizer = BatteryOptimizer(
             capacity_wh=battery_opts.get("capacity_kwh", 10.0) * 1000,
@@ -217,7 +217,7 @@ class EnergyManager:
         self._charge_reason: str = "charge shaving disabled"
 
         # Appliance signal config
-        appliance_opts = options.get("appliances", {})
+        appliance_opts = options.get("appliances") or {}
         self.appliance_power_w = appliance_opts.get("power_w", 2500)
         self.appliance_energy_wh = appliance_opts.get("energy_wh", 1500)
 
@@ -250,7 +250,7 @@ class EnergyManager:
         self._charge_target_reason: str = ""
 
         # Sensor entities for appliance signal calculation
-        sensors_opts = options.get("sensors", {})
+        sensors_opts = options.get("sensors") or {}
         self.pv_power_entity = sensors_opts.get("pv_power", "sensor.solar_pv_total_ac_power")
         self.load_power_entity = sensors_opts.get("load_power", "sensor.house_load_power")
         self.surplus_power_entity = sensors_opts.get("surplus_power", "sensor.surplus_power")
@@ -259,7 +259,7 @@ class EnergyManager:
         )
 
         # Scheduler
-        schedule_opts = options.get("schedule", {})
+        schedule_opts = options.get("schedule") or {}
         self.update_interval = schedule_opts.get("update_interval_minutes", 15)
         self.scheduler = BackgroundScheduler(timezone="UTC")
 
@@ -279,7 +279,7 @@ class EnergyManager:
         )
 
         # Daily household flows summary (long-term reporting)
-        reporting_opts = options.get("reporting", {})
+        reporting_opts = options.get("reporting") or {}
         self.flows_daily = FlowsDaily(
             influx_host=influx_opts.get("host", "192.168.0.203"),
             influx_port=influx_opts.get("port", 8087),
@@ -292,14 +292,14 @@ class EnergyManager:
         )
 
         # Initialize Telegram notifications
-        telegram_opts = options.get("telegram", {})
+        telegram_opts = options.get("telegram") or {}
         init_telegram(
             bot_token=telegram_opts.get("bot_token", ""),
             chat_id=telegram_opts.get("chat_id", ""),
         )
 
         # EV charging config (FSD 4.5)
-        ev_opts = options.get("ev_charging", {})
+        ev_opts = options.get("ev_charging") or {}
         self.ev_charging_enabled = ev_opts.get("enabled", False)
         self.ev_min_power_w = ev_opts.get("min_power_w", 1400)
         self.ev_max_power_w = ev_opts.get("max_power_w", 11000)
@@ -316,7 +316,7 @@ class EnergyManager:
         # `unavailable`, so a fresh install works with no helpers at all. Read
         # once per 15-min cycle by `_refresh_runtime_settings`, which writes the
         # same attributes the YAML populated, so every use site is unchanged.
-        settings_opts = options.get("settings", {})
+        settings_opts = options.get("settings") or {}
         self.setting_entities = {
             "charge_shaving_enabled": settings_opts.get(
                 "shaving_enabled", "input_boolean.battery_shaving_enabled"
@@ -443,7 +443,7 @@ class EnergyManager:
         self.ev_battery_optimizer: EVBatteryOptimizer | None = None
 
         # Smart car config (FSD 4.5 Step 2 — hourly SOC readback)
-        smart_opts = options.get("smart_car", {})
+        smart_opts = options.get("smart_car") or {}
         self.smart_car_enabled = smart_opts.get("enabled", False)
         self.smart_car_soc_entity = smart_opts.get("soc_entity", "sensor.smart_battery")
         self.smart_car_capacity_kwh = float(smart_opts.get("capacity_kwh", 100.0))
@@ -495,7 +495,7 @@ class EnergyManager:
         if current_soc is None:
             # Fallback: try to get SOC from InfluxDB
             logger.info("HA SOC not available, trying InfluxDB...")
-            influx_opts = self.options.get("influxdb", {})
+            influx_opts = self.options.get("influxdb") or {}
             current_soc = self.forecast_reader.get_current_soc(
                 bucket=influx_opts.get("soc_bucket", "HuaweiNew"),
                 measurement=influx_opts.get("soc_measurement", "Energy"),
@@ -764,7 +764,7 @@ class EnergyManager:
             return
 
         # Determine target value: max_discharge_w if allowed, 0W if blocked
-        battery_opts = self.options.get("battery", {})
+        battery_opts = self.options.get("battery") or {}
         max_discharge_w = battery_opts.get("max_discharge_w", 5000)
         target_value = max_discharge_w if discharge_allowed else 0
         action = "enable" if discharge_allowed else "block"
