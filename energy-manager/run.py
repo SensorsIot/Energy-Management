@@ -34,6 +34,7 @@ from src.ev_charging import (
     solar_start_threshold,
 )
 from src.influxdb_writer import SimulationWriter
+from src.longevity import battery_longevity
 from src.integration_observer import CycleSnapshot, IntegrationObserver
 from src.flows_daily import FlowsDaily
 from src.mbus_watchdog import MbusWatchdog
@@ -42,9 +43,6 @@ from src.sanity import validate_power_readings
 
 # Swiss timezone for display
 SWISS_TZ = ZoneInfo("Europe/Zurich")
-
-# Adaptive SOC polling: 1 minute during charging, hourly otherwise
-CAR_SOC_CHARGING_INTERVAL_S = 60
 
 
 
@@ -227,28 +225,28 @@ class EnergyManager:
         self.capacity_wh = battery_opts.get("capacity_kwh", 10.0) * 1000
         self.reserve_percent = battery_opts.get("reserve_percent", 10)
 
-        # Topic 3 longevity (FSD 4.2.4): dynamic charge target — charge the LFP
-        # battery only to the lowest SOC that stays protected from buying over
-        # 48 h (worst-case p10 PV / p50 load) + margin, then hold; reduces
-        # high-SOC dwell. OFF by default pending live validation (Topics 1/2/4
-        # ship first). The target is NOT threaded into the EV/discharge forecast.
-        self.charge_target_enabled = battery_opts.get("charge_target_enabled", False)
-        self.charge_target_margin = float(battery_opts.get("charge_target_margin", 10.0))
-        self.charge_target_horizon_h = int(battery_opts.get("charge_target_horizon_h", 48))
-        # Floor on the dynamic target: even when the 48 h survival need is lower,
-        # always charge to at least this SOC. 80% is well within the LFP-friendly
-        # band (no longevity cost) and keeps headroom available for shaving. The
-        # survival math still uses no_buy_floor_percent; this only raises the
-        # final target.
-        self.charge_target_min = float(battery_opts.get("charge_target_min", 90.0))
-        self.charge_target_full_interval_days = float(
-            battery_opts.get("charge_target_full_interval_days", 7)
+        # Topic 3 longevity (FSD 4.2.4): hold the LFP pack below full to reduce
+        # high-SOC dwell. The ceiling is a goal, not a derived quantity — the
+        # only exception is the periodic calibration charge that lets the BMS
+        # re-anchor its SOC estimate. The ceiling is NOT threaded into the
+        # EV/discharge forecast. Legacy `charge_target_*` keys are still read.
+        self.longevity_enabled = bool(
+            battery_opts.get("longevity_enabled", battery_opts.get("charge_target_enabled", False))
         )
-        # Current dynamic ceiling (%); 100 until first optimization (safe default).
-        # Enforced in software (charge limit 0 at/above target) because the
+        self.longevity_ceiling = float(
+            battery_opts.get("longevity_ceiling", battery_opts.get("charge_target_min", 90.0))
+        )
+        self.longevity_calibration_days = float(
+            battery_opts.get(
+                "longevity_calibration_days",
+                battery_opts.get("charge_target_full_interval_days", 7),
+            )
+        )
+        # Current ceiling (%); 100 until the first optimization (safe default).
+        # Backed in software (charge limit 0 at/above the ceiling) because the
         # inverter's native max-SOC entity only accepts 90-100%.
         self._battery_target_soc: float = 100.0
-        # Human-readable explanation of the current target (published to HA).
+        # Human-readable explanation of the current ceiling (published to HA).
         self._charge_target_reason: str = ""
 
         # Sensor entities for appliance signal calculation
@@ -311,6 +309,44 @@ class EnergyManager:
         # DTSU meter. Set this while the gPlug reader is knowingly out so a
         # dead meter does not alert on every restart.
         self.mbus_enabled = bool(sensors_opts.get("mbus_enabled", True))
+
+        # Runtime settings (FSD 4.7.6): six values the tablet can change without
+        # editing YAML or restarting the add-on. The YAML value stays the
+        # default — it is what applies when the helper is absent, `unknown` or
+        # `unavailable`, so a fresh install works with no helpers at all. Read
+        # once per 15-min cycle by `_refresh_runtime_settings`, which writes the
+        # same attributes the YAML populated, so every use site is unchanged.
+        settings_opts = options.get("settings", {})
+        self.setting_entities = {
+            "charge_shaving_enabled": settings_opts.get(
+                "shaving_enabled", "input_boolean.battery_shaving_enabled"
+            ),
+            "longevity_enabled": settings_opts.get(
+                "longevity_enabled", "input_boolean.battery_longevity_enabled"
+            ),
+            "longevity_ceiling": settings_opts.get(
+                "longevity_ceiling", "input_number.battery_longevity_ceiling"
+            ),
+            "shaving_decision_hour": settings_opts.get(
+                "shaving_decision_hour", "input_number.shaving_decision_hour"
+            ),
+            "charge_shaving_reserve_soc": settings_opts.get(
+                "shaving_reserve_soc", "input_number.shaving_reserve_soc"
+            ),
+            "mbus_enabled": settings_opts.get(
+                "mbus_enabled", "input_boolean.mbus_reader_enabled"
+            ),
+        }
+        # The YAML-derived values, kept so a helper that disappears falls back
+        # to them rather than to a hardcoded constant.
+        self._setting_defaults = {
+            "charge_shaving_enabled": self.charge_shaving_enabled,
+            "longevity_enabled": self.longevity_enabled,
+            "longevity_ceiling": self.longevity_ceiling,
+            "shaving_decision_hour": self.shaving_decision_hour,
+            "charge_shaving_reserve_soc": self.charge_shaving_reserve_soc,
+            "mbus_enabled": self.mbus_enabled,
+        }
         self.mbus_grid_power_entity = sensors_opts.get("mbus_grid_power", "sensor.grid_power")
         self.dtsu_grid_power_entity = sensors_opts.get(
             "dtsu_grid_power", "sensor.power_meter_active_power"
@@ -426,9 +462,6 @@ class EnergyManager:
         self.wallbox_session_energy_entity = ev_opts.get(
             "wallbox_session_energy_entity", "sensor.wallbox_energy"
         )
-        self._last_wallbox_status: str | None = None
-        self._last_ev_charging_mode: str | None = None
-        self._last_car_soc_poll: float = 0.0
 
     def connect(self) -> None:
         """Connect to services."""
@@ -867,6 +900,33 @@ class EnergyManager:
         """
         return self._car_is_full() is False
 
+    def _refresh_runtime_settings(self) -> None:
+        """Re-read the six tablet-controlled settings (FSD 4.7.6).
+
+        Each setting resolves as: the HA helper when it holds a definite state,
+        otherwise the YAML default. A missing, `unknown` or `unavailable` helper
+        must never read as "off" — that would disable a feature because an
+        entity failed to load, which is the opposite of a safe default.
+
+        Called once per 15-min optimization cycle, and the values are written
+        back onto the same attributes the YAML populated, so the ~10 places that
+        read them need no change. `mbus_enabled` is also consumed by the 10-s EV
+        loop; it picks the new value up at the next 15-min refresh.
+        """
+        for attr, entity_id in self.setting_entities.items():
+            default = self._setting_defaults[attr]
+            if isinstance(default, bool):
+                value = self.ha_client.get_optional_bool(entity_id)
+                resolved = default if value is None else value
+            else:
+                raw = self.ha_client.get_sensor_value(entity_id)
+                resolved = default if raw is None else type(default)(raw)
+            if resolved != getattr(self, attr):
+                logger.info(
+                    f"Setting {attr}: {getattr(self, attr)} → {resolved} (from {entity_id})"
+                )
+            setattr(self, attr, resolved)
+
     def _update_shaving_day_mode(self, now) -> None:
         """Decide the day's shaving mode at the configured hour; downgrade on departure.
 
@@ -882,13 +942,20 @@ class EnergyManager:
 
         With shaving disabled there is no snapshot to take: the mode is held at
         car day so the day-mode context published to the dashboard matches what
-        the battery actually does (charge greedily).
+        the battery actually does (charge greedily). Once the decision hour has
+        passed, a disabled day still **commits** that car day, so switching
+        shaving on from the tablet later the same day cannot arm a shaving day
+        mid-morning — the latch is once-daily, and the switch takes effect at
+        the next decision hour (FSD 4.7.6). Before the decision hour nothing is
+        committed, so a switch flipped overnight still gets its snapshot today.
         """
-        if not self.charge_shaving_enabled:
-            self._shaving_day_mode = "car_day"
-            return
         local_now = now.astimezone(SWISS_TZ)
         today = local_now.date()
+        if not self.charge_shaving_enabled:
+            self._shaving_day_mode = "car_day"
+            if local_now.hour >= self.shaving_decision_hour:
+                self._shaving_decision_date = today
+            return
         if self._shaving_decision_date == today:
             # Latch committed today. Departure trigger: a shaving day drops to a
             # car day as soon as the car is no longer full, so the battery stops
@@ -946,27 +1013,25 @@ class EnergyManager:
         Records the decision (use case / action / reason) on self for
         publication to sensor.battery_decision (FSD 4.6.4).
         """
-        # Topic 3 longevity (FSD 4.2.4): mirror the dynamic charge target (lowest
-        # SOC that stays protected over 48 h) onto the inverter's native
-        # end-of-charge SOC ceiling, so the inverter hard-stops charging at the
-        # target in real time — no 15-min control lag, and PV surplus can't
-        # trickle the battery past it. When the cap is disabled EM does not own
-        # the register: it leaves it untouched, only releasing it to 100% once if
-        # EM itself had previously lowered it (feature turned off mid-run).
-        if self.charge_target_enabled:
-            self._apply_soc_ceiling(self._battery_target_soc)
-        elif self._last_soc_ceiling is not None and self._last_soc_ceiling < 100.0:
-            self._apply_soc_ceiling(100.0)
+        # Topic 3 longevity (FSD 4.2.4): mirror the ceiling onto the inverter's
+        # native end-of-charge SOC register, so it hard-stops charging in real
+        # time — no 15-min control lag, and PV surplus can't trickle past it.
+        # Applied UNCONDITIONALLY, including the neutral 100% a disabled feature
+        # returns: "off" is a value that must be written, or a ceiling written
+        # while the feature was on stays latched in the register forever. The
+        # no-op write is suppressed by set_number, which compares against the
+        # register's own live value (FSD 4.7.1) rather than an in-process cache,
+        # so this costs no flash cycles and self-heals across a restart.
+        self._apply_soc_ceiling(self._battery_target_soc)
 
-        # The software power limit (limit 0) still backs the ceiling and drives
-        # the dashboard action. Holds once the battery reaches the target. When
-        # disabled or at the 100% fail-safe target this never fires. Re-evaluated
-        # every 15 min.
-        if self.charge_target_enabled and current_soc >= self._battery_target_soc:
+        # The software power limit (limit 0) backs the register. Holds once the
+        # battery reaches the ceiling. At the neutral 100% this never fires.
+        # Re-evaluated every 15 min.
+        if current_soc >= self._battery_target_soc:
             self._charge_use_case = "B"
             self._charge_action = "deferred"
             self._charge_reason = (
-                f"at charge target {self._battery_target_soc:.0f}% — holding "
+                f"at charge ceiling {self._battery_target_soc:.0f}% — holding "
                 f"(LFP longevity, surplus exported)"
             )
             self._apply_charge_control(False, self._charge_reason)
@@ -1173,7 +1238,7 @@ class EnergyManager:
         """Whether an LFP calibration full charge is due (FSD 4.2.4).
 
         Due when the battery has not reached ≥99% SOC within the last
-        `charge_target_full_interval_days` (rolling — the clock restarts each
+        `longevity_calibration_days` (rolling — the clock restarts each
         time SOC reaches ≥99%, by sun or by a prior calibration). Reads the
         most recent ≥99% point
         from SOC history (no separate persisted state). On query error or no
@@ -1183,7 +1248,7 @@ class EnergyManager:
         if self.influx_client is None:
             return False
         short_id = self.soc_entity.split(".", 1)[-1]
-        interval = self.charge_target_full_interval_days
+        interval = self.longevity_calibration_days
         try:
             query = f'''
             from(bucket: "HomeAssistant")
@@ -1235,21 +1300,28 @@ class EnergyManager:
         self._last_charge_power_w = target
 
     def _apply_soc_ceiling(self, target_soc: float) -> None:
-        """Mirror the charge target onto the inverter's end-of-charge SOC.
+        """Mirror the longevity ceiling onto the inverter's end-of-charge SOC.
 
         The inverter hard-stops charging at this SOC in real time, so the
-        longevity cap (FSD 4.2.4) holds without the 15-min lag of the power
-        limit and without PV trickling the battery past it. The register
-        accepts 90-100%; the charge target is floored to 90 so it always fits
-        (a target above 100 is impossible, 100 means "no cap"). Writes only on
-        change.
+        ceiling (FSD 4.2.4) holds without the 15-min lag of the power limit and
+        without PV trickling the battery past it. The register accepts 90-100%;
+        a ceiling below 90 is clamped (it is then enforced by the software power
+        limit alone), and 100 means "no cap".
+
+        Called on every cycle, whatever the ceiling — a disabled feature still
+        writes its neutral 100%, so a ceiling set while it was enabled can never
+        stay latched in the register. No-op writes are suppressed inside
+        `set_number`, which compares against the register's own live value
+        (FSD 4.7.1), so an unchanged ceiling costs no inverter flash cycle. The
+        `_last_soc_ceiling` cache below only governs log verbosity; it never
+        gates the write, so a restart re-asserts the ceiling instead of
+        stranding it.
         """
         ceiling = round(max(90.0, min(100.0, float(target_soc))), 1)
-        if ceiling == self._last_soc_ceiling:
-            return
-        logger.info(
-            f"Inverter end-of-charge SOC → {self.end_of_charge_soc_entity}={ceiling}%"
-        )
+        if ceiling != self._last_soc_ceiling:
+            logger.info(
+                f"Inverter end-of-charge SOC → {self.end_of_charge_soc_entity}={ceiling}%"
+            )
         success, error_msg = self.ha_client.set_number(
             self.end_of_charge_soc_entity, ceiling, max_retries=5
         )
@@ -1316,7 +1388,6 @@ class EnergyManager:
                 "charge_limit_w": charge_limit_w,
                 # Charge ceiling (Topic 3, FSD 4.2.4) + day-mode latch (Topic 5, FSD 4.2.3)
                 "battery_target_soc": round(self._battery_target_soc),
-                "charge_target_enabled": self.charge_target_enabled,
                 "battery_target_reason": self._charge_target_reason,
                 "shaving_day_mode": self._shaving_day_mode,
                 "shaving_decision_hour": self.shaving_decision_hour,
@@ -1336,6 +1407,9 @@ class EnergyManager:
         logger.info("Running battery optimization...")
 
         try:
+            # Pick up any tablet changes before anything reads a setting.
+            self._refresh_runtime_settings()
+
             # Get current SOC
             current_soc = self.get_current_soc()
             logger.debug(f"Current battery SOC: {current_soc:.1f}%")
@@ -1403,45 +1477,40 @@ class EnergyManager:
                 f"{swiss_datetime(forecast.index[-1])}"
             )
 
-            # Topic 3 longevity (FSD 4.2.4): charge only to the lowest SOC that
-            # keeps the home battery >= no_buy_floor over 48 h (worst-case p10 PV
-            # / p50 load) + margin, floored at charge_target_min; hold above it.
-            # A due calibration charge (rolling 7 d since the last >= 99%) and a
-            # stale/missing forecast fail UP to 100%. The target is enforced ONLY
-            # by control_battery_charge — it is deliberately NOT threaded into the
-            # discharge/EV SOC forecast (those read the natural charge-to-100
-            # trajectory; threading the cap in caused the 2026-06-18/19 incidents).
-            if self.charge_target_enabled:
-                calibration_due = self._calibration_charge_due(now)
-                target_soc, target_reason = self.optimizer.compute_charge_target(
-                    current_soc,
-                    gate_forecast,
-                    now,
-                    reserve=self.no_buy_floor_percent,
-                    margin_pct=self.charge_target_margin,
-                    min_target=self.charge_target_min,
-                    horizon_h=self.charge_target_horizon_h,
-                    calibration_due=calibration_due,
-                    forecast_fresh=self._forecast_fresh,
-                )
-                self._battery_target_soc = target_soc
-                self._charge_target_reason = target_reason
-                logger.info(f"Battery charge target: {target_soc:.0f}% ({target_reason})")
-            else:
-                self._battery_target_soc = 100.0
-                self._charge_target_reason = "charge target disabled"
+            # Topic 3 longevity (FSD 4.2.4). The ceiling is a goal, not a derived
+            # quantity: the configured longevity_ceiling, lifted to 100% only for
+            # a due calibration charge (rolling longevity_calibration_days since
+            # the last >= 99%) so the LFP BMS can re-anchor its SOC estimate.
+            # The calibration query costs an InfluxDB round trip, so it is only
+            # made on the path that can use the answer.
+            constraint = battery_longevity(
+                enabled=self.longevity_enabled,
+                calibration_due=(
+                    self._calibration_charge_due(now) if self.longevity_enabled else False
+                ),
+                ceiling=self.longevity_ceiling,
+            )
+            self._battery_target_soc = constraint.soc_ceiling
+            self._charge_target_reason = constraint.reason
+            logger.info(
+                f"Battery charge ceiling: {constraint.soc_ceiling:.0f}% ({constraint.reason})"
+            )
 
-            # Discharge decision (Topic 4). The planned SOC forecast it produces
-            # is the NATURAL charge-to-100 trajectory — the Topic 3 charge target
-            # is deliberately NOT threaded in, so the EV safety gate (Rule 4) and
-            # Topic 4 read the unpolluted forecast.
+            # Discharge decision (Topic 4). The planned SOC forecast is capped at
+            # the longevity ceiling, because that is where charging actually
+            # stops — a forecast assuming charge-to-100 over-states the energy
+            # available to the EV safety gate (Rule 4) and to Topic 4. Threading
+            # the OLD dynamic target in caused the 2026-06-18/19 incidents; the
+            # ceiling is now a constant that never derives from the forecast, so
+            # it can be neither stale nor arbitrarily low, and it equals 100%
+            # (a no-op) whenever longevity is disabled.
             decision, sim_battery_on, sim_battery_off, sim_planned = (
                 self.optimizer.calculate_decision(
                     soc_percent=current_soc,
                     forecast=forecast,
                     now=now,
                     previously_blocked=self._discharge_blocked_by_protection,
-                    max_soc_percent=100.0,
+                    max_soc_percent=self._battery_target_soc,
                 )
             )
 
@@ -1660,49 +1729,9 @@ class EnergyManager:
                 logger.debug("Wallbox not connected, skipping EV control")
                 return
 
-            # Adaptive SOC polling: on connect, on mode change, every 1 min while charging
+            # Wallbox status drives the state machine (Finishing/SuspendedEV below)
             wb_status_state = self.ha_client.get_state(self.ev_wallbox_status_entity)
             wb_status = wb_status_state.get("state", "Unknown") if wb_status_state else "Unknown"
-
-            if self.smart_car_enabled:
-                ev_mode_poll = self.ha_client.get_input_select(self.ev_charging_mode_entity)
-                now_mono = time.monotonic()
-
-                # Charging mode changed — get fresh SOC before deciding
-                if (
-                    ev_mode_poll != self._last_ev_charging_mode
-                    and self._last_ev_charging_mode is not None
-                ):
-                    logger.info(
-                        f"Smart car: mode changed "
-                        f"({self._last_ev_charging_mode} → {ev_mode_poll}), polling SOC"
-                    )
-                    self.update_car_soc()
-                    self._last_car_soc_poll = now_mono
-
-                # Car just connected (transition to Preparing from disconnected state)
-                elif wb_status == "Preparing" and self._last_wallbox_status not in (
-                    "Preparing",
-                    "Charging",
-                    "SuspendedEV",
-                    "SuspendedEVSE",
-                    "Finishing",
-                ):
-                    logger.info("Smart car: car connected, polling SOC")
-                    self.update_car_soc()
-                    self._last_car_soc_poll = now_mono
-
-                # Every 1 min while charging
-                elif (
-                    wb_status == "Charging"
-                    and (now_mono - self._last_car_soc_poll) >= CAR_SOC_CHARGING_INTERVAL_S
-                ):
-                    logger.info("Smart car: charging poll (1-min interval)")
-                    self.update_car_soc()
-                    self._last_car_soc_poll = now_mono
-
-                self._last_wallbox_status = wb_status
-                self._last_ev_charging_mode = ev_mode_poll
 
             # Read wallbox power
             wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity) or 0.0
@@ -2170,36 +2199,6 @@ class EnergyManager:
         except Exception as e:
             logger.error(f"EV charging control failed: {e}", exc_info=True)
 
-    def update_car_soc(self) -> None:
-        """Read SOC and charging state from smarthashtag HA entities."""
-        if not self.smart_car_enabled:
-            return
-
-        try:
-            soc_raw = self.ha_client.get_sensor_value(self.smart_car_soc_entity)
-            if soc_raw is None:
-                return
-
-            charger_status = self.ha_client.get_state("sensor.smart_charging_status")
-            charging_current = self.ha_client.get_state("sensor.smart_charging_current")
-            time_remaining = self.ha_client.get_state("sensor.smart_charging_time_remaining")
-            range_state = self.ha_client.get_state("sensor.smart_range")
-
-            charger_str = charger_status.get("state", "unknown") if charger_status else "unknown"
-            current_a = float(charging_current.get("state", 0)) if charging_current else 0.0
-            time_raw = time_remaining.get("state", "unknown") if time_remaining else "unknown"
-            time_min = int(float(time_raw)) if time_raw not in ("unknown", "unavailable") else None
-            range_km = int(float(range_state.get("state", 0))) if range_state else 0
-
-            logger.info(
-                f"Smart car SOC: {soc_raw}% charger={charger_str} "
-                f"current={current_a}A range={range_km}km"
-                + (f" time_remaining={time_min}min" if time_min is not None else "")
-            )
-
-        except Exception as e:
-            logger.error(f"Smart car SOC update failed: {e}")
-
     def _query_last_value(self, entity_id: str) -> str | None:
         """Query InfluxDB for the last known value of an HA entity."""
         try:
@@ -2326,19 +2325,6 @@ class EnergyManager:
             )
             logger.info("EV charging control enabled (10-second interval)")
 
-        # Schedule Smart car SOC update (hourly)
-        if self.smart_car_enabled:
-            self.update_car_soc()  # Run immediately
-            self.scheduler.add_job(
-                self.update_car_soc,
-                "interval",
-                hours=1,
-                id="smart_car_soc",
-                name="Smart Car SOC Update",
-                max_instances=1,
-                coalesce=True,
-            )
-            logger.info("Smart car SOC update enabled (1-hour interval)")
 
         self.scheduler.start()
 

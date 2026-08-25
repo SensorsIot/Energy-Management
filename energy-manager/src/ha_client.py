@@ -296,6 +296,32 @@ class HAClient:
         state = self.get_state(entity_id)
         return state is not None and state.get("state") == "on"
 
+    def get_optional_bool(self, entity_id: str) -> bool | None:
+        """Read a toggle, distinguishing "off" from "not there".
+
+        `get_input_boolean` collapses a missing entity into False, which is
+        unusable for a setting that falls back to a configured default — an
+        absent helper would silently read as "off" and disable the feature.
+        This returns None for missing, `unknown` or `unavailable`, so the
+        caller can apply its default instead.
+
+        Args:
+            entity_id: The input_boolean entity ID
+
+        Returns:
+            True / False when the entity holds a definite state, else None.
+
+        """
+        state = self.get_state(entity_id)
+        if not state:
+            return None
+        value = state.get("state")
+        if value == "on":
+            return True
+        if value == "off":
+            return False
+        return None
+
     def set_input_boolean(self, entity_id: str, state: bool) -> bool:
         """Set input_boolean on or off.
 

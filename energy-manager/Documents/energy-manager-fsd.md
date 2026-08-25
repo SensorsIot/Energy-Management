@@ -833,8 +833,8 @@ shaving state is computed or latched (`shaving_day_mode` stays `car_day`). The
 key is read at startup, so a change takes effect on the next add-on restart.
 
 Turning shaving off does **not** release the charge register: energy-manager
-still writes `max_charge_w` each cycle, and the Topic 3 dynamic charge target
-(4.2.4, its own `charge_target_enabled` switch) is evaluated *before* the gate
+still writes `max_charge_w` each cycle, and the Topic 3 longevity ceiling
+(4.2.4, its own `longevity_enabled` switch) is evaluated *before* the gate
 and still caps charging at `battery_target_soc`.
 
 Whatever the switch, the gate logic guarantees charging is never left stuck
@@ -1038,38 +1038,40 @@ an unknown SOC is held, not a departure (`test_stale_car_soc_is_not_a_departure`
 
 ### 4.2.4 Charge Ceiling -- Longevity (Topic 3)
 
-Limits how high the home battery charges, sparing the LFP from high-SOC dwell. Enforced on two inverter outputs: the native end-of-charge SOC ceiling (`battery.end_of_charge_soc_entity`, `number.battery_end_of_charge_soc`) is the real-time hard cap, backed by the charge-power limit (`battery.charge_control_entity`, `number.battery_maximum_charging_power`). Re-evaluated every 15 min. Off by default (`charge_target_enabled`).
+Limits how high the home battery charges, sparing the LFP from high-SOC dwell. Enforced on two inverter outputs: the native end-of-charge SOC ceiling (`battery.end_of_charge_soc_entity`, `number.battery_end_of_charge_soc`) is the real-time hard cap, backed by the charge-power limit (`battery.charge_control_entity`, `number.battery_maximum_charging_power`). Re-evaluated every 15 min. Off by default (`longevity_enabled`).
 
-| # | Rule | Condition | Action |
-|---|------|-----------|--------|
-| **1** | **Charge to target, then hold** | current SOC >= `battery_target_soc` | set charge power to 0 -- hold (surplus exports; discharge unaffected) |
-| **2** | **Calibration charge** | > `charge_target_full_interval_days` (7) since SOC last reached >= 99 % (rolling — restarts at each >= 99 %) | `battery_target_soc` = 100 % |
-| **3** | **Fail-safe** | forecast missing / stale | `battery_target_soc` = 100 % |
+The ceiling is a **goal**, not a derived quantity: `battery_target_soc` is the configured `longevity_ceiling`. The single exception is the calibration charge — LFP has a flat voltage curve, so the BMS re-anchors its SOC estimate at the top of the range, and a pack held permanently below full drifts. Because the ceiling itself stops the pack reaching >= 99 %, the calibration rule fires on its own interval, giving a ceiling / full-charge duty cycle of roughly 1 day in `longevity_calibration_days` + 1.
 
-**`battery_target_soc`** = the lowest SOC ceiling C in [`no_buy_floor_percent`, 100] such that simulating the next `charge_target_horizon_h` (48 h) at worst-case PV (p10) / load (p50), capped at C, keeps the home-battery minimum >= `no_buy_floor_percent`, plus `charge_target_margin`, then **floored to `charge_target_min`** (`BatteryOptimizer.compute_charge_target`). The minimum is taken only from the end of today's charging window onward — the **last interval today (searched back from local 23:59) where PV exceeds load**, i.e. the battery's daily peak / start of overnight discharge. This excludes today's transient pre-charge low SOC, so a battery currently below the floor (e.g. drained overnight) does not by itself force a 100 % target; the deficit-→100 % result reflects a genuine forward shortfall. If no surplus remains today, the anchor is now. The floor means the battery always charges to at least `charge_target_min` (default 90 %) even when the survival need is lower — LFP-safe and banking more headroom for the car/house instead of exporting it. The survival math itself still uses `no_buy_floor_percent`; the floor only raises the final target.
+| # | Rule | Condition | `battery_target_soc` |
+|---|------|-----------|----------------------|
+| **1** | **Disabled** | `longevity_enabled` is false | 100 % (no cap) |
+| **2** | **Calibration charge** | > `longevity_calibration_days` (7) since SOC last reached >= 99 % (rolling — restarts at each >= 99 %) | 100 % |
+| **3** | **Ceiling** | otherwise | `longevity_ceiling` (90 %) |
 
-`battery_target_soc` is enforced **only** by the charge control. It is **not** threaded into the discharge/EV SOC forecast -- those read the natural charge-to-100 trajectory (the EV's wallbox-off question, Section 4.3.6). Because the target is sized on worst-case p10 PV, the held battery still stays >= `no_buy_floor_percent` (above the EV floor and the discharge reserve), so the natural forecast the other topics read remains safe.
+Rules are evaluated by `battery_longevity()` (`src/longevity.py`), a pure function of three scalars that performs no I/O and returns a `LongevityConstraint`. It needs neither the forecast nor the current SOC. A disabled feature returns an explicit 100 % rather than nothing, so "off" is a value the caller writes.
 
-The "last full" timestamp is read from SOC history (InfluxDB: most recent point with SOC >= 99) -- no persisted state.
+A separate rule in the charge control holds the pack once it arrives: **current SOC >= `battery_target_soc` → charge power 0** (surplus exports; discharge unaffected). At the neutral 100 % this never fires.
 
-**Enforcement.** Every 15 min the target is mirrored onto the inverter's native end-of-charge SOC register (`battery.end_of_charge_soc_entity`), which hard-stops charging at that SOC in real time — no 15-min control lag, and PV surplus cannot trickle the battery past it. The register accepts only 90-100 %, exactly the range of `battery_target_soc` (floored to `charge_target_min` >= 90), so it always fits; a 100 % target means "no cap". The charge-power limit (`0` at/above target, Rule 1) backs it and drives the dashboard `charge_action`. When `charge_target_enabled` is off EM does **not** own the SOC register — it leaves it untouched, and releases it to 100 % only when its own last-written ceiling is below 100 % (a cap left in place by the feature is cleared; a register EM never wrote is not clobbered).
+The "last full" timestamp is read from SOC history (InfluxDB: most recent point with SOC >= 99) — no persisted state. On a query error it returns "not due", so a broken InfluxDB cannot force a full charge. The query is made only when `longevity_enabled` is true, so a disabled feature costs no round trip.
+
+**Forecast coupling.** `battery_target_soc` **is** threaded into the discharge/EV SOC forecast as `max_soc_percent`, because it is where charging actually stops — a forecast assuming charge-to-100 over-states the energy available to the EV safety gate (Rule 4, Section 4.3.6) and to Topic 4. This is safe because the ceiling is a constant that never derives from the forecast: it can be neither stale nor arbitrarily low, and it equals 100 % — a no-op — whenever the feature is disabled. Enabling it therefore makes the EV gate correctly more conservative, reflecting the smaller usable range the ceiling creates.
+
+**Enforcement.** Every 15 min the ceiling is written to the inverter's native end-of-charge SOC register (`battery.end_of_charge_soc_entity`), which hard-stops charging at that SOC in real time — no 15-min control lag, and PV surplus cannot trickle the battery past it. The register accepts only 90-100 %; a ceiling below 90 is clamped for the register and enforced by the software power limit alone. The write is **unconditional**, including the neutral 100 % of a disabled feature: skipping it would leave a ceiling written while the feature was enabled latched in the register indefinitely, including across the add-on restart that a config change requires. No-op writes are suppressed inside `set_number`, which compares against the register's own live value (Section 4.7.1) rather than an in-process cache, so an unchanged ceiling costs no inverter flash cycle and a restart re-asserts rather than strands it.
 
 #### Configuration
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `battery.charge_target_enabled` | `false` | Master switch (off pending live validation) |
-| `battery.charge_target_margin` | `10` | Extra % of capacity above the worst-case need |
-| `battery.charge_target_horizon_h` | `48` | Survival look-ahead |
-| `battery.charge_target_full_interval_days` | `7` | Days after the last >= 99 % SOC to force a 100 % calibration charge |
-| `battery.charge_target_min` | `90` | Floor on the target — always charge to at least this SOC, even when the survival need is lower |
+| `battery.longevity_enabled` | `false` | Master switch. A programming constant — read at startup, never published as an entity or attribute |
+| `battery.longevity_ceiling` | `90` | The goal (%) while enabled |
+| `battery.longevity_calibration_days` | `7` | Days after the last >= 99 % SOC to force a 100 % calibration charge |
 | `battery.end_of_charge_soc_entity` | `number.battery_end_of_charge_soc` | Inverter's native end-of-charge SOC ceiling — the real-time hard cap |
 
-Survival floor = `battery.no_buy_floor_percent` (shared, 20 %); target floor = `battery.charge_target_min` (90 %).
+Each key also accepts an alternative spelling, read only when the primary key is absent: `charge_target_enabled`, `charge_target_min`, `charge_target_full_interval_days`.
 
 #### Test Cases
 
-Test file: `energy-manager/tests/test_charge_target.py`.
+Test files: `energy-manager/tests/test_longevity.py` (the rules), `energy-manager/tests/test_charge_gate.py::TestSocCeiling` (the register), `energy-manager/tests/test_inverter_writes.py` (write economy).
 
 ---
 
@@ -1298,7 +1300,7 @@ The wallbox may charge **iff all four hold**; the first that fails stops it.
 **Notes**
 
 - Rule 3's start threshold is **phase-aware** (`solar_start_threshold`): in **3φ** it is the manual `input_number.ev_min_solar_power`; in **1φ** that gate is **not honored** and the threshold is the wallbox minimum (6 A ≈ 1380 W). Single-phase power is inherently small (max 3680 W / 16 A), so `ev_min_solar_power` — sized for 3-phase, where the minimum step is already 3962 W — would strand most of the 1φ range and force charging only in the top band. The connected-phase count comes from `sensor.wallbox_phases` (ocpp-server §3.6.4.1); phases also select the Topic 2 step table (Section 4.3.7).
-- Rule 4 gives the **home battery priority** over the car: the same `compute_charge_target` survival model (Section 4.2.4) drives both the battery's target *and* the car's permission. The reachability forecast is **car-excluded**, so it reads as *"if the car stops now and the battery gets all the surplus from here on, does it still reach the target today?"* When that turns false, the car yields all surplus to the battery. It is **self-correcting**: while the car charges it steals surplus, so each cycle the sim is re-anchored to a lower (car-suppressed) live SOC; the moment the battery cannot reach the target, the car stops, the battery then receives 100 % of the surplus and lands at (nearly) the target. Full-battery exception: at 100 % SOC the battery has already reached the target, so the check is skipped (the Rule-1 grid-export-capture path applies).
+- Rule 4 gives the **home battery priority** over the car: the battery's own charge ceiling (`battery_target_soc`, Section 4.2.4) is the target the car's permission is measured against. The reachability forecast is **car-excluded**, so it reads as *"if the car stops now and the battery gets all the surplus from here on, does it still reach the target today?"* When that turns false, the car yields all surplus to the battery. It is **self-correcting**: while the car charges it steals surplus, so each cycle the sim is re-anchored to a lower (car-suppressed) live SOC; the moment the battery cannot reach the target, the car stops, the battery then receives 100 % of the surplus and lands at (nearly) the target. Full-battery exception: at 100 % SOC the battery has already reached the target, so the check is skipped (the Rule-1 grid-export-capture path applies).
 - **Evaluated on the live 10-s loop, re-anchored to the live SOC.** `reaches_target_today` re-runs `simulate_soc` from the current SOC over the cached net-energy forecast every EV cycle. The earlier implementation read the `soc_forecast` curve from InfluxDB — but that curve is regenerated only on the 15-min cycle and anchored to the SOC *at that cycle*, so while the car drained the battery the gate stayed optimistic and let the car run ~one forecast period too long (≈ `car_power × 15 min` of overshoot, e.g. observed 79 % vs a 90 % target on 2026-06-25). Re-anchoring to live SOC closes that gap to one 10-s step. The 15-min `soc_forecast` write to InfluxDB remains, now purely for the dashboard. (`will_battery_hit_full` still backs the dashboard `battery_full_time`/`battery_peak_soc` attributes on `sensor.battery_decision`, published on the 15-min cycle.)
 - **Why no 48 h no-buy-floor veto?** A previous rule also blocked charging when `battery_min_soc_48h` fell below `no_buy_floor_percent`. Rule 4 supersedes it: charging *at or below* surplus never drains the battery (the remainder still charges it), the *only* draining step (Topic 2 step-up) is already gated by the instantaneous SOC floor (Section 4.3.7), and any multi-day trough is driven by future PV/load — not by the car spending *today's* surplus, which Rule 4 already protects. So the 48 h veto only ever produced false positives (when Rule 4 passed) or fired redundantly (when Rule 4 had already stopped the car).
 
@@ -1368,32 +1370,21 @@ The wallbox only charges at integer amp levels. The energy-manager picks from a 
 
 **Rate limit:** `number.wallbox_power_limit` is sent only when it differs from the last-sent value **and** >= 30 s have passed since the last change -- preventing oscillation at step boundaries (e.g. surplus hovering near 3962/4354 W flipping 6 A <-> 7 A). 0 W (pause) bypasses the rate limit for safety. `sensor.ev_target_power` still updates every 10 s for the dashboard.
 
-### 4.3.8 Smart Car SOC Polling
+### 4.3.8 Smart Car SOC
 
-The EV battery SOC is read from the Hello Smart API and published as `sensor.smart_battery`. Polling frequency adapts to wallbox state to balance freshness against API rate limits.
+The EV battery SOC is read from the Hello Smart API and published as `sensor.smart_battery`. The `smarthashtag` integration owns the polling cadence and the rate-limit handling; the energy-manager is a pure consumer — it reads the entity's current Home Assistant state at each point it needs a value and never drives a refresh.
 
 > **Interface:** the `smarthashtag` HACS integration, the local `pysmarthashtag` patch, the rate-limit behavior (HTTP `403048`, adaptive backoff, `MAX_TRANSIENT_FAILURES = 10`), the `HelloSmartClient` session caching strategy (2 vs 6 requests/poll), the `sensor.smart_battery_last_known` template sensor, and debug-logging configuration are all documented in `Home-Installation-fsd.md §7.7` "Smart car interface (smarthashtag)". This section only covers how the energy-manager *consumes* that interface.
 
-#### Polling Strategy
+#### Read points
 
-| Trigger | Frequency | Condition |
-|---------|-----------|-----------|
-| Mode changed | Once, immediately | `input_select.ev_charging_mode` value differs from previous cycle (e.g. solar → immediate). Ensures fresh SOC before any charging decision. |
-| Car connected | Once, immediately | Wallbox status transitions to `Preparing` from a disconnected state (`Available`, `Unknown`, or first poll) |
-| Active charging | Every 60 seconds | Wallbox status = `Charging` |
-| Idle / baseline | Every 60 minutes | Scheduled job (always running) |
+| Entity | Consumer |
+|--------|----------|
+| `sensor.smart_battery` | `_read_car_soc_with_fallback()` (Car SOC Forecast start state, §4.3.9); the solar-mode snap-up gate; a `last_updated` staleness check |
+| `sensor.smart_battery_last_known` | the manual-charge kWh budget (§4.3.4) and the shaving-day fullness test (§4.2.3) |
+| `sensor.smart_charging_max_last_known` | the car-side target SOC in the same two decisions |
 
-**Priority:** Mode change > car connected > charging interval (first matching trigger wins per cycle).
-
-**Connected states** (no re-poll on transitions between these): `Preparing`, `Charging`, `SuspendedEV`, `SuspendedEVSE`, `Finishing`.
-
-#### Implementation
-
-- **Adaptive polling** runs inside `control_ev_charging()` (10-second loop), checking wallbox status transitions
-- **Hourly baseline** is a separate APScheduler job (`id="smart_car_soc"`)
-- **Monotonic timestamps** (`time.monotonic()`) track poll intervals to avoid clock-skew issues
-- **Wallbox status tracking** via `_last_wallbox_status` detects connection events (transition to `Preparing`)
-- **Mode tracking** via `_last_ev_charging_mode` detects charging mode changes (skips first cycle to avoid false trigger on startup)
+**Decisions read the last-known sensors, never the volatile `sensor.smart_battery`** — the volatile entity goes `unavailable` when the car sleeps, and a `None` would silently flip a decision. §4.2.3 states this rule for the shaving-day latch.
 
 #### Python-side Last-Known Fallback
 
@@ -1865,9 +1856,8 @@ cycle. State string: `discharge=on|off charge=<action>`.
 | `charge_action` | `charging`, `deferred`, or `released` |
 | `charge_reason` | Human-readable charge-shaving reason |
 | `charge_limit_w` | Charge limit being applied (W); `0` = deferred, `null` = not managed |
-| `battery_target_soc` | Topic 3 dynamic charge ceiling (%) — see 4.2.4; drives the ceiling line |
-| `charge_target_enabled` | Whether Topic 3 charge-target control is active (gates the ceiling line) |
-| `battery_target_reason` | Human-readable target explanation (e.g. `floored to 80% (survival need only 59%)`; logs/debug, not rendered) |
+| `battery_target_soc` | Topic 3 longevity ceiling (%) — see 4.2.4; drives the ceiling line. `100` means no cap, so the line is gated on `< 100` rather than on a separate flag |
+| `battery_target_reason` | Human-readable ceiling explanation (e.g. `longevity ceiling 90%`; logs/debug, not rendered) |
 | `shaving_day_mode` | Topic 5 day-mode latch: `shaving_day` or `car_day` (4.2.3) |
 | `shaving_decision_hour` | Local hour the day-mode latch is decided (default 8) |
 | `charge_shaving_enabled` | Whether export-peak shaving is active at all (4.2.3) |
@@ -1929,7 +1919,7 @@ battery is charging (on a car day it often discharges to support the car):
 | `charge_action` | `deferred` + `shaving_day`, idle | Shaving day · holding for the midday peak |
 | `charge_action` | `deferred` + `car_day`, idle | Saving room for the midday peak |
 | flow idle | no surplus | Idle — no solar surplus |
-| `charge_target_enabled` | true (+ SOC < 100) | Longevity cap `battery_target_soc`% (`+ shaving headroom` only on a shaving day; `Calibration charge · 100%` at 100) |
+| `battery_target_soc` | < 100 (+ SOC < 100) | Longevity cap `battery_target_soc`% (`+ shaving headroom` only on a shaving day; `Calibration charge · 100%` at 100) |
 | `battery_will_be_full` | true (+ SOC < 100) | Reaches `battery_target_soc`% by `battery_full_time` (or `Full by …` when target = 100) |
 | `battery_will_be_full` | false (+ peak > SOC, surplus) | Peaks at ~`battery_peak_soc`% today |
 | `discharge_blocked_by_ev` | true | Reserved for the car |
@@ -1957,9 +1947,11 @@ label: >-
   const useCase = a.charge_use_case || '';
   const dayMode = a.shaving_day_mode || (useCase === 'B' ? 'shaving_day' : 'car_day');
   const shaveDay = dayMode === 'shaving_day';
-  // Topic 3 dynamic charge ceiling (longevity target; 100 = calibration).
+  // Topic 3 longevity ceiling. 100 = no cap (feature off, or a calibration
+  // charge), so the ceiling line keys on the value itself — the switch is a
+  // programming constant and is deliberately not published (4.2.4).
   const target = a.battery_target_soc != null ? Math.round(a.battery_target_soc) : null;
-  const tEnabled = a.charge_target_enabled;
+  const tEnabled = target != null && target < 100;
   const byEv = a.discharge_blocked_by_ev;
   const byProt = a.discharge_blocked_by_protection;
   const disAllowed = a.discharge_allowed;
@@ -2189,7 +2181,7 @@ within `mbus_stale_alert_seconds` of restart.
 recovery notice is ever sent, and every grid read comes from the DTSU meter — the same value the
 fallback already supplies, so reporting is unchanged from a stale-M-Bus day. It is the switch to set
 while the gPlug reader is knowingly out, so a meter that is *expected* to be dead stops alerting on
-every add-on restart. Read at startup, so a change takes effect on the next restart.
+every add-on restart. Also settable from the dashboard (Section 4.7.6).
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -2197,6 +2189,47 @@ every add-on restart. Read at startup, so a change takes effect on the next rest
 | `sensors.mbus_grid_power` | `sensor.grid_power` | M-Bus meter entity |
 | `sensors.dtsu_grid_power` | `sensor.power_meter_active_power` | Fallback meter entity |
 | `sensors.mbus_stale_alert_seconds` | `300` | Continuous staleness before the one-shot alert |
+
+### 4.7.6 Runtime Settings
+
+Six settings are changeable from the dashboard without editing `energy-manager.yaml` or restarting
+the add-on. Each is backed by a Home Assistant helper the user owns and energy-manager **reads**;
+none of them is published as an attribute, so no setting is ever broadcast back into Home Assistant
+or InfluxDB.
+
+| Helper | Sets | Range |
+|--------|------|-------|
+| `input_boolean.battery_shaving_enabled` | `battery.charge_shaving_enabled` (4.2.3) | on / off |
+| `input_boolean.battery_longevity_enabled` | `battery.longevity_enabled` (4.2.4) | on / off |
+| `input_number.battery_longevity_ceiling` | `battery.longevity_ceiling` (4.2.4) | 85-100 % |
+| `input_number.shaving_decision_hour` | `battery.shaving_decision_hour` (4.2.3) | 5-12 h |
+| `input_number.shaving_reserve_soc` | `battery.charge_shaving_reserve_soc` (4.2.3) | 0-50 % |
+| `input_boolean.mbus_reader_enabled` | `sensors.mbus_enabled` (4.7.5) | on / off |
+
+**Precedence.** The helper wins when it holds a definite state; the value in `energy-manager.yaml`
+is the default and applies whenever the helper is missing, `unknown` or `unavailable`. A helper that
+is not there must never resolve to "off" — that would disable a feature because an entity failed to
+load — so the resolver distinguishes absent from off (`HAClient.get_optional_bool`), and an
+installation with no helpers at all behaves exactly as its YAML says.
+
+**Cadence.** `_refresh_runtime_settings()` runs once per 15-minute optimization cycle, before
+anything reads a setting, and writes the resolved values onto the same attributes the YAML
+populated. `sensors.mbus_enabled` is also consumed by the 10-second EV loop; it takes effect there
+at the next 15-minute refresh.
+
+**The day-mode latch takes effect tomorrow.** The shave-vs-car choice is a once-daily snapshot
+(4.2.3), so turning shaving on after the decision hour must not arm a shaving day mid-afternoon. A
+disabled day past the decision hour therefore **commits** its car day, and the switch applies at the
+next decision hour. Before the decision hour nothing is committed, so a switch flipped overnight
+still gets its snapshot the same day.
+
+Entity ids are overridable under `settings:` in `energy-manager.yaml`.
+
+#### Test Cases
+
+Test files: `energy-manager/tests/test_runtime_settings.py` (precedence and types),
+`energy-manager/tests/test_charge_gate.py::TestShavingDisabled` (the latch commit).
+
 
 # Chapter 5: Forecast Accuracy Tracking
 
@@ -3251,6 +3284,14 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.97: **Six settings are changeable from the dashboard (new Section 4.7.6).** `charge_shaving_enabled`, `longevity_enabled`, `longevity_ceiling`, `shaving_decision_hour`, `charge_shaving_reserve_soc` and `mbus_enabled` were startup-only YAML values, so a seasonal change meant editing a file and restarting the add-on. Each is now backed by a Home Assistant helper energy-manager reads once per 15-min cycle in `_refresh_runtime_settings()`; the YAML value stays the default and applies whenever the helper is missing, `unknown` or `unavailable`, so an installation with no helpers is unchanged. The settings are read, never published — nothing is broadcast back to HA or InfluxDB. `HAClient.get_optional_bool()` added because `get_input_boolean()` collapses a missing entity into `False`, which would disable a feature whenever an entity failed to load. The once-daily day-mode latch (4.2.3) now **commits its car day when shaving is disabled past the decision hour**, so switching shaving on at 14:00 cannot arm a shaving day mid-afternoon — it applies at the next decision hour; before the decision hour nothing is committed, so a switch flipped overnight still gets today's snapshot. New `test_runtime_settings.py` (13 cases) and two latch cases. 351 tests pass. (1.9.21 -> 1.9.22)
+
+- v2.96: **The discharge/EV forecast is capped at the charge ceiling (Sections 4.2.4, 4.3.6).** `calculate_decision` was called with a hardcoded `max_soc_percent=100.0`, so the planned SOC curve — published to InfluxDB as `soc_forecast` and read by the EV safety gate (Rule 4) and Topic 4 — assumed the battery charges to full even while the ceiling stopped it lower, over-stating available energy by the gap. It now receives `battery_target_soc`. Threading the **old** dynamic target in caused the 2026-06-18 EV cut (capped low → over-blocked) and the 2026-06-19 empty battery (stale-high → under-blocked); neither mechanism survives, because the ceiling is now a constant that never derives from the forecast — it cannot be stale, and it cannot be arbitrarily low. It equals 100 % whenever longevity is disabled, so the change is a no-op until the feature is switched on, at which point the EV gate becomes correctly more conservative. (1.9.20 -> 1.9.21)
+
+- v2.95: **The charge ceiling is a goal, not a simulation (Section 4.2.4).** The dynamic target ran an 8-iteration binary search over a 48 h worst-case survival simulation, then discarded the answer: over 6088 samples (2026-06-21 → 08-25) it produced 90 % on 89.2 %, 100 % on 9.0 %, and a distinct searched value on **14 samples — 0.23 %**. The search was squeezed between two constants (`charge_target_min` truncating everything below 90, and 100 above) while the survival need sat far lower (a live sample read `floored to 90% (survival need only 74%)`), so the machinery answered a question whose answer the floor threw away. Replaced by `battery_longevity()` (`src/longevity.py`), a pure function of three scalars: disabled → 100 %, calibration due → 100 %, otherwise `longevity_ceiling`. `compute_charge_target` (108 lines, incl. the backward-anchored trough search) and `test_charge_target.py` deleted; `charge_target_margin` and `charge_target_horizon_h` are gone. The calibration charge is **kept** — LFP's flat voltage curve means the BMS re-anchors its SOC estimate at the top, and the ceiling itself prevents the pack reaching >= 99 %, so the rule self-schedules. Config `battery.charge_target_enabled` → **`battery.longevity_enabled`**, `charge_target_min` → **`longevity_ceiling`**, `charge_target_full_interval_days` → **`longevity_calibration_days`** (old keys still read as fallbacks). The switch is a programming constant: it is no longer published on `sensor.battery_decision`, so HA and InfluxDB never see it, and the dashboard ceiling line keys on `battery_target_soc < 100`. New `test_longevity.py` (12 cases). 336 tests pass. (1.9.19 -> 1.9.20)
+
+- v2.94: **Removed the Smart car SOC poller (Section 4.3.8).** `update_car_soc()` read `sensor.smart_battery` plus four companion entities (`sensor.smart_charging_status`, `sensor.smart_charging_current`, `sensor.smart_charging_time_remaining`, `sensor.smart_range`) and consumed all of them in a single `logger.info` line — no stored state, no published attribute, no decision. Reading an entity's Home Assistant state does not ask the `smarthashtag` integration to refresh, so the four "poll" triggers (mode change, car connected, 60 s while charging, hourly baseline) never fetched anything; the integration's own cadence has always been what determines freshness. Deleted with them: the hourly APScheduler job `smart_car_soc`, the trigger chain in `control_ev_charging()`, `CAR_SOC_CHARGING_INTERVAL_S`, and the `_last_wallbox_status` / `_last_ev_charging_mode` / `_last_car_soc_poll` trackers that existed only to drive it. `wb_status` is still read — the state machine uses it for `Finishing`/`SuspendedEV`. Section 4.3.8 now states that the energy-manager is a pure consumer of the interface and lists its read points. No behaviour change; 335 tests pass. (1.9.18 -> 1.9.19)
 
 - v2.93: **The BR reserve floor charges at full power (Section 4.2.3).** The floor banked its surplus at `charge_shaving_power_w` (2500 W), which is the right C-rate for the water-fill but the wrong one below the floor: observed live 2026-08-24 at 6 % SOC with ~3.4 kW of surplus, the 2500 W cap exported ~950 W while the battery was nearly empty. The floor now releases to `max_charge_w` like the other two greedy paths (use case A and the B0 marginal day), so the reserve is banked as fast as the surplus allows; the gentle shaving rate still governs everything above the floor. Reason string reads `... → bank the surplus greedily before shaving`. (1.9.17 -> 1.9.18)
 

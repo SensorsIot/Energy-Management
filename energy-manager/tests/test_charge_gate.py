@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from run import EnergyManager
+from run import SWISS_TZ, EnergyManager
 from src.battery_optimizer import BatteryOptimizer
 
 MINIMAL_OPTIONS = {
@@ -73,6 +73,24 @@ def _wire(
 # Decision-hour times (Europe/Zurich = UTC+2 in June).
 _AT_DECISION = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)      # 12:00 local ≥ 8
 _BEFORE_DECISION = datetime(2026, 6, 7, 4, 0, tzinfo=UTC)   # 06:00 local < 8
+
+
+def _assert_charge_power(manager, watts) -> None:
+    """The charge register was written exactly once this cycle, with `watts`.
+
+    control_battery_charge also writes the end-of-charge SOC register on every
+    cycle (FSD 4.2.4), so a bare assert_called_once_with on set_number would
+    now count that write too. This isolates the charge-power register while
+    still catching a duplicate write to it.
+    """
+    calls = [
+        c
+        for c in manager.ha_client.set_number.call_args_list
+        if c.args[0] == manager.charge_control_entity
+    ]
+    assert len(calls) == 1, f"expected one charge-power write, got {calls}"
+    assert calls[0].args[1] == watts
+    assert calls[0].kwargs.get("max_retries") == 5
 
 
 class TestDayModeDecision:
@@ -245,9 +263,7 @@ class TestMarginalDayGate:
         assert manager._charge_action == "charging"
         assert "marginal" in manager._charge_reason
         # Released to full max_charge_w (not the gentle shaving power).
-        manager.ha_client.set_number.assert_called_once_with(
-            manager.charge_control_entity, manager.charge_max_w, max_retries=5
-        )
+        _assert_charge_power(manager, manager.charge_max_w)
 
     def test_abundant_day_routes_to_shaving(self, manager) -> None:
         """End-to-end: no car + abundant day → gate passes to the water-fill
@@ -285,7 +301,6 @@ class TestMarginalDayGate:
         self._real_optimizer(manager)
         _wire(manager, car_soc=50.0, target=80.0)  # car day
         manager.ha_client.set_number.return_value = (True, None)
-        manager.charge_target_enabled = True
         manager._battery_target_soc = 50.0
         now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
         fc = _forecast(now, [3000.0] * 40)
@@ -293,7 +308,7 @@ class TestMarginalDayGate:
         manager.control_battery_charge(60.0, fc, fc, now)
 
         assert manager._charge_action == "deferred"
-        assert "charge target" in manager._charge_reason
+        assert "charge ceiling" in manager._charge_reason
         # Ceiling mirrors the target (clamped to the register's 90% min); the
         # software power limit holds at 0 behind it.
         manager.ha_client.set_number.assert_any_call(
@@ -308,14 +323,13 @@ class TestMarginalDayGate:
         self._real_optimizer(manager)
         _wire(manager, car_soc=80.0, target=80.0)  # shaving day
         manager.ha_client.set_number.return_value = (True, None)
-        manager.charge_target_enabled = True
         manager._battery_target_soc = 90.0
         now = datetime(2026, 6, 7, 16, 0, tzinfo=UTC)
         fc = _forecast(now, [50.0] * 24)  # marginal → greedy, not a hold
 
         manager.control_battery_charge(50.0, fc, fc, now)
 
-        assert "charge target" not in manager._charge_reason
+        assert "charge ceiling" not in manager._charge_reason
 
     def test_stale_forecast_routes_to_greedy(self, manager) -> None:
         """Fail-safe: a stale PV forecast → greedy charging, never shave."""
@@ -330,9 +344,7 @@ class TestMarginalDayGate:
 
         assert manager._charge_action == "charging"
         assert "stale" in manager._charge_reason
-        manager.ha_client.set_number.assert_called_once_with(
-            manager.charge_control_entity, manager.charge_max_w, max_retries=5
-        )
+        _assert_charge_power(manager, manager.charge_max_w)
 
 
 class TestShavingDisabled:
@@ -358,9 +370,7 @@ class TestShavingDisabled:
         assert manager._charge_use_case == "A"
         assert manager._charge_action == "released"
         assert "shaving disabled" in manager._charge_reason
-        manager.ha_client.set_number.assert_called_once_with(
-            manager.charge_control_entity, manager.charge_max_w, max_retries=5
-        )
+        _assert_charge_power(manager, manager.charge_max_w)
 
     def test_disabled_never_latches_a_shaving_day(self, manager) -> None:
         """No snapshot is taken, so the published day mode matches behaviour."""
@@ -368,8 +378,36 @@ class TestShavingDisabled:
         _wire(manager, car_soc=80.0, target=80.0)
         manager._update_shaving_day_mode(_AT_DECISION)
         assert manager._shaving_day_mode == "car_day"
-        assert manager._shaving_decision_date is None
         assert manager._charge_gate_active() is False
+
+    def test_disabled_past_the_hour_commits_the_car_day(self, manager) -> None:
+        """Switching shaving on later today must not arm a shaving day (4.7.6).
+
+        The latch is once-daily, so a disabled day past the decision hour still
+        commits its car day. Without the commit, enabling the tablet toggle at
+        14:00 would take a fresh snapshot mid-afternoon.
+        """
+        manager.charge_shaving_enabled = False
+        _wire(manager, car_soc=80.0, target=80.0)  # car full → would be a shaving day
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_decision_date == _AT_DECISION.astimezone(SWISS_TZ).date()
+
+        # Tablet flips the switch on, same day, car still full.
+        manager.charge_shaving_enabled = True
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "car_day"
+        assert manager._charge_gate_active() is False
+
+    def test_disabled_before_the_hour_leaves_today_open(self, manager) -> None:
+        """A switch flipped overnight still gets today's snapshot (4.7.6)."""
+        manager.charge_shaving_enabled = False
+        _wire(manager, car_soc=80.0, target=80.0)
+        manager._update_shaving_day_mode(_BEFORE_DECISION)
+        assert manager._shaving_decision_date is None
+
+        manager.charge_shaving_enabled = True
+        manager._update_shaving_day_mode(_AT_DECISION)
+        assert manager._shaving_day_mode == "shaving_day"
 
     def test_disabled_gate_is_false_even_if_mode_says_shaving(self, manager) -> None:
         """The switch is authoritative at the gate, not only at the latch."""
@@ -386,7 +424,6 @@ class TestShavingDisabled:
         _wire(manager, car_soc=80.0, target=80.0)
         manager.ha_client.set_number.return_value = (True, None)
         manager.charge_shaving_enabled = False
-        manager.charge_target_enabled = True
         manager._battery_target_soc = 90.0
         now = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)
         fc = _forecast(now, [3000.0] * 40)
@@ -394,7 +431,7 @@ class TestShavingDisabled:
         manager.control_battery_charge(95.0, fc, fc, now)  # at/above target
 
         assert manager._charge_action == "deferred"
-        assert "charge target" in manager._charge_reason
+        assert "charge ceiling" in manager._charge_reason
         manager.ha_client.set_number.assert_any_call(
             manager.charge_control_entity, 0, max_retries=5
         )
@@ -473,7 +510,6 @@ class TestReserveFloor:
         self._real_optimizer(manager)
         _wire(manager, car_soc=80.0, target=80.0)
         manager.ha_client.set_number.return_value = (True, None)
-        manager.charge_target_enabled = True
         manager._battery_target_soc = 10.0  # below the 20% floor
         now = datetime(2026, 6, 7, 6, 0, tzinfo=UTC)
 
@@ -482,7 +518,7 @@ class TestReserveFloor:
         manager.control_battery_charge(15.0, fc, fc, now)
 
         assert manager._charge_action == "deferred"
-        assert "charge target" in manager._charge_reason
+        assert "charge ceiling" in manager._charge_reason
 
     def test_car_day_unaffected_by_the_floor(self, manager) -> None:
         """Use case A already charges greedily — the floor never downgrades it
@@ -497,9 +533,7 @@ class TestReserveFloor:
         manager.control_battery_charge(1.0, fc, fc, now)
 
         assert manager._charge_use_case == "A"
-        manager.ha_client.set_number.assert_called_once_with(
-            manager.charge_control_entity, manager.charge_max_w, max_retries=5
-        )
+        _assert_charge_power(manager, manager.charge_max_w)
 
 
 class TestSocCeiling:
@@ -521,7 +555,13 @@ class TestSocCeiling:
         manager._apply_soc_ceiling(90.0)
         manager.ha_client.set_number.reset_mock()
         manager._apply_soc_ceiling(90.0)
-        manager.ha_client.set_number.assert_not_called()
+        # The write is still issued — suppressing an unchanged value is
+        # set_number's job, and it compares against the register's own live
+        # state (FSD 4.7.1) rather than an in-process cache, so it survives a
+        # restart. Gating here is what stranded the register at 90%.
+        manager.ha_client.set_number.assert_called_once_with(
+            manager.end_of_charge_soc_entity, 90.0, max_retries=5
+        )
 
     def test_ceiling_clamped_to_register_min(self, manager) -> None:
         # The register accepts only 90-100%; a (hypothetical) sub-90 target is
@@ -535,7 +575,6 @@ class TestSocCeiling:
     def test_enabled_mirrors_target_onto_register(self, manager) -> None:
         _wire(manager, car_soc=50.0, target=80.0)  # car day
         manager.ha_client.set_number.return_value = (True, None)
-        manager.charge_target_enabled = True
         manager._battery_target_soc = 90.0
         now = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)
         fc = _forecast(now, [3000.0] * 40)
@@ -547,25 +586,36 @@ class TestSocCeiling:
         )
         assert manager._last_soc_ceiling == 90.0
 
-    def test_disabled_leaves_register_untouched(self, manager) -> None:
-        # Feature off and EM never lowered the register → don't clobber it.
+    def test_disabled_writes_the_neutral_ceiling(self, manager) -> None:
+        """Disabled must WRITE 100%, not skip the write (FSD 4.2.4).
+
+        Skipping leaves a ceiling set while the feature was enabled latched in
+        the register forever. set_number suppresses the write when the register
+        already holds 100, so this costs no flash cycle.
+        """
         _wire(manager, car_soc=50.0, target=80.0)
         manager.ha_client.set_number.return_value = (True, None)
-        manager.charge_target_enabled = False
+        manager._battery_target_soc = 100.0
         now = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)
         fc = _forecast(now, [3000.0] * 40)
 
         manager.control_battery_charge(50.0, fc, fc, now)
 
-        for call in manager.ha_client.set_number.call_args_list:
-            assert call.args[0] != manager.end_of_charge_soc_entity
+        manager.ha_client.set_number.assert_any_call(
+            manager.end_of_charge_soc_entity, 100.0, max_retries=5
+        )
 
-    def test_disabled_releases_ceiling_once_if_previously_set(self, manager) -> None:
-        # Feature turned off after EM had capped → release to 100% once.
+    def test_ceiling_reasserted_after_restart(self, manager) -> None:
+        """A fresh process (_last_soc_ceiling=None) still asserts the ceiling.
+
+        The in-process cache governs log verbosity only. Gating the write on it
+        stranded the register at 90% across the restart that disabled the
+        feature.
+        """
         _wire(manager, car_soc=50.0, target=80.0)
         manager.ha_client.set_number.return_value = (True, None)
-        manager.charge_target_enabled = False
-        manager._last_soc_ceiling = 90.0
+        manager._last_soc_ceiling = None
+        manager._battery_target_soc = 100.0
         now = datetime(2026, 6, 7, 10, 0, tzinfo=UTC)
         fc = _forecast(now, [3000.0] * 40)
 

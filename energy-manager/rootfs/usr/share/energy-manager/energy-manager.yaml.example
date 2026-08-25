@@ -40,8 +40,8 @@ battery:
   # Master switch for the whole shaving path (day-mode latch, B0 gate, BR
   # reserve floor, water-fill). false → the battery charges greedily at
   # max_charge_w every cycle. Read at startup, so changing it needs an add-on
-  # restart. The Topic 3 charge target (charge_target_enabled, FSD 4.2.4) is a
-  # separate feature and still caps charging at battery_target_soc.
+  # restart. The longevity ceiling (longevity_enabled, FSD 4.2.4) is a separate
+  # feature and still caps charging at battery_target_soc.
   charge_shaving_enabled: true
   # Charge power (W) used while shaving the export peak (use case B). Lower
   # than max_charge_w on purpose: a gentler C-rate is easier on the battery
@@ -78,17 +78,16 @@ battery:
   # charge greedily (the safe default that never under-fills the battery).
   forecast_max_age_minutes: 120
   charge_control_entity: "number.battery_maximum_charging_power"
-  # Dynamic charge target (FSD 4.2.4): charge the LFP battery only to the SOC
-  # needed to survive the next days under worst-case PV (p10), not 100% — less
-  # high-SOC dwell, longer life. No fixed cap: reaches 100% when genuinely
-  # needed; lands below 100% most days. Enforced in software via
-  # charge_control_entity (limit 0 at/above target) — the inverter's native
-  # max-SOC accepts only 90-100% and cannot enforce a lower ceiling.
-  charge_target_enabled: false   # Topic 3 dynamic charge target — off pending validation (FSD 4.2.4)
-  charge_target_margin: 10            # extra % of capacity above the worst-case need
-  charge_target_horizon_h: 48         # survival look-ahead (worst-case p10 PV / p50 load)
-  charge_target_min: 90               # floor on the target — always charge to >= this SOC (LFP-safe; banks more for the car/house)
-  charge_target_full_interval_days: 7 # force a 100% calibration charge this long after the last >=99% (LFP BMS)
+  # Longevity ceiling (FSD 4.2.4): hold the LFP pack below full to cut high-SOC
+  # dwell. The ceiling is a goal you choose, not a computed value — the one
+  # exception is the periodic calibration charge, which lets the pack reach the
+  # top so the BMS can re-anchor its SOC estimate against the flat LFP voltage
+  # curve. Enforced by the inverter's native end-of-charge SOC register (which
+  # accepts only 90-100%) and backed in software via charge_control_entity
+  # (limit 0 at/above the ceiling), which is what a sub-90 ceiling would rely on.
+  longevity_enabled: false          # off -> no cap; the register is held at 100%
+  longevity_ceiling: 90             # the goal (%) while enabled
+  longevity_calibration_days: 7     # force a 100% charge this long after the last >=99% (LFP BMS)
   # Dashboard sensor that surfaces the combined battery reasoning
   # (discharge + charge-shaving). Advisory only. See FSD 4.6.4.
   battery_decision_entity: "sensor.battery_decision"
@@ -146,6 +145,24 @@ smart_car:
   soc_entity: "sensor.smart_battery"
   capacity_kwh: 100.0          # EV usable battery capacity
   charge_efficiency: 0.9       # end-to-end surplus→car efficiency (Car SOC Forecast)
+
+# Runtime settings (FSD 4.7.6) — six values the dashboard can change without
+# editing this file or restarting the add-on. The values set above stay the
+# DEFAULTS: each applies whenever its helper is missing, `unknown` or
+# `unavailable`, so a setup with no helpers at all behaves exactly as before.
+# Re-read once per 15-min cycle.
+#
+# A helper that is absent must never read as "off" — that would disable a
+# feature because an entity failed to load. Only a definite on/off wins.
+#
+# Uncomment to point a setting at a different entity.
+settings:
+  # shaving_enabled: "input_boolean.battery_shaving_enabled"        # battery.charge_shaving_enabled
+  # longevity_enabled: "input_boolean.battery_longevity_enabled"    # battery.longevity_enabled
+  # longevity_ceiling: "input_number.battery_longevity_ceiling"     # battery.longevity_ceiling
+  # shaving_decision_hour: "input_number.shaving_decision_hour"     # battery.shaving_decision_hour
+  # shaving_reserve_soc: "input_number.shaving_reserve_soc"         # battery.charge_shaving_reserve_soc
+  # mbus_enabled: "input_boolean.mbus_reader_enabled"               # sensors.mbus_enabled
 
 # Schedule settings
 schedule:
