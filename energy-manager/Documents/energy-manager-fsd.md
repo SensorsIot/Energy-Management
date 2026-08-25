@@ -2212,6 +2212,11 @@ is not there must never resolve to "off" — that would disable a feature becaus
 load — so the resolver distinguishes absent from off (`HAClient.get_optional_bool`), and an
 installation with no helpers at all behaves exactly as its YAML says.
 
+**Restart behaviour.** The helpers carry no `initial:` value, so each restores its last state
+across a Home Assistant restart. An `initial:` would force the value on every restart, silently
+reverting a seasonal setting on any core update or reboot with no signal other than the battery
+behaving differently.
+
 **Cadence.** `_refresh_runtime_settings()` runs once per 15-minute optimization cycle, before
 anything reads a setting, and writes the resolved values onto the same attributes the YAML
 populated. `sensors.mbus_enabled` is also consumed by the 10-second EV loop; it takes effect there
