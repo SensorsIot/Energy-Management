@@ -1374,6 +1374,8 @@ The wallbox only charges at integer amp levels. The energy-manager picks from a 
 
 The EV battery SOC is read from the Hello Smart API and published as `sensor.smart_battery`. The `smarthashtag` integration owns the polling cadence and the rate-limit handling; the energy-manager is a pure consumer — it reads the entity's current Home Assistant state at each point it needs a value and never drives a refresh.
 
+energy-manager cannot ask the integration to refresh: `HAClient` exposes no `homeassistant.update_entity` call, so every read returns whatever the integration last fetched on its own schedule. Freshness is therefore a property of the integration, not something a control path can demand before deciding.
+
 > **Interface:** the `smarthashtag` HACS integration, the local `pysmarthashtag` patch, the rate-limit behavior (HTTP `403048`, adaptive backoff, `MAX_TRANSIENT_FAILURES = 10`), the `HelloSmartClient` session caching strategy (2 vs 6 requests/poll), the `sensor.smart_battery_last_known` template sensor, and debug-logging configuration are all documented in `Home-Installation-fsd.md §7.7` "Smart car interface (smarthashtag)". This section only covers how the energy-manager *consumes* that interface.
 
 #### Read points
@@ -1815,11 +1817,19 @@ the structured fields below; `reason` is kept for logs, not rendered:
 | `grid_export_w` | Current grid export (W) |
 | `snap_power_w` | Winning charging power from `snap_to_power_step()` (W); 0 = no charging |
 | `ev_step_offset` | Chosen amp step's offset from the surplus-snapped level: `+n` snapped up (home battery bridges the gap), `-n` stepped down (battery preserved), `0` matched, `null` not solar-charging — published for diagnostics; not shown on the card (the home-battery line shows only the contribution) |
-| `battery_soc` | Current home-battery SOC (%) |
-| `battery_will_be_full` | Informational: does peak SOC today reach 100%? |
-| `battery_full_time` | Forecast time the home battery reaches 100% (if any) |
-| `battery_target_soc` | Topic 3 dynamic charge ceiling (%) — see 4.2.4 |
-| `shaving_day_mode` | Topic 5 day-mode latch: `shaving_day` or `car_day` (4.2.3) — drives the day-mode context line |
+| `battery_soc` | Current home-battery SOC (%) — live read on the 10-s loop |
+| `battery_will_be_full` | Does peak SOC today reach the charge ceiling? Recomputed on the **10-s loop** (`reaches_target_today`), re-anchored to the live SOC |
+| `battery_full_time` | Forecast time the home battery reaches the ceiling (if any) — same 10-s computation |
+| `battery_target_soc` | Topic 3 charge ceiling (%) — see 4.2.4; mirrored from the 15-min cycle |
+| `shaving_day_mode` | Topic 5 day-mode latch: `shaving_day` or `car_day` (4.2.3) — drives the day-mode context line; mirrored from the daily latch |
+
+Five attributes here also appear on `sensor.battery_decision` (Section 4.6.4), and the two sensors
+can legitimately **differ**. `battery_target_soc` and `shaving_day_mode` are mirrors of the same
+in-process values and always agree. `battery_soc`, `battery_will_be_full` and `battery_full_time`
+are *not* copies: this card recomputes them every 10 s from the live SOC, which is the version EV
+control acts on, while `sensor.battery_decision` publishes the 15-minute forecast copy for the
+dashboard. While the car is charging and draining the battery, the 10-s values lead — the 15-min
+copy can still read "will be full" for up to one cycle after the live check has turned false.
 | `car_target_time` | Forecast time the car reaches its target SOC (ISO-UTC, else `null`) — drives the ETA line |
 | `car_target_soc` | Car's target SOC from `sensor.smart_charging_max_last_known` (%) |
 | `car_eod_soc_forecast` | Forecast car SOC at end of today on the p50 curve (%) |
@@ -2216,6 +2226,14 @@ installation with no helpers at all behaves exactly as its YAML says.
 across a Home Assistant restart. An `initial:` would force the value on every restart, silently
 reverting a seasonal setting on any core update or reboot with no signal other than the battery
 behaving differently.
+
+**Update behaviour.** An add-on update never changes a setting. The helpers live in Home
+Assistant's own configuration, which an add-on image replacement does not touch. `/config/
+energy-manager.yaml` is written **only when it does not exist** (first-run bootstrap); every later
+start logs `Using existing config` and leaves it alone. Only `energy-manager.yaml.example` is
+refreshed on each start, so new options become visible without editing the live file. Shipped
+defaults are merged *under* the user config (`deep_merge(defaults, user_config)`), so a changed
+default can never override a value the user has set.
 
 **Cadence.** `_refresh_runtime_settings()` runs once per 15-minute optimization cycle, before
 anything reads a setting, and writes the resolved values onto the same attributes the YAML
