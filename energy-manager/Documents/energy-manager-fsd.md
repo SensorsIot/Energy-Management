@@ -1955,7 +1955,10 @@ label: >-
   // Topic 5 day-mode latch (decided once at 08:00). Falls back to the use-case
   // flag (A = car day, B = shaving day) when the attribute is absent.
   const useCase = a.charge_use_case || '';
-  const dayMode = a.shaving_day_mode || (useCase === 'B' ? 'shaving_day' : 'car_day');
+  // shaving_day_mode is always published; 'car_day' is the safe default if it
+  // is ever absent. Do NOT infer it from charge_use_case — 'B' also means the
+  // longevity hold (4.2.4), which is not a shaving day.
+  const dayMode = a.shaving_day_mode || 'car_day';
   const shaveDay = dayMode === 'shaving_day';
   // Topic 3 longevity ceiling. 100 = no cap (feature off, or a calibration
   // charge), so the ceiling line keys on the value itself — the switch is a
@@ -3307,6 +3310,8 @@ See Section 4.3.8 for adaptive polling logic.
 ---
 
 ## Changelog
+
+- v2.99: **Removed an unreachable Influx writer and a day-mode fallback that had become wrong (Sections 4.2.2, 4.6.4).** `SimulationWriter.write_decision()` was never called — `discharge_decision` is written by `EnergyManager.write_decision` through its own `write_api`, so the method was a second, dead implementation of the same measurement; deleted along with the import it alone needed. The battery card inferred the day mode as `a.shaving_day_mode || (useCase === 'B' ? 'shaving_day' : 'car_day')`. The attribute has been published unconditionally since 1.9.16, so the fallback never fired, but it had silently become incorrect: `charge_use_case == 'B'` now also covers the longevity hold (4.2.4), which is **not** a shaving day, so the branch would have mislabelled a longevity hold as peak-shaving had it ever run. Now `a.shaving_day_mode || 'car_day'` — the published value, with the safe default. 353 tests pass. (1.9.23 -> 1.9.24)
 
 - v2.98: **A present-but-empty config section no longer crashes startup.** `options.get("settings", {})` supplies its default only when the key is **absent**; a section that is present with every entry commented out parses as `None`, and `None.get(...)` raised `AttributeError` in `__init__` — which is exactly what the shipped `energy-manager.yaml.example` does with the new `settings:` block, so 1.9.22 crash-looped on any host using the template. All 14 section lookups now use `options.get(name) or {}`, so commenting out an entire section is safe for every section, not just this one. `__version__` was also stale at 1.9.18 (the startup banner had under-reported the version since then) and now tracks `config.yaml`. New `TestEmptySections`, including a case that parses the shipped template and asserts the empty-section shape that triggered it. 353 tests pass. (1.9.22 -> 1.9.23)
 

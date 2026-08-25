@@ -1,7 +1,7 @@
 """InfluxDB writer for EnergyManager simulation results."""
 
 import logging
-from datetime import datetime, UTC
+from datetime import UTC
 
 import pandas as pd
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -83,39 +83,6 @@ class SimulationWriter:
         logger.info(f"Writing {len(points)} SOC forecast points ({scenario}) to InfluxDB")
         self.write_api.write(bucket=self.bucket, org=self.org, record=points)
         logger.info(f"SOC forecast ({scenario}) written successfully")
-
-    def write_decision(
-        self,
-        discharge_allowed: bool,
-        reason: str,
-        min_soc_percent: float,
-        min_soc_time: datetime,
-        current_soc: float,
-    ) -> None:
-        """Write discharge decision to InfluxDB.
-
-        Args:
-            discharge_allowed: Whether discharge is allowed
-            reason: Explanation of decision
-            min_soc_percent: Minimum SOC in simulation
-            min_soc_time: Time of minimum SOC
-            current_soc: Current battery SOC
-
-        """
-        now = datetime.now(UTC)
-
-        point = (
-            Point("discharge_decision")
-            .field("allowed", discharge_allowed)
-            .field("reason", reason)
-            .field("min_soc_percent", float(min_soc_percent))
-            .field("min_soc_time", min_soc_time.isoformat())
-            .field("current_soc", float(current_soc))
-            .time(now, WritePrecision.S)
-        )
-
-        self.write_api.write(bucket=self.bucket, org=self.org, record=point)
-        logger.info(f"Decision logged: discharge_allowed={discharge_allowed}")
 
     def write_forecast_snapshot(
         self,
