@@ -216,3 +216,54 @@ def test_ev_target_hysteresis_retains_pause_until_two_percent_recovery(manager, 
         calls = manager.ha_client.set_sensor_state.call_args_list
         power = next(c.args[1] for c in calls if c.args[0] == "sensor.ev_target_power")
         assert power == expected
+
+
+@pytest.mark.parametrize(
+    "soc,phases,stop", [(50, 3, 3200), (19, 3, 3962), (100, 3, 3200), (19, 1, 1380)]
+)
+def test_solar_start_stop_hysteresis(manager, soc, phases, stop):
+    now = datetime(2026, 9, 28, 13, 0, tzinfo=UTC)
+    manager._latest_forecast = forecast(pd.date_range(now, periods=16, freq="15min"), 1250)
+    manager._battery_min_soc_forecast = 80
+    manager.ha_client.get_input_select.return_value = "solar"
+    manager.ha_client.get_state.side_effect = lambda entity: {
+        "state": "Charging" if entity == manager.ev_wallbox_status_entity else "on"
+    }
+    values = {
+        manager.soc_entity: soc,
+        manager.pv_power_entity: 5500,
+        manager.ev_min_solar_power_entity: 3200,
+        "sensor.wallbox_phases": phases,
+        "sensor.wallbox_min_power_w": 1380 if phases == 1 else 3962,
+    }
+    manager.ha_client.get_sensor_value.side_effect = values.get
+    manager._read_grid_power = MagicMock(return_value=0)
+    for surplus, charging in [
+        (stop + 299, False),
+        (stop + 300, True),
+        (stop, True),
+        (stop - 1, False),
+        (stop + 299, False),
+        (stop + 300, True),
+    ]:
+        values[manager.surplus_power_entity] = surplus
+        # Supply a settled average to isolate hysteresis from smoothing.
+        manager._surplus_samples = [surplus, surplus]
+        manager.ha_client.set_sensor_state.reset_mock()
+        with patch("run.datetime") as clock:
+            clock.now.return_value = now
+            manager.control_ev_charging()
+        calls = manager.ha_client.set_sensor_state.call_args_list
+        power = next(c.args[1] for c in calls if c.args[0] == "sensor.ev_target_power")
+        assert (power > 0) is charging
+        if soc < 20:
+            assert power <= surplus
+    # A battery target shortfall must still stop an active solar session.
+    if soc < 100:
+        manager._latest_forecast = forecast([now], [0])
+        manager.ha_client.set_sensor_state.reset_mock()
+        with patch("run.datetime") as clock:
+            clock.now.return_value = now
+            manager.control_ev_charging()
+        calls = manager.ha_client.set_sensor_state.call_args_list
+        assert next(c.args[1] for c in calls if c.args[0] == "sensor.ev_target_power") == 0

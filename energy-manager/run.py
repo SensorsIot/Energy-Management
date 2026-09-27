@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.27"
+__version__ = "1.9.28"
 
 import json
 import logging
@@ -1794,7 +1794,7 @@ class EnergyManager:
             load_power = self.ha_client.get_sensor_value(self.load_power_entity) or 0.0
             surplus_power_raw = self.ha_client.get_sensor_value(self.surplus_power_entity) or 0.0
 
-            # Rolling 1-minute average of surplus (6 samples × 10 s)
+            # Rolling surplus average (3 samples × 10 s)
             self._surplus_samples.append(surplus_power_raw)
             if len(self._surplus_samples) > 3:
                 self._surplus_samples.pop(0)
@@ -1813,6 +1813,7 @@ class EnergyManager:
             ev_charging_source = "none"
             ev_source_reason = "no solar mode"
             ev_threshold = 0.0
+            solar_battery_support = battery_soc >= 100
             battery_full_time = None
             # Solar-mode step offset vs the surplus-snapped level (Section 4.3.6):
             # +n = snapped up n steps (home battery bridges the gap), −n = stepped
@@ -1921,13 +1922,15 @@ class EnergyManager:
                 # surplus to the battery (no candidates). Re-evaluated each cycle
                 # from the car-suppressed current SOC → self-correcting: once the
                 # car stops, the battery climbs and reaches (nearly) the target.
+                solar_battery_support = (
+                    self._battery_min_soc_forecast >= self.no_buy_floor_percent
+                    and battery_soc >= self.no_buy_floor_percent
+                    and not step_up_suppressed
+                )
                 candidates, snap_up_gate_reason = build_solar_candidates(
                     surplus_w=surplus_power,
                     threshold=threshold,
-                    step_up_allowed=(
-                        self._battery_min_soc_forecast >= self.no_buy_floor_percent
-                        and battery_soc >= self.no_buy_floor_percent
-                    ),
+                    step_up_allowed=solar_battery_support,
                     target_reachable=battery_will_be_full,
                     steps=power_steps,
                     both_full_by_evening=step_up_suppressed,
@@ -1987,6 +1990,23 @@ class EnergyManager:
                 battery_full_time = None
             self._ev_safe = ev_safe
             self._battery_min_soc_forecast = min_soc_forecast
+
+            if ev_mode == "solar":
+                # Start with 300 W headroom, then retain charging down to the
+                # effective minimum. This gate only removes power candidates;
+                # battery protection and the physical step limits still apply.
+                stop_threshold = threshold
+                if not solar_battery_support:
+                    valid_steps = [s for s in power_steps if s >= threshold]
+                    if valid_steps:
+                        stop_threshold = max(threshold, valid_steps[0])
+                ev_threshold = stop_threshold + (
+                    0 if self._ev_sm.state == EVState.SOLAR else 300
+                )
+                if surplus_power < ev_threshold:
+                    ev_charging_power_w = 0.0
+                    ev_charging_source = "none"
+                    ev_step_offset = None
 
             if ev_charging_source == "none" and ev_mode == "solar":
                 # Explain why neither rule fired
