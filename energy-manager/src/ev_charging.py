@@ -173,7 +173,7 @@ def simulate_house_and_car(
 
 
 def build_solar_candidates(
-    candidate_power: int,
+    surplus_w: float,
     threshold: float,
     step_up_allowed: bool,
     target_reachable: bool = True,
@@ -184,7 +184,7 @@ def build_solar_candidates(
 
     Topic 1 target gate (FSD 4.3.6) — the home battery has priority over the
     car. `target_reachable` is the car-excluded forecast of the battery reaching
-    its charge target today (`will_battery_hit_full`):
+    its charge target today (`reaches_target_today`):
 
     - **target_reachable=False**: the battery can no longer reach its charge
       target today, so the car yields *all* surplus to the battery — no
@@ -194,7 +194,9 @@ def build_solar_candidates(
     - **target_reachable=True**: proceed to the Topic 2 step decision below.
 
     Topic 2 step decision (FSD 4.3.7) — the "step-up" step (one level above
-    candidate_power) draws the gap to the next amp step from the home battery:
+    `surplus_w`) draws the gap to the next amp step from the home battery.
+    Compare against actual surplus, including when it is below the minimum
+    step: that minimum is itself a step-up and requires permission.
 
     - **step_up_allowed=True**: the battery is still protected — both the 48 h
       forecast min **and** the current SOC are `>= no_buy_floor_percent` — so
@@ -226,7 +228,7 @@ def build_solar_candidates(
     elif step_up_allowed:
         snap_up = [
             s for s in steps
-            if s > candidate_power and s >= threshold
+            if s > surplus_w and s >= threshold
         ]
         snap_up_step = [snap_up[0]] if snap_up else []
         gate_reason = "protected (SOC & min48h >= floor) → step-up allowed"
@@ -235,6 +237,6 @@ def build_solar_candidates(
         gate_reason = "not protected → stay at/below surplus (preserve battery)"
     snap_down = [
         s for s in reversed(steps)
-        if s <= candidate_power and s >= threshold
+        if s <= surplus_w and s >= threshold
     ]
     return snap_up_step + snap_down, gate_reason

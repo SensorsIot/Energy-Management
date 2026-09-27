@@ -46,10 +46,9 @@ def compute_ev_charging_power(
     if surplus_power_w < threshold:
         return 0.0, "none"
 
-    candidate_power = snap_to_power_step(surplus_power_w, min_power_w, max_power_w)
     step_up_allowed = min48h >= no_buy_floor and battery_soc >= no_buy_floor
     candidates, _ = build_solar_candidates(
-        candidate_power=candidate_power,
+        surplus_w=surplus_power_w,
         threshold=threshold,
         step_up_allowed=step_up_allowed,
         target_reachable=will_be_full,

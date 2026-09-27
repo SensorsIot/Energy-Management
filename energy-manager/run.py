@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.24"
+__version__ = "1.9.25"
 
 import json
 import logging
@@ -1405,6 +1405,7 @@ class EnergyManager:
         """Run battery optimization cycle."""
         logger.info("=" * 50)
         logger.info("Running battery optimization...")
+        self._latest_forecast = None  # Fail closed if this refresh cannot supply the EV gate.
 
         try:
             # Pick up any tablet changes before anything reads a setting.
@@ -1442,8 +1443,20 @@ class EnergyManager:
                 logger.error("No forecast data available")
                 return
 
-            # Cache for the 10-s EV target gate's live SOC re-anchoring (FSD 4.3.6).
-            self._latest_forecast = forecast
+            # EV target gate: low PV and high household load (FSD 4.3.6).
+            # Discharge protection shares the same conservative forecast.
+            self._latest_forecast = self.forecast_reader.get_combined_forecast(
+                start=start,
+                end=end,
+                pv_percentile="p10",
+                load_percentile="p90",
+            )
+
+            if self._latest_forecast.empty:
+                logger.error("No conservative forecast — holding battery during cheap tariff")
+                self._discharge_blocked_by_protection = tariff.is_cheap_now
+                self._update_discharge_control()
+                return
 
             # Conservative forecast for the marginal-day fill check (B0): low
             # PV (p10) against median load (p50). Shaving only runs when the
@@ -1507,7 +1520,7 @@ class EnergyManager:
             decision, sim_battery_on, sim_battery_off, sim_planned = (
                 self.optimizer.calculate_decision(
                     soc_percent=current_soc,
-                    forecast=forecast,
+                    forecast=self._latest_forecast,
                     now=now,
                     previously_blocked=self._discharge_blocked_by_protection,
                     max_soc_percent=self._battery_target_soc,
@@ -1519,6 +1532,8 @@ class EnergyManager:
                     f"Simulation first: {swiss_datetime(sim_battery_on.index[0])} "
                     f"SOC={sim_battery_on['soc_percent'].iloc[0]:.1f}%"
                 )
+
+            logger.info("Battery protection forecast: p10 PV / p90 household load")
 
             # Log decision
             logger.info(
@@ -1897,7 +1912,7 @@ class EnergyManager:
                 # from the car-suppressed current SOC → self-correcting: once the
                 # car stops, the battery climbs and reaches (nearly) the target.
                 candidates, snap_up_gate_reason = build_solar_candidates(
-                    candidate_power=candidate_power,
+                    surplus_w=surplus_power,
                     threshold=threshold,
                     step_up_allowed=(
                         self._battery_min_soc_forecast >= self.no_buy_floor_percent

@@ -344,13 +344,11 @@ class BatteryOptimizer:
     ) -> tuple[bool, float | None, str | None]:
         """Report whether the battery reaches `target`% today, re-anchored to live SOC.
 
-        The 10-s-fresh version of the EV target gate (Section 4.3.6). Re-runs the
-        SOC simulation from the *current* SOC over the net-energy forecast and
-        takes the peak between now and local midnight. Unlike the `soc_forecast`
-        curve in InfluxDB — which is anchored to the 15-min cycle and so reads
-        optimistically while the car drains the real battery — this reflects the
-        live (car-suppressed) SOC, so the gate stops the car at the right moment
-        instead of ~one forecast period late.
+        The caller supplies conservative net energy (p10 PV minus p90 load).
+        Completed 15-minute slots are excluded; the current slot's energy and
+        charge/discharge limits are prorated to its remaining duration. The
+        simulation starts at live SOC and includes the last slot ending at
+        local midnight, without including tomorrow's energy.
 
         Returns (reaches, peak_soc_today, full_time_local "HH:MM" or None). An
         empty/missing forecast returns (False, None, None) — fail-closed, matching
@@ -358,18 +356,41 @@ class BatteryOptimizer:
         """
         if forecast is None or forecast.empty:
             return False, None, None
-        end_today = (
-            now.astimezone(SWISS_TZ)
-            .replace(hour=23, minute=59, second=59, microsecond=0)
-            .astimezone(UTC)
-        )
-        sim = self.simulate_soc(current_soc, forecast, max_soc_percent=100.0)
+        now = now.replace(tzinfo=UTC) if now.tzinfo is None else now.astimezone(UTC)
+        midnight = (
+            now.astimezone(SWISS_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+            + timedelta(days=1)
+        ).astimezone(UTC)
+        slot = timedelta(minutes=15)
+        remaining = forecast[["net_energy_wh"]].copy()
+        remaining.index = pd.to_datetime(remaining.index, utc=True)
+        remaining = remaining[
+            (remaining.index + slot > now) & (remaining.index < midnight)
+        ].sort_index()
+        if remaining.empty:
+            return False, None, None
+
+        # Live SOC already contains elapsed energy. Limit each slot's energy
+        # before prorating, so a partial slot also respects battery power limits.
+        remaining["net_energy_wh"] = remaining["net_energy_wh"].astype(float)
+        for t in remaining.index:
+            fraction = (min(t + slot, midnight) - max(t, now)) / slot
+            net_wh = remaining.at[t, "net_energy_wh"]
+            if fraction < 1:
+                net_wh = min(
+                    max(net_wh, -self.max_discharge_wh_per_15min * self.discharge_efficiency),
+                    self.max_charge_wh_per_15min / self.charge_efficiency,
+                )
+                remaining.at[t, "net_energy_wh"] = net_wh * fraction
+        terminal = min(remaining.index[-1] + slot, midnight)
+        remaining.index = pd.DatetimeIndex([max(t, now) for t in remaining.index])
+        # simulate_soc records slot-start SOC; include the final slot's result.
+        remaining.loc[terminal, "net_energy_wh"] = 0.0
+        sim = self.simulate_soc(current_soc, remaining, max_soc_percent=100.0)
         peak: float | None = None
         full_time: str | None = None
         for t, v in sim["soc_percent"].items():
             tt = t if t.tzinfo else t.replace(tzinfo=UTC)
-            if tt < now or tt > end_today:
-                continue
             fv = float(v)
             if peak is None or fv > peak:
                 peak = fv

@@ -164,14 +164,14 @@ class TestBuildSolarCandidates:
     """Gate: include the snap-up step only when the HOME battery still reaches
     full today (with the EV load accounted for).
 
-    candidate_power=5117 (8A) chosen so that snap_up=[5727] and
+    surplus_w=5117 (8A) chosen so that snap_up=[5727] and
     snap_down=[5117, 4354, 3962] under default threshold=3500.
     """
 
     def test_battery_full_keeps_snap_up(self) -> None:
         """Home battery still fills today → snap-up included (battery drain OK)."""
         candidates, reason = build_solar_candidates(
-            candidate_power=5117,
+            surplus_w=5117,
             threshold=3500,
             step_up_allowed=True,
         )
@@ -181,7 +181,7 @@ class TestBuildSolarCandidates:
     def test_battery_not_full_drops_snap_up(self) -> None:
         """Home battery would NOT fill today → snap-down only (preserve battery)."""
         candidates, reason = build_solar_candidates(
-            candidate_power=5117,
+            surplus_w=5117,
             threshold=3500,
             step_up_allowed=False,
         )
@@ -192,7 +192,7 @@ class TestBuildSolarCandidates:
     def test_candidate_at_top_step_no_snap_up_exists(self) -> None:
         """candidate=7624 (max) → snap_up list is empty even when allowed."""
         candidates, _ = build_solar_candidates(
-            candidate_power=7624,
+            surplus_w=7624,
             threshold=3500,
             step_up_allowed=True,
         )
@@ -202,7 +202,7 @@ class TestBuildSolarCandidates:
     def test_threshold_filters_low_steps_out(self) -> None:
         """threshold=5000 filters 3962/4354 from snap_down."""
         candidates, _ = build_solar_candidates(
-            candidate_power=5117,
+            surplus_w=5117,
             threshold=5000,
             step_up_allowed=True,
         )
@@ -211,7 +211,7 @@ class TestBuildSolarCandidates:
     def test_battery_not_full_still_charges_at_or_below_surplus(self) -> None:
         """Even when not filling, the EV still charges (snap-down), just no drain."""
         candidates, _ = build_solar_candidates(
-            candidate_power=4354,
+            surplus_w=4354,
             threshold=3500,
             step_up_allowed=False,
         )
@@ -226,7 +226,7 @@ class TestStepUpSuppression:
 
     def test_both_full_suppresses_step_up(self) -> None:
         candidates, reason = build_solar_candidates(
-            candidate_power=5117,
+            surplus_w=5117,
             threshold=3500,
             step_up_allowed=True,
             both_full_by_evening=True,
@@ -238,7 +238,7 @@ class TestStepUpSuppression:
     def test_default_off_preserves_step_up(self) -> None:
         """Omitting the flag (e.g. signal not computable) → unchanged behaviour."""
         candidates, reason = build_solar_candidates(
-            candidate_power=5117,
+            surplus_w=5117,
             threshold=3500,
             step_up_allowed=True,
         )
@@ -248,7 +248,7 @@ class TestStepUpSuppression:
     def test_suppression_does_not_block_charging(self) -> None:
         """The car keeps charging at/below surplus — only the drain step goes."""
         candidates, _ = build_solar_candidates(
-            candidate_power=4354,
+            surplus_w=4354,
             threshold=3500,
             step_up_allowed=True,
             both_full_by_evening=True,
@@ -258,11 +258,11 @@ class TestStepUpSuppression:
     def test_suppression_is_redundant_when_already_unprotected(self) -> None:
         """Below the floor the step-up is already gone; suppression is a no-op."""
         suppressed, _ = build_solar_candidates(
-            candidate_power=5117, threshold=3500,
+            surplus_w=5117, threshold=3500,
             step_up_allowed=False, both_full_by_evening=True,
         )
         unsuppressed, _ = build_solar_candidates(
-            candidate_power=5117, threshold=3500,
+            surplus_w=5117, threshold=3500,
             step_up_allowed=False, both_full_by_evening=False,
         )
         assert suppressed == unsuppressed == [5117, 4354, 3962]
@@ -270,7 +270,7 @@ class TestStepUpSuppression:
     def test_target_gate_still_wins_over_suppression(self) -> None:
         """Battery can't reach target → no charging at all, regardless."""
         candidates, reason = build_solar_candidates(
-            candidate_power=5117,
+            surplus_w=5117,
             threshold=3500,
             step_up_allowed=True,
             target_reachable=False,
@@ -351,7 +351,7 @@ class TestTargetGate:
     def test_target_unreachable_blocks_all_charging(self) -> None:
         """target_reachable=False → no candidates at all (car stops)."""
         candidates, reason = build_solar_candidates(
-            candidate_power=5117,
+            surplus_w=5117,
             threshold=3500,
             step_up_allowed=True,
             target_reachable=False,
@@ -362,7 +362,7 @@ class TestTargetGate:
     def test_target_unreachable_overrides_step_down_too(self) -> None:
         """Even snap-down is suppressed — the battery owns the surplus."""
         candidates, _ = build_solar_candidates(
-            candidate_power=4354,
+            surplus_w=4354,
             threshold=3500,
             step_up_allowed=False,
             target_reachable=False,
@@ -372,7 +372,7 @@ class TestTargetGate:
     def test_target_reachable_default_is_unchanged(self) -> None:
         """Omitting target_reachable defaults to True → existing behaviour."""
         candidates, reason = build_solar_candidates(
-            candidate_power=5117,
+            surplus_w=5117,
             threshold=3500,
             step_up_allowed=True,
         )
@@ -433,7 +433,7 @@ class TestBuildSolarCandidatesSinglePhase:
     def test_step_up_uses_1p_steps(self) -> None:
         # candidate 2300 (10A), protected → step up to 2530 (11A) on 1φ.
         cands, _ = build_solar_candidates(
-            candidate_power=2300, threshold=1380, step_up_allowed=True,
+            surplus_w=2300, threshold=1380, step_up_allowed=True,
             target_reachable=True, steps=POWER_STEPS_1P,
         )
         assert 2530 in cands
