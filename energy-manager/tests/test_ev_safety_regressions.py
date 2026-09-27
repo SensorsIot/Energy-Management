@@ -178,3 +178,41 @@ def test_discharge_uses_conservative_forecast_and_preserves_tariff(manager, hour
     planned = manager.simulation_writer.write_soc_forecast.call_args.args[0]
     assert planned.net_wh.eq(-300).all()
     assert manager.write_energy_balance.call_args.args[0].net_energy_wh.eq(1000).all()
+
+
+@pytest.mark.parametrize("target", [90, 100])
+def test_ev_target_hysteresis_retains_pause_until_two_percent_recovery(manager, target):
+    now = datetime(2026, 9, 28, 13, 0, tzinfo=UTC)
+    manager._battery_target_soc = target
+    manager._latest_forecast = forecast(
+        pd.date_range(now, periods=2, freq="15min"), [750 / 0.95, 750 / 0.95]
+    )
+    manager._battery_min_soc_forecast = 80
+    manager.ha_client.get_input_select.return_value = "solar"
+    manager.ha_client.get_state.side_effect = lambda entity: {
+        "state": "Charging" if entity == manager.ev_wallbox_status_entity else "on"
+    }
+    values = {
+        manager.surplus_power_entity: 5000,
+        manager.pv_power_entity: 5500,
+        manager.ev_min_solar_power_entity: 3200,
+    }
+    manager.ha_client.get_sensor_value.side_effect = values.get
+    manager._read_grid_power = MagicMock(return_value=0)
+    # 15 percentage points of future charge. Once paused, reaching the target
+    # exactly must not restart the car; two points of extra energy releases it.
+    for soc, expected in [
+        (target - 16, 0),
+        (target - 15, 0),
+        (target - 13, 5117),
+        (target - 15, 5117),
+        (target - 16, 0),
+    ]:
+        values[manager.soc_entity] = soc
+        manager.ha_client.set_sensor_state.reset_mock()
+        with patch("run.datetime") as clock:
+            clock.now.return_value = now
+            manager.control_ev_charging()
+        calls = manager.ha_client.set_sensor_state.call_args_list
+        power = next(c.args[1] for c in calls if c.args[0] == "sensor.ev_target_power")
+        assert power == expected

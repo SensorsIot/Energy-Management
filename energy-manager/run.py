@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.26"
+__version__ = "1.9.27"
 
 import json
 import logging
@@ -199,10 +199,11 @@ class EnergyManager:
         # weather) → don't shave, charge greedily. Set on each tick by the loop.
         self.forecast_max_age_minutes = battery_opts.get("forecast_max_age_minutes", 120)
         self._forecast_fresh: bool = True
-        # Latest combined net-energy forecast (p50), cached each 15-min cycle so
+        # Conservative net energy (p10 PV / p90 load), cached each 15-min cycle so
         # the 10-s EV loop can re-anchor the SOC sim to the live SOC for the
         # target gate (FSD 4.3.6) without re-fetching. None until the first cycle.
         self._latest_forecast = None
+        self._ev_target_blocked = False
         # Tracks last applied charge power (W) to only write/log on change.
         # Tracks power, not a bool, so a use-case A→B transition (max→shaving
         # power) is still detected even though "charging" stays true.
@@ -1870,19 +1871,27 @@ class EnergyManager:
                 ev_safe = True
                 min_soc_forecast = 100.0
                 battery_will_be_full = True
+                self._ev_target_blocked = False
             elif ev_charging_source == "solar_surplus":
                 # Target gate (FSD 4.3.6): re-anchor the SOC sim to the LIVE SOC
                 # every 10-s cycle (not the 15-min-stale soc_forecast in InfluxDB),
                 # so the gate reflects how far the car has actually drained the
                 # battery and stops it at the right moment (no ~one-period overshoot).
+                # An active target hold requires extra recoverable energy before
+                # restarting. Debit the margin from live SOC rather than asking
+                # a physically capped simulation to reach more than 100%.
+                recovery_margin = (
+                    self.optimizer.discharge_hysteresis_percent if self._ev_target_blocked else 0
+                )
                 battery_will_be_full, _, battery_full_time = (
                     self.optimizer.reaches_target_today(
-                        battery_soc,
+                        battery_soc - recovery_margin,
                         self._latest_forecast,
                         datetime.now(UTC),
                         self._battery_target_soc,
                     )
                 )
+                self._ev_target_blocked = not battery_will_be_full
                 ev_min_power = power_steps[0]
                 ev_max_power = power_steps[-1]
                 candidate_power = snap_to_power_step(
@@ -1959,6 +1968,7 @@ class EnergyManager:
                             f"battery won't reach target "
                             f"{self._battery_target_soc:.0f}% today → "
                             f"car yields surplus to home battery"
+                            f" (recovery margin {recovery_margin:.0f}%)"
                         )
                     else:
                         ev_source_reason = (
