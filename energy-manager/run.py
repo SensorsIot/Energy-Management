@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.25"
+__version__ = "1.9.26"
 
 import json
 import logging
@@ -130,7 +130,8 @@ class EnergyManager:
 
         self.optimizer = BatteryOptimizer(
             capacity_wh=battery_opts.get("capacity_kwh", 10.0) * 1000,
-            min_soc_percent=battery_opts.get("reserve_percent", 10),
+            min_soc_percent=battery_opts.get("reserve_percent", 0),
+            discharge_hysteresis_percent=battery_opts.get("discharge_hysteresis_percent", 2.0),
             charge_efficiency=battery_opts.get("charge_efficiency", 0.95),
             discharge_efficiency=battery_opts.get("discharge_efficiency", 0.95),
             max_charge_w=battery_opts.get("max_charge_w", 5000),
@@ -223,7 +224,7 @@ class EnergyManager:
 
         # Battery parameters for appliance signal
         self.capacity_wh = battery_opts.get("capacity_kwh", 10.0) * 1000
-        self.reserve_percent = battery_opts.get("reserve_percent", 10)
+        self.reserve_percent = battery_opts.get("reserve_percent", 0)
 
         # Topic 3 longevity (FSD 4.2.4): hold the LFP pack below full to reduce
         # high-SOC dwell. The ceiling is a goal, not a derived quantity — the

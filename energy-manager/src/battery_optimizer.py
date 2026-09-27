@@ -65,8 +65,10 @@ class BatteryOptimizer:
         weekday_cheap_end: str = "06:00",
         weekend_all_day_cheap: bool = True,
         holidays: list[str] = None,
+        discharge_hysteresis_percent: float = 2.0,
     ) -> None:
         self.capacity_wh = capacity_wh
+        self.discharge_hysteresis_percent = max(0.0, discharge_hysteresis_percent)
         self.min_soc_percent = min_soc_percent
         self.min_soc_wh = capacity_wh * min_soc_percent / 100
         self.charge_efficiency = charge_efficiency
@@ -415,8 +417,8 @@ class BatteryOptimizer:
         expensive-hours grid import (Wh) for each, and the lower wins -- ties go
         to battery_on (free discharge). Emits `expensive_import_wh` (== 0 means
         the battery covers every expensive hour without buying).
-        `previously_blocked` is accepted but unused -- the metric is a stable
-        cost, so no hysteresis.
+        An existing cheap-tariff hold is released only when free discharge also
+        keeps expensive-hour SOC above reserve plus discharge_hysteresis_percent.
 
         Returns (decision, sim_battery_on, sim_battery_off, sim_planned), where
         sim_planned is whichever of the two the decision selects (the path that
@@ -460,16 +462,31 @@ class BatteryOptimizer:
         imp_without = float(sim_without.loc[expensive, "grid_import_wh"].sum())
         imp_with = float(sim_with.loc[expensive, "grid_import_wh"].sum())
 
-        # Lower expensive import wins; tie -> battery_on (free discharge).
-        use_with = imp_with < imp_without
+        # A cost tie releases only after an existing hold has recovered margin.
+        # Ignore floating-point residue when comparing imported Wh.
+        now_cheap = bool(cheap.iloc[0]) if len(cheap) else False
+        free_exp_soc = sim_without.loc[expensive, "soc_percent"]
+        free_min_soc = float(free_exp_soc.min()) if not free_exp_soc.empty else 100.0
+        release_soc = min(100.0, self.min_soc_percent + self.discharge_hysteresis_percent)
+        hysteresis_hold = (
+            previously_blocked and now_cheap and free_min_soc < release_soc
+        )
+        saves_import = imp_without - imp_with > 1e-6
+        use_with = saves_import or hysteresis_hold
         expensive_import_wh = imp_with if use_with else imp_without
         sim_planned = sim_with if use_with else sim_without
 
         exp_soc = sim_planned.loc[expensive, "soc_percent"]
         min_soc = float(exp_soc.min()) if not exp_soc.empty else 100.0
 
-        now_cheap = bool(cheap.iloc[0]) if len(cheap) else False
-        if use_with and now_cheap:
+        if hysteresis_hold and not saves_import:
+            discharge_allowed = False
+            reason = (
+                f"Hold (hysteresis) - free-discharge expensive-hour minimum "
+                f"{free_min_soc:.1f}% < release threshold {release_soc:.1f}%; "
+                f"exp_import={expensive_import_wh:.0f} Wh"
+            )
+        elif use_with and now_cheap:
             discharge_allowed = False
             reason = (
                 f"Hold (cheap slot) - with-strategy saves "

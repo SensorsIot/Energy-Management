@@ -435,3 +435,28 @@ class TestReachesTargetToday:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize('soc,blocked,allowed', [
+    (2, False, True),  # Forecast 1%: no new hold on an import-cost tie.
+    (2, True, False),  # Forecast 1%: keep an existing hold.
+    (2.99, True, False),
+    (3, True, True),  # Forecast 2%: release at the upper boundary.
+])
+def test_discharge_hysteresis_release_boundary(soc, blocked, allowed):
+    now = datetime(2026, 9, 28, 3, 45, tzinfo=UTC)
+    fc = pd.DataFrame({'net_energy_wh': [-100, 0, 0, 0]},
+                      index=pd.date_range(now, periods=4, freq='15min'))
+    opt = BatteryOptimizer(min_soc_percent=0, discharge_efficiency=1)
+    decision, on, off, planned = opt.calculate_decision(soc, fc, now, blocked)
+    assert decision.discharge_allowed is allowed
+    pd.testing.assert_frame_equal(planned, on if allowed else off)
+    if not allowed:
+        assert 'hysteresis' in decision.reason
+
+
+def test_expensive_tariff_overrides_hysteresis():
+    now = datetime(2026, 9, 28, 8, 0, tzinfo=UTC)
+    fc = make_forecast(now, 24, [0], [100])
+    decision, *_ = BatteryOptimizer(min_soc_percent=10).calculate_decision(11, fc, now, True)
+    assert decision.discharge_allowed

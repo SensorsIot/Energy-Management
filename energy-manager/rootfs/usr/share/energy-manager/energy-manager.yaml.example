@@ -24,7 +24,9 @@ influxdb:
 # Battery settings
 battery:
   capacity_kwh: 10.0
-  reserve_percent: 10
+  reserve_percent: 0
+  # Resume protected discharge only above reserve + this SOC margin.
+  discharge_hysteresis_percent: 2
   # Buy-protection floor: home-battery SOC kept to avoid grid purchases
   # (shared by Topics 1/2/3; FSD 4.2.2/4.3.6).
   no_buy_floor_percent: 20

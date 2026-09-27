@@ -415,7 +415,7 @@ setup/update workflow is in [`Handbook.md` → Installation](../../Handbook.md#i
 | `influxdb.soc_measurement` | Energy | Measurement name for SOC |
 | `influxdb.soc_field` | BATT_Level | Field name for SOC value |
 | `battery.capacity_kwh` | 10.0 | Usable battery capacity |
-| `battery.reserve_percent` | 10 | Minimum SOC reserve |
+| `battery.reserve_percent` | 0 | Discharge simulation reserve |
 | `battery.charge_efficiency` | 0.95 | Charging efficiency (0-1) |
 | `battery.discharge_efficiency` | 0.95 | Discharging efficiency (0-1) |
 | `battery.max_charge_w` | 5000 | Max charge power (W) |
@@ -567,7 +567,8 @@ Starting SOC is read live every simulation cycle, not cached — the forecast tr
 | Key | Default | Used by |
 |---|---|---|
 | `capacity_kwh` | 10.0 | Simulator and EV forecast conversions (Wh → SOC %) |
-| `reserve_percent` | 10 | Discharge-sim floor / forecast-error buffer for the protection (Section 4.2.2); 0 = pure SOC=0 must-buy trigger |
+| `reserve_percent` | 0 | Discharge simulation floor (Section 4.2.2) |
+| `discharge_hysteresis_percent` | 2 | Recovery margin above reserve before an active cheap-tariff hold releases |
 | `charge_efficiency` | 0.95 | Simulator (charge branch) |
 | `discharge_efficiency` | 0.95 | Simulator (discharge branch) |
 | `soc_entity` | `sensor.battery_state_of_capacity` | Current SOC readback |
@@ -708,7 +709,7 @@ This is the **complete** EBL low-tariff holiday list; other canton-BL holidays (
 2. **Label** every 15-min slot cheap/expensive (*Cheap/expensive labeling* above).
 3. **Sum expensive-hours import** for each option: total unserved load **energy (Wh)** over all **expensive** slots where the battery is empty (SOC = 0) -- the energy bought at the high price.
 4. **Compare** the two sums.
-5. **Lower wins. On a tie, battery_on wins** (don't buy cheap energy or hold SOC for no expensive-hours benefit -- the Topic 3 longevity win). The winner is published as the `planned` trajectory.
+5. **Lower wins.** On a tie, battery_on wins unless an existing cheap-tariff hold has not recovered its release margin (see *Self-correction*). The selected strategy is published as the `planned` trajectory.
 
 #### Outputs
 
@@ -728,13 +729,23 @@ discharge_allowed = (winning strategy allows this slot) AND NOT blocked_by_ev
 
 When the wallbox draws power, the Modbus proxy raises the household load the inverter sees, which would otherwise discharge the home battery into the car. The control signal is sent only when the combined decision changes.
 
-#### Safety margin
+#### Simulation reserve
 
-The "empty" trigger in the simulation is `battery.reserve_percent` (**default 10 %**) — the `floor_wh` the discharge sim never drains below. Raising it from 0 is a deliberate **forecast-error buffer**: with floor 0 the free-discharge sim can spend the battery's last few % to cover a small *forecast* morning deficit (so it ties and discharges overnight); with floor 10 that bottom slice is treated as unavailable, so free-discharge shows the morning as unserved → **hold wins → the battery is kept high overnight**, leaving a real ~10 % buffer for the expensive morning even when the load/PV forecast is optimistic (observed 2026-06-24: median load forecast ~280 W vs ~750 W actual → battery drained to ~1 % → expensive morning import; a 10 % floor would have held it). Set to 0 for pure SOC=0 must-buy economics.
+`battery.reserve_percent` defaults to **0%**. The p10-PV/p90-load forecast
+provides the uncertainty allowance. A configured reserve raises the simulation's
+unavailable battery-energy floor; it does not change the inverter's physical SOC cutoff.
 
 #### Self-correction
 
-Re-run every 15 min from the live SOC; binary strategy, no hysteresis -- the metric is a stable energy cost, not an SOC-vs-threshold comparison.
+Re-run every 15 min from live SOC. Protection starts during cheap tariff when
+holding saves expensive-hour imports. Once active, a cost tie releases protection
+only when the free-discharge forecast's minimum expensive-hour SOC reaches
+`battery.reserve_percent + battery.discharge_hysteresis_percent` (capped at 100%).
+The hysteresis margin defaults to **2 percentage points**: with a 0% reserve,
+release requires at least **2%**. Values inside the band retain the previous
+protection state. Expensive tariff always permits discharge. The margin is read
+at startup; changing it requires an add-on restart. Import differences below
+0.000001 Wh are treated as floating-point equality.
 
 #### Output entity
 
@@ -1288,7 +1299,7 @@ A single home-battery signal consumed by **Topic 2** (step-up gate) and **Topic 
 
 The wallbox is excluded -- the load forecast is the Shelly-3EM house load, which already excludes the wallbox draw. Re-computed every 15 min from the live SOC. **Power-independent**: no EV load is subtracted and no charge-target cap is applied.
 
-The floor it is compared against is **`battery.no_buy_floor_percent`** (default **20 %**), separate from `battery.reserve_percent` (the Section 4.2.2 discharge floor, default 10 %).
+The floor it is compared against is **`battery.no_buy_floor_percent`** (default **20 %**), separate from `battery.reserve_percent` (the Section 4.2.2 discharge floor, default 0 %).
 
 - Horizon: 48 h.
 - No hysteresis -- the same bar for every consumer.
@@ -2477,6 +2488,12 @@ This chapter is the canonical home for EnergyManager's test-case specs; it is in
 hub `Harness/project/testing.md` (strategy + levels in `Harness/standards/testing.md`).
 
 ## 6.1 Battery Discharge Optimizer Tests
+
+- **BD-HYST-01:** On a cost tie in cheap tariff, a free-discharge minimum of 1%
+  leaves an inactive protection off but retains an active hold (reserve 0%,
+  margin 2%). Release occurs at 2%, not at 1.99%. The planned curve matches
+  the held strategy, and expensive tariff overrides the hold.
+
 
 - **BD-CONS-01:** A median forecast permitting discharge and a p10-PV/p90-load
   forecast predicting expensive imports select protection during cheap tariff.
