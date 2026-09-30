@@ -409,14 +409,15 @@ class BatteryOptimizer:
         now: datetime,
         previously_blocked: bool = False,
         max_soc_percent: float = 100.0,
-    ) -> tuple[DischargeDecision, pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[DischargeDecision, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Decide whether the home battery may discharge (FSD 4.2.2, Topic 4).
 
         Simulates the next 48 h two ways: **battery_on** (free discharge) and
         **battery_off** (hold discharge during cheap slots), sums the
-        expensive-hours grid import (Wh) for each, and the lower wins -- ties go
+        expensive-hours grid import (Wh) until both paths refill to the charge
+        ceiling (or the horizon ends), and the lower wins -- ties go
         to battery_on (free discharge). Emits `expensive_import_wh` (== 0 means
-        the battery covers every expensive hour without buying).
+        the battery covers every expensive hour in the comparison without buying).
         An existing cheap-tariff hold is released only when free discharge also
         keeps expensive-hour SOC above reserve plus discharge_hysteresis_percent.
 
@@ -459,13 +460,24 @@ class BatteryOptimizer:
             cheap_mask=cheap,
         )
 
-        imp_without = float(sim_without.loc[expensive, "grid_import_wh"].sum())
-        imp_with = float(sim_with.loc[expensive, "grid_import_wh"].sum())
+        # After both paths refill, the present hold has no remaining energy benefit.
+        # Later cheap-hour holds must not influence this cycle's comparison or hysteresis.
+        shared_full = (
+            (sim_without["soc_percent"] >= max_soc_percent - 1e-9)
+            & (sim_with["soc_percent"] >= max_soc_percent - 1e-9)
+            & (fc.index > now)
+        )
+        comparison_end = shared_full[shared_full].index[0] if shared_full.any() else horizon
+        comparison_expensive = expensive.copy()
+        if shared_full.any():
+            comparison_expensive &= fc.index < comparison_end
+        imp_without = float(sim_without.loc[comparison_expensive, "grid_import_wh"].sum())
+        imp_with = float(sim_with.loc[comparison_expensive, "grid_import_wh"].sum())
 
         # A cost tie releases only after an existing hold has recovered margin.
         # Ignore floating-point residue when comparing imported Wh.
         now_cheap = bool(cheap.iloc[0]) if len(cheap) else False
-        free_exp_soc = sim_without.loc[expensive, "soc_percent"]
+        free_exp_soc = sim_without.loc[comparison_expensive, "soc_percent"]
         free_min_soc = float(free_exp_soc.min()) if not free_exp_soc.empty else 100.0
         release_soc = min(100.0, self.min_soc_percent + self.discharge_hysteresis_percent)
         hysteresis_hold = (
@@ -476,7 +488,7 @@ class BatteryOptimizer:
         expensive_import_wh = imp_with if use_with else imp_without
         sim_planned = sim_with if use_with else sim_without
 
-        exp_soc = sim_planned.loc[expensive, "soc_percent"]
+        exp_soc = sim_planned.loc[comparison_expensive, "soc_percent"]
         min_soc = float(exp_soc.min()) if not exp_soc.empty else 100.0
 
         if hysteresis_hold and not saves_import:
@@ -509,7 +521,8 @@ class BatteryOptimizer:
         logger.info(
             f"Discharge: expensive import battery_on={imp_without:.0f} Wh, "
             f"battery_off={imp_with:.0f} Wh -> {'battery_off' if use_with else 'battery_on'}; "
-            f"allowed={discharge_allowed}, exp_min_soc={min_soc:.0f}%"
+            f"allowed={discharge_allowed}, exp_min_soc={min_soc:.0f}%, "
+            f"comparison_end={comparison_end.astimezone(SWISS_TZ).isoformat()}"
         )
 
         return (

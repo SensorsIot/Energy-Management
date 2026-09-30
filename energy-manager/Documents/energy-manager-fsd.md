@@ -680,7 +680,14 @@ forecast data holds discharge during cheap tariff and leaves discharge allowed d
 expensive tariff; the EV target gate fails closed.
 
 
-Decides whether the home battery may discharge. Acts on `number.battery_maximum_discharging_power`. Re-evaluated every 15 min over a 48 h horizon.
+Decides whether the home battery may discharge. Acts on `number.battery_maximum_discharging_power`.
+Re-evaluated every 15 min. The decision horizon ends at the first future forecast
+point where **both** battery_on and battery_off reach the configured charge ceiling
+(`battery_target_soc`, 100% with longevity disabled), within at most 48 h. If only
+one path refills, comparison continues; if neither shares a full recharge, the
+available 48 h horizon applies. Expensive imports and the SOC release margin use
+only slots before this shared refill. The initial SOC alone is not a refill event.
+Published scenario curves retain their complete 48 h horizon for monitoring and EV inputs.
 
 #### Principle
 
@@ -707,7 +714,7 @@ This is the **complete** EBL low-tariff holiday list; other canton-BL holidays (
    - **battery_on** -- discharge on every deficit (free discharge).
    - **battery_off** -- skip discharge during **cheap** slots (that load is bought from the grid); discharge normally during **expensive** slots.
 2. **Label** every 15-min slot cheap/expensive (*Cheap/expensive labeling* above).
-3. **Sum expensive-hours import** for each option: total unserved load **energy (Wh)** over all **expensive** slots where the battery is empty (SOC = 0) -- the energy bought at the high price.
+3. **Sum expensive-hours import** for each option within the decision horizon: total unserved load **energy (Wh)** over **expensive** slots where the battery is empty (SOC = 0) -- the energy bought at the high price. Slots at or after the first shared full recharge are excluded.
 4. **Compare** the two sums.
 5. **Lower wins.** On a tie, battery_on wins unless an existing cheap-tariff hold has not recovered its release margin (see *Self-correction*). The selected strategy is published as the `planned` trajectory.
 
@@ -716,7 +723,7 @@ This is the **complete** EBL low-tariff holiday list; other canton-BL holidays (
 - **Discharge actuation:**
   - battery_on wins -> discharge allowed (5000 W).
   - battery_off wins -> discharge blocked (0 W) during cheap slots, allowed during expensive slots.
-- **`expensive_import_wh`** = the winning sum: `== 0` means the battery covers every expensive hour without buying; `> 0` means an expensive purchase is unavoidable.
+- **`expensive_import_wh`** = the winning sum within the decision horizon: `== 0` means the battery covers every expensive hour before the shared refill without buying; `> 0` means an expensive purchase is unavoidable within that horizon.
 
 #### EV-charging override
 
@@ -739,7 +746,7 @@ unavailable battery-energy floor; it does not change the inverter's physical SOC
 
 Re-run every 15 min from live SOC. Protection starts during cheap tariff when
 holding saves expensive-hour imports. Once active, a cost tie releases protection
-only when the free-discharge forecast's minimum expensive-hour SOC reaches
+only when the free-discharge forecast's minimum expensive-hour SOC within the decision horizon reaches
 `battery.reserve_percent + battery.discharge_hysteresis_percent` (capped at 100%).
 The hysteresis margin defaults to **2 percentage points**: with a 0% reserve,
 release requires at least **2%**. Values inside the band retain the previous
@@ -2550,6 +2557,14 @@ Test file: `energy-manager/tests/test_battery_optimizer.py`
 | `test_previously_blocked_requires_margin_to_reallow` | When already blocked, min_soc barely above 10% stays blocked | Cheap tariff, min_soc 10-12%, `previously_blocked=True` | `discharge_allowed=False` |
 | `test_previously_blocked_allows_with_clear_margin` | When already blocked but min_soc clearly above 12%, allow | Cheap tariff, SOC 90%, `previously_blocked=True` | `discharge_allowed=True` |
 | `test_not_previously_blocked_allows_at_threshold` | When not already blocked, min_soc at 10% allows normally | Cheap tariff, min_soc 10-12%, `previously_blocked=False` | `discharge_allowed=True` |
+
+#### Shared Recharge Decision Horizon
+
+| ID | Description | Setup | Expected | Status |
+|----|-------------|-------|----------|--------|
+| BAT-REFILL-01 | Later-night savings cannot trigger or retain a current hold | Both paths refill before a later night; existing hold on/off; ceiling 80%/100% | Allow discharge; zero expensive import before refill; published curves retain 48 h | Tested |
+| BAT-REFILL-02 | Protect against expensive purchases before refill | Low initial SOC; both paths refill after morning deficits | Hold discharge; expensive import before refill remains reported | Tested |
+| BAT-REFILL-03 | A refill in only the held path does not erase the difference | Limited solar fills battery_off but not battery_on | Continue comparison and retain the beneficial hold | Tested |
 
 #### Dataclass Validation
 

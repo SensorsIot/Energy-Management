@@ -117,6 +117,59 @@ class TestExpensiveImportComparison:
         assert decision.expensive_import_wh > 0
 
 
+class TestRefillDecisionHorizon:
+    """FSD 6.1: discharge decisions stop at the first shared full recharge."""
+
+    @staticmethod
+    def forecast(now):
+        fc = make_forecast(now, 48, [0], [400])
+        local = fc.index.tz_convert(SWISS_TZ)
+        sunny = (local.day == 27) & (local.hour >= 10) & (local.hour < 16)
+        fc.loc[sunny, "pv_energy_wh"] = 1250.0
+        fc["net_energy_wh"] = fc["pv_energy_wh"] - fc["load_energy_wh"]
+        return fc
+
+    @pytest.mark.parametrize("ceiling", [80.0, 100.0])
+    @pytest.mark.parametrize("blocked", [False, True])
+    def test_later_night_savings_do_not_block_before_shared_refill(self, ceiling, blocked):
+        now = datetime(2026, 1, 26, 22, tzinfo=SWISS_TZ).astimezone(UTC)
+        opt = BatteryOptimizer()
+        fc = self.forecast(now)
+        decision, on, off, planned = opt.calculate_decision(
+            80, fc, now, previously_blocked=blocked, max_soc_percent=ceiling
+        )
+        expensive = opt.expensive_mask(fc.index)
+        # The complete curves still show savings from holding the *later* night.
+        assert on.loc[expensive, "grid_import_wh"].sum() > off.loc[
+            expensive, "grid_import_wh"
+        ].sum()
+        assert ((on.soc_percent >= ceiling) & (off.soc_percent >= ceiling)).any()
+        assert len(on) == len(fc)
+        assert decision.discharge_allowed
+        assert decision.expensive_import_wh == 0
+        assert opt.discharge_hysteresis_percent < decision.min_soc_percent < ceiling
+        pd.testing.assert_frame_equal(planned, on)
+
+    def test_expensive_import_before_refill_still_blocks(self):
+        now = datetime(2026, 1, 26, 22, tzinfo=SWISS_TZ).astimezone(UTC)
+        decision, on, off, _ = BatteryOptimizer().calculate_decision(
+            15, self.forecast(now), now
+        )
+        assert ((on.soc_percent >= 100) & (off.soc_percent >= 100)).any()
+        assert not decision.discharge_allowed
+        assert decision.expensive_import_wh > 0
+
+    def test_only_held_scenario_refills_does_not_end_comparison(self):
+        now = datetime(2026, 1, 26, 22, tzinfo=SWISS_TZ).astimezone(UTC)
+        fc = self.forecast(now)
+        fc.loc[fc.pv_energy_wh > 0, "pv_energy_wh"] = 400.0
+        fc["net_energy_wh"] = fc["pv_energy_wh"] - fc["load_energy_wh"]
+        decision, on, off, _ = BatteryOptimizer().calculate_decision(80, fc, now)
+        assert off.soc_percent.max() == 100
+        assert on.soc_percent.max() < 100
+        assert not decision.discharge_allowed
+
+
 class TestScenarioCurves:
     """calculate_decision returns battery_on, battery_off, and the planned path."""
 
