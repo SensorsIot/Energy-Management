@@ -267,3 +267,37 @@ def test_solar_start_stop_hysteresis(manager, soc, phases, stop):
             manager.control_ev_charging()
         calls = manager.ha_client.set_sensor_state.call_args_list
         assert next(c.args[1] for c in calls if c.args[0] == "sensor.ev_target_power") == 0
+
+
+@pytest.mark.parametrize(
+    "soc,minimum,suppressed,expected", [
+        (99, 100, False, 3000),
+        (19, 100, False, 4262),
+        (99, 10, False, 4262),
+        (99, 100, True, 4262),
+        (100, 100, True, 3000),
+    ]
+)
+def test_threshold_below_configured_surplus_uses_battery_support(
+    manager, soc, minimum, suppressed, expected
+):
+    """EV-29: low surplus must not imply battery support is unavailable."""
+    manager._battery_min_soc_forecast = minimum
+    manager._step_up_suppressed = MagicMock(return_value=(suppressed, "test"))
+    manager.ha_client.get_input_select.return_value = "solar"
+    manager.ha_client.get_state.return_value = {"state": "on"}
+    values = {
+        manager.soc_entity: soc,
+        manager.pv_power_entity: 5500,
+        manager.surplus_power_entity: 2366,
+        manager.ev_min_solar_power_entity: 2700,
+        "sensor.wallbox_phases": 3,
+        "sensor.wallbox_min_power_w": 3962,
+    }
+    manager.ha_client.get_sensor_value.side_effect = values.get
+    manager._read_grid_power = MagicMock(return_value=0)
+    manager.control_ev_charging()
+    call = next(c for c in manager.ha_client.set_sensor_state.call_args_list
+                if c.args[0] == "sensor.ev_target_power")
+    assert call.args[1] == 0
+    assert call.kwargs["attributes"]["threshold_w"] == expected

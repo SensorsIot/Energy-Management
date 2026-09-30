@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.29"
+__version__ = "1.9.30"
 
 import json
 import logging
@@ -1840,6 +1840,25 @@ class EnergyManager:
                     and car_soc_solar >= car_target_solar
                 )
 
+                # Rule 4 (Topic 2, FSD 4.3.7): re-evaluated here on the 10-s loop
+                # against the live car SOC/target read above for Rule 2, so a
+                # mid-cycle change to the car's charge limit takes effect at once
+                # instead of trailing the 15-min simulation.
+                step_up_suppressed, step_up_suppressed_reason = self._step_up_suppressed(
+                    car_soc_solar, car_target_solar
+                )
+                self._step_up_suppressed_now = step_up_suppressed
+                self._step_up_suppressed_reason = step_up_suppressed_reason
+                # Threshold reporting needs this even below the configured surplus.
+                solar_battery_support = (
+                    battery_soc >= 100
+                    or (
+                        self._battery_min_soc_forecast >= self.no_buy_floor_percent
+                        and battery_soc >= self.no_buy_floor_percent
+                        and not step_up_suppressed
+                    )
+                )
+
                 if car_at_target:
                     ev_charging_source = "none"
                     ev_source_reason = (
@@ -1898,15 +1917,6 @@ class EnergyManager:
                 candidate_power = snap_to_power_step(
                     surplus_power, ev_min_power, ev_max_power, steps=power_steps
                 )
-                # Rule 4 (Topic 2, FSD 4.3.7): re-evaluated here on the 10-s loop
-                # against the live car SOC/target read above for Rule 2, so a
-                # mid-cycle change to the car's charge limit takes effect at once
-                # instead of trailing the 15-min simulation.
-                step_up_suppressed, step_up_suppressed_reason = self._step_up_suppressed(
-                    car_soc_solar, car_target_solar
-                )
-                self._step_up_suppressed_now = step_up_suppressed
-                self._step_up_suppressed_reason = step_up_suppressed_reason
                 # Step-up gate (Topic 2, FSD 4.3.7): step one amp level above
                 # surplus (draining the gap from the home battery) only while the
                 # battery is still protected from buying over 48 h
@@ -1922,11 +1932,6 @@ class EnergyManager:
                 # surplus to the battery (no candidates). Re-evaluated each cycle
                 # from the car-suppressed current SOC → self-correcting: once the
                 # car stops, the battery climbs and reaches (nearly) the target.
-                solar_battery_support = (
-                    self._battery_min_soc_forecast >= self.no_buy_floor_percent
-                    and battery_soc >= self.no_buy_floor_percent
-                    and not step_up_suppressed
-                )
                 candidates, snap_up_gate_reason = build_solar_candidates(
                     surplus_w=surplus_power,
                     threshold=threshold,
