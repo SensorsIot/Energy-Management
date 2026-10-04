@@ -2015,6 +2015,134 @@ class TestProxyCorrection:
         assert server._proxy_charging is False
         assert server._proxy_power_w() == 0.0
 
+    @pytest.mark.asyncio
+    async def test_bridge_bounded_by_single_phase_maximum(self, server) -> None:
+        """Regression: a 1φ cable still commanded at 3φ scale must not latch the
+        bridge. Live on 2026-10-04 an 11000 W command on a single-phase cable
+        published 11200 W of correction for a whole 7-minute session while the car
+        drew 3539 W — measured can never reach 85 % of 11000 W on a cable that
+        maxes at 3680 W. Commanded is bounded by the cable maximum, so the handoff
+        to measured is reachable.
+        """
+        server._current_phases = 1
+        server._last_sent_power_w = 11000.0  # stale 3φ-scale setpoint
+        server._proxy_charging = True
+
+        # Bridge is capped at the 1φ maximum, not the unreachable 11000 W.
+        assert server._proxy_power_w() == 3680.0 + self.BIAS
+
+        # A real 1φ draw is ≥85 % of 3680 W, so the correction hands off to measured.
+        server._on_status_change("power_w", 3539.0)
+        await asyncio.sleep(0)
+        assert server._proxy_power_w() == 3539.0 + self.BIAS
+
+    @pytest.mark.asyncio
+    async def test_three_phase_bridge_unaffected_by_cap(self, server) -> None:
+        """The cap must not disturb a genuine 3φ ramp: 11000 W is within the 3φ
+        maximum (11040 W), so the bridge still publishes the full commanded load.
+        """
+        server._current_phases = 3
+        server._last_sent_power_w = 11000.0
+        server._proxy_charging = True
+
+        assert server._proxy_power_w() == 11000.0 + self.BIAS
+
+
+class TestSinglePhaseCableClamp:
+    """A detected single-phase cable must clamp the live command, not just the
+    advertised range (FSD 3.6.4). Leaving the command at 3φ scale is what fed the
+    Modbus proxy an unreachable setpoint (3.6.6).
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {
+                "wallbox_id": "test",
+                "power_update_interval_s": 5,
+                "wallbox_type": "three_phase",
+                "min_current_a": 6,
+                "max_current_a": 16,
+            }
+        )
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="11000")
+        srv.ha.call_service = AsyncMock(return_value=True)
+
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.current_status = "Charging"
+        cp.current_power_w = 0
+        cp.set_charging_power = AsyncMock()
+        srv.charge_point = cp
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_above_single_phase_maximum_clamps(self, server) -> None:
+        """11000 W on a 1φ cable is clamped to 3680 W — no phase time lock needed.
+
+        Regression: the only 1φ clamp sat behind `phase_lock_active`, which never
+        engages for `three_phase` (no relay, so `_last_phase_switch_time` stays 0),
+        so 11000 W was sent and recorded verbatim.
+        """
+        server._current_phases = 1
+
+        await server._send_power_to_wallbox(11000.0)
+
+        server.charge_point.set_charging_power.assert_awaited_with(
+            3680, num_phases=1, force=False
+        )
+        assert server._last_sent_power_w == 3680
+
+    @pytest.mark.asyncio
+    async def test_three_phase_maximum_not_clamped(self, server) -> None:
+        """11000 W on a 3φ cable is within range (11040 W) and passes through."""
+        server._current_phases = 3
+
+        await server._send_power_to_wallbox(11000.0)
+
+        server.charge_point.set_charging_power.assert_awaited_with(
+            11000.0, num_phases=3, force=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_below_single_phase_minimum_pauses(self, server) -> None:
+        """Below the 1φ minimum (1380 W) still pauses rather than clamping up."""
+        server._current_phases = 1
+
+        await server._send_power_to_wallbox(900.0)
+
+        server.charge_point.set_charging_power.assert_awaited_with(
+            0, num_phases=1, force=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_detection_reapplies_limit_at_new_phase_range(self, server) -> None:
+        """Detecting 3φ→1φ re-applies the HA limit through the 1φ range.
+
+        Regression: detection published the 1380–3680 W range but left the live
+        command at 11000 W, so the proxy correction stayed on the 3φ-scale bridge.
+        """
+        server._current_phases = 3
+        server._last_sent_power_w = 11000.0
+
+        server._on_phases_detected(1)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert server._current_phases == 1
+        server.ha.set_state.assert_any_call("sensor.wallbox_phases", 1)
+        assert server._last_sent_power_w == 3680
+        server.charge_point.set_charging_power.assert_awaited_with(
+            3680, num_phases=1, force=False
+        )
+
 
 class TestCableLockCommands:
     """OCPP commands backing the cable lock/unlock switch."""

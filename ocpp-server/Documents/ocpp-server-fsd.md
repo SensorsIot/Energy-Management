@@ -325,7 +325,7 @@ Behavior depends on `wallbox_type`:
 
 | `wallbox_type` | Phase switching |
 |----------------|-----------------|
-| `three_phase` | No relay switching. The **connected cable** decides the phase count, detected live from MeterValues (§3.6.4.1); the server clamps to the detected phase's range and zeroes requests below its minimum. |
+| `three_phase` | No relay switching. The **connected cable** decides the phase count, detected live from MeterValues (§3.6.4.1). Every request is clamped to the detected phase's range: above its maximum down to that maximum, below its minimum to 0 (pause). The clamp is unconditional — there is no relay here, so it does not depend on a phase-switch time lock. |
 | `external_breaker` | Server drives the EARU latching relay via `phase_switch_entity`. Detailed flow below. |
 | `universal` | Wallbox manages phases natively; server passes the requested power through and reports observed phase count. |
 
@@ -338,8 +338,12 @@ counts as drawing when its `Current.Import` is ≥ **0.5 A**, evaluated only onc
 so idle/ramp noise cannot flap it. The detected count (1 or 3) drives:
 
 - `sensor.wallbox_phases` and the published `min/max_power_w` range (§3.6.1),
-- the watts→amps divisor (the wallbox applies the amp limit per phase: 3φ ÷637, 1φ ÷212 — §7.2),
-- the meter power correction (3φ-calibrated; a 1φ/2φ draw reports the wallbox's own measured power, §7.1).
+- the watts→amps divisor (the wallbox applies the amp limit per phase: 3φ ÷637, 1φ ÷230 — §7.2),
+- the meter power correction (3φ-calibrated; a 1φ/2φ draw reports the wallbox's own measured power, §7.1),
+- the **live command**: adopting a new count re-applies the current HA power limit through the new
+  range, so the commanded setpoint and the charging profile's `numberPhases` match the cable. The
+  published range alone is not enough — a setpoint left at the previous phase scale is unreachable,
+  and the Modbus-proxy correction publishes that setpoint as its commanded bridge (§3.6.6).
 
 Detection is continuous, so swapping to a different cable (3φ↔1φ) re-detects on the next meaningful
 draw. In `external_breaker`/`universal` modes the relay/wallbox owns the phase count and the detected
@@ -421,9 +425,14 @@ the wallbox's *actual* draw so the corrected DTSU matches the M-Bus grid meter. 
 measured power (`ChargePointHandler._correct_meter_power`, `METER_SCALE·raw + METER_OFFSET`) is that
 value, but it lags — ~60 s cadence and a slow post-command ramp — so the published value is:
 
-- **Bridge — commanded** (`_last_sent_power_w`): while a charge is commanded but the fresh measured
-  reading has **not yet reached 85 %** of the commanded setpoint (or is stale, >90 s), publish the
-  commanded power. Injected the instant the command is sent during an active session (`Charging` or
+- **Bridge — commanded** (`_last_sent_power_w`), **bounded by the cable's physical maximum**
+  (`max_current_a × 230 ×` detected phases, §3.6.4.1): while a charge is commanded but the fresh
+  measured reading has **not yet reached 85 %** of the bounded setpoint (or is stale, >90 s), publish
+  it. The bound is what makes the handoff reachable — the test is a *ratio of commanded*, so a
+  setpoint the cable cannot draw latches the bridge on for the whole session (a 1φ cable maxes at
+  3680 W and can never reach 85 % of a 3φ-scale 11000 W, so the proxy would inject that unreachable
+  figure as phantom load). It also covers the window between a phase-count change and the re-sent
+  profile. Injected the instant the command is sent during an active session (`Charging` or
   `SuspendedEVSE` = warm resume / amp change), and on reaching `Charging` for the cold-start path. This
   signals the SUN2000 the full load immediately and covers the whole ramp; a late car briefly
   **exports** (sells) — deliberately preferred over under-reading and **importing** (buying).
@@ -669,7 +678,10 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-13 | Full charge cycle | Start → Charge → Pause → Resume → Stop |
 | TC-14 | HA restart with active wallbox | Entities re-registered, state re-synced |
 | TC-15 | Cable-lock switch toggled (§3.6.7) | `LOCK`→`ChangeConfiguration(UnlockConnectorOnEVSideDisconnect, false)`, `UNLOCK`→`true`; state follows on Accepted, reverts on reject/offline; `GetConfiguration` on connect syncs the switch |
-| TC-16 | Cable phase detection (§3.6.4.1) | L1-only MeterValues ≥400 W → `active_phases`=1, `sensor.wallbox_phases`=1, range→1380–3680 W, divisor ÷212, `wallbox_power`=raw; all three phases → 3, ÷637, linear correction; below 400 W does not flap; `universal`/`external_breaker` ignore detection |
+| TC-16 | Cable phase detection (§3.6.4.1) | L1-only MeterValues ≥400 W → `active_phases`=1, `sensor.wallbox_phases`=1, range→1380–3680 W, divisor ÷230, `wallbox_power`=raw; all three phases → 3, ÷637, linear correction; below 400 W does not flap; `universal`/`external_breaker` ignore detection |
+| TC-32 | 1φ cable, request above the 1φ maximum (§3.6.4) | 11000 W → clamped to 3680 W and recorded as the commanded setpoint; no phase-switch time lock involved. 3φ cable at 11000 W (within 11040 W) passes through; below the 1φ minimum still pauses at 0 W |
+| TC-33 | Phase detection re-applies the live limit (§3.6.4.1) | 3φ→1φ with 11000 W commanded → limit re-applied through the 1φ range: commanded setpoint 3680 W, profile `numberPhases`=1 |
+| TC-34 | Proxy bridge on a 1φ cable (§3.6.6) | Commanded 11000 W with 1 phase detected → correction bounded to 3680 W + bias, not 11000 W + bias; a 3539 W measured draw (≥85 % of 3680 W) hands off to measured. A genuine 3φ 11000 W command is unaffected by the bound |
 
 ### 8.1 Security test cases
 
@@ -736,6 +748,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.23 | 2026-10-04 | **A detected single-phase cable now clamps the live command, so the Modbus-proxy correction stays reachable (§3.6.4, §3.6.4.1, §3.6.6).** Live on 2026-10-04 a single-phase cable charging at 3539 W had the proxy inject **11200 W** of correction for a whole 7-minute session — the SUN2000 was told it was importing ~10 kW against a real 2.4 kW and ramped PV to chase a 7.7 kW phantom load (caught by the `modbus_proxy_correction_diverges` watchdog). Three faults compounded: (1) the only 1φ clamp sat behind `phase_lock_active`, which never engages in `three_phase` mode (no relay, so `_last_phase_switch_time` stays 0), so an 11000 W request was sent and recorded verbatim — the clamp to the detected phase's range is now unconditional and bounds the **maximum** as well as the minimum; (2) `_on_phases_detected` published the new 1380–3680 W range but left the live command at 11000 W, and now re-applies the HA limit through the new range (also correcting the profile's `numberPhases`); (3) the proxy bridge hands off to measured at a *ratio of commanded*, which an unreachable setpoint can never satisfy, so `_proxy_power_w` bounds commanded by `max_current_a × 230 ×` detected phases. The ESP32 Modbus Proxy is a pass-through (`calculatePowerCorrection` returns the MQTT value unchanged, totals corrected once) and needed no change. Also corrects the 1φ divisor stated in §3.6.4.1 and TC-16 (÷212 → the measured **÷230** already specified in §7.2). TC-32…TC-34. ocpp-server 0.9.75; tests 149 → 155 (`TestSinglePhaseCableClamp`, 2 added to `TestProxyCorrection`). |
 | 3.22 | 2026-08-10 | **Wallbox response deadlines are named, and the suite stops waiting them out (§3.5.1).** The five deadlines were inline literals in `run.py`, so a test exercising the post-connect or start path waited them out in real wall-clock time — 236 of the suite's 246 seconds. They are now named attributes (`POST_CONNECT_TIMEOUT_S`, `METER_SYNC_TIMEOUT_S`, `TRANSACTION_START_TIMEOUT_S`, `PROFILE_SETTLE_S`, `PHASE_RELAY_SETTLE_S`) with **unchanged shipped values** (30/10/15/3/3 s), reviewable in one place and shrinkable per-process by tests. A second, larger source of waiting was the ocpp library's own `response_timeout` (default 30 s): a handler on a mock connection never gets a CALL answered, so anything reaching `self.call()` — `get_configuration` during post-connect — blocked the full 30 s regardless of our constants; tests shrink `_response_timeout` too. Suite: **246 s → 1.4 s**, 148 → 149 tests. The new test asserts the *shipped* values (including `power_update_interval_s` = 60), so shrinking a deadline fails the suite — these must stay generous because the wallbox does not talk often. Behaviour unchanged. ocpp-server 0.9.74. |
 | 3.21 | 2026-08-10 | **Write economy on SetChargingProfile (§3.5.2).** Every profile is a write to the wallbox's non-volatile store, and three paths were spending them for nothing. (1) **Duplicate profiles.** Change detection compared HA state *strings*, and nothing compared the command actually sent, so `"4354.0"` vs `"4354"` re-sent, and — the costly case — different watts that floor to the same amps re-sent (the wallbox floors watts to whole amps, so 4354 W and 4400 W are both `7 A`). `set_charging_power` now compares `(limit_a, num_phases)` against the last **accepted** profile and returns success without sending when they match; a rejected profile is not remembered, and the state is per-connection so a reconnect re-asserts. A `force` flag preserves the SuspendedEVSE recovery (§5.4), which re-sends an identical profile deliberately. (2) **Throttle measured from the wrong event.** `_last_change_at` was reset on *every* change including throttled ones, so the interval measured the gap between changes, not since the last send — a steady stream of sub-interval changes starved the queue and the pending value was never delivered (only the 60 s reconciliation rescued it). Now timed from `_last_sent_at`; `0 W` still bypasses. (3) **A start attempt per power change.** Each change re-entered the start path and fired a fresh `RemoteStartTransaction` — three in two minutes on 2026-08-09 against a car in `Preparing` that was never going to start. Now one attempt, then an escalating back-off (60/300/900 s), reset on transaction start or `Available`. TC-20…TC-31. ocpp-server 0.9.73. |
 | 3.20 | 2026-08-02 | **Meter correction recalibrated against the utility meter, and applied to energy (§7.1).** Coefficients moved to `1.023 × raw − 101`, measured against the gPlug utility smart meter (`sensor.grid_power`) using the stable night house baseline (280 W median, n=7492): two 11 kW charging→idle transitions after 23:00 agreeing to 3 W (raw 11315 W → true 11475 W) plus one 4 kW night (raw 4027 W → true 4019 W). The reference meter matters — the wallbox sits outside the DTSU loop and the Modbus proxy injects the correction into the DTSU, so calibrating against `sensor.power_meter_active_power` would measure the correction against itself. The dedicated M-Bus wallbox meter disagrees in sign; the utility meter is authoritative. Separately, `session_energy_wh` was assigned **raw** while only power was corrected, so `sensor.wallbox_power` and `sensor.wallbox_energy` sat on different scales; `_accumulate_energy()` now corrects register increments (`METER_SCALE·dE_raw + METER_OFFSET·dt_h` — the offset is a power, so it only becomes an energy once integrated) and resets on transaction start or a backwards register. Known weakness: the slope/offset split rests on the single 4 kW anchor. ocpp-server 0.9.72; tests 125 → 129. |

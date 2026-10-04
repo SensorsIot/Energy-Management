@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.74"
+__version__ = "0.9.75"
 
 import asyncio
 import json
@@ -613,12 +613,22 @@ class OCPPServer:
           feed the **calibrated measured** draw — removing the integer-amp-flooring
           overstatement of the commanded value (the ~12 %/W divergence from M-Bus).
 
+        The commanded setpoint is first bounded by the connected cable's physical
+        maximum (`max_current_a × 230 × _current_phases`), so the ratio handoff is
+        always reachable.
+
         `_PROXY_EXPORT_BIAS_W` is added on top so the corrected grid leans to export.
         Returns 0 when not commanding a charge.
         """
         if not (self._proxy_charging and self._last_sent_power_w > 0):
             return 0.0
-        commanded = float(self._last_sent_power_w)
+        # Bound the bridge by what the connected cable can physically draw. The
+        # handoff test is a ratio of commanded, so an unreachable setpoint latches
+        # the bridge on for the whole session (a 1φ cable maxes at 3680 W and can
+        # never reach 85 % of a 3φ-scale 11000 W). This also covers the window
+        # between phase detection and the re-sent profile (_on_phases_detected).
+        phase_max_w = float(self.max_current_a * 230 * self._current_phases)
+        commanded = min(float(self._last_sent_power_w), phase_max_w)
         measured = float(self._last_measured_power_w)
         fresh = (time.monotonic() - self._last_measured_time) <= self._PROXY_MEASURED_MAX_AGE_S
         if fresh and measured >= self._PROXY_MEASURED_MIN_RATIO * commanded:
@@ -728,6 +738,13 @@ class OCPPServer:
         self._current_phases = detected
         asyncio.ensure_future(self.ha.set_state("sensor.wallbox_phases", detected))
         asyncio.ensure_future(self._publish_power_limits())
+        # Re-apply the HA limit through the new phase range. Publishing the range
+        # alone left the *live* command at its old phase scale: a 3φ→1φ change kept
+        # `_last_sent_power_w` at 11000 W, which the proxy correction then injected
+        # as an 11200 W phantom load (FSD 3.6.4 / 3.6.6). The re-send also fixes the
+        # profile's `numberPhases`; `set_charging_power` dedups on (amps, phases),
+        # so an unchanged profile is not re-written to the wallbox.
+        asyncio.ensure_future(self._apply_current_power_limit())
 
     async def _abort_phase_switch(self, reason: str) -> None:
         """Abort phase switch: disable single-phase, restore previous profile."""
@@ -947,13 +964,29 @@ class OCPPServer:
                 self._last_phase_switch_time = time.monotonic()
             # three_phase: no phase switching, _current_phases stays 3
 
-        # 3-phase only: below minimum (6A × 3 × 230V = 4140W) → pause
+        # three_phase: the connected cable owns the phase count, so the request is
+        # clamped to the *detected* phase's range (FSD 3.6.4) — not only while a
+        # phase-switch time lock happens to be active (there is no relay here, so
+        # that lock never engages and the clamp never ran). Above the maximum the
+        # wallbox physically cannot comply, and the unreachable setpoint is what
+        # the Modbus-proxy correction publishes as the commanded bridge (3.6.6):
+        # a 1φ cable commanded 11000 W injected 11200 W of phantom load for the
+        # whole session, because measured can never reach 85 % of commanded.
         min_power_w = self.min_current_a * 230 * self._current_phases
-        if power_w > 0 and power_w < min_power_w and self.wallbox_type == "three_phase":
-            logger.info(
-                f"Below minimum {min_power_w}W (3-phase only) → pausing (0W)"
-            )
-            power_w = 0
+        max_power_w = self.max_current_a * 230 * self._current_phases
+        if power_w > 0 and self.wallbox_type == "three_phase":
+            if power_w > max_power_w:
+                logger.info(
+                    f"Above maximum {max_power_w}W "
+                    f"({self._current_phases}-phase) → clamped from {power_w}W"
+                )
+                power_w = max_power_w
+            elif power_w < min_power_w:
+                logger.info(
+                    f"Below minimum {min_power_w}W "
+                    f"({self._current_phases}-phase) → pausing (0W)"
+                )
+                power_w = 0
 
         if power_w > 0 and self.charge_point.transaction_id is None:
             # No transaction yet — one start attempt, then back off (FSD 3.5.1).
