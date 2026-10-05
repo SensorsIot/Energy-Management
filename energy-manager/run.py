@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.33"
+__version__ = "1.9.34"
 
 import json
 import logging
@@ -304,7 +304,6 @@ class EnergyManager:
         # EV charging config (FSD 4.5)
         ev_opts = options.get("ev_charging") or {}
         self.ev_charging_enabled = ev_opts.get("enabled", False)
-        self.ev_min_power_w = ev_opts.get("min_power_w", 1400)
         self.ev_max_power_w = ev_opts.get("max_power_w", 11000)
         # Master switch for the M-Bus grid meter (FSD 4.7.5). False takes the
         # reader out of service entirely: the entity is never read, the
@@ -1808,6 +1807,14 @@ class EnergyManager:
             # User power slider (manual_power for immediate/cheap modes)
             manual_power_raw = self.ha_client.get_sensor_value(self.manual_power_entity)
             manual_power = int(manual_power_raw) if manual_power_raw is not None else ev_max_power
+            # The slider is a human preference expressed in watts, so it is mapped
+            # once onto the amp grid the wallbox actually accepts. This is the only
+            # watts→amps step in the system, and it exists because the *input* is
+            # watts — it does not re-derive a decision already made in amps.
+            # Floored, so the command never exceeds the power asked for; a value
+            # below the wallbox minimum stays below it and the OCPP server's range
+            # clamp turns it into a pause (its FSD 3.6.4).
+            manual_a = min(ev_max_a, int(manual_power // ev_watts_per_amp))
 
             pv_power = self.ha_client.get_sensor_value(self.pv_power_entity) or 0.0
             load_power = self.ha_client.get_sensor_value(self.load_power_entity) or 0.0
@@ -2100,7 +2107,7 @@ class EnergyManager:
                 manual_power_w=manual_power,
                 ev_charging_power_w=ev_charging_power_w,
                 ev_charging_a=ev_charging_a,
-                manual_a=ev_max_a,
+                manual_a=manual_a,
                 target_soc=target_soc,
                 car_soc=car_soc,
                 car_soc_age_s=car_soc_age_s,

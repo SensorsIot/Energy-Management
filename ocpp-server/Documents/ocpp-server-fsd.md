@@ -164,7 +164,7 @@ from the **same** id is allowed and replaces a stale connection. (SEC-04)
 
 ### 3.5 Transaction Management
 
-Transactions are fully automatic — EnergyManager only sets `number.wallbox_power_limit`.
+Transactions are fully automatic — EnergyManager only sets `number.wallbox_current_limit`.
 
 **Start sequence** (order critical for AcTec):
 
@@ -215,21 +215,20 @@ minimum number of commands that still holds the wallbox at the requested power. 
 in order.
 
 **No duplicate profiles.** A profile is sent only when the command actually differs from the one the
-wallbox already holds. The comparison is on the **integer amps and phase count actually commanded**,
-not on the requested watts: the wallbox floors watts to whole amps (§7.2), so 4354 W and 4400 W are
-both `7 A` and the second is a duplicate. `set_charging_power` compares `(limit_a, num_phases)`
-against the last accepted profile and returns success without sending when they match. The last
+wallbox already holds. The comparison is on the **amp limit and phase count commanded**:
+`set_charging_current` compares `(limit_a, num_phases)` against the last accepted profile and
+returns success without sending when they match. The last
 accepted profile is per-connection state — a reconnect re-asserts the profile, since the server
 cannot know what the wallbox retained.
 
 A caller may set `force` to re-send an identical profile deliberately. The SuspendedEVSE recovery
 (§5.4) needs this: nudging a stuck wallbox means re-sending the *same* profile on purpose.
 
-**At most one power change per minute.** Changes to `number.wallbox_power_limit` are queued in
-`_pending_power_w` and sent when `power_update_interval_s` (default 60 s) has elapsed **since the
+**At most one change per minute.** Changes to `number.wallbox_current_limit` are queued in
+`_pending_a` and sent when `power_update_interval_s` (default 60 s) has elapsed **since the
 last send** — not since the last change. Measuring from the last change lets a
 steady stream of sub-interval changes starve the queue indefinitely, so the queued value is never
-delivered. A pause (`0 W`) bypasses the throttle entirely; it is safety-critical and is never delayed.
+delivered. A pause (`0 A`) bypasses the throttle entirely; it is safety-critical and is never delayed.
 
 **No start attempts while the car is not charging.** When power is requested and no transaction is
 active, the server makes **one** start attempt (the §3.5 start sequence). If the wallbox does not
@@ -354,7 +353,7 @@ The current limit (including `0`) is **re-applied to the wallbox on every (re)co
 | **Init** | Read last-known state from HA entities | off |
 | **State-sync** | Wait for StatusNotification from wallbox | off |
 | **Inner-sync** | Only if Charging: wait for MeterValues to recover power/energy/transaction | off |
-| **Active** | Derive car_ready from status, accept power commands, re-apply the current `number.wallbox_power_limit` (including `0`/pause) | per table |
+| **Active** | Derive car_ready from status, accept current commands, re-apply the current `number.wallbox_current_limit` (including `0`/pause) | per table |
 
 #### 3.6.4 Phase Switching
 

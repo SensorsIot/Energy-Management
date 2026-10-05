@@ -312,3 +312,53 @@ def test_threshold_below_configured_surplus_uses_battery_support(
                 if c.args[0] == "sensor.ev_target_power")
     assert call.args[1] == 0
     assert call.kwargs["attributes"]["threshold_w"] == expected
+
+
+@pytest.mark.parametrize(
+    "phases,watts_per_amp,slider,expected_a",
+    [
+        # 1-phase: the slider is above what one phase can take, so the command
+        # saturates at the wallbox maximum.
+        (1, 230, 6800, 16),
+        (1, 230, 1500, 6),
+        # 3-phase: the slider genuinely selects a step. Regression — 1.9.32/33
+        # commanded the maximum here, ignoring the slider and drawing ~3.4 kW
+        # more than asked.
+        (3, 637, 6800, 10),
+        (3, 637, 11000, 16),
+        (3, 637, 4000, 6),
+    ],
+)
+def test_manual_mode_honours_the_power_slider(
+    manager, phases, watts_per_amp, slider, expected_a
+):
+    """IMMEDIATE commands the highest amp step that fits the user's slider.
+
+    Floored, never rounded up, so the command cannot exceed the power asked for.
+    """
+    manager.ha_client.get_input_select.return_value = "immediate"
+    manager.ha_client.get_state.side_effect = lambda entity: {
+        "state": "Charging" if entity == manager.ev_wallbox_status_entity else "on"
+    }
+    values = {
+        manager.soc_entity: 50,
+        manager.pv_power_entity: 0,
+        manager.surplus_power_entity: 0,
+        manager.manual_power_entity: slider,
+        "sensor.wallbox_phases": phases,
+        "sensor.wallbox_min_current_a": 6,
+        "sensor.wallbox_max_current_a": 16,
+        "sensor.wallbox_watts_per_amp": watts_per_amp,
+        "sensor.wallbox_max_power_w": 16 * watts_per_amp,
+    }
+    manager.ha_client.get_sensor_value.side_effect = values.get
+    manager._read_grid_power = MagicMock(return_value=0)
+
+    manager.control_ev_charging()
+
+    sent = [c for c in manager.ha_client.set_sensor_state.call_args_list
+            if c.args[0] == manager.wallbox_current_limit_entity]
+    assert sent, "no current limit was written"
+    assert sent[-1].args[1] == expected_a
+    # Never more than the slider asked for (unless saturated at the maximum).
+    assert expected_a * watts_per_amp <= slider or expected_a == 16

@@ -428,8 +428,7 @@ setup/update workflow is in [`Handbook.md` → Installation](../../Handbook.md#i
 | _(holidays)_ | computed | The 8 EBL cheap holidays computed in-add-on (Section 4.1.3); no config key |
 | `appliances.power_w` | 2500 | Deferrable appliance power |
 | `appliances.energy_wh` | 1500 | Appliance energy per cycle |
-| `ev_charging.min_power_w` | 4100 | Min EV charging power |
-| `ev_charging.max_power_w` | 11000 | Max EV charging power |
+| `ev_charging.max_power_w` | 11000 | Fallback for the manual-power slider when `input_number.ev_manual_power` is absent. The step range itself comes from the wallbox's published amp range (`sensor.wallbox_min_current_a` / `max_current_a`), not from config. |
 | `schedule.update_interval_minutes` | 15 | Optimization cycle interval |
 | `log_level` | info | Logging level |
 
@@ -1162,8 +1161,8 @@ The user selects one of three charging modes via the kitchen dashboard (Amazon F
 |------|---------------------|----------------|-------------|
 | **Off** | `off` | Off | Charging disabled. No wallbox charging even when PV surplus is available. Sticky — never auto-reverts. |
 | **Solar** | `solar` | *(default — button-card greyed)* | Follow PV surplus while the home battery can reach its daily target; the 48-hour floor governs step-up only |
-| **Immediate** | `immediate` | Charge Now | Charge at `manual_power_w` regardless of tariff or surplus |
-| **Cheap** | `cheap` | Cheap Charge | Charge at `manual_power_w` during cheap tariff, 0 W during expensive |
+| **Immediate** | `immediate` | Charge Now | Charge at the highest amp step that fits `manual_power_w`, regardless of tariff or surplus |
+| **Cheap** | `cheap` | Cheap Charge | Charge at the highest amp step that fits `manual_power_w` during cheap tariff, 0 A during expensive |
 
 **Control entity:** Two custom button-cards on `lovelace-amazonfire/test` (Cheap Charge / Charge Now). Each `tap_action` calls `script.ev_toggle_manual_charge` with the mode value. The script branches:
 
@@ -1285,7 +1284,7 @@ Freshness of `car_soc` (age of `sensor.smart_battery.last_updated`) is logged in
 | `charging_mode` | `input_select.ev_charging_mode` | State routing |
 | `is_cheap_tariff` | Tariff schedule (Section 4.1.3) | CHEAP power toggle |
 | `ev_charging_power_w` | EV Charge Power (Section 4.3.7) | SOLAR entry + power |
-| `manual_power_w` | `input_number.ev_manual_power` | CHEAP/IMMEDIATE power |
+| `manual_power_w` | `input_number.ev_manual_power` | CHEAP/IMMEDIATE power. A human preference in watts, so it is mapped once onto the amp grid (`manual_power_w // watts_per_amp`, floored so the command never exceeds the power asked for, clamped to `max_current_a`). This is the only watts→amps step in the system; it converts an *input*, not a decision already made in amps. A result below the wallbox minimum is left there and the OCPP server's range clamp pauses it (its FSD 3.6.4). |
 | `target_soc` | `input_number.ev_target_soc` | CHEAP/IMMEDIATE budget |
 | `car_soc` | `sensor.smart_battery_last_known` | CHEAP/IMMEDIATE SOC stop |
 | `car_soc_age_s` | `now − sensor.smart_battery.last_updated` | Logging only |
@@ -1868,7 +1867,7 @@ the structured fields below; `reason` is kept for logs, not rendered:
 | `threshold_w` | Min solar power threshold (W) |
 | `surplus_power_w` | Solar surplus = PV − house load (W) |
 | `grid_export_w` | Current grid export (W) |
-| `snap_power_w` | Winning charging power from `snap_to_power_step()` (W); 0 = no charging |
+| `snap_power_w` | Winning amp step expressed in watts (`step_watts`); 0 = no charging |
 | `ev_step_offset` | Chosen amp step's offset from the surplus-snapped level: `+n` snapped up (home battery bridges the gap), `-n` stepped down (battery preserved), `0` matched, `null` not solar-charging — published for diagnostics; not shown on the card (the home-battery line shows only the contribution) |
 | `battery_soc` | Current home-battery SOC (%) — live read on the 10-s loop |
 | `battery_will_be_full` | Does peak SOC today reach the charge ceiling? Recomputed on the **10-s loop** (`reaches_target_today`), re-anchored to the live SOC |
@@ -3411,6 +3410,18 @@ See Section 4.3.8 for adaptive polling logic.
 - v2.85: **Topic 3 longevity cap now enforced by the inverter's native end-of-charge SOC register, not just the software power limit (Section 4.2.4).** The old cap wrote `number.battery_maximum_charging_power = 0` once the battery reached `battery_target_soc`. Two gaps let the battery overshoot the 90 % longevity target — verified live 2026-07-17, where it reached 100 %: (1) the power limit is written on the 15-min battery cycle, so the battery kept charging at ~5 kW for up to ~15 min after crossing the target (90 % → ~96 % before the limit landed); (2) a 0 W charge-power limit does not stop DC PV surplus trickling the battery up to the inverter's own SOC cutoff, which sat at 100 %. EM now mirrors `battery_target_soc` onto `number.battery_end_of_charge_soc` every cycle, so the inverter hard-stops charging at the target in real time. The register accepts 90-100 %, exactly the range of the floored target, so it always fits; a 100 % target means "no cap". The power limit is kept as a backing control and drives the dashboard action. When `charge_target_enabled` is off EM leaves the register untouched, releasing it to 100 % only if it had previously lowered it. New `end_of_charge_soc_entity` config key; new `_apply_soc_ceiling`; new `TestSocCeiling`. (1.9.9 -> 1.9.10)
 
 - v2.84: **Shaving day-mode decision log now reports the actual decision time.** The once-daily shave-vs-car-day snapshot (Section 4.2.3) is evaluated on the 15-minute battery-control cycle, so the first tick at/after `shaving_decision_hour` lands up to 15 min past the hour (e.g. 08:12 for an 08:00 hour). The log line previously printed the configured hour (`decided at 08:00`), which misrepresented when the snapshot was taken; it now prints the real local time plus the configured hour: `decided at 08:12 (decision hour 08:00)`. Behaviour and the 15-minute cadence are unchanged. (1.9.8 -> 1.9.9)
+
+- v2.88: **The manual power slider selects an amp step again (Section 4.3.4).** v2.87 passed the
+  wallbox maximum as the manual-mode command, so IMMEDIATE and CHEAP ignored
+  `input_number.ev_manual_power`: with the slider at 6800 W a three-phase cable would have charged at
+  16 A (~10.2 kW) instead of the requested ~6.8 kW. The slider is now mapped onto the amp grid once —
+  `manual_power_w // watts_per_amp`, floored so the command never exceeds the power asked for, clamped
+  to `max_current_a`. Floored rather than rounded: the previous `round(W / 637)` could command one amp
+  more than requested. A result below the wallbox minimum is left there and the OCPP server's range
+  clamp pauses it. Not visible on the single-phase cable in use (both old and new give 16 A). The dead
+  `ev_charging.min_power_w` option is dropped: the step range comes from the wallbox's published amp
+  range, so the key had no remaining reader. `test_manual_mode_honours_the_power_slider` (5 cases).
+  (1.9.33 -> 1.9.34)
 
 - v2.87: **The wallbox is commanded in amps, and the step ladder covers the whole 6-16 A range (Sections 4.3.6-4.3.7).** The ladder was a table of *watts* per amp level, and `POWER_STEPS_3P` stopped at **12 A (7624 W)** while the wallbox goes to 16 A — so on a three-phase cable `ev_max_power = power_steps[-1]` capped solar charging at 7.6 kW and up to **2.6 kW of surplus went to the grid instead of the car**. The watt encoding also meant the decision round-tripped amps → watts → amps (the OCPP server divided back by 637 or 230), with three different watts-per-amp models in play across the two add-ons. Now `amp_steps(min_a, max_a)` is the ladder — every whole amp, identical on one and three phases — built from `sensor.wallbox_min_current_a` / `max_current_a`, and `step_watts(amps, watts_per_amp)` is the only conversion, running **amps → watts only**, with the factor read from `sensor.wallbox_watts_per_amp` rather than hardcoded. The chosen amp goes to `number.wallbox_current_limit` unconverted (ocpp-server 0.9.76, its FSD §3.6.1-3.6.2). `POWER_STEPS_3P` / `POWER_STEPS_1P` / `power_steps_for_phases` / `snap_to_power_step` are replaced; `calculate_ev_power` and `resolve_phase_gap` are deleted — the 3681-4139 W dead zone was an artefact of the watt encoding and does not exist in amps. `EVOutput` gains `target_current_a` (the command) alongside `target_power_w` (the same decision in watts, for logging and the dashboard). Side effect of the single factor: a derived step watt moves by up to ±140 W at the bottom of the 3-phase range versus the old per-amp measurements, which changes only how a step is sized against surplus, never what is commanded. (1.9.31 -> 1.9.33)
 
