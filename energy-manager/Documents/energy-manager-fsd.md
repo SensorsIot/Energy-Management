@@ -535,7 +535,7 @@ Everything the decision logic (Sections 4.2–4.5) reads from. All consumers sha
 | Source bucket | Measurement | Fields used | Unit |
 |---|---|---|---|
 | `pv_forecast` | `pv_forecast` (inverter=`total`, model=`hybrid`) | `power_w_p10/p50/p90` | W per 15 min |
-| `load_forecast` | `load_forecast` | `energy_wh_p10/p50/p90` | Wh per 15 min |
+| `load_forecast` | `load_forecast` | `power_w_p10/p50/p90` | W per 15 min |
 
 **Why the 120 h (5-day) horizon:** Both forecasts cover 120 hours. This ensures the SOC simulation can look ahead to the next weekday's expensive hours even from a Friday evening (worst case: Fri 21:00 → Mon 21:00 = 72 hours). The extended horizon also enables 5-day Grafana visualisation of the energy balance and gives the EV step-up check enough headroom to inspect two full day/night cycles.
 
@@ -672,12 +672,19 @@ from(bucket: "energy_manager")
 
 ### 4.2.2 Discharge Strategy and Protection Signal (Topic 4)
 
-Discharge protection compares strategies using **p10 PV / p90 household load**.
+Discharge protection compares strategies using **p10 PV / p50 household load**.
 The tariff schedule and expensive-import comparison remain the decision rules.
 Published `battery_on`, `battery_off`, `planned`, and SOC snapshot curves use this
-conservative input. Energy-balance and car-outlook curves use p50. Missing conservative
+input. Energy-balance and car-outlook curves use p50 for both. Missing conservative
 forecast data holds discharge during cheap tariff and leaves discharge allowed during
 expensive tariff; the EV target gate fails closed.
+
+Load stays at **p50**, not p90: the load forecast's p90 is a per-slot bound, and
+no night has every slot at its high. Summed over an evening and night, per-slot
+p90 exceeded the real load on every one of 30 nights checked (Sep–Oct 2026: 11.3 kWh
+planned vs 6.7 kWh average, 10.3 kWh worst), so a p90 plan sees the battery empty
+before the expensive window almost every night and holds discharge even at 98–100 %
+SOC. The low-PV p10 side carries the uncertainty allowance.
 
 
 Decides whether the home battery may discharge. Acts on `number.battery_maximum_discharging_power`.
@@ -738,7 +745,7 @@ When the wallbox draws power, the Modbus proxy raises the household load the inv
 
 #### Simulation reserve
 
-`battery.reserve_percent` defaults to **0%**. The p10-PV/p90-load forecast
+`battery.reserve_percent` defaults to **0%**. The p10-PV forecast
 provides the uncertainty allowance. A configured reserve raises the simulation's
 unavailable battery-energy floor; it does not change the inverter's physical SOC cutoff.
 
@@ -1328,7 +1335,7 @@ The wallbox may charge **iff all four hold**; the first that fails stops it.
 - **Surplus hysteresis:** the phase-aware configured threshold is the stop threshold when battery support is permitted. Starting or restarting requires **300 W more**; an active solar session continues at the stop threshold and pauses below it. With a 3200 W threshold, start is **3500 W**, stop is **below 3200 W**. When battery support is unavailable (SOC/forecast floor or step-up suppression), the stop threshold is at least the lowest eligible wallbox power step; start is that effective threshold plus 300 W. Decisions use the three-sample surplus average. Battery-target protection and car readiness/target checks take priority; hysteresis cannot retain charging after these checks fail. `sensor.ev_target_power.threshold_w` reports the currently applicable start or stop threshold. Battery-support eligibility is evaluated even when surplus is below the configured threshold, so a low surplus reading alone does not raise the displayed requirement to the wallbox minimum.
 - Rule 3's start threshold is **phase-aware** (`solar_start_threshold`): in **3φ** it is the manual `input_number.ev_min_solar_power`; in **1φ** that gate is **not honored** and the threshold is the wallbox minimum (6 A ≈ 1380 W). Single-phase power is inherently small (max 3680 W / 16 A), so `ev_min_solar_power` — sized for 3-phase, where the minimum step is already 3962 W — would strand most of the 1φ range and force charging only in the top band. The connected-phase count comes from `sensor.wallbox_phases` (ocpp-server §3.6.4.1); phases also select the Topic 2 step table (Section 4.3.7).
 - Rule 4 gives the **home battery priority** over the car: the battery's own charge ceiling (`battery_target_soc`, Section 4.2.4) is the target the car's permission is measured against. The reachability forecast is **car-excluded**, so it reads as *"if the car stops now and the battery gets all the surplus from here on, does it still reach the target today?"* When that turns false, the car yields all surplus to the battery. It is **self-correcting**: while the car charges it steals surplus, so each cycle the sim is re-anchored to a lower (car-suppressed) live SOC; the moment the battery cannot reach the target, the car stops, the battery then receives 100 % of the surplus and lands at (nearly) the target. Full-battery exception: at 100 % SOC the battery has already reached the target, so the check is skipped (the Rule-1 grid-export-capture path applies).
-- **Evaluated on the live 10-s loop, re-anchored to live SOC.** The target gate uses **p10 PV minus p90 household load**, excluding the car. The 15-min optimizer shares this conservative forecast with the discharge decision; the energy-balance and car-outlook curves use p50. Each EV cycle excludes completed slots and prorates the current slot's energy and battery power limits to the time remaining. The check includes energy through local midnight and excludes tomorrow's production. Missing or empty conservative input blocks charging; a failed refresh clears the EV forecast cache.
+- **Evaluated on the live 10-s loop, re-anchored to live SOC.** The target gate uses **p10 PV minus p90 household load**, excluding the car. The 15-min discharge decision uses p10 PV minus **p50** load (Section 4.2.2); the energy-balance and car-outlook curves use p50 for both. Each EV cycle excludes completed slots and prorates the current slot's energy and battery power limits to the time remaining. The check includes energy through local midnight and excludes tomorrow's production. Missing or empty conservative input blocks charging; a failed refresh clears the EV forecast cache.
 - **Battery-target hysteresis:** after the target check pauses solar charging, restart requires the same `battery.discharge_hysteresis_percent` recovery margin (default 2 percentage points). The check debits this energy from the starting live SOC before testing reachability, so a 100% target remains achievable. After release, ordinary target reachability governs until the next shortfall. A physically full home battery clears the hold.
 - The 15-min `soc_forecast` and `sensor.battery_decision` attributes describe the conservative planned trajectory. `sensor.ev_target_power`'s `battery_will_be_full` and `battery_full_time` describe the live conservative target check.
 - The 48-hour minimum SOC constrains step-up power (Section 4.3.7); Rule 4 is the target-based charging permission check.
@@ -2504,10 +2511,11 @@ hub `Harness/project/testing.md` (strategy + levels in `Harness/standards/testin
   the held strategy, and expensive tariff overrides the hold.
 
 
-- **BD-CONS-01:** A median forecast permitting discharge and a p10-PV/p90-load
+- **BD-CONS-01:** A median forecast permitting discharge and a p10-PV/p50-load
   forecast predicting expensive imports select protection during cheap tariff.
-  During expensive tariff discharge stays allowed. Published SOC curves use the
-  conservative forecast; the energy-balance curve retains p50.
+  During expensive tariff discharge stays allowed. The p10-PV/p90-load EV-gate
+  forecast does not drive the decision. Published SOC curves use the p10-PV/p50-load
+  forecast; the energy-balance curve retains p50.
 
 
 Test file: `energy-manager/tests/test_battery_optimizer.py`
@@ -2745,7 +2753,7 @@ cd energy-manager && python -m pytest tests/test_ev_state_machine.py -v
 | EV-22 | Suppression fails open | Car SOC or car-side target unavailable, or the forecast is stale → `step_up_suppressed=false` (Rule 3 governs alone) |
 | EV-23 | Live target gate counts remaining energy only | Completed slots add no energy; partial slots prorate energy and charge/discharge limits; cached input is unchanged |
 | EV-24 | Target horizon ends at local midnight | Include the final slot's result; exclude tomorrow's production; no remaining data blocks charging |
-| EV-25 | Conservative EV forecast | Cache p10 PV / p90 load; a conservative target shortfall pauses the live EV controller; discharge uses the same conservative input; missing input does not reuse a median forecast |
+| EV-25 | Conservative EV forecast | Cache p10 PV / p90 load; a conservative target shortfall pauses the live EV controller; discharge uses p10 PV / p50 load instead (BD-CONS-01); missing input does not reuse a median forecast |
 | EV-26 | Surplus below minimum step | Below the SOC floor or with step-up suppressed, no charging; when permitted, select the minimum step, for either cable phase count |
 | EV-27 | Battery-target hysteresis | A target shortfall pauses the EV; exact target recovery keeps it paused; two extra SOC points of forecast energy release it. Test both 90% and 100% targets and repeated transitions |
 | EV-28 | Surplus start/stop hysteresis | Supported: 3499 W stays idle, 3500 W starts, 3200 W continues, 3199 W stops; restarting needs 3500 W. Unsupported: stop at the lowest eligible step and restart 300 W above it. Cover both phase counts, full battery, and battery-target override |

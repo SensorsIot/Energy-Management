@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.30"
+__version__ = "1.9.31"
 
 import json
 import logging
@@ -1446,7 +1446,6 @@ class EnergyManager:
                 return
 
             # EV target gate: low PV and high household load (FSD 4.3.6).
-            # Discharge protection shares the same conservative forecast.
             self._latest_forecast = self.forecast_reader.get_combined_forecast(
                 start=start,
                 end=end,
@@ -1454,23 +1453,22 @@ class EnergyManager:
                 load_percentile="p90",
             )
 
-            if self._latest_forecast.empty:
-                logger.error("No conservative forecast — holding battery during cheap tariff")
-                self._discharge_blocked_by_protection = tariff.is_cheap_now
-                self._update_discharge_control()
-                return
-
-            # Conservative forecast for the marginal-day fill check (B0): low
-            # PV (p10) against median load (p50). Shaving only runs when the
-            # battery fills today even under this pessimistic estimate, so a
-            # marginal day cannot trip shaving and then fail to fill. Everything
-            # else (discharge, water-fill, dashboards) stays on p50 above.
+            # Low PV (p10) against median load (p50): discharge protection
+            # (FSD 4.2.2), the marginal-day fill check (B0) and step-up
+            # suppression. Load stays at p50 because p90 is a per-slot bound —
+            # summed over a night it overstates the load every night.
             gate_forecast = self.forecast_reader.get_combined_forecast(
                 start=start,
                 end=end,
                 pv_percentile="p10",
                 load_percentile="p50",
             )
+
+            if self._latest_forecast.empty or gate_forecast.empty:
+                logger.error("No conservative forecast — holding battery during cheap tariff")
+                self._discharge_blocked_by_protection = tariff.is_cheap_now
+                self._update_discharge_control()
+                return
 
             # Fail-safe: a stale forecast heartbeat means the upstream guard is
             # keeping the last-good forecast because the weather input is bad.
@@ -1522,7 +1520,7 @@ class EnergyManager:
             decision, sim_battery_on, sim_battery_off, sim_planned = (
                 self.optimizer.calculate_decision(
                     soc_percent=current_soc,
-                    forecast=self._latest_forecast,
+                    forecast=gate_forecast,
                     now=now,
                     previously_blocked=self._discharge_blocked_by_protection,
                     max_soc_percent=self._battery_target_soc,
@@ -1535,7 +1533,7 @@ class EnergyManager:
                     f"SOC={sim_battery_on['soc_percent'].iloc[0]:.1f}%"
                 )
 
-            logger.info("Battery protection forecast: p10 PV / p90 household load")
+            logger.info("Battery protection forecast: p10 PV / p50 household load")
 
             # Log decision
             logger.info(

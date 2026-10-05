@@ -164,10 +164,14 @@ def test_discharge_uses_conservative_forecast_and_preserves_tariff(manager, hour
     times = pd.date_range(now, periods=200, freq="15min")
 
     def read(**kwargs):
-        conservative = (
-            kwargs.get("pv_percentile") == "p10" and kwargs.get("load_percentile") == "p90"
-        )
-        return pd.DataFrame({"net_energy_wh": -300 if conservative else 1000}, index=times)
+        pv, load = kwargs.get("pv_percentile"), kwargs.get("load_percentile")
+        if pv == "p10" and load == "p50":
+            net = -300
+        elif pv == "p10" and load == "p90":
+            net = -5000  # EV-gate input only; must not drive discharge.
+        else:
+            net = 1000
+        return pd.DataFrame({"net_energy_wh": net}, index=times)
 
     manager.forecast_reader.get_combined_forecast.side_effect = read
     with patch("run.datetime") as clock:
