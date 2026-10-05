@@ -78,9 +78,27 @@ class ChargePointHandler(CP):
     # 105.6 (2026-03-04 sweep 6–14 A).
     # The correction is 3-phase-calibrated (its anchors are multi-kW 3φ points), so it
     # is only applied when 3 phases are drawing; a single-phase draw would be biased
-    # low by the −101 W offset, so 1φ/2φ reports the wallbox's own measured power.
+    # low by the −101 W offset, so 1φ has its own gain (METER_SCALE_1P) and 2φ,
+    # for which nothing has been measured, reports the wallbox's own power.
     METER_SCALE = 1.023
     METER_OFFSET = -101.0
+
+    # Single-phase gain. The regression above is anchored on 3φ points and its
+    # −101 W offset biases a 1φ reading low, so 1φ gets its own correction —
+    # previously it was left uncorrected, which under-reported every 1φ session.
+    # Measured 2026-10-04 over a 30-minute steady window at 16 A, the wallbox
+    # the only variable load: the house meters put the true draw at 3704 W
+    # (PV − grid − battery − house, with the Shelly 3EM house clamp independent
+    # of the wallbox) while MeterValues reported 3527 W → 1.050.
+    # The same balance over three wallbox-idle windows that day closed to
+    # −35 / +15 / −30 W average, so the method carries no meaningful bias.
+    # **One operating point**, so this is a gain with no offset: a fixed offset
+    # fits the same data equally well (sd 98 vs 103 W) but would apply a +5 %
+    # correction as a +13 % one at the 6 A minimum. A gain cannot misbehave that
+    # way, and a gain error is the ordinary failure mode for this meter. Below
+    # ~3.5 kW the figure is therefore unverified — `tools/wallbox_calibration_sweep.py`
+    # walks 6–16 A and settles it.
+    METER_SCALE_1P = 1.050
 
     # Watts drawn per commanded amp, by phase count — see module-level
     # WATTS_PER_AMP, the single conversion constant. Kept as a class attribute
@@ -388,14 +406,18 @@ class ChargePointHandler(CP):
     def _correct_meter_power(self, raw_w: float, active_phases: int = 3) -> float:
         """Correct OCPP MeterValues power using linear regression.
 
-        corrected = METER_SCALE * raw + METER_OFFSET when 3 phases are drawing.
-        The regression is anchored on multi-kW 3φ points, so for a single- (or
-        two-) phase draw the −286 W offset would bias the reading low; there the
-        wallbox's own measured power is returned unchanged. Returns raw value
-        unchanged when not charging (raw <= 0).
+        Per phase count, because the meter's error differs:
+
+        - **3φ**: `METER_SCALE * raw + METER_OFFSET`, the multi-kW regression.
+        - **1φ**: `METER_SCALE_1P * raw`, a measured gain with no offset.
+        - **2φ**: raw, unchanged — no measurement exists for a two-phase draw.
+
+        Returns the raw value unchanged when not charging (raw <= 0).
         """
         if raw_w <= 0:
             return raw_w
+        if active_phases == 1:
+            return self.METER_SCALE_1P * raw_w
         if active_phases < 3:
             return raw_w
         return self.METER_SCALE * raw_w + self.METER_OFFSET
@@ -410,8 +432,9 @@ class ChargePointHandler(CP):
 
             dE_true = METER_SCALE * dE_raw + METER_OFFSET * dt_hours
 
-        and summed. Correction is applied on the same terms as the power path
-        (3 phases only); a 1φ/2φ draw accumulates the raw increment unchanged.
+        and summed. The 1φ correction is a pure gain, which *is* safe to apply to
+        an increment directly, so no dt term is needed there. A 2φ draw has no
+        measured correction and accumulates the raw increment unchanged.
 
         A register that goes backwards means the wallbox restarted the transaction,
         so the session restarts from zero.
@@ -427,6 +450,9 @@ class ChargePointHandler(CP):
 
         d_raw = raw_wh - prev_wh
         if d_raw <= 0:
+            return
+        if active_phases == 1:
+            self.session_energy_wh += self.METER_SCALE_1P * d_raw
             return
         if active_phases < 3:
             self.session_energy_wh += d_raw

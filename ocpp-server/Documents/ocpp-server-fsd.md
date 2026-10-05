@@ -585,16 +585,17 @@ Logging goes to both the console (s6/journal, wiped on restart) and a rotating f
 
 ### 7.1 Linear Regression
 
-OCPP MeterValues are corrected at source in `on_meter_values()` using a single linear formula:
+OCPP MeterValues are corrected at source in `on_meter_values()`, **per phase count** — the meter's
+error differs with the number of phases drawing (§3.6.4.1):
 
-```
-corrected = 1.023 × raw − 101
-```
+| Phases | Correction | Basis |
+|:------:|------------|-------|
+| 3φ | `1.023 × raw − 101` | Night-baseline regression, multi-kW anchors (below) |
+| 1φ | `1.050 × raw` | Measured 2026-10-04, one steady point at 16 A (below) |
+| 2φ | `raw` | Nothing measured for a two-phase draw |
 
-**Applies only when 3 phases are drawing.** The fit is anchored on multi-kW 3-phase points, so its
-−101 W offset biases a single-phase draw low. When cable phase detection (§3.6.4.1) sees fewer than
-3 active phases, both power and energy pass through unchanged. A single-phase correction is not
-separately calibrated.
+The 3-phase fit is anchored on multi-kW 3-phase points, and its −101 W offset biases a single-phase
+draw low. 1φ therefore carries its own gain.
 
 **Both power and energy carry the correction.** `sensor.wallbox_power` and `sensor.wallbox_energy`
 are on the same scale, so any consumer may compare them — including the EnergyManager kWh charge
@@ -606,8 +607,12 @@ over the interval it applied to, so `_accumulate_energy()` corrects each registe
 them:
 
 ```
-dE_true = METER_SCALE × dE_raw + METER_OFFSET × dt_hours
+dE_true = METER_SCALE × dE_raw + METER_OFFSET × dt_hours        (3φ)
+dE_true = METER_SCALE_1P × dE_raw                               (1φ)
 ```
+
+The 1φ correction is a pure gain, and a ratio is safe on any quantity, so it applies to an increment
+directly with no `dt` term.
 
 A register that goes backwards means the wallbox restarted the transaction; the session restarts from
 zero. `on_start_transaction` also resets the accumulator, so a wallbox that carried its register
@@ -626,6 +631,25 @@ site load          = PV − grid_power − battery_charge_discharge_power
 
 Samples are taken after 23:00 local, from charging→idle transitions, so household evening activity is
 excluded.
+
+**The single-phase gain is measured from a daytime energy balance**, because single-phase sessions are
+solar-driven and do not occur at night. With the wallbox the only load outside the house meter:
+
+```
+true wallbox power = (PV − grid_power − battery_charge_discharge_power) − house_load_power
+```
+
+`sensor.house_load_power` is an independent Shelly 3EM clamp on the house circuits, so this does not
+use the wallbox's own meter and is not circular. Measured over a 30-minute steady window at 16 A on
+2026-10-04 (29 one-minute means): true 3704 W against 3527 W reported → **1.050**. The same balance
+over three wallbox-idle windows the same day closed to −35 / +15 / −30 W average, so the method
+carries no meaningful bias.
+
+**It is one operating point**, so the correction is a gain with no offset. A fixed `+177 W` offset fits
+the same data equally well (residual sd 98 W vs 103 W), but would turn a +5 % correction at 16 A into
++13 % at the 6 A minimum; a gain cannot misbehave that way. Below ~3.5 kW the figure is therefore
+**unverified** — `tools/wallbox_calibration_sweep.py` walks 6–16 A against the same meters and settles
+it.
 
 **The reference meter is `sensor.grid_power` — the gPlug utility smart meter (MQTT).** This choice is
 load-bearing: the wallbox is wired *outside* the DTSU loop and the Modbus proxy (§3.6.6) injects
@@ -723,6 +747,7 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-34 | Proxy bridge follows the detected phase count (§3.6.6) | 16 A commanded → correction 3680 W + bias on 1φ and 10192 W + bias on 3φ; a 3539 W draw on 1φ is ≥85 % of commanded, so the bridge hands off to measured |
 | TC-35 | Amps reach the profile unconverted (§7.2) | `set_charging_current(10, 3)` → `chargingRateUnit=A`, `limit=10`; 7 and 7.0 dedup to one write; a negative request sends 0 |
 | TC-36 | One factor, one direction (§3.6.1) | `watts_per_amp` is 230/434/637 for 1/2/3 phases and clamps out-of-range phase counts; `amps_to_watts(16, 1)`=3680 and `amps_to_watts(16, 3)`=10192 |
+| TC-39 | 1-phase meter correction (§7.1) | 1φ power and energy carry `1.050 × raw`; at the measured point 3527 W → 3704 W. The correction is proportional, so the absolute addition at 6 A is far smaller than at 16 A. 2φ stays raw. 1φ energy is time-independent (a gain needs no `dt`) |
 | TC-38 | HA state re-sync re-publishes the factor (§3.6.2) | After re-registration with a 1φ cable → `watts_per_amp`=230, `min/max_power_w`=1380/3680, `wallbox_power_limit` follows the commanded amps |
 | TC-37 | Every amp is reachable on both cables (§3.6.4) | 6–16 A each sent verbatim on 1φ and on 3φ — including 13–16 A, which the former 3-phase watt step table could not express |
 
@@ -791,6 +816,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.25 | 2026-10-05 | **Single-phase MeterValues now carry their own gain correction (§7.1).** 1φ power and energy passed through uncorrected because the 3φ regression's −101 W offset would bias them low, so every single-phase session was under-reported — `sensor.wallbox_power`, `sensor.wallbox_energy` and the HA Energy dashboard all under-counted, and the Modbus-proxy correction inherited the same shortfall. Measured on 2026-10-04 from a daytime energy balance (`PV − grid − battery − house`, with the Shelly 3EM house clamp independent of the wallbox): over a 30-minute steady window at 16 A the true draw was 3704 W against 3527 W reported, and over the whole 2.6-hour session 8.52 kWh against 7.96 kWh — **−4.8 % instantaneous, −6.6 % over the session**. The same balance over three wallbox-idle windows closed to −35 / +15 / −30 W, so the method is unbiased. New `METER_SCALE_1P = 1.050`, applied to both the power and the energy path; a gain is a ratio, so the energy increment needs no `dt` term. One operating point, so no offset is fitted: a `+177 W` offset fits equally (sd 98 vs 103 W) but would read as +13 % at the 6 A minimum. Below ~3.5 kW the gain is unverified. Side effect: the +200 W proxy export bias (§3.6.6) was previously cancelled almost exactly by the meter shortfall (net +23 W), and now delivers the ~+200 W export lean it was designed for. TC-39. ocpp-server 0.9.77 → 0.9.78; tests 156 → 159. |
 | 3.24 | 2026-10-05 | **The wallbox is commanded in amps, and watts are derived one way from a single factor (§3.6.1, §3.6.2, §3.6.4, §3.6.6, §7.2).** The control path ran amps → watts → amps: a consumer picked an amp level, published it as watts on `number.wallbox_power_limit`, and the server divided back with `round(W / 637 or 230)`. The round-trip was exact for every table value, but three different watts-per-amp models coexisted — `A × 230 × phases` (690 W/A) in the published range, `DEMAND_DIVISOR` (637) in the command path, and the measured per-amp table (622–660) in the consumer's step table — which is why the published 3φ maximum (11040 W) overstated what 16 A actually delivers (~10192 W) and why an out-of-table watt value could land on the wrong amp. Now: `number.wallbox_current_limit` (A) is the control, `set_charging_current` sends the amps unconverted, and `WATTS_PER_AMP` {1: 230, 2: 434, 3: 637} is the only calibration in the path — used **solely** to derive watts for surplus sizing, the proxy bridge and display. Phase selection no longer needs a power either: `number.wallbox_phase_request` states it, since 6 A is 1380 W on one phase and 3822 W on three. Consequences: the 3681–4139 W dead zone disappears (the amp range is identical on both cables, so `resolve_phase_gap` is gone), and the derived watt range is honest. New `sensor.wallbox_watts_per_amp`, `sensor.wallbox_min_current_a`, `sensor.wallbox_max_current_a`, `sensor.wallbox_power_limit` (derived, display only); `number.wallbox_power_limit` is withdrawn. TC-32…TC-38. ocpp-server 0.9.77; tests 155 → 156. An HA core restart re-registers these entities at their declared defaults while the wallbox WebSocket survives, so `_sync_ha_state` re-publishes the range and the factor as well (TC-38). |
 | 3.23 | 2026-10-04 | **A detected single-phase cable now clamps the live command, so the Modbus-proxy correction stays reachable (§3.6.4, §3.6.4.1, §3.6.6).** Live on 2026-10-04 a single-phase cable charging at 3539 W had the proxy inject **11200 W** of correction for a whole 7-minute session — the SUN2000 was told it was importing ~10 kW against a real 2.4 kW and ramped PV to chase a 7.7 kW phantom load (caught by the `modbus_proxy_correction_diverges` watchdog). Three faults compounded: (1) the only 1φ clamp sat behind `phase_lock_active`, which never engages in `three_phase` mode (no relay, so `_last_phase_switch_time` stays 0), so an 11000 W request was sent and recorded verbatim — the clamp to the detected phase's range is now unconditional and bounds the **maximum** as well as the minimum; (2) `_on_phases_detected` published the new 1380–3680 W range but left the live command at 11000 W, and now re-applies the HA limit through the new range (also correcting the profile's `numberPhases`); (3) the proxy bridge hands off to measured at a *ratio of commanded*, which an unreachable setpoint can never satisfy, so `_proxy_power_w` bounds commanded by `max_current_a × 230 ×` detected phases. The ESP32 Modbus Proxy is a pass-through (`calculatePowerCorrection` returns the MQTT value unchanged, totals corrected once) and needed no change. Also corrects the 1φ divisor stated in §3.6.4.1 and TC-16 (÷212 → the measured **÷230** already specified in §7.2). TC-32…TC-34. ocpp-server 0.9.75; tests 149 → 155 (`TestSinglePhaseCableClamp`, 2 added to `TestProxyCorrection`). |
 | 3.22 | 2026-08-10 | **Wallbox response deadlines are named, and the suite stops waiting them out (§3.5.1).** The five deadlines were inline literals in `run.py`, so a test exercising the post-connect or start path waited them out in real wall-clock time — 236 of the suite's 246 seconds. They are now named attributes (`POST_CONNECT_TIMEOUT_S`, `METER_SYNC_TIMEOUT_S`, `TRANSACTION_START_TIMEOUT_S`, `PROFILE_SETTLE_S`, `PHASE_RELAY_SETTLE_S`) with **unchanged shipped values** (30/10/15/3/3 s), reviewable in one place and shrinkable per-process by tests. A second, larger source of waiting was the ocpp library's own `response_timeout` (default 30 s): a handler on a mock connection never gets a CALL answered, so anything reaching `self.call()` — `get_configuration` during post-connect — blocked the full 30 s regardless of our constants; tests shrink `_response_timeout` too. Suite: **246 s → 1.4 s**, 148 → 149 tests. The new test asserts the *shipped* values (including `power_update_interval_s` = 60), so shrinking a deadline fails the suite — these must stay generous because the wallbox does not talk often. Behaviour unchanged. ocpp-server 0.9.74. |

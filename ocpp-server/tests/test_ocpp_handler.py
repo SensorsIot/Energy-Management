@@ -2453,10 +2453,29 @@ class TestPhaseDetection:
         assert h.active_phases == 3  # unchanged default
         assert ("phases_active", 1) not in [c.args for c in cb.call_args_list]
 
-    def test_correction_identity_single_phase(self, handler) -> None:
-        """1φ draw returns the wallbox's raw measured power (no 3φ offset)."""
-        assert handler._correct_meter_power(1492, active_phases=1) == 1492
+    def test_correction_single_phase_applies_its_own_gain(self, handler) -> None:
+        """1φ applies the measured 1φ gain; 2φ has no measurement and stays raw.
+
+        Regression: 1φ used to pass through uncorrected, which under-reported
+        every single-phase session. Measured 2026-10-04 at 16 A, the house meters
+        put the true draw at 3704 W while MeterValues reported 3527 W.
+        """
+        assert handler._correct_meter_power(1492, active_phases=1) == pytest.approx(
+            handler.METER_SCALE_1P * 1492
+        )
+        # The point the gain was measured at.
+        assert handler._correct_meter_power(3527, active_phases=1) == pytest.approx(
+            3703.4, abs=1.0
+        )
         assert handler._correct_meter_power(1492, active_phases=2) == 1492
+
+    def test_correction_single_phase_is_a_gain_not_an_offset(self, handler) -> None:
+        """A gain scales with load, so it cannot blow up at the 6 A minimum."""
+        lo = handler._correct_meter_power(1380, active_phases=1) - 1380
+        hi = handler._correct_meter_power(3680, active_phases=1) - 3680
+        assert lo < hi                     # proportional, not constant
+        assert lo / 1380 == pytest.approx(hi / 3680, rel=1e-9)
+        assert lo < 100                    # a +177 W offset would be +13 % here
 
     def test_correction_linear_three_phase(self, handler) -> None:
         """3φ draw applies the linear regression."""
@@ -2491,13 +2510,42 @@ class TestPhaseDetection:
         expected = handler.METER_SCALE * 11000 + handler.METER_OFFSET * 1.0
         assert handler.session_energy_wh == pytest.approx(expected)
 
-    def test_energy_single_phase_uncorrected(self, handler, monkeypatch) -> None:
-        """1φ accumulates the raw increment (correction is 3φ-calibrated)."""
+    def test_energy_single_phase_applies_the_gain(self, handler, monkeypatch) -> None:
+        """1φ energy carries the same gain — a ratio needs no dt term."""
         t = [1000.0]
         monkeypatch.setattr("src.ocpp_handler.time.monotonic", lambda: t[0])
         handler._accumulate_energy(0, active_phases=1)
         t[0] += 3600.0
         handler._accumulate_energy(2300, active_phases=1)
+        assert handler.session_energy_wh == pytest.approx(
+            handler.METER_SCALE_1P * 2300
+        )
+
+    def test_energy_single_phase_gain_is_time_independent(self, handler, monkeypatch) -> None:
+        """The 1φ gain is a ratio, so the same increment gives the same energy
+        however long it took — unlike the 3φ path, whose offset is a power.
+        """
+        t = [1000.0]
+        monkeypatch.setattr("src.ocpp_handler.time.monotonic", lambda: t[0])
+        handler._accumulate_energy(0, active_phases=1)
+        t[0] += 60.0
+        handler._accumulate_energy(2300, active_phases=1)
+        fast = handler.session_energy_wh
+
+        h2 = ChargePointHandler("t2", MagicMock())
+        t[0] = 5000.0
+        h2._accumulate_energy(0, active_phases=1)
+        t[0] += 7200.0
+        h2._accumulate_energy(2300, active_phases=1)
+        assert h2.session_energy_wh == pytest.approx(fast)
+
+    def test_energy_two_phase_stays_raw(self, handler, monkeypatch) -> None:
+        """2φ has no measured correction, so its increment is accumulated raw."""
+        t = [1000.0]
+        monkeypatch.setattr("src.ocpp_handler.time.monotonic", lambda: t[0])
+        handler._accumulate_energy(0, active_phases=2)
+        t[0] += 3600.0
+        handler._accumulate_energy(2300, active_phases=2)
         assert handler.session_energy_wh == pytest.approx(2300)
 
     def test_energy_register_reset_restarts_session(self, handler, monkeypatch) -> None:
