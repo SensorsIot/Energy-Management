@@ -16,6 +16,43 @@ SENSORS = {
         "icon": "mdi:ev-station",
         "initial_state": 0,
     },
+    # Derived from the commanded amps (amps × watts-per-amp). Display only —
+    # the control entity is number.wallbox_current_limit.
+    "sensor.wallbox_power_limit": {
+        "name": "Wallbox Power Limit",
+        "unique_id": "ocpp_wallbox_power_limit_w",
+        "device_class": "power",
+        "state_class": "measurement",
+        "unit_of_measurement": "W",
+        "icon": "mdi:speedometer",
+        "initial_state": 0,
+    },
+    # The one watts↔amps conversion factor in use, for the phase count now
+    # detected. Consumers read this instead of hardcoding their own.
+    "sensor.wallbox_watts_per_amp": {
+        "name": "Wallbox Watts Per Amp",
+        "unique_id": "ocpp_wallbox_watts_per_amp",
+        "state_class": "measurement",
+        "unit_of_measurement": "W/A",
+        "icon": "mdi:math-compass",
+        "initial_state": 637,
+    },
+    "sensor.wallbox_min_current_a": {
+        "name": "Wallbox Min Current",
+        "unique_id": "ocpp_wallbox_min_current_a",
+        "device_class": "current",
+        "unit_of_measurement": "A",
+        "icon": "mdi:current-ac",
+        "initial_state": 6,
+    },
+    "sensor.wallbox_max_current_a": {
+        "name": "Wallbox Max Current",
+        "unique_id": "ocpp_wallbox_max_current_a",
+        "device_class": "current",
+        "unit_of_measurement": "A",
+        "icon": "mdi:current-ac",
+        "initial_state": 16,
+    },
     "sensor.wallbox_energy": {
         "name": "Wallbox Energy",
         "unique_id": "ocpp_wallbox_energy",
@@ -96,18 +133,36 @@ BINARY_SENSORS = {
 
 # Control entities (HA → wallbox via OCPP)
 CONTROLS = {
-    "number.wallbox_power_limit": {
-        "name": "Wallbox Power Limit",
-        "unique_id": "ocpp_wallbox_power_limit",
-        "device_class": "power",
-        "unit_of_measurement": "W",
+    # The control unit is amps: OCPP carries amps and the wallbox applies them
+    # per phase, so the commanded value reaches the wallbox unconverted. The
+    # matching watts are published read-only as sensor.wallbox_power_limit.
+    "number.wallbox_current_limit": {
+        "name": "Wallbox Current Limit",
+        "unique_id": "ocpp_wallbox_current_limit",
+        "device_class": "current",
+        "unit_of_measurement": "A",
         "icon": "mdi:speedometer",
-        "min": 0,  # 0 = pause charging
-        "max": 11000,  # 3-phase × 16A × 230V
-        "step": 100,
+        "min": 0,  # 0 = pause charging; otherwise min_current_a..max_current_a
+        "max": 16,
+        "step": 1,  # the wallbox only accepts whole amps
         "initial_state": 0,
-        "mode": "slider",
+        "mode": "box",
         # Triggers: SetChargingProfile
+    },
+    # Phase count the consumer wants those amps on. Amps alone cannot express a
+    # power on a switchable wallbox — 6 A is 1380 W on one phase and 3822 W on
+    # three — so the pair (amps, phases) is the complete request and nothing has
+    # to be converted to decide. Ignored for `three_phase`, where the connected
+    # cable owns the phase count (FSD 3.6.4).
+    "number.wallbox_phase_request": {
+        "name": "Wallbox Phase Request",
+        "unique_id": "ocpp_wallbox_phase_request",
+        "icon": "mdi:transmission-tower",
+        "min": 1,
+        "max": 3,
+        "step": 2,  # 1 or 3 — two-phase charging is not commanded
+        "initial_state": 3,
+        "mode": "box",
     },
 }
 

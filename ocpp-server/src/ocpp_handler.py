@@ -23,6 +23,34 @@ from ocpp.v16.enums import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# The single watts↔amps conversion constant.
+#
+# Amps are the control unit from end to end: the consumer commands amps, OCPP
+# carries amps (`chargingRateUnit=A`), and the wallbox meters amps. Watts are
+# only ever *derived* from amps — to compare a step against solar surplus, and
+# to display a limit. Nothing converts watts back to amps, so no rounding
+# round-trip exists and the table below is the only calibration in the path.
+#
+# Measured per phase count, not derived from one another:
+#   3φ = 637 W/A — midpoint of safe range [612, 662], 2026-03-04 M-Bus sweep.
+#   1φ = 230 W/A — live single-phase OCPP MeterValues (2026-07-09), linear
+#                  through origin. NOT 637/3 = 212: a single-phase load draws
+#                  more per amp than one leg of a 3φ load.
+#   2φ          — mean of the two, for a rare/transitional two-phase draw.
+# ---------------------------------------------------------------------------
+WATTS_PER_AMP = {1: 230, 2: 434, 3: 637}
+
+
+def watts_per_amp(num_phases: int) -> int:
+    """Watts drawn per commanded amp for `num_phases` (clamped to 1..3)."""
+    return WATTS_PER_AMP[min(3, max(1, int(num_phases)))]
+
+
+def amps_to_watts(limit_a: float, num_phases: int) -> int:
+    """Convert an amp limit to its expected draw in watts (the only direction)."""
+    return round(limit_a * watts_per_amp(num_phases))
+
 
 class ChargePointHandler(CP):
     """OCPP 1.6j ChargePoint handler.
@@ -54,15 +82,10 @@ class ChargePointHandler(CP):
     METER_SCALE = 1.023
     METER_OFFSET = -101.0
 
-    # Demand calibration: W→A divisor so round(mbus_w / DEMAND_DIVISOR) = correct amps.
-    # The wallbox applies the amp limit PER PHASE, so the divisor is phase-specific
-    # (see _demand_divisor). Both are measured, not derived from each other:
-    #   3φ = 637 — midpoint of safe range [612, 662], 2026-03-04 M-Bus sweep.
-    #   1φ = 230 — from live single-phase OCPP MeterValues (2026-07-09, ~230 W/A,
-    #              linear through origin). NOT 637/3=212: single-phase draws more
-    #              per amp than one leg of a 3φ load.
-    DEMAND_DIVISOR = 637
-    DEMAND_DIVISOR_1P = 230
+    # Watts drawn per commanded amp, by phase count — see module-level
+    # WATTS_PER_AMP, the single conversion constant. Kept as a class attribute
+    # so a test or a differently-calibrated wallbox can override it.
+    WATTS_PER_AMP = WATTS_PER_AMP
 
     # Phase detection from MeterValues: a phase counts as "drawing" when its current
     # is at/above PHASE_ACTIVE_MIN_A, evaluated only once the total draw is meaningful
@@ -413,43 +436,28 @@ class ChargePointHandler(CP):
             0.0, self.session_energy_wh + self.METER_SCALE * d_raw + self.METER_OFFSET * dt_h
         )
 
-    def _demand_divisor(self, num_phases: int) -> int:
-        """Watts→amps divisor for the requested phase count.
-
-        Each phase count has its own measured divisor (3φ → 637, 1φ → 230); a
-        2φ draw interpolates between them (rare / transitional).
-        """
-        if num_phases >= 3:
-            return self.DEMAND_DIVISOR
-        if num_phases <= 1:
-            return self.DEMAND_DIVISOR_1P
-        return round((self.DEMAND_DIVISOR_1P + self.DEMAND_DIVISOR) / 2)
-
-    async def set_charging_power(
-        self, power_w: float, num_phases: int = 3, force: bool = False
+    async def set_charging_current(
+        self, limit_a: int, num_phases: int = 3, force: bool = False
     ):
-        """Set charging power limit via SetChargingProfile.
+        """Set the charging current limit via SetChargingProfile.
 
-        Converts M-Bus watts to integer amps using the phase-aware calibrated
-        divisor, then sends via OCPP 1.6 chargingRateUnit=A.
+        The amp limit is sent as given — OCPP carries amps
+        (`chargingRateUnit=A`) and the wallbox applies them per phase, so there
+        is no watts→amps conversion here and nothing to round.
 
         Every profile is a write to the wallbox's non-volatile store, so an
-        unchanged command is not sent (FSD 3.5.1). The comparison is on the
-        integer amps and phase count actually commanded, not the requested
-        watts: the wallbox floors watts to whole amps, so 4354 W and 4400 W are
-        both 7 A and the second would be a duplicate write.
+        unchanged command is not sent (FSD 3.5.1). The comparison is on the amp
+        limit and phase count actually commanded.
 
         Args:
-            power_w: Target power in watts (M-Bus scale)
+            limit_a: Target current per phase in amps (0 = pause).
             num_phases: Number of phases (1 or 3)
             force: Re-send even if the wallbox already holds this profile. The
                 SuspendedEVSE recovery (FSD 5.4) needs this — nudging a stuck
                 wallbox means re-sending the same profile deliberately.
 
         """
-        limit_w = max(0, power_w)
-        divisor = self._demand_divisor(num_phases)
-        limit_a = round(limit_w / divisor) if limit_w > 0 else 0
+        limit_a = max(0, int(limit_a))
         # Hard cap at the configured maximum — the wallbox does not enforce it.
         capped_a = min(limit_a, self.max_current_a)
         if capped_a != limit_a:
@@ -466,8 +474,8 @@ class ChargePointHandler(CP):
             return True
 
         logger.info(
-            f"Setting charging power: {limit_w:.0f}W → {limit_a}A "
-            f"({num_phases}-phase, ÷{divisor})"
+            f"Setting charging current: {limit_a}A ({num_phases}-phase, "
+            f"≈{amps_to_watts(limit_a, num_phases)}W)"
         )
 
         request = call.SetChargingProfile(

@@ -51,7 +51,7 @@ Two tiers, with different stakes:
 | Python class | `PascalCase` | `EVBatteryOptimizer` | PEP 8 |
 | Python constant / module-level set | `UPPER_SNAKE` | `_PROXY_LIVE_STATUSES` | PEP 8 |
 | `StrEnum` member value | the exact string the HA entity carries | `EVState.SOLAR → "solar"` | PEP 8 + HA |
-| HA `entity_id` | `domain.snake_case`, scope-prefixed | `sensor.house_load_power`, `number.wallbox_power_limit` | HA + 11179 |
+| HA `entity_id` | `domain.snake_case`, scope-prefixed | `sensor.house_load_power`, `number.wallbox_current_limit` | HA + 11179 |
 | InfluxDB bucket | `snake_case` | `pv_forecast`, `energy_manager` | InfluxData + 11179 |
 | InfluxDB measurement | `snake_case` noun | `load_forecast`, `energy_balance` | InfluxData |
 | InfluxDB tag key | `snake_case`, low cardinality | `model` | InfluxData + 11179 |

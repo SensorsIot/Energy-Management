@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.75"
+__version__ = "0.9.76"
 
 import asyncio
 import json
@@ -21,7 +21,7 @@ import aiomqtt
 import websockets
 
 from src.ha_entities import ALL_DEFS, BINARY_SENSORS, CONTROLS, SENSORS
-from src.ocpp_handler import ChargePointHandler
+from src.ocpp_handler import ChargePointHandler, amps_to_watts, watts_per_amp
 
 # Configure logging. Console (s6/journal) is ephemeral — lost on restart and
 # limited in length — which makes post-mortem of events like wallbox reconnects
@@ -255,10 +255,9 @@ class OCPPServer:
 
         # Phase switching state
         self._current_phases = 3
-        self._phase_threshold_w = self.min_current_a * 230 * 3
         self._phase_switching_disabled = False
-        self._last_sent_power_w: float = 0.0
-        self._last_requested_power_w: float = 0.0  # pre-clamping HA value
+        self._last_sent_a: int = 0           # amps last commanded (post-clamp)
+        self._last_requested_a: int = 0      # amps asked for (pre-clamp HA value)
         self._last_measured_power_w: float = 0.0   # calibrated measured draw (proxy handoff)
         self._last_measured_time: float = 0.0      # monotonic time of last measured update
         self._last_phase_switch_time: float = 0.0
@@ -275,7 +274,7 @@ class OCPPServer:
         self.PHASE_RELAY_SETTLE_S = 3         # let the phase relay settle
 
         # Track last-seen control states for change detection
-        self._last_power_limit: str | None = None
+        self._last_current_limit: str | None = None
 
         # Throttle state for SetChargingProfile rate-limiting (FSD 3.5.1).
         # Measured from the last SEND, not the last change: measuring from the
@@ -283,7 +282,7 @@ class OCPPServer:
         # resetting the timer, so the queued value never gets delivered.
         self._last_change_at: float = 0.0  # When value last changed (SuspendedEVSE resend)
         self._last_sent_at: float = 0.0  # When a profile was last transmitted
-        self._pending_power_w: float | None = None
+        self._pending_a: int | None = None
 
         # One start attempt, then back off (FSD 3.5.1). A car sitting in
         # Preparing does not start because the profile changed, so further
@@ -308,12 +307,27 @@ class OCPPServer:
         self._setup_complete = asyncio.Event()
 
     async def _publish_power_limits(self) -> None:
-        """Publish min/max wallbox power based on current phase count."""
-        min_w = self.min_current_a * 230 * self._current_phases
-        max_w = self.max_current_a * 230 * self._current_phases
+        """Publish the wallbox's amp range, and the watts it maps to.
+
+        The amp range is the contract; the watt range and the factor are
+        published so a consumer can size a step against solar surplus without
+        hardcoding a conversion of its own (FSD 3.6.1). Both watt values come
+        from the one `watts_per_amp` factor — previously this used a flat
+        `A × 230 × phases` (690 W/A on 3φ), which disagreed with the 637 W/A
+        the command path used.
+        """
+        wpa = watts_per_amp(self._current_phases)
+        min_w = amps_to_watts(self.min_current_a, self._current_phases)
+        max_w = amps_to_watts(self.max_current_a, self._current_phases)
+        await self.ha.set_state("sensor.wallbox_min_current_a", self.min_current_a)
+        await self.ha.set_state("sensor.wallbox_max_current_a", self.max_current_a)
+        await self.ha.set_state("sensor.wallbox_watts_per_amp", wpa)
         await self.ha.set_state("sensor.wallbox_min_power_w", min_w)
         await self.ha.set_state("sensor.wallbox_max_power_w", max_w)
-        logger.info(f"Power limits: {min_w}–{max_w}W ({self._current_phases}-phase)")
+        logger.info(
+            f"Power limits: {self.min_current_a}–{self.max_current_a}A "
+            f"({min_w}–{max_w}W at {wpa} W/A, {self._current_phases}-phase)"
+        )
 
     @property
     def _current_start_backoff(self) -> int:
@@ -613,22 +627,17 @@ class OCPPServer:
           feed the **calibrated measured** draw — removing the integer-amp-flooring
           overstatement of the commanded value (the ~12 %/W divergence from M-Bus).
 
-        The commanded setpoint is first bounded by the connected cable's physical
-        maximum (`max_current_a × 230 × _current_phases`), so the ratio handoff is
-        always reachable.
+        The commanded power is derived from the amps actually commanded at the
+        detected phase count (`amps_to_watts`). Because the command is already
+        clamped to the wallbox's amp range, the setpoint is always physically
+        reachable and the ratio handoff can always complete.
 
         `_PROXY_EXPORT_BIAS_W` is added on top so the corrected grid leans to export.
         Returns 0 when not commanding a charge.
         """
-        if not (self._proxy_charging and self._last_sent_power_w > 0):
+        if not (self._proxy_charging and self._last_sent_a > 0):
             return 0.0
-        # Bound the bridge by what the connected cable can physically draw. The
-        # handoff test is a ratio of commanded, so an unreachable setpoint latches
-        # the bridge on for the whole session (a 1φ cable maxes at 3680 W and can
-        # never reach 85 % of a 3φ-scale 11000 W). This also covers the window
-        # between phase detection and the re-sent profile (_on_phases_detected).
-        phase_max_w = float(self.max_current_a * 230 * self._current_phases)
-        commanded = min(float(self._last_sent_power_w), phase_max_w)
+        commanded = float(amps_to_watts(self._last_sent_a, self._current_phases))
         measured = float(self._last_measured_power_w)
         fresh = (time.monotonic() - self._last_measured_time) <= self._PROXY_MEASURED_MAX_AGE_S
         if fresh and measured >= self._PROXY_MEASURED_MIN_RATIO * commanded:
@@ -660,8 +669,8 @@ class OCPPServer:
             state = "charging" if value == "started" else "idle"
             if value == "stopped":
                 # Reset so reconciliation detects the mismatch and re-sends
-                self._last_sent_power_w = 0
-                self._last_requested_power_w = 0
+                self._last_sent_a = 0
+                self._last_requested_a = 0
                 self._proxy_charging = False
                 self._publish_proxy_power()
                 # Re-apply current HA power limit (car may reconnect quickly)
@@ -703,7 +712,7 @@ class OCPPServer:
                 self._reset_start_backoff()
 
             # SuspendedEV cloud correction: start/stop polling
-            if value == "SuspendedEVSE" and self._last_sent_power_w > 0:
+            if value == "SuspendedEVSE" and self._last_sent_a > 0:
                 if self._cloud_charging_entity and (
                     self._cloud_poll_task is None or self._cloud_poll_task.done()
                 ):
@@ -740,9 +749,9 @@ class OCPPServer:
         asyncio.ensure_future(self._publish_power_limits())
         # Re-apply the HA limit through the new phase range. Publishing the range
         # alone left the *live* command at its old phase scale: a 3φ→1φ change kept
-        # `_last_sent_power_w` at 11000 W, which the proxy correction then injected
+        # `_last_sent_a` at a 3φ-scale value, which the proxy correction then injected
         # as an 11200 W phantom load (FSD 3.6.4 / 3.6.6). The re-send also fixes the
-        # profile's `numberPhases`; `set_charging_power` dedups on (amps, phases),
+        # profile's `numberPhases`; `set_charging_current` dedups on (amps, phases),
         # so an unchanged profile is not re-written to the wallbox.
         asyncio.ensure_future(self._apply_current_power_limit())
 
@@ -759,9 +768,9 @@ class OCPPServer:
             self._on_status_change("phases", 3)
             await self._publish_power_limits()
         # Resume previous power profile
-        if self._last_sent_power_w > 0 and self.charge_point:
-            await self.charge_point.set_charging_power(
-                self._last_sent_power_w, num_phases=self._current_phases
+        if self._last_sent_a > 0 and self.charge_point:
+            await self.charge_point.set_charging_current(
+                self._last_sent_a, num_phases=self._current_phases
             )
 
     async def _switch_phases(self, target_phases: int) -> None:
@@ -799,7 +808,7 @@ class OCPPServer:
         if cp_status not in ALLOWED_STATUSES:
             # Send 0A profile to pause
             if self.charge_point:
-                await self.charge_point.set_charging_power(
+                await self.charge_point.set_charging_current(
                     0, num_phases=self._current_phases
                 )
             # Poll up to 5s for allowed status
@@ -867,12 +876,28 @@ class OCPPServer:
                 cp.current_power_w = 0
                 self._on_status_change("power_w", 0)
 
+    async def _read_phase_request(self) -> int | None:
+        """Phase count the consumer wants (1 or 3), or None if unset/invalid.
+
+        Only `external_breaker` / `universal` act on it; `three_phase` ignores
+        it because the connected cable owns the phase count (FSD 3.6.4).
+        """
+        state = await self.ha.get_state("number.wallbox_phase_request")
+        if state is None:
+            return None
+        try:
+            phases = int(float(state))
+        except ValueError:
+            return None
+        return phases if phases in (1, 3) else None
+
     async def _apply_current_power_limit(self) -> None:
-        """Read the current HA power limit and apply it immediately.
+        """Read the current HA current limit and apply it immediately.
 
         Called after post-connect setup and after transaction stop to avoid
-        waiting for a change event in _watch_controls. Resets _last_power_limit
-        so the next _watch_controls cycle won't see a stale match.
+        waiting for a change event in _watch_controls. Resets
+        _last_current_limit so the next _watch_controls cycle won't see a stale
+        match.
 
         A limit of **0 is applied too** (not skipped): 0 means "pause" (0 A
         charging profile), and the Actec wallbox resumes at its 6 A minimum on
@@ -880,48 +905,50 @@ class OCPPServer:
         car keeps charging (draining the home battery) after a WS reconnect even
         though the energy-manager commanded stop.
         """
-        power_state = await self.ha.get_state("number.wallbox_power_limit")
-        if power_state is None:
+        state = await self.ha.get_state("number.wallbox_current_limit")
+        if state is None:
             return
         try:
-            power_w = float(power_state)
+            limit_a = int(float(state))
         except ValueError:
             return
-        if power_w >= 0:
+        if limit_a >= 0:
             logger.info(
-                f"Applying current HA power limit: {power_w}W"
-                f"{' (pause)' if power_w == 0 else ''}"
+                f"Applying current HA current limit: {limit_a}A"
+                f"{' (pause)' if limit_a == 0 else ''}"
             )
-            self._last_power_limit = power_state
-            await self._send_power_to_wallbox(power_w)
+            self._last_current_limit = state
+            await self._send_current_to_wallbox(
+                limit_a, requested_phases=await self._read_phase_request()
+            )
 
-    async def _send_power_to_wallbox(self, power_w: float, force: bool = False) -> None:
-        """Send power limit to wallbox (phase switching, auto-start, SetChargingProfile).
+    async def _send_current_to_wallbox(
+        self, limit_a: int, requested_phases: int | None = None, force: bool = False
+    ) -> None:
+        """Send a current limit to the wallbox (phase switching, auto-start, profile).
 
-        This method contains the actual wallbox communication logic,
-        extracted from _watch_controls so it can be gated by the throttle.
+        Amps are the control unit: the value reaches `SetChargingProfile`
+        unconverted, and the phase count is stated rather than inferred, so
+        **nothing in this path converts between watts and amps**.
 
         Args:
-            power_w: Target power in watts.
+            limit_a: Target current per phase in amps (0 = pause).
+            requested_phases: Phase count the caller wants those amps on (1 or
+                3). Ignored for `three_phase`, where the cable decides. Defaults
+                to the phase count currently in use.
             force: Re-send even if the wallbox already holds this profile — for
                 the SuspendedEVSE recovery, which nudges a stuck wallbox with a
                 deliberate duplicate (FSD 3.5.1 / 5.4).
 
         """
         if not self.charge_point:
-            logger.warning("No wallbox connected, ignoring power limit")
+            logger.warning("No wallbox connected, ignoring current limit")
             return
 
-        self._last_requested_power_w = power_w  # before clamping
-
-        # Gap clamping: 3681–4139W is unreachable (above 1φ max, below 3φ min)
-        if 3681 <= power_w <= 4139:
-            if self._current_phases == 1:
-                power_w = 3680
-                logger.info("Gap clamping: 1-phase → clamped to 3680W")
-            else:
-                power_w = 4140
-                logger.info("Gap clamping: 3-phase → clamped to 4140W")
+        limit_a = max(0, int(limit_a))
+        if requested_phases is None:
+            requested_phases = self._current_phases
+        self._last_requested_a = limit_a  # before clamping
 
         # Phase switch time lock: prevent switching within 5 minutes
         phase_lock_active = (
@@ -930,21 +957,16 @@ class OCPPServer:
             < self.PHASE_SWITCH_LOCK_S
         )
 
-        if phase_lock_active and power_w > 0:
-            if self._current_phases == 1 and power_w > 3680:
-                power_w = 3680
-                logger.info("Phase time lock: clamping to 3680W (1-phase locked)")
-            elif self._current_phases == 3 and power_w < 4140:
-                power_w = 4140
-                logger.info("Phase time lock: clamping to 4140W (3-phase locked)")
-
-        # Phase switching (before setting profile)
+        # Phase switching (before setting profile). The consumer states the phase
+        # count explicitly, so no power has to be derived to decide — the pair
+        # (amps, phases) is the whole request. `three_phase` ignores it: there the
+        # connected cable owns the phase count (FSD 3.6.4).
         if (
-            power_w > 0
+            limit_a > 0
             and not self._phase_switching_disabled
             and not phase_lock_active
         ):
-            target_phases = 1 if power_w < self._phase_threshold_w else 3
+            target_phases = 1 if requested_phases == 1 else 3
 
             if self.wallbox_type == "external_breaker" and self.phase_switch_entity:
                 # DIY: toggle relay (existing _switch_phases logic)
@@ -964,31 +986,25 @@ class OCPPServer:
                 self._last_phase_switch_time = time.monotonic()
             # three_phase: no phase switching, _current_phases stays 3
 
-        # three_phase: the connected cable owns the phase count, so the request is
-        # clamped to the *detected* phase's range (FSD 3.6.4) — not only while a
-        # phase-switch time lock happens to be active (there is no relay here, so
-        # that lock never engages and the clamp never ran). Above the maximum the
-        # wallbox physically cannot comply, and the unreachable setpoint is what
-        # the Modbus-proxy correction publishes as the commanded bridge (3.6.6):
-        # a 1φ cable commanded 11000 W injected 11200 W of phantom load for the
-        # whole session, because measured can never reach 85 % of commanded.
-        min_power_w = self.min_current_a * 230 * self._current_phases
-        max_power_w = self.max_current_a * 230 * self._current_phases
-        if power_w > 0 and self.wallbox_type == "three_phase":
-            if power_w > max_power_w:
+        # Clamp to the wallbox's amp range. In amps the range is the same on one
+        # phase and on three (min_current_a..max_current_a), so the old watt
+        # "dead zone" between 1φ max and 3φ min does not exist here. Above the
+        # maximum the wallbox cannot comply and the unreachable setpoint would be
+        # published as the Modbus-proxy commanded bridge (FSD 3.6.6); below the
+        # minimum it cannot charge at all, so pause.
+        if limit_a > 0:
+            if limit_a > self.max_current_a:
                 logger.info(
-                    f"Above maximum {max_power_w}W "
-                    f"({self._current_phases}-phase) → clamped from {power_w}W"
+                    f"Above maximum {self.max_current_a}A → clamped from {limit_a}A"
                 )
-                power_w = max_power_w
-            elif power_w < min_power_w:
+                limit_a = self.max_current_a
+            elif limit_a < self.min_current_a:
                 logger.info(
-                    f"Below minimum {min_power_w}W "
-                    f"({self._current_phases}-phase) → pausing (0W)"
+                    f"Below minimum {self.min_current_a}A → pausing (0A)"
                 )
-                power_w = 0
+                limit_a = 0
 
-        if power_w > 0 and self.charge_point.transaction_id is None:
+        if limit_a > 0 and self.charge_point.transaction_id is None:
             # No transaction yet — one start attempt, then back off (FSD 3.5.1).
             if not self._start_attempt_due():
                 since = time.monotonic() - self._last_start_attempt_at
@@ -1003,8 +1019,8 @@ class OCPPServer:
                 f"(attempt {self._start_retry_count + 1})"
             )
             self._last_start_attempt_at = time.monotonic()
-            await self.charge_point.set_charging_power(
-                power_w, num_phases=self._current_phases, force=force
+            await self.charge_point.set_charging_current(
+                limit_a, num_phases=self._current_phases, force=force
             )
             await asyncio.sleep(self.PROFILE_SETTLE_S)
             self.charge_point.transaction_started_event.clear()
@@ -1029,20 +1045,25 @@ class OCPPServer:
                 logger.warning("RemoteStartTransaction not accepted")
         else:
             # Transaction active (or pausing) — just update profile
-            await self.charge_point.set_charging_power(
-                power_w, num_phases=self._current_phases, force=force
+            await self.charge_point.set_charging_current(
+                limit_a, num_phases=self._current_phases, force=force
             )
 
-        # When pausing (0W), reset reported power immediately
+        # When pausing (0A), reset reported power immediately
         # Wallbox may not send MeterValues with 0W
-        if power_w == 0 and self.charge_point and self.charge_point.current_power_w > 0:
-            logger.info("Power limit set to 0W — resetting reported power")
+        if limit_a == 0 and self.charge_point and self.charge_point.current_power_w > 0:
+            logger.info("Current limit set to 0A — resetting reported power")
             self.charge_point.current_power_w = 0
             self._on_status_change("power_w", 0)
 
-        self._pending_power_w = None
-        self._last_sent_power_w = power_w
+        self._pending_a = None
+        self._last_sent_a = limit_a
         self._last_sent_at = time.monotonic()
+        # Derived watts for display only (FSD 3.6.1)
+        await self.ha.set_state(
+            "sensor.wallbox_power_limit",
+            amps_to_watts(limit_a, self._current_phases),
+        )
 
         # Drive the proxy correction from the command itself, immediately:
         # - >0 while the car is already in a charging session (Charging /
@@ -1052,13 +1073,16 @@ class OCPPServer:
         #   later →Charging in _on_status_change.
         # - 0 (pause) → stop the correction.
         status = self.charge_point.current_status if self.charge_point else None
-        if power_w > 0 and status in self._PROXY_LIVE_STATUSES:
+        if limit_a > 0 and status in self._PROXY_LIVE_STATUSES:
             self._proxy_charging = True
             self._publish_proxy_power()
-        elif power_w == 0:
+        elif limit_a == 0:
             self._proxy_charging = False
             self._publish_proxy_power()
-        logger.info(f"Sent power profile: {power_w}W")
+        logger.info(
+            f"Sent current profile: {limit_a}A "
+            f"(≈{amps_to_watts(limit_a, self._current_phases)}W)"
+        )
 
 
     async def _sync_ha_state(self) -> None:
@@ -1086,7 +1110,7 @@ class OCPPServer:
     async def _watch_controls(self) -> None:
         """Poll HA control entities for changes from EnergyManager.
 
-        Detected changes are queued in _pending_power_w and only sent
+        Detected changes are queued in _pending_a and only sent
         to the wallbox when power_update_interval_s has elapsed since the
         last SetChargingProfile, preventing wallbox oscillation.
         """
@@ -1097,9 +1121,9 @@ class OCPPServer:
             if not self._setup_complete.is_set():
                 await self._setup_complete.wait()
             try:
-                # Power limit (number entity)
-                power_state = await self.ha.get_state("number.wallbox_power_limit")
-                if power_state is None:
+                # Current limit (number entity)
+                state = await self.ha.get_state("number.wallbox_current_limit")
+                if state is None:
                     # Entity lost (e.g. HA core restarted) — re-register all entities
                     logger.warning("Control entity missing, re-registering HA entities")
                     await self.ha.register_entities()
@@ -1108,80 +1132,85 @@ class OCPPServer:
                     continue
 
                 # Detect change
-                if power_state != self._last_power_limit:
-                    prev = self._last_power_limit
-                    self._last_power_limit = power_state
+                if state != self._last_current_limit:
+                    prev = self._last_current_limit
+                    self._last_current_limit = state
                     if prev is not None:
                         try:
-                            power_w = float(power_state)
+                            limit_a = int(float(state))
                             self._last_change_at = time.monotonic()
                             since_last_send = time.monotonic() - self._last_sent_at
                             if (
-                                power_w == 0
+                                limit_a == 0
                                 or since_last_send >= self.power_update_interval_s
                             ):
-                                # 0W (pause) bypasses throttle — safety-critical
+                                # 0A (pause) bypasses throttle — safety-critical
                                 logger.info(
-                                    f"Power limit changed to {power_w}W (sending immediately, "
-                        f"{since_last_send:.0f}s since last send)"
+                                    f"Current limit changed to {limit_a}A (sending immediately, "
+                                    f"{since_last_send:.0f}s since last send)"
                                 )
-                                await self._send_power_to_wallbox(power_w)
+                                await self._send_current_to_wallbox(
+                                    limit_a,
+                                    requested_phases=await self._read_phase_request(),
+                                )
                             else:
                                 # Rapid change — queue, send when interval expires
                                 logger.info(
-                                    f"Power limit changed to {power_w}W (throttled, "
-                        f"{since_last_send:.0f}s since last send)"
+                                    f"Current limit changed to {limit_a}A (throttled, "
+                                    f"{since_last_send:.0f}s since last send)"
                                 )
-                                self._pending_power_w = power_w
+                                self._pending_a = limit_a
                         except ValueError:
-                            logger.warning(f"Invalid power limit value: {power_state}")
+                            logger.warning(f"Invalid current limit value: {state}")
 
                 # Send throttled value when the interval since the last SEND expires.
                 # Timing off the last send (not the last change) is what stops a
                 # steady stream of sub-interval changes from starving the queue.
-                if self._pending_power_w is not None:
+                if self._pending_a is not None:
                     since_last_send = time.monotonic() - self._last_sent_at
                     if since_last_send >= self.power_update_interval_s:
-                        power_w = self._pending_power_w
-                        await self._send_power_to_wallbox(power_w)
+                        await self._send_current_to_wallbox(
+                            self._pending_a,
+                            requested_phases=await self._read_phase_request(),
+                        )
 
                 # Periodic reconciliation: re-send if HA value differs from last-sent
                 if (
-                    self._pending_power_w is None
+                    self._pending_a is None
                     and self.charge_point
-                    and power_state is not None
+                    and state is not None
                     and time.monotonic() - self._last_reconcile_at >= 60
                 ):
                     try:
-                        ha_power_w = float(power_state)
+                        ha_a = int(float(state))
                     except ValueError:
-                        ha_power_w = None
-                    if ha_power_w is not None and ha_power_w != self._last_requested_power_w:
+                        ha_a = None
+                    if ha_a is not None and ha_a != self._last_requested_a:
                         logger.warning(
-                            f"Reconciliation: HA says {ha_power_w}W but wallbox has "
-                            f"{self._last_requested_power_w}W — re-sending"
+                            f"Reconciliation: HA says {ha_a}A but wallbox has "
+                            f"{self._last_requested_a}A — re-sending"
                         )
-                        await self._send_power_to_wallbox(ha_power_w)
+                        await self._send_current_to_wallbox(ha_a)
                     self._last_reconcile_at = time.monotonic()
 
                 # Re-send profile if wallbox stuck in SuspendedEVSE with power > 0
                 if (
-                    self._pending_power_w is None
+                    self._pending_a is None
                     and self.charge_point
                     and self.charge_point.current_status == "SuspendedEVSE"
-                    and self._last_sent_power_w > 0
+                    and self._last_sent_a > 0
                     and not self._synthesized_suspended_ev
                 ):
                     since_last = time.monotonic() - self._last_change_at
                     if since_last >= self._current_resend_interval:
                         logger.info(
                             f"Wallbox stuck in SuspendedEVSE — re-sending "
-                            f"{self._last_sent_power_w}W profile "
+                            f"{self._last_sent_a}A profile "
                             f"(retry {self._resend_retry_count}, "
                             f"interval {self._current_resend_interval}s)"
                         )
-                        await self._send_power_to_wallbox(
-                            self._last_sent_power_w, force=True
+                        await self._send_current_to_wallbox(
+                            self._last_sent_a, force=True
                         )
                         self._resend_retry_count += 1
                         self._last_change_at = time.monotonic()
@@ -1323,7 +1352,7 @@ class OCPPServer:
         self.charge_point = cp
 
         # Reset power limit tracking so _watch_controls re-applies current value
-        self._last_power_limit = "0"
+        self._last_current_limit = "0"
 
         # Block _watch_controls until post-connect setup finishes
         self._setup_complete.clear()

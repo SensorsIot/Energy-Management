@@ -8,7 +8,7 @@ import pytest
 
 from run import EnergyManager
 from src.battery_optimizer import BatteryOptimizer
-from src.ev_charging import build_solar_candidates, power_steps_for_phases
+from src.ev_charging import amp_steps, build_solar_candidates
 
 
 def forecast(times, energy):
@@ -44,15 +44,18 @@ def test_final_slot_counts_but_tomorrow_does_not():
     assert not opt.reaches_target_today(85, fc, now, 95)[0]
 
 
-@pytest.mark.parametrize("phases,surplus", [(3, 3749), (1, 1300)])
+# Surplus just below the 6 A step on each cable (6 A x 637 = 3822, x 230 = 1380),
+# so taking the minimum step necessarily draws the shortfall from the battery.
+@pytest.mark.parametrize("watts_per_amp,surplus", [(637, 3749), (230, 1300)])
 @pytest.mark.parametrize("allowed,suppressed", [(False, False), (True, True), (True, False)])
-def test_minimum_step_is_a_battery_draw(phases, surplus, allowed, suppressed):
-    steps = power_steps_for_phases(phases)
+def test_minimum_step_is_a_battery_draw(watts_per_amp, surplus, allowed, suppressed):
+    steps = amp_steps(6, 16)
     candidates, _ = build_solar_candidates(
         threshold=1200,
         step_up_allowed=allowed,
         both_full_by_evening=suppressed,
         steps=steps,
+        watts_per_amp=watts_per_amp,
         surplus_w=surplus,
     )
     assert candidates == ([steps[0]] if allowed and not suppressed else [])
@@ -106,7 +109,7 @@ def test_optimizer_caches_p10_pv_p90_load_for_ev(manager):
     [
         (85, 5000, 0, 0),  # Conservative target shortfall stops the car.
         (19, 3749, 1250, 0),  # Below floor: the minimum step is unaffordable.
-        (50, 3749, 1250, 3962),  # Protected: bridge to the first step only.
+        (50, 3749, 1250, 3822),  # Protected: bridge to the first step (6 A) only.
     ],
 )
 def test_live_controller_enforces_target_and_step_floor(manager, soc, surplus, energy, expected):
@@ -208,8 +211,8 @@ def test_ev_target_hysteresis_retains_pause_until_two_percent_recovery(manager, 
     for soc, expected in [
         (target - 16, 0),
         (target - 15, 0),
-        (target - 13, 5117),
-        (target - 15, 5117),
+        (target - 13, 5096),
+        (target - 15, 5096),
         (target - 16, 0),
     ]:
         values[manager.soc_entity] = soc
@@ -223,7 +226,7 @@ def test_ev_target_hysteresis_retains_pause_until_two_percent_recovery(manager, 
 
 
 @pytest.mark.parametrize(
-    "soc,phases,stop", [(50, 3, 3200), (19, 3, 3962), (100, 3, 3200), (19, 1, 1380)]
+    "soc,phases,stop", [(50, 3, 3200), (19, 3, 3822), (100, 3, 3200), (19, 1, 1380)]
 )
 def test_solar_start_stop_hysteresis(manager, soc, phases, stop):
     now = datetime(2026, 9, 28, 13, 0, tzinfo=UTC)
@@ -238,7 +241,9 @@ def test_solar_start_stop_hysteresis(manager, soc, phases, stop):
         manager.pv_power_entity: 5500,
         manager.ev_min_solar_power_entity: 3200,
         "sensor.wallbox_phases": phases,
-        "sensor.wallbox_min_power_w": 1380 if phases == 1 else 3962,
+        "sensor.wallbox_min_current_a": 6,
+        "sensor.wallbox_max_current_a": 16,
+        "sensor.wallbox_watts_per_amp": 230 if phases == 1 else 637,
     }
     manager.ha_client.get_sensor_value.side_effect = values.get
     manager._read_grid_power = MagicMock(return_value=0)
@@ -276,9 +281,9 @@ def test_solar_start_stop_hysteresis(manager, soc, phases, stop):
 @pytest.mark.parametrize(
     "soc,minimum,suppressed,expected", [
         (99, 100, False, 3000),
-        (19, 100, False, 4262),
-        (99, 10, False, 4262),
-        (99, 100, True, 4262),
+        (19, 100, False, 4122),
+        (99, 10, False, 4122),
+        (99, 100, True, 4122),
         (100, 100, True, 3000),
     ]
 )
@@ -296,7 +301,9 @@ def test_threshold_below_configured_surplus_uses_battery_support(
         manager.surplus_power_entity: 2366,
         manager.ev_min_solar_power_entity: 2700,
         "sensor.wallbox_phases": 3,
-        "sensor.wallbox_min_power_w": 3962,
+        "sensor.wallbox_min_current_a": 6,
+        "sensor.wallbox_max_current_a": 16,
+        "sensor.wallbox_watts_per_amp": 637,
     }
     manager.ha_client.get_sensor_value.side_effect = values.get
     manager._read_grid_power = MagicMock(return_value=0)

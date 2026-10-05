@@ -456,8 +456,8 @@ is optimized, *for which entity*, on *what criteria*, with *what output*.
 | **Home battery** | Discharge blocking (battery protection) | Keep enough SOC to cover the expensive tariff window (and the EV) instead of dumping it early | Allow / block discharge | `number.battery_maximum_discharging_power` (`max`/`0`) | 15 min | 4.2.2 |
 | **Home battery** | Export-peak-shaving charge control | Defer PV charging so the battery's headroom absorbs the midday **export** peak at a gentle, capped rate (less clipping, longer battery life) | Allow / defer charging | `number.battery_maximum_charging_power` (`charge_shaving_power_w`/`0`) | 15 min | 4.2.3 |
 | **Home battery** | Dynamic charge target (longevity) | Charge only to the SOC needed to survive the next days (worst-case PV), not 100% — less LFP dwell at high SOC; full charge for BMS calibration 7 days after the last >= 99% (rolling) | Cap at target SOC | `number.battery_end_of_charge_soc` (= target, hard cap) + `number.battery_maximum_charging_power` (`0` at/above target) | 15 min | 4.2.4 |
-| **EV (car)** | Solar-surplus charging | Maximize solar self-consumption into the car without draining the home battery | Wallbox charge power (amp step) | `number.wallbox_power_limit` (via REST `set_sensor_state`) | 10 s | 4.3.6-4.3.7 |
-| **EV (car)** | Cheap / immediate charging (manual modes) | Reach the user's target SOC by a kWh budget + SOC stop | Wallbox power + discharge block | `number.wallbox_power_limit` & `_discharge_blocked_by_ev` | 10 s | 4.3.4–4.3.6 |
+| **EV (car)** | Solar-surplus charging | Maximize solar self-consumption into the car without draining the home battery | Wallbox charge current (amp step) | `number.wallbox_current_limit` (via REST `set_sensor_state`) | 10 s | 4.3.6-4.3.7 |
+| **EV (car)** | Cheap / immediate charging (manual modes) | Reach the user's target SOC by a kWh budget + SOC stop | Wallbox current + discharge block | `number.wallbox_current_limit` & `_discharge_blocked_by_ev` | 10 s | 4.3.4–4.3.6 |
 | **Appliance (washer)** | Run-now signal | Advise when a high-power appliance can run on solar without forcing grid import | green / orange / red | `sensor.appliance_signal` (**advisory — no actuation**) | 15 min | 4.4 |
 
 ### Execution order (decision DAG, Directed Acyclic Graph)
@@ -1135,7 +1135,7 @@ From the EnergyManager's perspective, the wallbox is controlled through HA entit
 
 | Direction | Entity | Type | Description |
 |-----------|--------|------|-------------|
-| **Control** | `number.wallbox_power_limit` | number | Power setpoint (W). `0` = pause, `> 0` = charge at this power. |
+| **Control** | `number.wallbox_current_limit` | number | Current setpoint (A). `0` = pause, `>= min_current_a` = charge at that current. |
 | **Feedback** | `sensor.wallbox_power` | sensor (W) | Actual measured charging power from wallbox MeterValues |
 | **Feedback** | `sensor.wallbox_status` | sensor | OCPP status: `Preparing`, `Charging`, `SuspendedEV`, `SuspendedEVSE`, `Finishing`, `Faulted` |
 | **Feedback** | `binary_sensor.wallbox_connected` | binary | WebSocket connection to wallbox (`on`/`off`). If `off`, EV control is skipped entirely. |
@@ -1297,7 +1297,7 @@ Freshness of `car_soc` (age of `sensor.smart_battery.last_updated`) is logged in
 
 | Output | HA Entity | Description |
 |--------|-----------|-------------|
-| `target_power_w` | `number.wallbox_power_limit` | Wallbox power setpoint (W). 0 = pause. |
+| `target_current_a` | `number.wallbox_current_limit` | Wallbox current setpoint (A). 0 = pause. `target_power_w` is the same decision in watts, for logging and the dashboard. |
 | `state` | `sensor.ev_charge_status` | Current state for dashboard/logging |
 | `reason` | Attribute on `sensor.ev_target_power` | Human-readable reason for current decision |
 
@@ -1333,7 +1333,7 @@ The wallbox may charge **iff all four hold**; the first that fails stops it.
 **Notes**
 
 - **Surplus hysteresis:** the phase-aware configured threshold is the stop threshold when battery support is permitted. Starting or restarting requires **300 W more**; an active solar session continues at the stop threshold and pauses below it. With a 3200 W threshold, start is **3500 W**, stop is **below 3200 W**. When battery support is unavailable (SOC/forecast floor or step-up suppression), the stop threshold is at least the lowest eligible wallbox power step; start is that effective threshold plus 300 W. Decisions use the three-sample surplus average. Battery-target protection and car readiness/target checks take priority; hysteresis cannot retain charging after these checks fail. `sensor.ev_target_power.threshold_w` reports the currently applicable start or stop threshold. Battery-support eligibility is evaluated even when surplus is below the configured threshold, so a low surplus reading alone does not raise the displayed requirement to the wallbox minimum.
-- Rule 3's start threshold is **phase-aware** (`solar_start_threshold`): in **3φ** it is the manual `input_number.ev_min_solar_power`; in **1φ** that gate is **not honored** and the threshold is the wallbox minimum (6 A ≈ 1380 W). Single-phase power is inherently small (max 3680 W / 16 A), so `ev_min_solar_power` — sized for 3-phase, where the minimum step is already 3962 W — would strand most of the 1φ range and force charging only in the top band. The connected-phase count comes from `sensor.wallbox_phases` (ocpp-server §3.6.4.1); phases also select the Topic 2 step table (Section 4.3.7).
+- Rule 3's start threshold is **phase-aware** (`solar_start_threshold`): in **3φ** it is the manual `input_number.ev_min_solar_power`; in **1φ** that gate is **not honored** and the threshold is the wallbox minimum (6 A = 1380 W). Single-phase power is inherently small (max 3680 W / 16 A), so `ev_min_solar_power` — sized for 3-phase, where the minimum step is already 3822 W — would strand most of the 1φ range and force charging only in the top band. The connected-phase count comes from `sensor.wallbox_phases` (ocpp-server §3.6.4.1); phases also set the watts each amp step draws (Section 4.3.7).
 - Rule 4 gives the **home battery priority** over the car: the battery's own charge ceiling (`battery_target_soc`, Section 4.2.4) is the target the car's permission is measured against. The reachability forecast is **car-excluded**, so it reads as *"if the car stops now and the battery gets all the surplus from here on, does it still reach the target today?"* When that turns false, the car yields all surplus to the battery. It is **self-correcting**: while the car charges it steals surplus, so each cycle the sim is re-anchored to a lower (car-suppressed) live SOC; the moment the battery cannot reach the target, the car stops, the battery then receives 100 % of the surplus and lands at (nearly) the target. Full-battery exception: at 100 % SOC the battery has already reached the target, so the check is skipped (the Rule-1 grid-export-capture path applies).
 - **Evaluated on the live 10-s loop, re-anchored to live SOC.** The target gate uses **p10 PV minus p90 household load**, excluding the car. The 15-min discharge decision uses p10 PV minus **p50** load (Section 4.2.2); the energy-balance and car-outlook curves use p50 for both. Each EV cycle excludes completed slots and prorates the current slot's energy and battery power limits to the time remaining. The check includes energy through local midnight and excludes tomorrow's production. Missing or empty conservative input blocks charging; a failed refresh clears the EV forecast cache.
 - **Battery-target hysteresis:** after the target check pauses solar charging, restart requires the same `battery.discharge_hysteresis_percent` recovery margin (default 2 percentage points). The check debits this energy from the starting live SOC before testing reachability, so a 100% target remains achievable. After release, ordinary target reachability governs until the next shortfall. A physically full home battery clears the hold.
@@ -1353,7 +1353,7 @@ The EV can sit either side of the live surplus:
 
 | # | Rule | Condition | Result |
 |---|------|-----------|--------|
-| **1** | **Available steps** | phase config (1-phase / 3-phase) | the discrete amp ladder; the 3680-4140 W phase gap is a dead zone. *Plumbing -- not a decision.* |
+| **1** | **Available steps** | wallbox amp range | the whole-amp ladder 6-16 A, identical on both cables. *Plumbing -- not a decision.* |
 | **2** | **Default: step at/below surplus** | always | the **highest step <= surplus** (`PV - house_load`), or 0 W if none fits. Remainder charges the home battery or is exported. Never pulls from the battery. |
 | **3** | **Step up** | home battery **full** **OR** (`battery_min_soc_48h` >= `battery.no_buy_floor_percent` **AND** current SOC >= `battery.no_buy_floor_percent`) | use the **next step above surplus**; the home battery covers the small gap. |
 | **4** | **No-gain suppression** | the **p10** forecast reaches **both** targets by end of today: home-battery peak SOC >= `battery_target_soc` **AND** car end-of-day SOC >= its car-side target | **veto Rule 3** — stay at/below surplus. |
@@ -1377,25 +1377,37 @@ Power = Rule 2's step, bumped one step by Rule 3 when allowed and Rule 4 does no
 
 Lives on `EVBatteryOptimizer`. Returns whether the **peak** home-battery SOC reaches its `full_threshold` (passed as `battery_target_soc`, Section 4.2.4) between now and end of today (midnight local), plus the time it first does, by reading the 15-min `soc_forecast` curve from InfluxDB. Backs the `battery_will_be_full` / `battery_full_time` / `battery_peak_soc` dashboard attributes on `sensor.battery_decision` (published on the 15-min cycle). **It does not gate the car** — the Topic 1 Rule 4 gate uses `reaches_target_today` re-anchored to the live SOC on the 10-s loop (Section 4.3.6); `sensor.ev_target_power`'s `battery_will_be_full` / `battery_full_time` come from that live path.
 
-#### Amp-step conversion (plumbing)
+#### The amp ladder (plumbing)
 
-The wallbox only charges at integer amp levels. The energy-manager picks from a discrete set of **M-Bus calibrated power steps** -- the actual power delivered at each amp level. **The step table is phase-specific** and chosen from the OCPP server's detected cable phase count (`sensor.wallbox_phases`, ocpp-server FSD §3.6.4.1), because the wallbox draws only the connected phases:
+The wallbox charges at integer amp levels and is **commanded in amps**, so the steps are
+those amp levels: every whole amp from `sensor.wallbox_min_current_a` to
+`sensor.wallbox_max_current_a` (6–16 A), **the same set on a one-phase and a three-phase
+cable**. `amp_steps(min_a, max_a)` builds it.
 
-| Amps | 3-phase (M-Bus W) | 1-phase (M-Bus W) |
+Sizing a step against solar surplus is the one place watts are needed, and the factor comes
+from the OCPP server — the owner of the wallbox calibration — as
+`sensor.wallbox_watts_per_amp` (230 W/A on 1φ, 637 W/A on 3φ; ocpp-server FSD §3.6.1).
+`step_watts(amps, watts_per_amp)` is the only conversion, and it only ever runs
+amps → watts:
+
+| Amps | 3-phase (637 W/A) | 1-phase (230 W/A) |
 |-----:|------------------:|------------------:|
-| 6 | 3962 | 1380 |
-| 7 | 4354 | 1610 |
-| 8 | 5117 | 1840 |
-| 9 | 5727 | 2070 |
-| 10 | 6288 | 2300 |
-| 11 | 7034 | 2530 |
-| 12 | 7624 | 2760 |
-| 13 | — | 2990 |
-| 14 | — | 3220 |
-| 15 | — | 3450 |
-| 16 | — | 3680 |
+| 6 | 3822 | 1380 |
+| 8 | 5096 | 1840 |
+| 10 | 6370 | 2300 |
+| 12 | 7644 | 2760 |
+| 14 | 8918 | 3220 |
+| 16 | 10192 | 3680 |
 
-`POWER_STEPS_3P` is the 2026-03-04 M-Bus sweep (6–12 A); `POWER_STEPS_1P` is 230 W/A from live single-phase MeterValues (2026-07-09, 6–16 A). Using the wrong table breaks single-phase charging: the 3-phase steps all start at 3962 W, above the 1φ maximum (3680 W), so `snap_to_power_step` finds no valid step and the car cannot modulate. `power_steps_for_phases(phases)` selects the table; `snap_to_power_step(surplus, steps=…)` returns the highest step <= surplus (Rule 2), Rule 3's step-up tries the next step above. The OCPP server converts watts -> integer amps with a phase-specific divisor (`round(power_w / 637)` 3φ, `round(power_w / 230)` 1φ), capped at `max_current_a` (ocpp-server FSD §7.2).
+`snap_to_amp_step(surplus, steps, watts_per_amp)` returns the highest step whose expected
+draw fits the surplus (Rule 2); Rule 3's step-up takes the next amp above. The chosen amp
+goes to `number.wallbox_current_limit` unconverted, so the commanded value and the
+delivered current are the same number.
+
+The derived watt figure is accurate to about ±140 W at the bottom of the 3-phase range and
+better above 8 A (ocpp-server FSD §7.2). That affects only how a step is *sized* against
+surplus, never what is commanded, and the home battery absorbs the difference — which is
+already what the minimum step does when surplus is below it.
 
 #### Self-correction and rate limiting (plumbing)
 
@@ -1406,7 +1418,7 @@ The wallbox only charges at integer amp levels. The energy-manager picks from a 
 | PV drops (clouds) / load rises | surplus drops -> next cycle picks a lower amp level |
 | PV rises / load drops | surplus rises -> next cycle may pick a higher level |
 
-**Rate limit:** `number.wallbox_power_limit` is sent only when it differs from the last-sent value **and** >= 30 s have passed since the last change -- preventing oscillation at step boundaries (e.g. surplus hovering near 3962/4354 W flipping 6 A <-> 7 A). 0 W (pause) bypasses the rate limit for safety. `sensor.ev_target_power` still updates every 10 s for the dashboard.
+**Rate limit:** `number.wallbox_current_limit` is sent only when it differs from the last-sent value **and** >= 30 s have passed since the last change -- preventing oscillation at step boundaries (e.g. surplus hovering near 3822/4459 W flipping 6 A <-> 7 A). 0 A (pause) bypasses the rate limit for safety. `sensor.ev_target_power` still updates every 10 s for the dashboard.
 
 ### 4.3.8 Smart Car SOC
 
@@ -2196,10 +2208,10 @@ ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no root@192.168.0.202 "ha core
 
 **EV charging control:**
 ```
-EnergyManager -> POST /api/states/ -> number.wallbox_power_limit -> OCPP Server -> SetChargingProfile -> Wallbox
+EnergyManager -> POST /api/states/ -> number.wallbox_current_limit -> OCPP Server -> SetChargingProfile -> Wallbox
 ```
 
-Note: `number.wallbox_power_limit` is a REST API entity (not a platform entity), so EnergyManager uses `POST /api/states/` instead of `number.set_value` service.
+Note: `number.wallbox_current_limit` is a REST API entity (not a platform entity), so EnergyManager uses `POST /api/states/` instead of `number.set_value` service.
 
 **Wallbox power correction (SUN2000 meter compensation):**
 ```
@@ -2818,49 +2830,36 @@ cd energy-manager && python -m pytest tests/test_discharge_blocking.py -v
 
 Test file: `energy-manager/tests/test_ev_charging.py`
 
-Tests the `snap_to_power_step()`, `calculate_ev_power()`, and `resolve_phase_gap()` logic (Sections 4.3.6-4.3.7).
+Tests the amp ladder and `snap_to_amp_step()` selection (Sections 4.3.6-4.3.7).
 
-#### `snap_to_power_step()` — Discrete M-Bus Power Steps
-
-| Test | Surplus | Expected | Reason |
-|------|---------|----------|--------|
-| `test_surplus_5000_picks_4354` | 5000 W | 4354 W | Highest step ≤ 5000 (7A) |
-| `test_surplus_below_steps_returns_min` | 2000 W | 3962 W | Below all steps → min (battery covers gap) |
-| `test_surplus_above_max_picks_max` | 12000 W | 7624 W | Max step (12A) |
-| `test_exact_step_boundary` | 6288 W | 6288 W | Exact 10A step |
-| `test_custom_power_range` | 5000 W (min=5117) | 5117 W | Min valid step |
-| `test_custom_max` | 12000 W (max=6288) | 6288 W | Capped at custom max |
-| `test_between_steps` | 5200 W | 5117 W | Highest step ≤ 5200 (8A) |
-| `test_just_at_min_step` | 3962 W | 3962 W | Exact min step (6A) |
-
-#### `resolve_phase_gap()` — Dead Zone Handling
-
-| Test | Input | battery_full | Expected |
-|------|-------|-------------|----------|
-| `test_in_gap_battery_not_full_snaps_down` | 3900 W | False | 3680 W |
-| `test_in_gap_battery_full_snaps_up` | 3900 W | True | 4140 W |
-| `test_at_gap_lo_no_snap` | 3680 W | False | 3680 W (boundary exclusive) |
-| `test_at_gap_hi_no_snap` | 4140 W | True | 4140 W (boundary exclusive) |
-| `test_below_gap_unaffected` | 2000 W | False | 2000 W |
-| `test_above_gap_unaffected` | 7000 W | True | 7000 W |
-
-#### `calculate_ev_power()` — Solar Clamp + Gap
-
-| Test | Excess | Expected | Reason |
-|------|--------|----------|--------|
-| `test_below_min_pauses` | 1000 W | 0 W | Below 1400 W minimum |
-| `test_excess_in_gap_snaps_down` | 3900 W | 3680 W | Gap snap (battery not full) |
-| `test_excess_in_gap_battery_full_snaps_up` | 3900 W | 4140 W | Gap snap (battery full) |
-| `test_at_gap_hi_stays` | 4140 W | 4140 W | At boundary (exclusive) → stays |
-| `test_normal_excess_unaffected` | 7000 W | 7000 W | Normal pass-through |
-| `test_clamps_to_max` | 15000 W | 11000 W | Clamped to max_power_w |
-
-#### Phase-Gap Stability (IT-PHASE-01)
+#### `amp_steps()` — the ladder
 
 | Test | Description | Expected |
 |------|-------------|----------|
-| `test_cloud_fluctuation_battery_not_full` | 20 excess values oscillating in gap (3750–4130 W) | All snap to 3680 W, zero phase switches |
-| `test_cloud_fluctuation_battery_full` | Same series, battery full | All snap to 4140 W, zero phase switches |
+| `test_every_whole_amp_is_a_step` | 6–16 A range | `[6, 7, …, 16]` — no gaps, nothing unreachable |
+| `test_three_phase_reaches_sixteen_amps` | 3-phase ceiling | 16 A = 10192 W reachable; 13–16 A exist (the former watt table stopped at 12 A / 7624 W) |
+| `test_same_ladder_on_one_and_three_phases` | Phase count | Same steps; only the watts per step change (16 A = 3680 W on 1φ) |
+| `test_step_watts_is_the_only_conversion` | `step_watts` | 6 A × 230 = 1380 W; 0 A = 0 W |
+
+#### `snap_to_amp_step()` — selecting a step from surplus
+
+| Test | Surplus | Expected | Reason |
+|------|---------|----------|--------|
+| `test_picks_highest_affordable_step` | 5000 W (3φ) | 7 A | 7 A = 4459 W fits; 8 A = 5096 W does not |
+| `test_surplus_below_all_steps_returns_min` | 2000 W (3φ) | 6 A | Below every step → minimum, battery covers the gap |
+| `test_surplus_above_max_picks_max` | 12000 W (3φ) | 16 A | The wallbox maximum (was capped at 12 A) |
+| `test_exact_step_boundary` | exactly 10 A worth | 10 A | Boundary is inclusive |
+| `test_threshold_removes_low_steps` | 5000 W, threshold 5096 W | 8 A | Steps below the threshold are not offered |
+| `test_threshold_above_every_step_returns_zero` | threshold 99999 W | 0 A | No step clears the threshold |
+| `test_single_phase_uses_the_whole_range` | 2500 / 9000 / 1000 W (1φ) | 10 / 16 / 6 A | The whole 1φ range is usable |
+
+#### Single-phase stepping (cable phase detection)
+
+| Test | Description | Expected |
+|------|-------------|----------|
+| `test_same_ladder_regardless_of_phase_count` | 1φ vs 3φ | Same amp steps; 6 A = 1380 W, 16 A = 3680 W on 1φ |
+| `test_single_phase_range_is_reachable` | 2500 W surplus on 1φ | 10 A — the old 3φ watt table yielded no step at all here |
+| `test_step_up_uses_the_same_ladder_on_one_phase` | Protected at 10 A on 1φ | Step up to 11 A |
 
 #### `build_solar_candidates()` — Step-Up Suppression (Rule 4, Section 4.3.7)
 
@@ -2961,7 +2960,7 @@ Integration tests verify cross-module behavior — interactions between EV charg
 | ID | Description | Setup | Expected | Status |
 |----|-------------|-------|----------|--------|
 | IT-PHASE-01 | Cloud fluctuation stability | 20 excess values oscillating in gap | All snap to one side, zero phase switches | ✅ `test_ev_charging.py::TestPhaseGapStability` |
-| IT-PHASE-02 | Phase transition on battery-full change | Excess in gap, toggle `battery_full` | Output switches 3700↔4140 only on flag change | 🔮 Future — pure-logic (extend TestPhaseGapStability) |
+| IT-PHASE-02 | Phase request honoured on a switchable wallbox | Toggle `number.wallbox_phase_request` | The relay/wallbox follows the request; the amp limit is unchanged | 🔮 Future — needs switchable hardware |
 | IT-PHASE-03 | Wallbox confirms phase switch | OCPP `MeterValues` after gap-snap change | Measured power matches target phase | 🔮 Future — requires OCPP mock |
 
 ### 6.6.4 Battery ↔ EV Cross-Coupling (Category D)
@@ -3409,6 +3408,8 @@ See Section 4.3.8 for adaptive polling logic.
 - v2.85: **Topic 3 longevity cap now enforced by the inverter's native end-of-charge SOC register, not just the software power limit (Section 4.2.4).** The old cap wrote `number.battery_maximum_charging_power = 0` once the battery reached `battery_target_soc`. Two gaps let the battery overshoot the 90 % longevity target — verified live 2026-07-17, where it reached 100 %: (1) the power limit is written on the 15-min battery cycle, so the battery kept charging at ~5 kW for up to ~15 min after crossing the target (90 % → ~96 % before the limit landed); (2) a 0 W charge-power limit does not stop DC PV surplus trickling the battery up to the inverter's own SOC cutoff, which sat at 100 %. EM now mirrors `battery_target_soc` onto `number.battery_end_of_charge_soc` every cycle, so the inverter hard-stops charging at the target in real time. The register accepts 90-100 %, exactly the range of the floored target, so it always fits; a 100 % target means "no cap". The power limit is kept as a backing control and drives the dashboard action. When `charge_target_enabled` is off EM leaves the register untouched, releasing it to 100 % only if it had previously lowered it. New `end_of_charge_soc_entity` config key; new `_apply_soc_ceiling`; new `TestSocCeiling`. (1.9.9 -> 1.9.10)
 
 - v2.84: **Shaving day-mode decision log now reports the actual decision time.** The once-daily shave-vs-car-day snapshot (Section 4.2.3) is evaluated on the 15-minute battery-control cycle, so the first tick at/after `shaving_decision_hour` lands up to 15 min past the hour (e.g. 08:12 for an 08:00 hour). The log line previously printed the configured hour (`decided at 08:00`), which misrepresented when the snapshot was taken; it now prints the real local time plus the configured hour: `decided at 08:12 (decision hour 08:00)`. Behaviour and the 15-minute cadence are unchanged. (1.9.8 -> 1.9.9)
+
+- v2.87: **The wallbox is commanded in amps, and the step ladder covers the whole 6-16 A range (Sections 4.3.6-4.3.7).** The ladder was a table of *watts* per amp level, and `POWER_STEPS_3P` stopped at **12 A (7624 W)** while the wallbox goes to 16 A — so on a three-phase cable `ev_max_power = power_steps[-1]` capped solar charging at 7.6 kW and up to **2.6 kW of surplus went to the grid instead of the car**. The watt encoding also meant the decision round-tripped amps → watts → amps (the OCPP server divided back by 637 or 230), with three different watts-per-amp models in play across the two add-ons. Now `amp_steps(min_a, max_a)` is the ladder — every whole amp, identical on one and three phases — built from `sensor.wallbox_min_current_a` / `max_current_a`, and `step_watts(amps, watts_per_amp)` is the only conversion, running **amps → watts only**, with the factor read from `sensor.wallbox_watts_per_amp` rather than hardcoded. The chosen amp goes to `number.wallbox_current_limit` unconverted (ocpp-server 0.9.76, its FSD §3.6.1-3.6.2). `POWER_STEPS_3P` / `POWER_STEPS_1P` / `power_steps_for_phases` / `snap_to_power_step` are replaced; `calculate_ev_power` and `resolve_phase_gap` are deleted — the 3681-4139 W dead zone was an artefact of the watt encoding and does not exist in amps. `EVOutput` gains `target_current_a` (the command) alongside `target_power_w` (the same decision in watts, for logging and the dashboard). Side effect of the single factor: a derived step watt moves by up to ±140 W at the bottom of the 3-phase range versus the old per-amp measurements, which changes only how a step is sized against surplus, never what is commanded. (1.9.31 -> 1.9.32)
 
 - v2.83: **1-phase mode no longer honors `input_number.ev_min_solar_power` (Section 4.3.6 Rule 3).** That gate ("don't start solar charging below X W") is sized for 3-phase, where the minimum step is already 3962 W. In single-phase the whole range is 1380–3680 W (6–16 A), so a 3000 W `ev_min_solar_power` stranded the bottom two-thirds of it — verified live 2026-07-10, where a full sunny day only ever charged in the 13–16 A band. New `solar_start_threshold(phases, ev_min_solar_power, wallbox_min)`: 1φ returns the wallbox minimum (6 A ≈ 1380 W), 3φ returns `ev_min_solar_power` (or the wallbox min as fallback). Selected from `sensor.wallbox_phases`. New `TestSolarStartThreshold`. (1.9.7 -> 1.9.8)
 

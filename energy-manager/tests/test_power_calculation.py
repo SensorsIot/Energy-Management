@@ -13,7 +13,10 @@ These tests verify that selection in isolation.
 
 from __future__ import annotations
 
-from src.ev_charging import snap_to_power_step, build_solar_candidates
+from src.ev_charging import amp_steps, build_solar_candidates, snap_to_amp_step
+
+LADDER = amp_steps(6, 16)
+W_PER_A_3P = 637
 
 
 def compute_ev_charging_power(
@@ -21,14 +24,15 @@ def compute_ev_charging_power(
     ev_mode: str,
     surplus_power_w: float,
     threshold: float,
-    min_power_w: float = 3962,
-    max_power_w: float = 7624,
+    watts_per_amp: float = 637,
     battery_soc: float = 50.0,
     no_buy_floor: float = 20.0,
     min48h: float = 100.0,
     will_be_full: bool = True,
-) -> tuple[float, str]:
+) -> tuple[int, str]:
     """Replicate the FSD 4.3.6-4.3.7 power calculation from run.py.
+
+    Returns the chosen amp step (0 = no charging).
 
     - Rule 1 (Battery Full): SOC >= 100 and surplus >= threshold → snap, no gate.
     - Otherwise: surplus >= threshold builds the Topic 2 candidate list, gated by
@@ -41,7 +45,7 @@ def compute_ev_charging_power(
 
     # Rule 1: Battery Full — surplus capture, no home-battery gate.
     if battery_soc >= 100 and surplus_power_w >= threshold:
-        return snap_to_power_step(surplus_power_w, min_power_w, max_power_w), "battery_full"
+        return snap_to_amp_step(surplus_power_w, LADDER, watts_per_amp), "battery_full"
 
     if surplus_power_w < threshold:
         return 0.0, "none"
@@ -51,6 +55,8 @@ def compute_ev_charging_power(
         surplus_w=surplus_power_w,
         threshold=threshold,
         step_up_allowed=step_up_allowed,
+        steps=LADDER,
+        watts_per_amp=watts_per_amp,
         target_reachable=will_be_full,
     )
     if candidates:
@@ -70,7 +76,7 @@ class TestRule1BatteryFull:
             threshold=1400,
         )
         # 5000W → snap to 4354W (7A)
-        assert power == 4354
+        assert power == 7
         assert source == "battery_full"
 
     def test_battery_full_surplus_below_threshold(self) -> None:
@@ -93,7 +99,7 @@ class TestRule1BatteryFull:
             will_be_full=False,
             threshold=1400,
         )
-        assert power == 4354
+        assert power == 7
         assert source == "battery_full"
 
 
@@ -108,7 +114,7 @@ class TestRule4TargetGate:
             threshold=1400,
         )
         # 4000W → candidate 3962, snap-up 4354 (step-up allowed) → 4354
-        assert power == 4354
+        assert power == 7
         assert source == "solar_surplus"
 
     def test_target_unreachable_blocks(self) -> None:
@@ -164,7 +170,7 @@ class TestStepUpFloor:
             min48h=50,
             threshold=1400,
         )
-        assert power == 5727
+        assert power == 9
         assert source == "solar_surplus"
 
     def test_no_step_up_below_floor_soc(self) -> None:
@@ -176,7 +182,7 @@ class TestStepUpFloor:
             min48h=50,
             threshold=1400,
         )
-        assert power == 5117  # snap-down only — no snap-up to 5727
+        assert power == 8  # snap-down only — no snap-up to 9 A
         assert source == "solar_surplus"
 
     def test_no_step_up_below_floor_forecast(self) -> None:
@@ -188,7 +194,7 @@ class TestStepUpFloor:
             min48h=15.0,  # forecast below floor
             threshold=1400,
         )
-        assert power == 5117
+        assert power == 8
         assert source == "solar_surplus"
 
     def test_step_up_at_floor(self) -> None:
@@ -200,7 +206,7 @@ class TestStepUpFloor:
             min48h=20.0,
             threshold=1400,
         )
-        assert power == 5727
+        assert power == 9
 
     def test_at_or_below_surplus_always_charges(self) -> None:
         """Even with step-up suppressed, the EV still charges at/below surplus."""
@@ -210,6 +216,7 @@ class TestStepUpFloor:
             battery_soc=15.0,  # step-up suppressed
             threshold=1400,
         )
-        # 4400W → snap-down 4354 (7A); no drain, so no floor needed
-        assert power == 4354
+        # 4400 W → snap-down to 6 A (3822 W); 7 A would be 4459 W, above surplus.
+        # No drain, so no floor is needed.
+        assert power == 6
         assert source == "solar_surplus"

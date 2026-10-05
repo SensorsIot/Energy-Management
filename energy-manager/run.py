@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.31"
+__version__ = "1.9.32"
 
 import json
 import logging
@@ -27,11 +27,12 @@ from src.appliance_signal import ApplianceSignal
 from src.ev_battery import EVBatteryOptimizer
 from src.ev_state_machine import EVStateMachine, EVInputs, EVState
 from src.ev_charging import (
+    amp_steps,
     build_solar_candidates,
     simulate_house_and_car,
-    snap_to_power_step,
-    power_steps_for_phases,
+    snap_to_amp_step,
     solar_start_threshold,
+    step_watts,
 )
 from src.influxdb_writer import SimulationWriter
 from src.longevity import battery_longevity
@@ -361,13 +362,13 @@ class EnergyManager:
         self.wallbox_connected_entity = ev_opts.get(
             "wallbox_connected_entity", "binary_sensor.wallbox_connected"
         )
-        self.wallbox_power_limit_entity = ev_opts.get(
-            "wallbox_power_limit_entity", "number.wallbox_power_limit"
+        self.wallbox_current_limit_entity = ev_opts.get(
+            "wallbox_current_limit_entity", "number.wallbox_current_limit"
         )
         self.ev_target_power_entity = ev_opts.get(
             "ev_target_power_entity", "sensor.ev_target_power"
         )
-        self._last_ev_power_limit = None
+        self._last_ev_current_limit = None
         self._last_ev_power_limit_at: float = 0.0  # monotonic timestamp
         self._ev_sm = EVStateMachine()
         self._surplus_samples: list[float] = []  # rolling 30s avg (3 × 10 s)
@@ -1752,17 +1753,28 @@ class EnergyManager:
             wallbox_power = self.ha_client.get_sensor_value(self.wallbox_power_entity) or 0.0
 
             # Dynamic min/max from OCPP server (falls back to config)
-            dyn_min = self.ha_client.get_sensor_value("sensor.wallbox_min_power_w")
-            dyn_max = self.ha_client.get_sensor_value("sensor.wallbox_max_power_w")
-            ev_min_power = int(dyn_min) if dyn_min and dyn_min > 0 else self.ev_min_power_w
-            ev_max_power = int(dyn_max) if dyn_max and dyn_max > 0 else self.ev_max_power_w
+            # The wallbox is commanded in amps, so the step ladder is its amp
+            # range and the watts-per-amp factor it publishes — one factor, read
+            # from the owner of the calibration rather than hardcoded here
+            # (FSD 3.6.1 of the OCPP server). Every whole amp is a step, so the
+            # whole 6–16 A range is usable on one phase and on three alike.
+            dyn_min_a = self.ha_client.get_sensor_value("sensor.wallbox_min_current_a")
+            dyn_max_a = self.ha_client.get_sensor_value("sensor.wallbox_max_current_a")
+            dyn_wpa = self.ha_client.get_sensor_value("sensor.wallbox_watts_per_amp")
+            ev_min_a = int(dyn_min_a) if dyn_min_a and dyn_min_a > 0 else 6
+            ev_max_a = int(dyn_max_a) if dyn_max_a and dyn_max_a > 0 else 16
 
-            # Cable phase count from the OCPP server (sensor.wallbox_phases): a
-            # single-phase cable uses the 1φ power-step table (230 W/A, 1380–3680W)
-            # instead of the 3φ table (which starts at 3962W, above the 1φ max).
+            # Cable phase count from the OCPP server (sensor.wallbox_phases). It
+            # only changes the watts an amp draws, never which amps are available.
             wallbox_phases = self.ha_client.get_sensor_value("sensor.wallbox_phases")
             ev_phases = int(wallbox_phases) if wallbox_phases else 3
-            power_steps = power_steps_for_phases(ev_phases)
+            ev_watts_per_amp = (
+                float(dyn_wpa) if dyn_wpa and dyn_wpa > 0
+                else (230.0 if ev_phases == 1 else 637.0)
+            )
+            amp_ladder = amp_steps(ev_min_a, ev_max_a)
+            ev_min_power = step_watts(ev_min_a, ev_watts_per_amp)
+            ev_max_power = step_watts(ev_max_a, ev_watts_per_amp)
 
             # Wallbox available = car_ready binary sensor from OCPP server
             car_ready_state = self.ha_client.get_state(self.car_ready_entity)
@@ -1808,6 +1820,7 @@ class EnergyManager:
             # Surplus is independent of wallbox consumption, avoiding the
             # feedback loop where grid_export drops when the wallbox charges.
             ev_charging_power_w = 0.0
+            ev_charging_a = 0
             ev_charging_source = "none"
             ev_source_reason = "no solar mode"
             ev_threshold = 0.0
@@ -1865,15 +1878,14 @@ class EnergyManager:
                 # Rule 4 full-battery exception: home battery full → capture the
                 # otherwise-curtailed surplus, no safety check needed.
                 elif battery_soc >= 100 and surplus_power >= threshold and pv_power > 0:
-                    ev_charging_power_w = snap_to_power_step(
-                        surplus_power,
-                        power_steps[0],
-                        power_steps[-1],
-                        steps=power_steps,
+                    ev_charging_a = snap_to_amp_step(
+                        surplus_power, amp_ladder, ev_watts_per_amp
                     )
+                    ev_charging_power_w = step_watts(ev_charging_a, ev_watts_per_amp)
                     ev_charging_source = "battery_full"
                     ev_source_reason = (
-                        f"Surplus {surplus_power:.0f}W → snap {ev_charging_power_w:.0f}W"
+                        f"Surplus {surplus_power:.0f}W → snap {ev_charging_a}A "
+                        f"(≈{ev_charging_power_w}W)"
                     )
                 # Solar-surplus candidate (needs the Rule 4 battery check)
                 elif surplus_power >= threshold:
@@ -1910,10 +1922,8 @@ class EnergyManager:
                     )
                 )
                 self._ev_target_blocked = not battery_will_be_full
-                ev_min_power = power_steps[0]
-                ev_max_power = power_steps[-1]
-                candidate_power = snap_to_power_step(
-                    surplus_power, ev_min_power, ev_max_power, steps=power_steps
+                candidate_a = snap_to_amp_step(
+                    surplus_power, amp_ladder, ev_watts_per_amp
                 )
                 # Step-up gate (Topic 2, FSD 4.3.7): step one amp level above
                 # surplus (draining the gap from the home battery) only while the
@@ -1935,7 +1945,8 @@ class EnergyManager:
                     threshold=threshold,
                     step_up_allowed=solar_battery_support,
                     target_reachable=battery_will_be_full,
-                    steps=power_steps,
+                    steps=amp_ladder,
+                    watts_per_amp=ev_watts_per_amp,
                     both_full_by_evening=step_up_suppressed,
                 )
 
@@ -1952,23 +1963,25 @@ class EnergyManager:
                 min_soc_forecast = self._battery_min_soc_forecast
                 ev_safe = bool(candidates)
                 if candidates:
-                    ev_charging_power_w = candidates[0]
-                    ev_step_offset = power_steps.index(
-                        ev_charging_power_w
-                    ) - power_steps.index(candidate_power)
-                    if ev_charging_power_w > candidate_power:
-                        detail = f", snap-up {candidate_power}→{ev_charging_power_w}W"
-                    elif ev_charging_power_w < candidate_power:
-                        detail = f", stepped {candidate_power}→{ev_charging_power_w}W"
+                    ev_charging_a = candidates[0]
+                    ev_charging_power_w = step_watts(ev_charging_a, ev_watts_per_amp)
+                    # Offset is now literally an amp difference, no table lookup.
+                    ev_step_offset = ev_charging_a - candidate_a
+                    if ev_charging_a > candidate_a:
+                        detail = f", snap-up {candidate_a}→{ev_charging_a}A"
+                    elif ev_charging_a < candidate_a:
+                        detail = f", stepped {candidate_a}→{ev_charging_a}A"
                     else:
                         detail = ""
                     ev_source_reason = (
                         f"Surplus {surplus_power:.0f}W ≥ {threshold:.0f}W, "
-                        f"forecast → {ev_charging_power_w:.0f}W{detail} "
+                        f"forecast → {ev_charging_a}A "
+                        f"(≈{ev_charging_power_w}W){detail} "
                         f"({snap_up_gate_reason})"
                     )
                 else:
                     ev_charging_power_w = 0.0
+                    ev_charging_a = 0
                     if not battery_will_be_full:
                         ev_source_reason = (
                             f"battery won't reach target "
@@ -2000,7 +2013,11 @@ class EnergyManager:
                 # battery protection and the physical step limits still apply.
                 stop_threshold = threshold
                 if not solar_battery_support:
-                    valid_steps = [s for s in power_steps if s >= threshold]
+                    valid_steps = [
+                        step_watts(a, ev_watts_per_amp)
+                        for a in amp_ladder
+                        if step_watts(a, ev_watts_per_amp) >= threshold
+                    ]
                     if valid_steps:
                         stop_threshold = max(threshold, valid_steps[0])
                 ev_threshold = stop_threshold + (
@@ -2008,6 +2025,7 @@ class EnergyManager:
                 )
                 if surplus_power < ev_threshold:
                     ev_charging_power_w = 0.0
+                    ev_charging_a = 0
                     ev_charging_source = "none"
                     ev_step_offset = None
 
@@ -2072,6 +2090,8 @@ class EnergyManager:
                 min_power_w=ev_min_power,
                 manual_power_w=manual_power,
                 ev_charging_power_w=ev_charging_power_w,
+                ev_charging_a=ev_charging_a,
+                manual_a=ev_max_a,
                 target_soc=target_soc,
                 car_soc=car_soc,
                 car_soc_age_s=car_soc_age_s,
@@ -2148,29 +2168,29 @@ class EnergyManager:
                 self.ha_client.set_input_select(self.ev_charging_mode_entity, "solar")
                 self._ev_idle_since = None
 
-            # Send power limit to OCPP (on change only; OCPP server handles re-sends)
-            # Rate limit: min 30s between changes to prevent wallbox oscillation
-            # at amp-step boundaries. 0W bypasses (safety).
-            if output.target_power_w != self._last_ev_power_limit:
+            # Send the current limit to OCPP (on change only; the OCPP server
+            # handles re-sends). Rate limit: min 30 s between changes to prevent
+            # wallbox oscillation between amp steps. 0 A bypasses (safety).
+            if output.target_current_a != self._last_ev_current_limit:
                 since_last = time.monotonic() - self._last_ev_power_limit_at
-                if output.target_power_w == 0 or since_last >= 30:
+                if output.target_current_a == 0 or since_last >= 30:
                     success = self.ha_client.set_sensor_state(
-                        self.wallbox_power_limit_entity,
-                        int(output.target_power_w),
+                        self.wallbox_current_limit_entity,
+                        int(output.target_current_a),
                         attributes={
-                            "friendly_name": "Wallbox Power Limit",
-                            "unit_of_measurement": "W",
+                            "friendly_name": "Wallbox Current Limit",
+                            "unit_of_measurement": "A",
                             "icon": "mdi:speedometer",
                         },
                     )
                     if success:
-                        self._last_ev_power_limit = output.target_power_w
+                        self._last_ev_current_limit = output.target_current_a
                         self._last_ev_power_limit_at = time.monotonic()
                     else:
-                        logger.error("Failed to set wallbox power limit")
+                        logger.error("Failed to set wallbox current limit")
                 else:
                     logger.debug(
-                        f"Rate-limited: want {output.target_power_w:.0f}W "
+                        f"Rate-limited: want {output.target_current_a}A "
                         f"but only {since_last:.0f}s since last change"
                     )
 
@@ -2190,7 +2210,7 @@ class EnergyManager:
                         output=output,
                         prev_state=prev_ev_state,
                         discharge_blocked_by_ev=self._discharge_blocked_by_ev,
-                        last_power_limit_sent=self._last_ev_power_limit,
+                        last_current_limit_sent=self._last_ev_current_limit,
                         wb_connected=wb_connected,
                         idle_since=self._ev_idle_since,
                         excess_w=(

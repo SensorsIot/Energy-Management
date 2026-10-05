@@ -33,7 +33,7 @@ class CycleSnapshot:
     output: EVOutput
     prev_state: EVState
     discharge_blocked_by_ev: bool
-    last_power_limit_sent: float | None
+    last_current_limit_sent: int | None
     wb_connected: bool
     idle_since: datetime | None
     excess_w: float
@@ -196,7 +196,7 @@ class IntegrationObserver:
             f"excess={s.excess_w:.0f}W "
             f"ev_charging={i.ev_charging_power_w:.0f}W "
             f"blocked={s.discharge_blocked_by_ev} "
-            f"last_sent={s.last_power_limit_sent}"
+            f"last_sent={s.last_current_limit_sent}A"
         )
 
     # -- persistence --
@@ -470,20 +470,20 @@ class IntegrationObserver:
         """EC-12: Power limit sent only on change."""
         if prev is None:
             return None
-        if prev.last_power_limit_sent is None:
+        if prev.last_current_limit_sent is None:
             return None  # skip after restart — first send is expected
-        if curr.output.target_power_w != prev.output.target_power_w:
-            return None  # power changed — not the scenario we're testing
+        if curr.output.target_current_a != prev.output.target_current_a:
+            return None  # the command changed — not the scenario we're testing
         # Use int() to avoid float/int mismatch (e.g. 8261.0 vs 8261)
         def _as_int(v: float | None) -> int | None:
             return int(v) if v is not None else None
         # Skip when previous cycle had a pending rate-limited send
         # (last_sent hadn't caught up to target yet — the current send is
         # the delayed catch-up, not a redundant re-send)
-        if _as_int(prev.last_power_limit_sent) != _as_int(prev.output.target_power_w):
+        if _as_int(prev.last_current_limit_sent) != _as_int(prev.output.target_current_a):
             return None
         # Power unchanged: last_sent should equal the previous value (no new send)
-        return _as_int(curr.last_power_limit_sent) == _as_int(prev.last_power_limit_sent)
+        return _as_int(curr.last_current_limit_sent) == _as_int(prev.last_current_limit_sent)
 
     def _detect_ec13(self, prev: CycleSnapshot | None, curr: CycleSnapshot) -> bool | None:
         """EC-13: Auto-revert — mode resets to solar after idle timeout."""

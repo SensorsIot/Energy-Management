@@ -56,6 +56,10 @@ class EVInputs:
     min_power_w: float                # default 1400W
     manual_power_w: float                # default 11000W
     ev_charging_power_w: float = 0.0   # pre-computed charging power (FSD 4.5.6)
+    # The wallbox is commanded in amps; the watt fields above are the same
+    # magnitudes expressed for comparison and logging only.
+    ev_charging_a: int = 0             # pre-computed solar amp step
+    manual_a: int = 16                 # manual/cheap mode: the wallbox maximum
     # Phase 3 — manual-charge kWh budget (immediate/cheap only; solar ignores)
     target_soc: float = 100.0          # input_number.ev_target_soc (% car SOC)
     car_soc: float | None = None       # sensor.smart_battery_last_known; None if unknown
@@ -72,6 +76,9 @@ class EVOutput:
     state: EVState
     target_power_w: float
     reason: str
+    # What is actually commanded. target_power_w is the same decision in watts,
+    # derived from these amps for logging and dashboards.
+    target_current_a: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +217,8 @@ class EVStateMachine:
             self._clear_budget()
             return EVOutput(EVState.IDLE, 0, stop)
         return EVOutput(EVState.IMMEDIATE, i.manual_power_w,
-                        "Immediate mode — charge at max power")
+                        "Immediate mode — charge at max power",
+                        target_current_a=i.manual_a)
 
     def _enter_cheap(self, i: EVInputs) -> EVOutput:
         """Transition into CHEAP: snapshot budget and short-circuit if exhausted."""
@@ -222,10 +230,11 @@ class EVStateMachine:
             self._clear_budget()
             return EVOutput(EVState.IDLE, 0, stop)
         power = i.manual_power_w if i.is_cheap_tariff else 0
+        amps = i.manual_a if i.is_cheap_tariff else 0
         reason = ("Cheap mode — cheap tariff active, charge at max power"
                   if i.is_cheap_tariff
                   else "Cheap mode — waiting for cheap tariff")
-        return EVOutput(EVState.CHEAP, power, reason)
+        return EVOutput(EVState.CHEAP, power, reason, target_current_a=amps)
 
     # -------------------------------------------------------------------
     # IDLE
@@ -245,7 +254,9 @@ class EVStateMachine:
             if i.ev_charging_power_w > 0:
                 self._set_state(EVState.SOLAR)
                 return EVOutput(EVState.SOLAR, i.ev_charging_power_w,
-                                f"Solar charging {i.ev_charging_power_w:.0f}W")
+                                f"Solar charging {i.ev_charging_a}A "
+                                f"(≈{i.ev_charging_power_w:.0f}W)",
+                                target_current_a=i.ev_charging_a)
 
         # Stay IDLE
         return EVOutput(EVState.IDLE, 0, "No EV charging")
@@ -278,7 +289,9 @@ class EVStateMachine:
         # Stay in SOLAR — use pre-computed power
         if i.ev_charging_power_w > 0:
             return EVOutput(EVState.SOLAR, i.ev_charging_power_w,
-                            f"Solar charging {i.ev_charging_power_w:.0f}W")
+                            f"Solar charging {i.ev_charging_a}A "
+                            f"(≈{i.ev_charging_power_w:.0f}W)",
+                            target_current_a=i.ev_charging_a)
 
         # No power — exit to IDLE
         self._set_state(EVState.IDLE)
@@ -319,7 +332,8 @@ class EVStateMachine:
         # Stay in CHEAP — toggle power based on tariff
         if i.is_cheap_tariff:
             return EVOutput(EVState.CHEAP, i.manual_power_w,
-                            "Cheap mode — cheap tariff active, charge at max power")
+                            "Cheap mode — cheap tariff active, charge at max power",
+                            target_current_a=i.manual_a)
         return EVOutput(EVState.CHEAP, 0,
                         "Cheap mode — waiting for cheap tariff")
 
@@ -357,7 +371,8 @@ class EVStateMachine:
 
         # Stay in IMMEDIATE
         return EVOutput(EVState.IMMEDIATE, i.manual_power_w,
-                        "Immediate mode — charge at max power")
+                        "Immediate mode — charge at max power",
+                        target_current_a=i.manual_a)
 
 
 # Dispatch table

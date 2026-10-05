@@ -20,7 +20,7 @@ OCPP 1.6j WebSocket server for EV wallbox control via Home Assistant entities.
 
 1. Wallbox connects via WebSocket (`ws://<ha-ip>:8887/<wallbox_id>`)
 2. OCPP messages update HA sensor entities (power, energy, status, phases)
-3. EnergyManager writes to `number.wallbox_power_limit`
+3. EnergyManager writes to `number.wallbox_current_limit`
 4. OCPP Server translates power limit to SetChargingProfile commands
 5. Phase switching and transaction management handled automatically
 
@@ -75,7 +75,8 @@ All options are in the add-on **Configuration tab**:
 
 | Entity | Range | Description |
 |--------|-------|-------------|
-| `number.wallbox_power_limit` | 0–11000 W | 0 = pause, >0 = charge |
+| `number.wallbox_current_limit` | 0, or 6–16 A | 0 = pause, >0 = charge at that current |
+| `number.wallbox_phase_request` | 1 or 3 | Phase count for those amps (ignored for `three_phase`) |
 
 ## Specification
 

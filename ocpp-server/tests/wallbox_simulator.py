@@ -169,7 +169,7 @@ async def main() -> None:
         await sim.send_boot()
         await sim.send_status("Available")
 
-        logger.info("Ready — set number.wallbox_power_limit in HA to test")
+        logger.info("Ready — set number.wallbox_current_limit in HA to test")
 
         # Run meter loop alongside handler
         meter_task = asyncio.create_task(sim._meter_loop())

@@ -64,7 +64,7 @@ def _make_snapshot(
         output=output,
         prev_state=prev_state,
         discharge_blocked_by_ev=discharge_blocked,
-        last_power_limit_sent=last_sent,
+        last_current_limit_sent=last_sent,
         wb_connected=wb_connected,
         idle_since=idle_since,
         excess_w=excess,
@@ -412,12 +412,12 @@ class TestDetectors:
     def test_ec12_pass_no_change(self, tmp_path) -> None:
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         prev = _make_snapshot(
-            output=EVOutput(EVState.SOLAR, 5000, "Solar"),
-            last_sent=5000,
+            output=EVOutput(EVState.SOLAR, 5096, "Solar", target_current_a=8),
+            last_sent=8,
         )
         curr = _make_snapshot(
-            output=EVOutput(EVState.SOLAR, 5000, "Solar"),
-            last_sent=5000,
+            output=EVOutput(EVState.SOLAR, 5096, "Solar", target_current_a=8),
+            last_sent=8,
         )
         assert obs._detect_ec12(prev, curr) is True
 
@@ -425,12 +425,12 @@ class TestDetectors:
         """EC-12 should skip when previous cycle had a pending rate-limited send."""
         obs = IntegrationObserver(report_path=str(tmp_path / "r.json"))
         prev = _make_snapshot(
-            output=EVOutput(EVState.SOLAR, 4354, "Solar"),
-            last_sent=3500,  # rate-limited — hasn't caught up to target yet
+            output=EVOutput(EVState.SOLAR, 4459, "Solar", target_current_a=7),
+            last_sent=6,  # rate-limited — hasn't caught up to target yet
         )
         curr = _make_snapshot(
-            output=EVOutput(EVState.SOLAR, 4354, "Solar"),
-            last_sent=4354,  # catch-up send completed
+            output=EVOutput(EVState.SOLAR, 4459, "Solar", target_current_a=7),
+            last_sent=7,  # catch-up send completed
         )
         assert obs._detect_ec12(prev, curr) is None
 

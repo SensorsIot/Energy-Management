@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Calibration verification sweep: set wallbox power 5000–11000W via HA,
-wait for settling, read EBL grid meter and Huawei DTSU to verify.
+"""Watts-per-amp sweep: command each amp level via HA, wait for settling, and
+read the EBL grid meter and the Huawei DTSU to measure what that amp draws.
+
+This is how WATTS_PER_AMP (src/ocpp_handler.py) is measured. The wallbox is
+commanded in amps, so the sweep walks amps and reports W/A per step.
 
 Usage: source ~/.secrets/env && python3 calibration_sweep.py
 """
@@ -13,7 +16,7 @@ import urllib.request
 HA_URL = os.environ["HA_URL"]
 HA_TOKEN = os.environ["HA_TOKEN"]
 
-POWER_LIMIT_ENTITY = "number.wallbox_power_limit"
+CURRENT_LIMIT_ENTITY = "number.wallbox_current_limit"
 GRID_METER_ENTITY = "sensor.grid_power"          # EBL M-Bus via gPlug
 DTSU_METER_ENTITY = "sensor.power_meter_active_power"  # Huawei DTSU
 WALLBOX_POWER_ENTITY = "sensor.wallbox_power"     # Wallbox OCPP MeterValues
@@ -77,7 +80,7 @@ def average_readings(n: int, interval: float) -> dict:
 def main() -> None:
     # First ensure wallbox is paused for clean baseline
     print("Pausing wallbox for baseline measurement...")
-    ha_set_state(POWER_LIMIT_ENTITY, "0")
+    ha_set_state(CURRENT_LIMIT_ENTITY, "0")
     time.sleep(10)
 
     status = ha_get(WALLBOX_STATUS_ENTITY)
@@ -95,21 +98,21 @@ def main() -> None:
     )
     print()
 
-    steps = list(range(5000, 12000, 1000))  # 5000, 6000, ..., 11000
+    steps = list(range(6, 17))  # 6, 7, ..., 16 A
     results = []
 
     print(
-        f"{'Req W':>7} | {'WB W':>7} | {'Grid W':>8} | {'DTSU W':>8} "
+        f"{'Req A':>7} | {'WB W':>7} | {'Grid W':>8} | {'DTSU W':>8} "
         f"| {'Grid-Base':>10} | {'DTSU-Base':>10}"
     )
     print("-" * 70)
 
-    for target_w in steps:
-        # Set power limit
-        ha_set_state(POWER_LIMIT_ENTITY, str(int(target_w)))
+    for target_a in steps:
+        # Set current limit
+        ha_set_state(CURRENT_LIMIT_ENTITY, str(int(target_a)))
         status = ha_get(WALLBOX_STATUS_ENTITY)
         print(
-            f"  Set {target_w}W, status={status}, settling {SETTLE_TIME_S}s...",
+            f"  Set {target_a}A, status={status}, settling {SETTLE_TIME_S}s...",
             end="", flush=True,
         )
         time.sleep(SETTLE_TIME_S)
@@ -129,7 +132,7 @@ def main() -> None:
         dtsu_delta = avg["dtsu_w"] - baseline["dtsu_w"]
 
         results.append({
-            "target_w": target_w,
+            "target_a": target_a,
             "wallbox_w": avg["wallbox_w"],
             "grid_w": avg["grid_w"],
             "dtsu_w": avg["dtsu_w"],
@@ -138,31 +141,36 @@ def main() -> None:
         })
 
         print(
-            f"{target_w:>7} | {avg['wallbox_w']:>7.0f} | {avg['grid_w']:>8.0f} "
+            f"{target_a:>7} | {avg['wallbox_w']:>7.0f} | {avg['grid_w']:>8.0f} "
             f"| {avg['dtsu_w']:>8.0f} | {grid_delta:>10.0f} | {dtsu_delta:>10.0f}"
         )
 
     # Stop charging
-    print("\nStopping: setting power limit to 0W...")
-    ha_set_state(POWER_LIMIT_ENTITY, "0")
+    print("\nStopping: setting current limit to 0A...")
+    ha_set_state(CURRENT_LIMIT_ENTITY, "0")
     time.sleep(5)
     status = ha_get(WALLBOX_STATUS_ENTITY)
     print(f"Final status: {status}")
 
-    # Summary
-    print("\n=== CALIBRATION VERIFICATION SUMMARY ===")
+    # Summary — W/A per step is the figure WATTS_PER_AMP is set from.
+    print("\n=== WATTS PER AMP ===")
     print(
-        f"{'Req W':>7} | {'WB W':>7} | {'Grid Delta':>10} | {'DTSU Delta':>10} "
-        f"| {'Req-Grid':>8} | {'Req-DTSU':>8}"
+        f"{'Req A':>7} | {'WB W':>7} | {'Grid Delta':>10} | {'DTSU Delta':>10} "
+        f"| {'W/A grid':>8} | {'W/A wb':>8}"
     )
     print("-" * 70)
     for r in results:
-        req_vs_grid = r["target_w"] - r["grid_delta_w"]
-        req_vs_dtsu = r["target_w"] - r["dtsu_delta_w"]
+        a = r["target_a"]
+        wpa_grid = r["grid_delta_w"] / a if a else 0.0
+        wpa_wb = r["wallbox_w"] / a if a else 0.0
         print(
-            f"{r['target_w']:>7} | {r['wallbox_w']:>7.0f} | {r['grid_delta_w']:>10.0f} "
-            f"| {r['dtsu_delta_w']:>10.0f} | {req_vs_grid:>+8.0f} | {req_vs_dtsu:>+8.0f}"
+            f"{a:>7} | {r['wallbox_w']:>7.0f} | {r['grid_delta_w']:>10.0f} "
+            f"| {r['dtsu_delta_w']:>10.0f} | {wpa_grid:>8.1f} | {wpa_wb:>8.1f}"
         )
+    usable = [r for r in results if r["target_a"] >= 8]
+    if usable:
+        mean_wpa = sum(r["grid_delta_w"] / r["target_a"] for r in usable) / len(usable)
+        print(f"\nMean W/A over 8-16 A (grid-measured): {mean_wpa:.1f}")
 
 
 if __name__ == "__main__":

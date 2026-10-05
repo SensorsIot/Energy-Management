@@ -245,21 +245,45 @@ The OCPP server exposes HA entities as its external interface. All OCPP details,
 
 #### 3.6.1 OCPP Server → Consumers (read-only)
 
+**The control unit is amps.** OCPP carries amps (`chargingRateUnit=A`), the wallbox
+applies them per phase and meters amps, so a commanded amp limit reaches the wallbox
+unconverted. Watts are **derived from amps and never converted back**, so no rounding
+round-trip exists anywhere in the path.
+
+**One conversion factor** (`WATTS_PER_AMP` in `src/ocpp_handler.py`) is the only
+calibration in that path, measured per phase count and published so consumers use the
+same number rather than their own:
+
+| Phase count | W per amp | Source |
+|:-----------:|----------:|--------|
+| 1φ | **230** | Live single-phase MeterValues (2026-07-09), linear through origin |
+| 2φ | 434 | Mean of the two — rare / transitional |
+| 3φ | **637** | Midpoint of safe range [612, 662], 2026-03-04 M-Bus sweep |
+
+1φ is not 637/3 = 212: a single-phase load draws more per amp than one leg of a 3φ load.
+
 **Static values** — from configuration, do not change during operation:
 
-| Wallbox type | `min_power_w` | `max_power_w` |
-|-------------|-------------:|-------------:|
-| 1-phase only | 1380W | 3680W |
-| 3-phase only | 4140W | 11040W |
-| Switchable (1+3) | 1380W | 11040W |
+| Entity | Type | Unit | Value |
+|--------|------|:----:|-------|
+| `sensor.wallbox_min_current_a` | sensor | A | `min_current_a` (6) |
+| `sensor.wallbox_max_current_a` | sensor | A | `max_current_a` (16) |
+
+The amp range is the **same on one phase and on three**. There is therefore no
+unreachable band: every whole amp from the minimum to the maximum is commandable
+on either cable.
 
 **Dynamic values:**
 
 | Entity | Type | Unit | Description |
 |--------|------|:----:|-------------|
 | `binary_sensor.car_ready` | binary | — | Can I charge? on = car plugged + system ready + server synced |
-| `sensor.wallbox_power` | sensor | W | Actual power (0 when not charging) |
+| `sensor.wallbox_power` | sensor | W | Actual measured power (0 when not charging) |
 | `sensor.wallbox_energy` | sensor | Wh | Session energy since transaction start |
+| `sensor.wallbox_watts_per_amp` | sensor | W/A | The factor above, for the phase count now detected |
+| `sensor.wallbox_min_power_w` | sensor | W | `min_current_a × watts_per_amp` — derived, for display and surplus sizing |
+| `sensor.wallbox_max_power_w` | sensor | W | `max_current_a × watts_per_amp` — derived |
+| `sensor.wallbox_power_limit` | sensor | W | The commanded amps expressed in watts — derived, display only |
 
 **`car_ready` derivation:**
 
@@ -298,13 +322,21 @@ Cloud lags 3–10 min behind OCPP — throttled retries bridge the gap.
 
 | Entity | Type | Unit | Range |
 |--------|------|:----:|-------|
-| `number.wallbox_power_limit` | number | W | 0 to max_power_w |
+| `number.wallbox_current_limit` | number | A | `0`, or `min_current_a`–`max_current_a` (whole amps) |
+| `number.wallbox_phase_request` | number | — | `1` or `3` |
 
 | Value | Action |
 |-------|--------------------|
-| `0` | Pause immediately (bypasses throttle) — 0A `SetChargingProfile`, wallbox goes `SuspendedEVSE` |
-| `min–max` | Charge — server selects phases, converts to amps, manages transaction |
-| Gap (3681–4139W) | Stay on current phase, clamp to nearest boundary |
+| `0` | Pause immediately (bypasses throttle) — 0 A `SetChargingProfile`, wallbox goes `SuspendedEVSE` |
+| `min–max` | Charge at that current — sent to the wallbox unconverted; server manages the transaction |
+| Above the maximum | Clamped to `max_current_a` |
+| Below the minimum | `0` (pause) — the wallbox cannot charge below its minimum |
+
+Amps alone cannot express a power on a **switchable** wallbox — 6 A is 1380 W on one
+phase and 3822 W on three — so `number.wallbox_phase_request` completes the request.
+The pair (amps, phases) fully determines the load, which is why the server needs no
+power value to pick a phase count. `three_phase` **ignores** the phase request: there
+the connected cable owns the phase count (§3.6.4.1).
 
 The current limit (including `0`) is **re-applied to the wallbox on every (re)connect**, not only on change. A wallbox resumes at its minimum current after a WebSocket reconnect, so a `0` (pause) that is not re-asserted would silently become a minimum-current charge; re-applying it keeps the commanded state authoritative across reconnects.
 
@@ -325,7 +357,7 @@ Behavior depends on `wallbox_type`:
 
 | `wallbox_type` | Phase switching |
 |----------------|-----------------|
-| `three_phase` | No relay switching. The **connected cable** decides the phase count, detected live from MeterValues (§3.6.4.1). Every request is clamped to the detected phase's range: above its maximum down to that maximum, below its minimum to 0 (pause). The clamp is unconditional — there is no relay here, so it does not depend on a phase-switch time lock. |
+| `three_phase` | No relay switching. The **connected cable** decides the phase count, detected live from MeterValues (§3.6.4.1), and `number.wallbox_phase_request` is ignored. |
 | `external_breaker` | Server drives the EARU latching relay via `phase_switch_entity`. Detailed flow below. |
 | `universal` | Wallbox manages phases natively; server passes the requested power through and reports observed phase count. |
 
@@ -337,13 +369,13 @@ mode the server therefore measures the active phase count from each MeterValues 
 counts as drawing when its `Current.Import` is ≥ **0.5 A**, evaluated only once total draw is ≥ **400 W**
 so idle/ramp noise cannot flap it. The detected count (1 or 3) drives:
 
-- `sensor.wallbox_phases` and the published `min/max_power_w` range (§3.6.1),
-- the watts→amps divisor (the wallbox applies the amp limit per phase: 3φ ÷637, 1φ ÷230 — §7.2),
+- `sensor.wallbox_phases`, `sensor.wallbox_watts_per_amp` and the derived
+  `min/max_power_w` watt range (§3.6.1) — the **amp** range is unchanged by phase count,
 - the meter power correction (3φ-calibrated; a 1φ/2φ draw reports the wallbox's own measured power, §7.1),
-- the **live command**: adopting a new count re-applies the current HA power limit through the new
-  range, so the commanded setpoint and the charging profile's `numberPhases` match the cable. The
-  published range alone is not enough — a setpoint left at the previous phase scale is unreachable,
-  and the Modbus-proxy correction publishes that setpoint as its commanded bridge (§3.6.6).
+- the **live command**: adopting a new count re-applies the current limit so the charging
+  profile's `numberPhases` matches the cable, and the derived watt figures follow it. The
+  amp limit itself stays valid, so there is no unreachable setpoint for the Modbus-proxy
+  bridge to latch on (§3.6.6).
 
 Detection is continuous, so swapping to a different cable (3φ↔1φ) re-detects on the next meaningful
 draw. In `external_breaker`/`universal` modes the relay/wallbox owns the phase count and the detected
@@ -365,28 +397,25 @@ use right now. On a dashboard, label that binary sensor "Phase switching", not "
 
 The remainder of this section describes the `external_breaker` flow (the only mode where the server actively switches phases). Consumer sends power; server decides phases.
 
-**Power ranges** (6A min, 16A max, 230V):
+**Current range** (6 A min, 16 A max) is identical on both phase counts, so the watts
+each amp delivers is the only thing the phase count changes:
 
 | Phases | Min | Max |
 |:------:|----:|----:|
-| 1-phase | 1380W | 3680W |
-| 3-phase | 4140W | 11040W |
-| Gap | 3681W | 4139W |
-
-Non-overlapping ranges provide natural hysteresis.
+| 1-phase | 6 A = 1380 W | 16 A = 3680 W |
+| 3-phase | 6 A = 3822 W | 16 A = 10192 W |
 
 **Decision table:**
 
-| Requested | Current | Action |
-|-----------|:-------:|--------|
-| 0W | any | Pause, stay on current phase |
-| 1380–3680W | 1φ | Stay |
-| 1380–3680W | 3φ | Switch to 1φ (if time lock allows) |
-| Gap | any | Stay, clamp to current phase boundary |
-| 4140–11040W | 3φ | Stay |
-| 4140–11040W | 1φ | Switch to 3φ (if time lock allows) |
+| Requested | Action |
+|-----------|--------|
+| 0 A | Pause, stay on current phase |
+| amps, phase request == current phases | Stay |
+| amps, phase request != current phases | Switch (if the time lock allows) |
 
-**Time lock:** 5 min after phase switch. During lock, clamp to current phase range. Battery/grid absorb mismatch.
+**Time lock:** 5 min after a phase switch. During the lock a differing phase request is
+ignored and the amps are served on the phase count the lock holds — no clamping is
+needed, because the amp range is valid on either. Battery/grid absorb the mismatch.
 
 **Safety sequence** (before relay toggle):
 
@@ -425,14 +454,14 @@ the wallbox's *actual* draw so the corrected DTSU matches the M-Bus grid meter. 
 measured power (`ChargePointHandler._correct_meter_power`, `METER_SCALE·raw + METER_OFFSET`) is that
 value, but it lags — ~60 s cadence and a slow post-command ramp — so the published value is:
 
-- **Bridge — commanded** (`_last_sent_power_w`), **bounded by the cable's physical maximum**
-  (`max_current_a × 230 ×` detected phases, §3.6.4.1): while a charge is commanded but the fresh
-  measured reading has **not yet reached 85 %** of the bounded setpoint (or is stale, >90 s), publish
-  it. The bound is what makes the handoff reachable — the test is a *ratio of commanded*, so a
-  setpoint the cable cannot draw latches the bridge on for the whole session (a 1φ cable maxes at
-  3680 W and can never reach 85 % of a 3φ-scale 11000 W, so the proxy would inject that unreachable
-  figure as phantom load). It also covers the window between a phase-count change and the re-sent
-  profile. Injected the instant the command is sent during an active session (`Charging` or
+- **Bridge — commanded**, the amps last commanded expressed in watts at the **detected**
+  phase count (`amps_to_watts(_last_sent_a, _current_phases)`, §3.6.1): while a charge is
+  commanded but the fresh measured reading has **not yet reached 85 %** of that figure (or
+  is stale, >90 s), publish it. Because the command is already clamped to the wallbox's amp
+  range, the setpoint is always physically reachable and the 85 % handoff can always
+  complete — the same amp limit is 3680 W on one phase and 10192 W on three, so there is no
+  phase-scale value to be stuck with. Injected the instant the command is sent during an
+  active session (`Charging` or
   `SuspendedEVSE` = warm resume / amp change), and on reaching `Charging` for the cold-start path. This
   signals the SUN2000 the full load immediately and covers the whole ramp; a late car briefly
   **exports** (sells) — deliberately preferred over under-reading and **importing** (buying).
@@ -615,32 +644,37 @@ baseline resolves it.
 
 The corrected power is published to `sensor.wallbox_power` as an integer (rounded for display).
 
-### 7.2 Demand Calibration (v0.9.47)
+### 7.2 Amps and the watts they draw
 
-The energy-manager sends demand values in M-Bus watts (the actual power delivered at each amp level). The OCPP server converts these to integer amps using a calibrated divisor:
+The wallbox is commanded in **amps** and OCPP carries amps, so there is no watts→amps
+conversion in the control path and nothing is rounded:
 
 ```
-limit_a = min(round(power_w / divisor), max_current_a)   divisor = 637 (3φ) | 230 (1φ)
+SetChargingProfile.limit = clamp(requested_a, 0 or min_current_a .. max_current_a)
 ```
 
-**The wallbox applies the amp limit per phase**, so the divisor is **measured per phase count**
-(not derived from one another) and selected by cable detection (§3.6.4.1): 637 for 3φ (midpoint of
-safe range [612, 662], 3-phase sweep below), **230 for 1φ** (live single-phase MeterValues,
-2026-07-09, ~230 W/A linear through origin — a single-phase load draws more per amp than one leg of a
-3φ load, so ÷637/3 = 212 would under-read). A single-phase 3000 W → 13 A (~3000 W) instead of ÷637 →
-5 A (~1150 W). The result is **hard-capped at `max_current_a`** (16 A): the wallbox does not enforce
-the configured maximum itself (a 1φ cable was seen drawing ~19 A from a 21 A profile), so the server
-caps it (SEC-07). Each M-Bus power value maps to the correct integer amp (3-phase sweep shown):
+The result is **hard-capped at `max_current_a`** (16 A): the wallbox does not enforce the
+configured maximum itself (a 1φ cable was seen drawing ~19 A from a 21 A profile), so the
+server caps it (SEC-07).
 
-| M-Bus W | W / 637 | round() | Correct A |
-|--------:|--------:|--------:|----------:|
-| 3962 | 6.22 | 6 | 6 ✓ |
-| 4354 | 6.83 | 7 | 7 ✓ |
-| 5117 | 8.03 | 8 | 8 ✓ |
-| 5727 | 8.99 | 9 | 9 ✓ |
-| 6288 | 9.87 | 10 | 10 ✓ |
-| 7034 | 11.04 | 11 | 11 ✓ |
-| 7624 | 11.97 | 12 | 12 ✓ |
+Watts are derived from amps in **one direction only**, with the single `WATTS_PER_AMP`
+factor of §3.6.1 — for sizing a step against solar surplus, for the Modbus-proxy
+commanded bridge (§3.6.6), and for display. Measured watts per amp, 3-phase sweep:
+
+| Commanded A | Measured W | W/A |
+|------------:|-----------:|----:|
+| 6 | 3962 | 660 |
+| 7 | 4354 | 622 |
+| 8 | 5117 | 640 |
+| 9 | 5727 | 636 |
+| 10 | 6288 | 629 |
+| 11 | 7034 | 640 |
+| 12 | 7624 | 635 |
+
+The per-amp figures scatter ±4 % around the 637 W/A midpoint, so a derived watt value is
+accurate to about **±140 W at the low end** and better above 8 A. That error only affects
+how a step is *sized against surplus* — never what is commanded — and the home battery
+absorbs it (§4.2.2 of the energy-manager FSD).
 
 ## 8. Test Cases
 
@@ -678,10 +712,13 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-13 | Full charge cycle | Start → Charge → Pause → Resume → Stop |
 | TC-14 | HA restart with active wallbox | Entities re-registered, state re-synced |
 | TC-15 | Cable-lock switch toggled (§3.6.7) | `LOCK`→`ChangeConfiguration(UnlockConnectorOnEVSideDisconnect, false)`, `UNLOCK`→`true`; state follows on Accepted, reverts on reject/offline; `GetConfiguration` on connect syncs the switch |
-| TC-16 | Cable phase detection (§3.6.4.1) | L1-only MeterValues ≥400 W → `active_phases`=1, `sensor.wallbox_phases`=1, range→1380–3680 W, divisor ÷230, `wallbox_power`=raw; all three phases → 3, ÷637, linear correction; below 400 W does not flap; `universal`/`external_breaker` ignore detection |
-| TC-32 | 1φ cable, request above the 1φ maximum (§3.6.4) | 11000 W → clamped to 3680 W and recorded as the commanded setpoint; no phase-switch time lock involved. 3φ cable at 11000 W (within 11040 W) passes through; below the 1φ minimum still pauses at 0 W |
-| TC-33 | Phase detection re-applies the live limit (§3.6.4.1) | 3φ→1φ with 11000 W commanded → limit re-applied through the 1φ range: commanded setpoint 3680 W, profile `numberPhases`=1 |
-| TC-34 | Proxy bridge on a 1φ cable (§3.6.6) | Commanded 11000 W with 1 phase detected → correction bounded to 3680 W + bias, not 11000 W + bias; a 3539 W measured draw (≥85 % of 3680 W) hands off to measured. A genuine 3φ 11000 W command is unaffected by the bound |
+| TC-16 | Cable phase detection (§3.6.4.1) | L1-only MeterValues ≥400 W → `active_phases`=1, `sensor.wallbox_phases`=1, watt range→1380–3680 W at 230 W/A, `wallbox_power`=raw; all three phases → 3, 637 W/A, linear correction; below 400 W does not flap; `universal`/`external_breaker` ignore detection |
+| TC-32 | Amp range clamp (§3.6.4) | 20 A → clamped to 16 A on either phase count; 5 A → 0 A (pause); 13 A passes through unchanged |
+| TC-33 | Phase detection re-applies the live limit (§3.6.4.1) | 3φ→1φ at 16 A → profile re-sent with `numberPhases`=1, same 16 A; `sensor.wallbox_power_limit` follows to 3680 W (not 10192 W) |
+| TC-34 | Proxy bridge follows the detected phase count (§3.6.6) | 16 A commanded → correction 3680 W + bias on 1φ and 10192 W + bias on 3φ; a 3539 W draw on 1φ is ≥85 % of commanded, so the bridge hands off to measured |
+| TC-35 | Amps reach the profile unconverted (§7.2) | `set_charging_current(10, 3)` → `chargingRateUnit=A`, `limit=10`; 7 and 7.0 dedup to one write; a negative request sends 0 |
+| TC-36 | One factor, one direction (§3.6.1) | `watts_per_amp` is 230/434/637 for 1/2/3 phases and clamps out-of-range phase counts; `amps_to_watts(16, 1)`=3680 and `amps_to_watts(16, 3)`=10192 |
+| TC-37 | Every amp is reachable on both cables (§3.6.4) | 6–16 A each sent verbatim on 1φ and on 3φ — including 13–16 A, which the former 3-phase watt step table could not express |
 
 ### 8.1 Security test cases
 
@@ -748,6 +785,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.24 | 2026-10-05 | **The wallbox is commanded in amps, and watts are derived one way from a single factor (§3.6.1, §3.6.2, §3.6.4, §3.6.6, §7.2).** The control path ran amps → watts → amps: a consumer picked an amp level, published it as watts on `number.wallbox_power_limit`, and the server divided back with `round(W / 637 or 230)`. The round-trip was exact for every table value, but three different watts-per-amp models coexisted — `A × 230 × phases` (690 W/A) in the published range, `DEMAND_DIVISOR` (637) in the command path, and the measured per-amp table (622–660) in the consumer's step table — which is why the published 3φ maximum (11040 W) overstated what 16 A actually delivers (~10192 W) and why an out-of-table watt value could land on the wrong amp. Now: `number.wallbox_current_limit` (A) is the control, `set_charging_current` sends the amps unconverted, and `WATTS_PER_AMP` {1: 230, 2: 434, 3: 637} is the only calibration in the path — used **solely** to derive watts for surplus sizing, the proxy bridge and display. Phase selection no longer needs a power either: `number.wallbox_phase_request` states it, since 6 A is 1380 W on one phase and 3822 W on three. Consequences: the 3681–4139 W dead zone disappears (the amp range is identical on both cables, so `resolve_phase_gap` is gone), and the derived watt range is honest. New `sensor.wallbox_watts_per_amp`, `sensor.wallbox_min_current_a`, `sensor.wallbox_max_current_a`, `sensor.wallbox_power_limit` (derived, display only); `number.wallbox_power_limit` is withdrawn. TC-32…TC-37. ocpp-server 0.9.76; tests 155 → 154. |
 | 3.23 | 2026-10-04 | **A detected single-phase cable now clamps the live command, so the Modbus-proxy correction stays reachable (§3.6.4, §3.6.4.1, §3.6.6).** Live on 2026-10-04 a single-phase cable charging at 3539 W had the proxy inject **11200 W** of correction for a whole 7-minute session — the SUN2000 was told it was importing ~10 kW against a real 2.4 kW and ramped PV to chase a 7.7 kW phantom load (caught by the `modbus_proxy_correction_diverges` watchdog). Three faults compounded: (1) the only 1φ clamp sat behind `phase_lock_active`, which never engages in `three_phase` mode (no relay, so `_last_phase_switch_time` stays 0), so an 11000 W request was sent and recorded verbatim — the clamp to the detected phase's range is now unconditional and bounds the **maximum** as well as the minimum; (2) `_on_phases_detected` published the new 1380–3680 W range but left the live command at 11000 W, and now re-applies the HA limit through the new range (also correcting the profile's `numberPhases`); (3) the proxy bridge hands off to measured at a *ratio of commanded*, which an unreachable setpoint can never satisfy, so `_proxy_power_w` bounds commanded by `max_current_a × 230 ×` detected phases. The ESP32 Modbus Proxy is a pass-through (`calculatePowerCorrection` returns the MQTT value unchanged, totals corrected once) and needed no change. Also corrects the 1φ divisor stated in §3.6.4.1 and TC-16 (÷212 → the measured **÷230** already specified in §7.2). TC-32…TC-34. ocpp-server 0.9.75; tests 149 → 155 (`TestSinglePhaseCableClamp`, 2 added to `TestProxyCorrection`). |
 | 3.22 | 2026-08-10 | **Wallbox response deadlines are named, and the suite stops waiting them out (§3.5.1).** The five deadlines were inline literals in `run.py`, so a test exercising the post-connect or start path waited them out in real wall-clock time — 236 of the suite's 246 seconds. They are now named attributes (`POST_CONNECT_TIMEOUT_S`, `METER_SYNC_TIMEOUT_S`, `TRANSACTION_START_TIMEOUT_S`, `PROFILE_SETTLE_S`, `PHASE_RELAY_SETTLE_S`) with **unchanged shipped values** (30/10/15/3/3 s), reviewable in one place and shrinkable per-process by tests. A second, larger source of waiting was the ocpp library's own `response_timeout` (default 30 s): a handler on a mock connection never gets a CALL answered, so anything reaching `self.call()` — `get_configuration` during post-connect — blocked the full 30 s regardless of our constants; tests shrink `_response_timeout` too. Suite: **246 s → 1.4 s**, 148 → 149 tests. The new test asserts the *shipped* values (including `power_update_interval_s` = 60), so shrinking a deadline fails the suite — these must stay generous because the wallbox does not talk often. Behaviour unchanged. ocpp-server 0.9.74. |
 | 3.21 | 2026-08-10 | **Write economy on SetChargingProfile (§3.5.2).** Every profile is a write to the wallbox's non-volatile store, and three paths were spending them for nothing. (1) **Duplicate profiles.** Change detection compared HA state *strings*, and nothing compared the command actually sent, so `"4354.0"` vs `"4354"` re-sent, and — the costly case — different watts that floor to the same amps re-sent (the wallbox floors watts to whole amps, so 4354 W and 4400 W are both `7 A`). `set_charging_power` now compares `(limit_a, num_phases)` against the last **accepted** profile and returns success without sending when they match; a rejected profile is not remembered, and the state is per-connection so a reconnect re-asserts. A `force` flag preserves the SuspendedEVSE recovery (§5.4), which re-sends an identical profile deliberately. (2) **Throttle measured from the wrong event.** `_last_change_at` was reset on *every* change including throttled ones, so the interval measured the gap between changes, not since the last send — a steady stream of sub-interval changes starved the queue and the pending value was never delivered (only the 60 s reconciliation rescued it). Now timed from `_last_sent_at`; `0 W` still bypasses. (3) **A start attempt per power change.** Each change re-entered the start path and fired a fresh `RemoteStartTransaction` — three in two minutes on 2026-08-09 against a car in `Preparing` that was never going to start. Now one attempt, then an escalating back-off (60/300/900 s), reset on transaction start or `Available`. TC-20…TC-31. ocpp-server 0.9.73. |
