@@ -3,8 +3,11 @@
 
 Uses the ocpp library as a client to match exact message format.
 
+Run by hand against a live add-on, so it is an operator tool rather than part
+of the test suite.
+
 Usage:
-    python3 wallbox_simulator.py [ws://HOST:PORT/CHARGEPOINT_ID]
+    python3 tools/wallbox_simulator.py [ws://HOST:PORT/CHARGEPOINT_ID]
 
 Default: ws://192.168.0.202:8887/AcTec001
 """

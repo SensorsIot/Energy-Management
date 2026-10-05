@@ -41,11 +41,11 @@ python -m pytest swiss-solar-forecast/test_pipeline.py -v
 # Run ocpp-server tests
 python -m pytest ocpp-server/tests/ -v
 
-# Lint all add-ons
-ruff check energy-manager/ load-forecast/ ocpp-server/ swiss-solar-forecast/
+# Lint all add-ons and the tracked tooling
+ruff check energy-manager/ load-forecast/ ocpp-server/ swiss-solar-forecast/ tools/
 
-# Format all add-ons
-ruff format energy-manager/ load-forecast/ ocpp-server/ swiss-solar-forecast/
+# Format all add-ons and the tracked tooling
+ruff format energy-manager/ load-forecast/ ocpp-server/ swiss-solar-forecast/ tools/
 
 # Install all dev dependencies
 pip install -r requirements-dev.txt

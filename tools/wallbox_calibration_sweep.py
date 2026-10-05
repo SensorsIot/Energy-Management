@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Watts-per-amp sweep: command each amp level via HA, wait for settling, and
-read the EBL grid meter and the Huawei DTSU to measure what that amp draws.
+"""Measure what each commanded amp actually draws.
 
-This is how WATTS_PER_AMP (src/ocpp_handler.py) is measured. The wallbox is
+Commands each amp level via HA, waits for settling, then reads the EBL grid
+meter and the Huawei DTSU to see what that amp delivered.
+
+This is how WATTS_PER_AMP (ocpp-server/src/ocpp_handler.py) is measured. The wallbox is
 commanded in amps, so the sweep walks amps and reports W/A per step.
 
-Usage: source ~/.secrets/env && python3 calibration_sweep.py
+Drives the live wallbox and the house meters, so it is an operator tool rather
+than part of the test suite.
+
+Reads HA_URL and HA_TOKEN from the environment (never from the file — see
+Harness/project/build-and-release.md). In the devcontainer they are already
+exported; elsewhere source the secrets file first.
+
+Usage: python3 tools/wallbox_calibration_sweep.py
 """
 
 import json

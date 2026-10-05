@@ -73,7 +73,7 @@ Every top-level directory, what it holds, and its **lifecycle**.
 |---|---|---|
 | `energy-manager/`, `load-forecast/`, `swiss-solar-forecast/`, `ocpp-server/` | Permanent/runtime | The four add-ons — code (`run.py`, `src/`, `tests/`) and each add-on's own `Documents/` FSD (the WHAT plane). |
 | `Harness/` | Permanent | The HOW plane — the AI build contract (`AI-Workflow.md`), portable `standards/`, project-wide `project/` rules, and module-specific HOW in `project/modules/<addon>.md`. |
-| `tools/` | Permanent | Tracked tooling — the doc-linter (`doc_lint.py`). |
+| `tools/` | Permanent | Tracked tooling — the doc-linter (`doc_lint.py`), the test runner (`run_tests.sh`), and the hand-run hardware utilities (`wallbox_calibration_sweep.py` measures watts per amp against the house meters; `wallbox_simulator.py` is a fake wallbox). These drive live or simulated hardware and are not collected by pytest, so they live here rather than in an add-on `tests/` directory. |
 | `scripts/` | Local-only (gitignored) | Standalone utilities (InfluxDB migration, Smart car status). Not tracked — never the source of truth. |
 | `.claude/skills/` | Permanent | Agent skills, incl. the `documentation` skill. **Not documentation** (see below). |
 
