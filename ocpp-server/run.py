@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.76"
+__version__ = "0.9.77"
 
 import asyncio
 import json
@@ -1098,6 +1098,17 @@ class OCPPServer:
             "on" if self.single_phase_supported else "off",
         )
         await self.ha.set_state("sensor.wallbox_phases", self._current_phases)
+        # The amp range, the conversion factor and the derived watt range are
+        # part of the state a consumer depends on (FSD 3.6.1), so they are
+        # re-published here too. Registration alone leaves them at their
+        # declared defaults, and after an HA restart the wallbox connection
+        # usually survives — so `_post_connect_setup` does not re-run and the
+        # factor would stay at its 3-phase default on a single-phase cable.
+        await self._publish_power_limits()
+        await self.ha.set_state(
+            "sensor.wallbox_power_limit",
+            amps_to_watts(self._last_sent_a, self._current_phases),
+        )
         if cp:
             await self.ha.set_state("sensor.wallbox_status", cp.current_status)
             await self.ha.set_state("sensor.wallbox_power", round(cp.current_power_w))

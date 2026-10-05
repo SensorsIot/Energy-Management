@@ -2145,6 +2145,64 @@ class TestAmpRangeClamp:
         server.ha.set_state.assert_any_call("sensor.wallbox_power_limit", 3680)
 
 
+class TestStateResyncPublishesTheFactor:
+    """`_sync_ha_state` re-publishes the amp range and the conversion factor.
+
+    Regression: after an HA core restart the entities are re-registered at their
+    declared defaults, but the wallbox WebSocket usually survives — so
+    `_post_connect_setup` does not re-run. `sensor.wallbox_watts_per_amp` was then
+    left at its 3-phase default (637) while a single-phase cable was connected,
+    and `min/max_power_w` stayed at 0, so a consumer sized its steps on the wrong
+    factor until the next reconnect or phase detection.
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {"wallbox_id": "test", "min_current_a": 6, "max_current_a": 16}
+        )
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        cp = MagicMock()
+        cp.transaction_id = None
+        cp.current_status = "SuspendedEVSE"
+        cp.current_power_w = 0
+        cp.session_energy_wh = 0
+        srv.charge_point = cp
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_resync_republishes_single_phase_factor(self, server) -> None:
+        server._current_phases = 1
+        server._last_sent_a = 0
+
+        await server._sync_ha_state()
+
+        server.ha.set_state.assert_any_call("sensor.wallbox_watts_per_amp", 230)
+        server.ha.set_state.assert_any_call("sensor.wallbox_min_current_a", 6)
+        server.ha.set_state.assert_any_call("sensor.wallbox_max_current_a", 16)
+        server.ha.set_state.assert_any_call("sensor.wallbox_min_power_w", 1380)
+        server.ha.set_state.assert_any_call("sensor.wallbox_max_power_w", 3680)
+
+    @pytest.mark.asyncio
+    async def test_resync_republishes_three_phase_factor(self, server) -> None:
+        server._current_phases = 3
+        server._last_sent_a = 10
+
+        await server._sync_ha_state()
+
+        server.ha.set_state.assert_any_call("sensor.wallbox_watts_per_amp", 637)
+        server.ha.set_state.assert_any_call("sensor.wallbox_max_power_w", 10192)
+        # The commanded amps are re-expressed in watts for display.
+        server.ha.set_state.assert_any_call("sensor.wallbox_power_limit", 6370)
+
+
 class TestCableLockCommands:
     """OCPP commands backing the cable lock/unlock switch."""
 

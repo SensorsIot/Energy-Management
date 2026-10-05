@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.32"
+__version__ = "1.9.33"
 
 import json
 import logging
@@ -1768,10 +1768,19 @@ class EnergyManager:
             # only changes the watts an amp draws, never which amps are available.
             wallbox_phases = self.ha_client.get_sensor_value("sensor.wallbox_phases")
             ev_phases = int(wallbox_phases) if wallbox_phases else 3
-            ev_watts_per_amp = (
-                float(dyn_wpa) if dyn_wpa and dyn_wpa > 0
-                else (230.0 if ev_phases == 1 else 637.0)
-            )
+            # The OCPP server owns the factor. Guard only against it being
+            # absent or implausible for the detected phase count (a stale
+            # 3-phase factor on a single-phase cable would over-estimate every
+            # step); in that case fall back to the wallbox's own published watt
+            # range, which carries the same factor.
+            ev_watts_per_amp = float(dyn_wpa) if dyn_wpa and dyn_wpa > 0 else 0.0
+            dyn_max_w = self.ha_client.get_sensor_value("sensor.wallbox_max_power_w")
+            if dyn_max_w and dyn_max_w > 0 and ev_max_a > 0:
+                from_range = float(dyn_max_w) / ev_max_a
+                if ev_watts_per_amp <= 0 or abs(ev_watts_per_amp - from_range) > 1.0:
+                    ev_watts_per_amp = from_range
+            if ev_watts_per_amp <= 0:
+                ev_watts_per_amp = 230.0 if ev_phases == 1 else 637.0
             amp_ladder = amp_steps(ev_min_a, ev_max_a)
             ev_min_power = step_watts(ev_min_a, ev_watts_per_amp)
             ev_max_power = step_watts(ev_max_a, ev_watts_per_amp)
