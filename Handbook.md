@@ -109,6 +109,65 @@ sibling user config, and restart.
   unplugged. The switch reflects the wallbox's real setting (re-read on every reconnect); if the
   wallbox is offline the toggle snaps back.
 
+### Measure the wallbox calibration
+
+`tools/wallbox_calibration_sweep.py` walks the wallbox through each amp step and measures what it
+actually draws. It produces the two constants in
+[`ocpp-server` FSD §7.1 / §7.2](ocpp-server/Documents/ocpp-server-fsd.md#71-linear-regression):
+`WATTS_PER_AMP` and the meter corrections.
+
+**Run it at 02:00, not in the afternoon.** The measurement rests on the car sitting between the EBL
+meter and the DTSU, so `grid_power − dtsu_raw` is the car and nothing else. Three things spoil that
+by day, all of them verified on 2026-10-07:
+
+| Spoiler | Effect |
+|---|---|
+| A moving house load | The meters do not sample together, so the common term stops cancelling |
+| PV running | The EBL per-phase currents are **net** magnitudes, so PV on the car's phase subtracts from them |
+| The home battery moving | Adds a term the subtraction cannot see |
+
+The sweep is **paced by the EBL meter**, which reports only every ~16 s while the DTSU runs near
+1 Hz. It counts a sample only when the meter's timestamp advances. Sampling on a wall clock instead
+re-reads a stale value: a contaminated run reported `sd 15 W` at 16 A while being 476 W wrong,
+because all six samples were the same number.
+
+**Prerequisites**, all already in place:
+
+- `sensor.grid_phase_1_current` / `_2_` / `_3_` — MQTT sensors for the gPlug `I1`/`I2`/`I3` fields.
+  With these the sweep compares commanded amps against measured amps on the car's phase, which needs
+  no voltage and no watts-per-amp assumption and is the most precise figure it produces
+  (sd ~0.01 A against ~47 W for the power subtraction). It also names the car's phase.
+- The car plugged in and **below** its own charging target, or it will refuse to draw.
+
+**Unattended run.** `tools/wallbox_sweep_runner.sh` does the whole sequence — record the battery
+limits, stop energy-manager, pin both battery limits to 0, sweep, restore — with a `trap` that
+restores on success, error or `SIGTERM`. Deploy it to the VM host and arm a timer:
+
+```bash
+scp tools/wallbox_calibration_sweep.py tools/wallbox_sweep_runner.sh \
+    tools/wallbox_sweep_safety_restore.sh dev@192.168.0.160:/home/dev/wallbox-sweep/
+ssh dev@192.168.0.160 "export XDG_RUNTIME_DIR=/run/user/\$(id -u); \
+  systemd-run --user --unit=wallbox-sweep --on-calendar='*-*-* 02:00:00' \
+    /home/dev/wallbox-sweep/sweep_runner.sh"
+```
+
+The host's user systemd instance has `Linger=no`, so it lives only as long as that host's tmux
+session. Three layers cover a failure:
+
+| Layer | Covers |
+|---|---|
+| `trap` in the runner | normal end, error, `SIGTERM` |
+| `wallbox-sweep-safety.timer` (03:30, same host) | the runner killed with `SIGKILL` |
+| `automation.wallbox_sweep_safety_restore` (03:30, in HA) | the VM host or its tmux session dying |
+
+The HA automation is the only one that cannot die with the sweep. It fires only when **both**
+battery power limits are 0 — the sweep's fingerprint, since energy-manager holds *discharge* at 0 on
+its own but never charging as well — restores them, starts energy-manager and sends Telegram.
+
+Results land in `/home/dev/wallbox-sweep/sweep-<date>.log`. The sweep **refuses to fit** a constant
+when fewer than four steps survive its spread and increment gates, so a contaminated run yields no
+number rather than a wrong one.
+
 ## Monitoring
 
 **Grid-correction watchdog** — a native HA automation (`automation.grid_correction_watchdog`) that
