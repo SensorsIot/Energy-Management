@@ -62,15 +62,32 @@ PV_ENTITY = "sensor.solar_pv_total_ac_power"
 GRID_ENTITY = "sensor.grid_power"                  # EBL M-Bus via gPlug
 BATTERY_ENTITY = "sensor.battery_charge_discharge_power"
 HOUSE_ENTITY = "sensor.house_load_power"           # Shelly 3EM, wallbox excluded
-DTSU_ENTITY = "sensor.power_meter_active_power"    # what the inverter is told
+# The proxy publishes the DTSU's RAW reading as an attribute, before injection
+# (`sun2000 = dtsu + wallbox` confirms it). That raw value is what the sweep needs.
+PROXY_ENTITY = "sensor.modbus_proxy_correction"
 
-# The wallbox reports MeterValues about once a minute, so a step needs a long
-# settle before its reading reflects the new limit.
-SETTLE_TIME_S = 75
+# Optional: EBL per-phase currents, if exposed as entities. Present -> the sweep
+# also checks the commanded amps against the measured current on the car's phase,
+# which needs no voltage and no watts-per-amp assumption.
+GRID_PHASE_CURRENT_ENTITIES = (
+    "sensor.grid_phase_1_current",
+    "sensor.grid_phase_2_current",
+    "sensor.grid_phase_3_current",
+)
+
+# The EBL meter is the clock. It reports only every ~16 s (measured 2026-10-07:
+# mean 16.5 s, range 14.6-19.9 s) while the DTSU runs at about 1 Hz — 250x apart.
+# Sampling on a wall clock therefore re-reads a stale EBL value and makes a step
+# look far steadier than it is: a 2026-10-07 run reported sd 15 W at 16 A and was
+# still 476 W wrong, because all six "samples" were the same stale reading.
+# So: poll fast, but only count a sample when the EBL has actually reported, and
+# pair it with the mean of the DTSU readings taken across that same interval.
+POLL_INTERVAL_S = 1.0
+EBL_SAMPLES_PER_STEP = 5      # ~80 s of real meter updates
+EBL_SETTLE_SAMPLES = 5        # discard this many EBL updates after a change
+EBL_TIMEOUT_S = 90            # give up if the meter goes quiet
 STATUS_WAIT_TRIES = 6
 STATUS_WAIT_S = 5
-SAMPLE_COUNT = 6
-SAMPLE_INTERVAL_S = 10
 
 # A sample is only trusted when the terms outside our control hold still across
 # it. Anything noisier is dropped rather than averaged in.
@@ -84,12 +101,22 @@ MIN_GOOD_SAMPLES = 3
 MAX_STEP_SD_W = 150
 
 
-def ha_get(entity_id: str) -> str:
-    """Get entity state from HA."""
+def ha_get_state(entity_id: str) -> dict:
+    """Get the full state object (state, attributes, timestamps)."""
     url = f"{HA_URL}/api/states/{entity_id}"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {HA_TOKEN}"})
     with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read())["state"]
+        return json.loads(resp.read())
+
+
+def ha_get(entity_id: str) -> str:
+    """Get entity state from HA."""
+    return ha_get_state(entity_id)["state"]
+
+
+def ha_get_attrs(entity_id: str) -> dict:
+    """Get an entity's attributes."""
+    return ha_get_state(entity_id)["attributes"]
 
 
 def ha_get_float(entity_id: str) -> float:
@@ -119,44 +146,85 @@ def ha_set_state(entity_id: str, value: str) -> None:
         resp.read()
 
 
-def read_sample() -> dict:
-    """One simultaneous read of every meter, plus the derived true draw."""
-    pv = ha_get_float(PV_ENTITY)
-    grid = ha_get_float(GRID_ENTITY)
-    batt = ha_get_float(BATTERY_ENTITY)
-    house = ha_get_float(HOUSE_ENTITY)
+def read_fast() -> dict:
+    """Read the fast meters, as close together in time as possible."""
+    p = ha_get_attrs(PROXY_ENTITY)
     return {
-        "pv_w": pv,
-        "grid_w": grid,
-        "battery_w": batt,
-        "house_w": house,
-        "dtsu_w": ha_get_float(DTSU_ENTITY),
+        "dtsu_raw_w": float(p["dtsu"]),
+        "injected_w": float(p["wallbox"]),
+        "pv_w": ha_get_float(PV_ENTITY),
+        "battery_w": ha_get_float(BATTERY_ENTITY),
+        "house_w": ha_get_float(HOUSE_ENTITY),
         "wallbox_w": ha_get_float(WALLBOX_POWER_ENTITY),
-        "true_ev_w": (pv - grid - batt) - house,
     }
 
 
-def collect(n: int, interval: float) -> tuple[list[dict], int]:
-    """Take n samples, keeping only those whose uncontrolled terms held still.
+def read_grid() -> tuple[float, str, list[float]]:
+    """Return EBL total power, its report timestamp, and per-phase currents if any."""
+    d = ha_get_state(GRID_ENTITY)
+    phases = []
+    for e in GRID_PHASE_CURRENT_ENTITIES:
+        try:
+            phases.append(float(ha_get_state(e)["state"]))
+        except Exception:                                       # noqa: BLE001
+            phases = []
+            break
+    return float(d["state"]), d["last_changed"], phases
 
-    Returns (kept, rejected). A sample is judged against its neighbours, so the
-    first and last are always kept — they have only one neighbour to compare to.
+
+def collect(n: int) -> tuple[list[dict], int]:
+    """Gather n samples, each paced by a real EBL report.
+
+    Polls at POLL_INTERVAL_S, accumulating the fast meters. When the EBL's
+    timestamp advances, that whole accumulation becomes one sample: the new EBL
+    value paired with the mean of the fast meters across the interval it covers.
+
+    Returns (samples, skipped) where skipped counts EBL reports that arrived with
+    no fast readings behind them.
     """
-    raw = []
-    for i in range(n):
-        raw.append(read_sample())
-        if i < n - 1:
-            time.sleep(interval)
-    kept, rejected = [], 0
-    for i, s in enumerate(raw):
-        nb = [raw[j] for j in (i - 1, i + 1) if 0 <= j < len(raw)]
-        drift_pv = max((abs(x["pv_w"] - s["pv_w"]) for x in nb), default=0.0)
-        drift_h = max((abs(x["house_w"] - s["house_w"]) for x in nb), default=0.0)
-        if drift_pv > MAX_PV_DRIFT_W or drift_h > MAX_HOUSE_DRIFT_W:
-            rejected += 1
-            continue
-        kept.append(s)
-    return kept, rejected
+    samples, skipped = [], 0
+    _, last_stamp, _ = read_grid()
+    pending: list[dict] = []
+    deadline = time.monotonic() + EBL_TIMEOUT_S
+    while len(samples) < n:
+        if time.monotonic() > deadline:
+            raise RuntimeError("EBL meter stopped reporting")
+        pending.append(read_fast())
+        grid_w, stamp, phase_a = read_grid()
+        if stamp != last_stamp:
+            last_stamp = stamp
+            deadline = time.monotonic() + EBL_TIMEOUT_S
+            if not pending:
+                skipped += 1
+                continue
+            avg = {k: statistics.fmean(x[k] for x in pending) for k in pending[0]}
+            avg["grid_w"] = grid_w
+            avg["phase_a_list"] = phase_a
+            # The whole point: both meters now describe the same interval.
+            avg["car_w"] = grid_w - avg["dtsu_raw_w"]
+            # Kept only as a cross-check on the subtraction above.
+            avg["balance_w"] = (avg["pv_w"] - grid_w - avg["battery_w"]) - avg["house_w"]
+            samples.append(avg)
+            pending = []
+        time.sleep(POLL_INTERVAL_S)
+    return samples, skipped
+
+
+def settle(n: int) -> None:
+    """Discard n EBL reports, so the step is fully established before sampling."""
+    _, last_stamp, _ = read_grid()
+    seen = 0
+    deadline = time.monotonic() + EBL_TIMEOUT_S
+    while seen < n:
+        if time.monotonic() > deadline:
+            raise RuntimeError("EBL meter stopped reporting")
+        time.sleep(POLL_INTERVAL_S)
+        _, stamp, _ = read_grid()
+        if stamp != last_stamp:
+            last_stamp = stamp
+            seen += 1
+            deadline = time.monotonic() + EBL_TIMEOUT_S
+            print(".", end="", flush=True)
 
 
 def mean(samples: list[dict], key: str) -> float:
@@ -202,30 +270,42 @@ def main() -> None:
     phases = preflight()
 
     print(f"\nSweeping {first}-{last} A on {phases} phase(s). Ctrl-C restores 0 A.")
-    print("Pausing for an idle reference...")
+    print("Idle reference", end="", flush=True)
     ha_set_state(CURRENT_LIMIT_ENTITY, "0")
-    time.sleep(30)
-    idle, idle_rej = collect(SAMPLE_COUNT, SAMPLE_INTERVAL_S)
-    if len(idle) < MIN_GOOD_SAMPLES:
-        raise SystemExit("Could not get a steady idle reference — too much drift.")
-    idle_resid = mean(idle, "true_ev_w")
-    print(f"  idle residual {idle_resid:+.0f} W over {len(idle)} samples "
-          f"({idle_rej} rejected) — this is the balance's own error, "
-          f"subtracted from every step.")
+    settle(2)
+    idle, _ = collect(EBL_SAMPLES_PER_STEP)
+    idle_car = mean(idle, "car_w")
+    idle_sd = statistics.pstdev([x["car_w"] for x in idle])
+    idle_phase: list[float] | None = None
+    has_phase = bool(idle[0]["phase_a_list"])
+    if has_phase:
+        n_ph = len(idle[0]["phase_a_list"])
+        idle_phase = [statistics.fmean(x["phase_a_list"][i] for x in idle)
+                      for i in range(n_ph)]
+    print(f"\n  EBL-DTSU with the car idle: {idle_car:+.0f} W (sd {idle_sd:.0f}) — "
+          f"the two meters' relative offset, subtracted from every step.")
+    if has_phase:
+        print(f"  idle phase currents: "
+              f"{', '.join(f'{v:.2f} A' for v in idle_phase)}")
+    else:
+        print("  per-phase currents not exposed — the amp cross-check is off.")
 
     results = []
-    print(f"\n{'A':>3} | {'true W':>7} {'sd':>4} {'n':>3} | {'meter W':>8} "
-          f"| {'W/A':>6} | {'meter err':>9}")
-    print("-" * 62)
+    hdr = f"\n{'A':>3} | {'car W':>7} {'sd':>4} {'n':>2} | {'W/A':>6} | {'meter W':>8}"
+    print(hdr + (" | phase ΔA" if has_phase else ""))
+    print("-" * (len(hdr) + (12 if has_phase else 0)))
     for amps in range(first, last + 1):
         ha_set_state(CURRENT_LIMIT_ENTITY, str(amps))
         print(f"  {amps:>2} A settling", end="", flush=True)
-        time.sleep(SETTLE_TIME_S)
+        try:
+            settle(EBL_SETTLE_SAMPLES)
+        except RuntimeError as exc:
+            print(f"  {exc} — aborting")
+            break
         status = ha_get(WALLBOX_STATUS_ENTITY)
         for _ in range(STATUS_WAIT_TRIES):
             if status == "Charging":
                 break
-            print(".", end="", flush=True)
             time.sleep(STATUS_WAIT_S)
             status = ha_get(WALLBOX_STATUS_ENTITY)
         print(f" {status}")
@@ -233,24 +313,30 @@ def main() -> None:
             print(f"      skipped — wallbox is {status}, not Charging")
             continue
 
-        kept, rejected = collect(SAMPLE_COUNT, SAMPLE_INTERVAL_S)
-        if len(kept) < MIN_GOOD_SAMPLES:
-            print(f"      skipped — only {len(kept)} steady samples")
-            continue
-        true_ev = mean(kept, "true_ev_w") - idle_resid
-        sd = statistics.pstdev([s["true_ev_w"] for s in kept]) if len(kept) > 1 else 0.0
+        samples, _ = collect(EBL_SAMPLES_PER_STEP)
+        car = mean(samples, "car_w") - idle_car
+        sd = statistics.pstdev([x["car_w"] for x in samples])
         if sd > MAX_STEP_SD_W:
             print(f"      skipped — spread too wide (sd {sd:.0f} W > {MAX_STEP_SD_W} W); "
-                  f"something else on the house was switching. Re-run this amp.")
+                  f"something else was switching. Re-run this amp.")
             continue
-        meter = mean(kept, "wallbox_w")
-        results.append({
-            "amps": amps, "true_w": true_ev, "sd": sd, "n": len(kept),
-            "rejected": rejected, "meter_w": meter,
-            "dtsu_w": mean(kept, "dtsu_w"),
-        })
-        print(f"{amps:>3} | {true_ev:>7.0f} {sd:>4.0f} {len(kept):>3} | {meter:>8.0f} "
-              f"| {true_ev / amps:>6.1f} | {meter - true_ev:>+9.0f}")
+        row = {
+            "amps": amps, "true_w": car, "sd": sd, "n": len(samples),
+            "meter_w": mean(samples, "wallbox_w"),
+            "balance_w": mean(samples, "balance_w"),
+        }
+        extra = ""
+        if has_phase:
+            now = [statistics.fmean(x["phase_a_list"][i] for x in samples)
+                   for i in range(len(idle_phase))]
+            deltas = [n - b for n, b in zip(now, idle_phase, strict=False)]
+            row["phase_delta_a"] = deltas
+            # The car sits on one phase, so exactly one delta should track the
+            # commanded amps. This needs no voltage and no watts-per-amp guess.
+            extra = " | " + " ".join(f"{d:+5.1f}" for d in deltas)
+        results.append(row)
+        print(f"{amps:>3} | {car:>7.0f} {sd:>4.0f} {len(samples):>2} "
+              f"| {car / amps:>6.1f} | {row['meter_w']:>8.0f}{extra}")
 
     restore("0")
 
@@ -259,19 +345,28 @@ def main() -> None:
         return
 
     print(f"\n=== RESULT, {phases} phase(s) ===")
-    print(f"{'A':>3} | {'true W':>7} {'±sd':>5} | {'W/A':>6} | {'meter W':>8} "
-          f"| {'meter/true':>10}")
-    print("-" * 60)
+    if has_phase:
+        # Name the car's phase from whichever delta actually tracked the command.
+        tot = [sum(abs(r["phase_delta_a"][i]) for r in results)
+               for i in range(len(idle_phase))]
+        car_phase = tot.index(max(tot)) + 1
+        print(f"The car draws on EBL phase {car_phase} "
+              f"(largest current response across the sweep).")
+        print(f"\n{'A':>3} | {'commanded':>9} | {'measured ΔA':>11} | {'diff':>6}")
+        print("-" * 40)
+        for r in results:
+            got = r["phase_delta_a"][car_phase - 1]
+            print(f"{r['amps']:>3} | {r['amps']:>9} | {got:>11.2f} | {got - r['amps']:>+6.2f}")
+
+    print(f"\n{'A':>3} | {'car W':>7} {'±sd':>5} | {'W/A':>6} | {'meter W':>8} "
+          f"| {'meter/car':>9} | {'balance W':>9}")
+    print("-" * 70)
     for r in results:
         print(f"{r['amps']:>3} | {r['true_w']:>7.0f} {r['sd']:>5.0f} "
               f"| {r['true_w'] / r['amps']:>6.1f} | {r['meter_w']:>8.0f} "
-              f"| {r['meter_w'] / r['true_w']:>10.3f}")
+              f"| {r['meter_w'] / r['true_w']:>9.3f} | {r['balance_w']:>9.0f}")
+    print("  (balance W is the independent PV-grid-battery-house cross-check)")
 
-    # Step-to-step increment is the sharpest contamination check: one more amp
-    # must add one amp's worth of power. If the increments scatter, the balance
-    # is not cancelling a moving house load and the absolute figures are junk —
-    # on 2026-10-07 a morning run showed +150 W per amp instead of ~230 because
-    # the house was swinging over a 2 kW range.
     print("\nPer-amp increments (each should be about one amp's worth):")
     bad = 0
     suspect: set[int] = set()
