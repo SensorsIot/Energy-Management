@@ -258,7 +258,10 @@ def preflight() -> int:
     if ready != "on":
         raise SystemExit("car_ready is not 'on' — plug the car in first.")
     if abs(pv) > 300:
-        print("  NOTE: PV is running. Night runs are cleaner; watch the sd column.")
+        print("  NOTE: PV is running. Two consequences, both argue for a night run:")
+        print("        - the power subtraction gets noisier (watch the sd column);")
+        print("        - the per-phase currents are NET magnitudes, so PV on the")
+        print("          car's phase subtracts from them and the amp check can fold.")
     if abs(batt) > 100:
         print("  NOTE: the battery is moving. Pin both battery power limits to 0.")
     return phases
@@ -332,7 +335,10 @@ def main() -> None:
             deltas = [n - b for n, b in zip(now, idle_phase, strict=False)]
             row["phase_delta_a"] = deltas
             # The car sits on one phase, so exactly one delta should track the
-            # commanded amps. This needs no voltage and no watts-per-amp guess.
+            # commanded amps. This needs no voltage and no watts-per-amp guess,
+            # and it is by far the quietest signal available: measured idle, the
+            # per-phase currents held to sd 0.004-0.009 A (about 2 W equivalent)
+            # where the power subtraction managed sd 47 W.
             extra = " | " + " ".join(f"{d:+5.1f}" for d in deltas)
         results.append(row)
         print(f"{amps:>3} | {car:>7.0f} {sd:>4.0f} {len(samples):>2} "
@@ -352,6 +358,8 @@ def main() -> None:
         car_phase = tot.index(max(tot)) + 1
         print(f"The car draws on EBL phase {car_phase} "
               f"(largest current response across the sweep).")
+        print("This amp table is the most precise result here — prefer it over the "
+              "watt table below when they disagree.")
         print(f"\n{'A':>3} | {'commanded':>9} | {'measured ΔA':>11} | {'diff':>6}")
         print("-" * 40)
         for r in results:
