@@ -16,6 +16,16 @@ set -uo pipefail
 exec >> /home/dev/wallbox-sweep/safety.log 2>&1
 echo "=== $(date -Is) safety restore ==="
 
+# Never act while the sweep is still working: mid-sweep both battery limits are
+# legitimately 0, which is also this script's trigger. The runner holds a lock
+# with its PID and clears it in its own trap.
+LOCK=/home/dev/wallbox-sweep/sweep.running
+if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
+  echo "  sweep still running (pid $(cat "$LOCK")) — standing down"
+  exit 0
+fi
+[ -f "$LOCK" ] && echo "  stale lock for pid $(cat "$LOCK") — the sweep died, continuing"
+
 read_state() {
   curl -s -H "Authorization: Bearer $HA_TOKEN" "$HA_URL/api/states/$1" \
     | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])'

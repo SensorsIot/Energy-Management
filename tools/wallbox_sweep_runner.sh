@@ -18,7 +18,12 @@ state()    { api_get "$1" | python3 -c 'import json,sys; print(json.load(sys.std
 set_num()  { curl -s -o /dev/null -X POST -H "Authorization: Bearer $HA_TOKEN" -H 'Content-Type: application/json' \
              "$HA_URL/api/services/number/set_value" -d "{\"entity_id\":\"$1\",\"value\":$2}"; }
 
+LOCK=/home/dev/wallbox-sweep/sweep.running
 echo "=== $(date -Is) 1-phase calibration sweep ==="
+# The safety net must not fire while this is still working: mid-sweep BOTH
+# battery limits are legitimately 0, which is also its trigger condition. A
+# lock holding this PID lets it tell "still running" from "died".
+echo $$ > "$LOCK"
 
 DIS=$(state number.battery_maximum_discharging_power)
 CHG=$(state number.battery_maximum_charging_power)
@@ -28,6 +33,7 @@ restored=0
 restore() {
   [ "$restored" = 1 ] && return
   restored=1
+  rm -f "$LOCK"
   echo "--- restoring ($(date -Is)) ---"
   curl -s -o /dev/null -X POST -H "Authorization: Bearer $HA_TOKEN" -H 'Content-Type: application/json' \
     "$HA_URL/api/states/number.wallbox_current_limit" -d '{"state":"0","attributes":{"unit_of_measurement":"A","friendly_name":"Wallbox Current Limit","min":0,"max":16,"step":1}}'

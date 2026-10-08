@@ -87,14 +87,24 @@ GRID_PHASE_CURRENT_SCALE = 10.0
 # So: poll fast, but only count a sample when the EBL has actually reported, and
 # pair it with the mean of the DTSU readings taken across that same interval.
 POLL_INTERVAL_S = 1.0
-EBL_SAMPLES_PER_STEP = 5      # ~80 s of real meter updates
-EBL_SETTLE_SAMPLES = 5        # discard this many EBL updates after a change
+# Dwell long enough on each step to have real evidence for it. The night is
+# long and samples are free, so nothing here is sized to finish quickly.
+#
+# The binding cadence is not the EBL meter but the WALLBOX, which reports
+# MeterValues only about once a minute — and the wallbox reading is the quantity
+# being calibrated. A step therefore has to span several of its reports, or the
+# figure is one meter sample dressed up as an average.
+#   settle  10 EBL reports ~160 s  -> the wallbox has reported 2-3 times at the
+#                                     new level before anything is counted
+#   sample  15 EBL reports ~240 s  -> about 4 independent wallbox reports
+EBL_SAMPLES_PER_STEP = 15
+EBL_SETTLE_SAMPLES = 10
 # The idle reference needs longer than a step change. The car may have been
 # charging hard right up to the start, and the wallbox only reports MeterValues
 # about once a minute, so a short wait measures a car that is still winding down.
 # On 2026-10-08 a 2-report wait produced a -479 W idle offset that was never
 # explained, and every step is corrected by it.
-EBL_IDLE_SETTLE_SAMPLES = 6
+EBL_IDLE_SETTLE_SAMPLES = 10
 EBL_TIMEOUT_S = 90            # give up if the meter goes quiet
 STATUS_WAIT_TRIES = 6
 STATUS_WAIT_S = 5
@@ -195,11 +205,16 @@ def collect(n: int) -> tuple[list[dict], int]:
     samples, skipped = [], 0
     _, last_stamp, _ = read_grid()
     pending: list[dict] = []
+    # Distinct wallbox readings seen. This is the real measure of how much
+    # independent evidence a step has, since the wallbox updates ~60 s.
+    seen_wb: set[int] = set()
     deadline = time.monotonic() + EBL_TIMEOUT_S
     while len(samples) < n:
         if time.monotonic() > deadline:
             raise RuntimeError("EBL meter stopped reporting")
-        pending.append(read_fast())
+        fast = read_fast()
+        pending.append(fast)
+        seen_wb.add(round(fast["wallbox_w"]))
         grid_w, stamp, phase_a = read_grid()
         if stamp != last_stamp:
             last_stamp = stamp
@@ -216,6 +231,7 @@ def collect(n: int) -> tuple[list[dict], int]:
             avg["car_w"] = avg["dtsu_raw_w"] - grid_w
             # Kept only as a cross-check on the subtraction above.
             avg["balance_w"] = (avg["pv_w"] - grid_w - avg["battery_w"]) - avg["house_w"]
+            avg["distinct_wb"] = len(seen_wb)
             samples.append(avg)
             pending = []
         time.sleep(POLL_INTERVAL_S)
@@ -335,8 +351,10 @@ def main() -> None:
             print(f"      skipped — spread too wide (sd {sd:.0f} W > {MAX_STEP_SD_W} W); "
                   f"something else was switching. Re-run this amp.")
             continue
+        sem = sd / len(samples) ** 0.5
         row = {
             "amps": amps, "true_w": car, "sd": sd, "n": len(samples),
+            "sem": sem, "distinct_wb": samples[-1].get("distinct_wb", 0),
             "meter_w": mean(samples, "wallbox_w"),
             "balance_w": mean(samples, "balance_w"),
         }
@@ -355,7 +373,8 @@ def main() -> None:
             extra = " | " + " ".join(f"{d:+5.1f}" for d in deltas)
         results.append(row)
         print(f"{amps:>3} | {car:>7.0f} {sd:>4.0f} {len(samples):>2} "
-              f"| {car / amps:>6.1f} | {row['meter_w']:>8.0f}{extra}")
+              f"| {car / amps:>6.1f} | {row['meter_w']:>8.0f}{extra}"
+              f"   (±{sem:.0f} W, {row['distinct_wb']} distinct wallbox reads)")
 
     # Re-measure the idle offset now the sweep is over. It is subtracted from every
     # step, so if it has moved the whole run is suspect — and comparing the two is
@@ -404,14 +423,14 @@ def main() -> None:
     # This is the result that matters: sensor.wallbox_power feeds the Modbus-proxy
     # correction, so it has to match the real power. Everything else is support.
     print("\nDoes sensor.wallbox_power match the real power? (the control-loop signal)")
-    print(f"\n{'A':>3} | {'real W':>7} {'±sd':>5} | {'reported W':>10} "
-          f"| {'error W':>8} {'error %':>8} | {'balance W':>9}")
-    print("-" * 72)
+    print(f"\n{'A':>3} | {'real W':>7} {'±sem':>5} | {'reported W':>10} "
+          f"| {'error W':>8} {'error %':>8} | {'wb reads':>8} | {'balance W':>9}")
+    print("-" * 86)
     for r in results:
         err = r["meter_w"] - r["true_w"]
-        print(f"{r['amps']:>3} | {r['true_w']:>7.0f} {r['sd']:>5.0f} "
+        print(f"{r['amps']:>3} | {r['true_w']:>7.0f} {r['sem']:>5.0f} "
               f"| {r['meter_w']:>10.0f} | {err:>+8.0f} {err / r['true_w'] * 100:>+7.1f}% "
-              f"| {r['balance_w']:>9.0f}")
+              f"| {r['distinct_wb']:>8} | {r['balance_w']:>9.0f}")
     print("  real W = dtsu_raw - grid (the car, since only the EBL sees it)")
     print("  balance W = independent PV-grid-battery-house cross-check")
 

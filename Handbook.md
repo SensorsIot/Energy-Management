@@ -139,6 +139,19 @@ because all six samples were the same number.
   (sd ~0.01 A against ~47 W for the power subtraction). It also names the car's phase.
 - The car plugged in and **below** its own charging target, or it will refuse to draw.
 
+**Dwell, do not hurry.** The binding cadence is the **wallbox**, which reports MeterValues only about
+once a minute — and the wallbox reading is the quantity being calibrated. Each step therefore settles
+for 10 EBL reports (~160 s, so the wallbox has reported 2–3 times at the new level) and then samples
+15 (~240 s, about 4 independent wallbox reports). The result table carries the standard error of each
+step's mean and the count of distinct wallbox readings behind it, so a figure resting on one meter
+sample is visible rather than disguised as an average. A full 6–16 A sweep takes about 90 minutes,
+which the cheap window accommodates comfortably.
+
+The idle reference is measured **twice**, before and after, with a longer settle (10 EBL reports) so a
+car that charged right up to the start has actually wound down. It is subtracted from every step, so
+the two are compared: if they differ by more than 50 W the absolute figures are suspect while the
+ratios remain usable.
+
 **Unattended run.** `tools/wallbox_sweep_runner.sh` does the whole sequence — record the battery
 limits, stop energy-manager, pin both battery limits to 0, sweep, restore — with a `trap` that
 restores on success, error or `SIGTERM`. Deploy it to the VM host and arm a timer:
@@ -157,12 +170,20 @@ session. Three layers cover a failure:
 | Layer | Covers |
 |---|---|
 | `trap` in the runner | normal end, error, `SIGTERM` |
-| `wallbox-sweep-safety.timer` (03:30, same host) | the runner killed with `SIGKILL` |
-| `automation.wallbox_sweep_safety_restore` (03:30, in HA) | the VM host or its tmux session dying |
+| `wallbox-sweep-safety` timer (05:00, same host) | the runner killed with `SIGKILL` |
+| `automation.wallbox_sweep_safety_restore` (05:00, in HA) | the VM host or its tmux session dying |
 
-The HA automation is the only one that cannot die with the sweep. It fires only when **both**
-battery power limits are 0 — the sweep's fingerprint, since energy-manager holds *discharge* at 0 on
-its own but never charging as well — restores them, starts energy-manager and sends Telegram.
+Both nets fire only when **both** battery power limits are 0 — the sweep's fingerprint, since
+energy-manager holds *discharge* at 0 on its own during a cheap-slot hold but never charging as
+well. The HA automation is the only one that cannot die with the sweep.
+
+**A net must never fire mid-sweep**, because during the sweep both limits are legitimately 0 and that
+is also the trigger. The runner holds `sweep.running` containing its PID and clears it in its trap;
+the host-side net stands down while that PID is alive and treats a stale lock as a death. Schedule
+the nets well clear of the run regardless — a full 6–16 A sweep takes about 90 minutes.
+
+An unconditional net is actively harmful: on 2026-10-08 one set the discharge limit back to 5000 W at
+03:30 while the car was charging, and the home battery drained from 62 % to 1 % into it.
 
 Results land in `/home/dev/wallbox-sweep/sweep-<date>.log`. The sweep **refuses to fit** a constant
 when fewer than four steps survive its spread and increment gates, so a contaminated run yields no
