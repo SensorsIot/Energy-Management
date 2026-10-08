@@ -89,6 +89,12 @@ GRID_PHASE_CURRENT_SCALE = 10.0
 POLL_INTERVAL_S = 1.0
 EBL_SAMPLES_PER_STEP = 5      # ~80 s of real meter updates
 EBL_SETTLE_SAMPLES = 5        # discard this many EBL updates after a change
+# The idle reference needs longer than a step change. The car may have been
+# charging hard right up to the start, and the wallbox only reports MeterValues
+# about once a minute, so a short wait measures a car that is still winding down.
+# On 2026-10-08 a 2-report wait produced a -479 W idle offset that was never
+# explained, and every step is corrected by it.
+EBL_IDLE_SETTLE_SAMPLES = 6
 EBL_TIMEOUT_S = 90            # give up if the meter goes quiet
 STATUS_WAIT_TRIES = 6
 STATUS_WAIT_S = 5
@@ -279,9 +285,9 @@ def main() -> None:
     phases = preflight()
 
     print(f"\nSweeping {first}-{last} A on {phases} phase(s). Ctrl-C restores 0 A.")
-    print("Idle reference", end="", flush=True)
+    print("Idle reference (waiting for the car to actually stop)", end="", flush=True)
     ha_set_state(CURRENT_LIMIT_ENTITY, "0")
-    settle(2)
+    settle(EBL_IDLE_SETTLE_SAMPLES)
     idle, _ = collect(EBL_SAMPLES_PER_STEP)
     idle_car = mean(idle, "car_w")
     idle_sd = statistics.pstdev([x["car_w"] for x in idle])
@@ -350,6 +356,28 @@ def main() -> None:
         results.append(row)
         print(f"{amps:>3} | {car:>7.0f} {sd:>4.0f} {len(samples):>2} "
               f"| {car / amps:>6.1f} | {row['meter_w']:>8.0f}{extra}")
+
+    # Re-measure the idle offset now the sweep is over. It is subtracted from every
+    # step, so if it has moved the whole run is suspect — and comparing the two is
+    # the only way to tell a genuine meter offset from a car that had not finished
+    # winding down when the first reference was taken.
+    print("\nIdle reference again", end="", flush=True)
+    ha_set_state(CURRENT_LIMIT_ENTITY, "0")
+    try:
+        settle(EBL_IDLE_SETTLE_SAMPLES)
+        idle2, _ = collect(EBL_SAMPLES_PER_STEP)
+        idle2_car = mean(idle2, "car_w")
+        drift = idle2_car - idle_car
+        print(f"\n  start {idle_car:+.0f} W, end {idle2_car:+.0f} W, drift {drift:+.0f} W")
+        if abs(drift) > 50:
+            print("  WARNING: the idle offset moved by more than 50 W. Every step is "
+                  "corrected by\n  it, so treat the absolute figures below as suspect "
+                  "— the ratios are still good.")
+        else:
+            print("  The offset held, so it is a real difference between the two meters "
+                  "and not\n  a car still winding down.")
+    except RuntimeError as exc:
+        print(f"\n  could not re-measure: {exc}")
 
     restore("0")
 

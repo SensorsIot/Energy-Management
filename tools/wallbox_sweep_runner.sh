@@ -59,3 +59,19 @@ done
 
 echo "--- sweep 6-16 A ---"
 cd /home/dev/wallbox-sweep && python3 -u wallbox_calibration_sweep.py 6 16
+
+# Push the headline to Telegram, so the result arrives without anyone having to
+# log in and read the log. The acceptance question is the error column: does
+# sensor.wallbox_power match the real power?
+summary=$(sed -n '/=== RESULT/,$p' "$LOG" | head -40)
+curl -s -o /dev/null -X POST -H "Authorization: Bearer $HA_TOKEN" \
+  -H 'Content-Type: application/json' \
+  "$HA_URL/api/services/telegram_bot/send_message" \
+  -d "$(python3 -c '
+import json, sys
+body = sys.stdin.read()
+print(json.dumps({
+    "title": "Wallbox calibration sweep",
+    "message": "```\n" + body[:3500] + "\n```",
+}))' <<<"$summary")"
+echo "telegram summary sent"
