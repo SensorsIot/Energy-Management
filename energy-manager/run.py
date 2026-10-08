@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.34"
+__version__ = "1.9.35"
 
 import json
 import logging
@@ -271,6 +271,7 @@ class EnergyManager:
         # Two independent discharge-block reasons (OR logic)
         self._discharge_blocked_by_protection = False
         self._discharge_blocked_by_ev = False
+        self._last_discharge_reconcile_at: float = 0.0
 
         # SimulationWriter for FSD 4.2.3 output
         self.simulation_writer = SimulationWriter(
@@ -779,16 +780,19 @@ class EnergyManager:
                 f"Could not read current discharge power from {self.discharge_control_entity}"
             )
             # Continue anyway - we should try to set the value
+        elif abs(current_value - target_value) < 1:
+            # Already correct. At the reconciliation cadence this is the common
+            # case, so it stays at debug or it would bury everything else.
+            logger.debug(
+                f"Discharge power already at target ({target_value}W), no change needed"
+            )
+            self.last_discharge_allowed = discharge_allowed
+            return
         else:
-            logger.info(f"Current discharge power: {current_value}W, target: {target_value}W")
-
-            # Check if already at target value (with small tolerance for float comparison)
-            if abs(current_value - target_value) < 1:
-                logger.debug(
-                    f"Discharge power already at target ({target_value}W), no change needed"
-                )
-                self.last_discharge_allowed = discharge_allowed
-                return
+            logger.info(
+                f"Discharge limit drifted: {self.discharge_control_entity} reads "
+                f"{current_value}W, should be {target_value}W — correcting"
+            )
 
         # Set the new value
         success, error_msg = self.ha_client.set_battery_discharge_power(
@@ -843,12 +847,35 @@ class EnergyManager:
                 f"{target_value}W (unverified)"
             )
 
+    # How often the discharge limit is re-checked against the inverter even when
+    # the decision has not changed. The decision alone is not enough: anything
+    # else that writes the entity — a dashboard slider, Spook, a maintenance
+    # script, an HA restart — would otherwise stand uncorrected indefinitely. On
+    # 2026-10-08 the limit was set to 5000 W externally at 03:30 while the EV
+    # block was active; the decision never changed, so nothing re-asserted it and
+    # the home battery drained from 62 % to 1 % into the car over 75 minutes.
+    # The OCPP server reconciles its wallbox command on the same principle.
+    DISCHARGE_RECONCILE_S = 60
+
     def _update_discharge_control(self) -> None:
-        """Combine both discharge-block flags and apply if changed."""
+        """Combine both discharge-block flags and keep the inverter matching them.
+
+        Applies immediately when the decision changes, and otherwise re-checks
+        every `DISCHARGE_RECONCILE_S` so external drift is corrected. The write
+        itself stays economical: `control_battery` reads the current value first
+        and returns without writing when it already matches (FSD 4.2.2).
+        """
         discharge_allowed = not (
             self._discharge_blocked_by_protection or self._discharge_blocked_by_ev
         )
-        if discharge_allowed != self.last_discharge_allowed:
+        changed = discharge_allowed != self.last_discharge_allowed
+        due = (
+            time.monotonic() - self._last_discharge_reconcile_at
+            >= self.DISCHARGE_RECONCILE_S
+        )
+        if not (changed or due):
+            return
+        if changed:
             reason = []
             if self._discharge_blocked_by_protection:
                 reason.append("battery protection")
@@ -858,7 +885,8 @@ class EnergyManager:
                 f"Discharge {'allowed' if discharge_allowed else 'blocked'}"
                 f"{' by ' + ' + '.join(reason) if reason else ''}"
             )
-            self.control_battery(discharge_allowed)
+        self._last_discharge_reconcile_at = time.monotonic()
+        self.control_battery(discharge_allowed)
 
     def _car_is_full(self):
         """Return whether the EV is at/above its charging target (True/False/None).
@@ -2214,9 +2242,10 @@ class EnergyManager:
             should_block = (
                 output.state in (EVState.IMMEDIATE, EVState.CHEAP) and output.target_power_w > 0
             )
-            if should_block != self._discharge_blocked_by_ev:
-                self._discharge_blocked_by_ev = should_block
-                self._update_discharge_control()
+            self._discharge_blocked_by_ev = should_block
+            # Called every tick, not only on a change: the function itself decides
+            # whether to act, so the periodic reconciliation gets a chance to run.
+            self._update_discharge_control()
 
             # Integration test observer
             if self._observer is not None:

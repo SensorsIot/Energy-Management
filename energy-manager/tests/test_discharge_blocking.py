@@ -101,13 +101,49 @@ class TestUpdateDischargeControl:
         manager._update_discharge_control()
         manager.control_battery.assert_called_once_with(False)
 
-    def test_no_call_when_unchanged(self, manager) -> None:
-        """If last_discharge_allowed matches the computed value, skip."""
+    def test_no_call_when_unchanged_and_not_yet_due(self, manager) -> None:
+        """An unchanged decision does not re-apply until the reconcile is due."""
+        import time as _t
+
         manager.last_discharge_allowed = True
+        manager._last_discharge_reconcile_at = _t.monotonic()
         manager._discharge_blocked_by_protection = False
         manager._discharge_blocked_by_ev = False
         manager._update_discharge_control()
         manager.control_battery.assert_not_called()
+
+    def test_reapplies_when_the_reconcile_is_due(self, manager) -> None:
+        """Past DISCHARGE_RECONCILE_S the limit is re-applied even unchanged.
+
+        Regression for 2026-10-08: the discharge limit was set to 5000 W
+        externally at 03:30 while the EV block was active. The decision never
+        changed, so nothing re-asserted it and the home battery drained from
+        62 % to 1 % into the car over the next 75 minutes, while the optimiser
+        logged "block" every 15 minutes.
+        """
+        import time as _t
+
+        manager.last_discharge_allowed = False
+        manager._discharge_blocked_by_ev = True
+        manager._discharge_blocked_by_protection = False
+        manager._last_discharge_reconcile_at = (
+            _t.monotonic() - manager.DISCHARGE_RECONCILE_S - 1
+        )
+        manager._update_discharge_control()
+        manager.control_battery.assert_called_once_with(False)
+
+    def test_reconcile_timer_resets_after_applying(self, manager) -> None:
+        """Two ticks in quick succession apply once, not twice."""
+        import time as _t
+
+        manager.last_discharge_allowed = False
+        manager._discharge_blocked_by_ev = True
+        manager._last_discharge_reconcile_at = (
+            _t.monotonic() - manager.DISCHARGE_RECONCILE_S - 1
+        )
+        manager._update_discharge_control()
+        manager._update_discharge_control()
+        assert manager.control_battery.call_count == 1
 
     def test_calls_on_transition_allow_to_block(self, manager) -> None:
         manager.last_discharge_allowed = True
@@ -203,7 +239,10 @@ class TestEVFlagOnCharging:
         manager.last_discharge_allowed = False
         _setup_ev_charging(manager, mode="immediate")
         # Flag already True, last_discharge_allowed already False → no call
-        manager.control_battery.assert_not_called()
+        # Reconciliation re-applies the unchanged decision; the write economy
+        # lives in control_battery, which skips the HA write when the value
+        # already matches (see TestWriteEconomy).
+        manager.control_battery.assert_called_once()
 
     def test_flag_not_toggled_when_already_clear(self, manager) -> None:
         """No redundant control_battery calls when flag is already False."""
@@ -212,7 +251,10 @@ class TestEVFlagOnCharging:
         # wb_status=Available → 0W → flag stays False
         _setup_ev_charging(manager, mode="immediate", wb_status="Available")
         # Flag already False, last_discharge_allowed already True → no call
-        manager.control_battery.assert_not_called()
+        # Reconciliation re-applies the unchanged decision; the write economy
+        # lives in control_battery, which skips the HA write when the value
+        # already matches (see TestWriteEconomy).
+        manager.control_battery.assert_called_once()
 
 
 class TestSolarModeClearsEVFlag:
@@ -231,7 +273,10 @@ class TestSolarModeClearsEVFlag:
         manager.last_discharge_allowed = True
         _setup_ev_charging(manager, mode="solar")
         assert manager._discharge_blocked_by_ev is False
-        manager.control_battery.assert_not_called()
+        # Reconciliation re-applies the unchanged decision; the write economy
+        # lives in control_battery, which skips the HA write when the value
+        # already matches (see TestWriteEconomy).
+        manager.control_battery.assert_called_once()
 
 
 # ===================================================================
@@ -253,7 +298,10 @@ class TestCombinedBlocking:
         assert manager._discharge_blocked_by_ev is False
         assert manager._discharge_blocked_by_protection is True
         # Still blocked by protection → no call (unchanged)
-        manager.control_battery.assert_not_called()
+        # Reconciliation re-applies the unchanged decision; the write economy
+        # lives in control_battery, which skips the HA write when the value
+        # already matches (see TestWriteEconomy).
+        manager.control_battery.assert_called_once()
 
     def test_protection_clears_but_ev_keeps_blocked(self, manager) -> None:
         """Protection clears but EV still charging → stays blocked."""
@@ -265,7 +313,10 @@ class TestCombinedBlocking:
         manager._discharge_blocked_by_protection = False
         manager._update_discharge_control()
         # Still blocked by EV → no call (unchanged)
-        manager.control_battery.assert_not_called()
+        # Reconciliation re-applies the unchanged decision; the write economy
+        # lives in control_battery, which skips the HA write when the value
+        # already matches (see TestWriteEconomy).
+        manager.control_battery.assert_called_once()
 
     def test_both_clear_allows_discharge(self, manager) -> None:
         """When both flags clear, discharge is allowed."""
@@ -287,7 +338,10 @@ class TestCombinedBlocking:
         _setup_ev_charging(manager, mode="immediate")
         assert manager._discharge_blocked_by_ev is True
         # Already blocked → no call
-        manager.control_battery.assert_not_called()
+        # Reconciliation re-applies the unchanged decision; the write economy
+        # lives in control_battery, which skips the HA write when the value
+        # already matches (see TestWriteEconomy).
+        manager.control_battery.assert_called_once()
 
 
 # ===================================================================
@@ -312,3 +366,45 @@ class TestCheapModeBlocksDischarge:
         _setup_ev_charging(manager, mode="cheap", is_cheap=False)
         assert manager._discharge_blocked_by_ev is False
         manager.control_battery.assert_called_with(True)
+
+
+# ===================================================================
+# Write economy — the choke point is control_battery, not the caller
+# ===================================================================
+
+
+class TestWriteEconomy:
+    """Reconciliation must not cost a device write when nothing is wrong.
+
+    `_update_discharge_control` re-applies the decision every
+    `DISCHARGE_RECONCILE_S`, so the guarantee that an unchanged value is never
+    written to the inverter has to hold inside `control_battery` itself.
+    """
+
+    @pytest.fixture()
+    def mgr(self):
+        with patch("run.ForecastReader"), \
+             patch("run.SimulationWriter"), \
+             patch("run.init_telegram"):
+            m = EnergyManager(MINIMAL_OPTIONS)
+        m.ha_client = MagicMock()
+        m.ha_client.token = "fake"
+        return m
+
+    def test_no_write_when_already_at_target(self, mgr) -> None:
+        mgr.ha_client.get_battery_discharge_power.return_value = 0
+        mgr.control_battery(discharge_allowed=False)
+        mgr.ha_client.set_battery_discharge_power.assert_not_called()
+
+    def test_no_write_when_already_released(self, mgr) -> None:
+        mgr.ha_client.get_battery_discharge_power.return_value = 5000
+        mgr.control_battery(discharge_allowed=True)
+        mgr.ha_client.set_battery_discharge_power.assert_not_called()
+
+    def test_writes_when_the_limit_has_drifted(self, mgr) -> None:
+        """The 2026-10-08 case: blocked, but the inverter reads 5000 W."""
+        mgr.ha_client.get_battery_discharge_power.return_value = 5000
+        mgr.ha_client.set_battery_discharge_power.return_value = (True, "")
+        mgr.control_battery(discharge_allowed=False)
+        args = mgr.ha_client.set_battery_discharge_power.call_args
+        assert args[0][1] == 0, "must correct the drifted limit back to 0 W"

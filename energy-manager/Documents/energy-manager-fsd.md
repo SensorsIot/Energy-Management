@@ -687,7 +687,18 @@ SOC. The low-PV p10 side carries the uncertainty allowance.
 
 
 Decides whether the home battery may discharge. Acts on `number.battery_maximum_discharging_power`.
-Re-evaluated every 15 min. The decision horizon ends at the first future forecast
+Re-evaluated every 15 min.
+
+**The limit is reconciled against the inverter, not just set on change.** Two flags block discharge
+independently — battery protection (this section) and EV charging in a manual mode (§4.3.4) — OR-ed
+together. Applying the result only when the *decision* changes is not enough: anything else that
+writes the entity (a dashboard slider, Spook, a maintenance script, an HA restart) then stands
+uncorrected for as long as the decision holds. So the combined result is re-applied every
+`DISCHARGE_RECONCILE_S` (60 s) as well, and a drift is logged when it is corrected.
+
+Write economy is preserved at the choke point rather than by skipping the check: `control_battery`
+reads the current value first and returns without writing when it already matches, so a reconcile
+that finds nothing wrong costs one read and no write. The decision horizon ends at the first future forecast
 point where **both** battery_on and battery_off reach the configured charge ceiling
 (`battery_target_soc`, 100% with longevity disabled), within at most 48 h. If only
 one path refills, comparison continues; if neither shares a full recharge, the
@@ -2790,9 +2801,19 @@ Tests the two-flag discharge blocking logic (Section 4.2.2) where battery protec
 | `test_protection_blocks` | Protection flag only | on | off | `control_battery(False)` |
 | `test_ev_blocks` | EV flag only | off | on | `control_battery(False)` |
 | `test_both_block` | Both flags set | on | on | `control_battery(False)` |
-| `test_no_call_when_unchanged` | Already allowed, still allowed | off | off | No call (unchanged) |
+| `test_no_call_when_unchanged_and_not_yet_due` | Already allowed, still allowed, reconcile not due | off | off | No call |
+| `test_reapplies_when_the_reconcile_is_due` | Unchanged decision, past `DISCHARGE_RECONCILE_S` | off | on | `control_battery(False)` — re-applied |
+| `test_reconcile_timer_resets_after_applying` | Two ticks in quick succession | off | on | One call, not two |
 | `test_calls_on_transition_allow_to_block` | Was allowed, now blocked | — | on | `control_battery(False)` |
 | `test_calls_on_transition_block_to_allow` | Was blocked, now allowed | off | off | `control_battery(True)` |
+
+#### Write economy — the choke point is `control_battery`
+
+| Test | Description | Expected |
+|------|-------------|----------|
+| `test_no_write_when_already_at_target` | Blocked, inverter already 0 W | No HA write |
+| `test_no_write_when_already_released` | Allowed, inverter already at max | No HA write |
+| `test_writes_when_the_limit_has_drifted` | Blocked, inverter reads 5000 W | Corrected to 0 W |
 
 #### EV Flag — Immediate/Cheap Mode Charging
 
@@ -3410,6 +3431,22 @@ See Section 4.3.8 for adaptive polling logic.
 - v2.85: **Topic 3 longevity cap now enforced by the inverter's native end-of-charge SOC register, not just the software power limit (Section 4.2.4).** The old cap wrote `number.battery_maximum_charging_power = 0` once the battery reached `battery_target_soc`. Two gaps let the battery overshoot the 90 % longevity target — verified live 2026-07-17, where it reached 100 %: (1) the power limit is written on the 15-min battery cycle, so the battery kept charging at ~5 kW for up to ~15 min after crossing the target (90 % → ~96 % before the limit landed); (2) a 0 W charge-power limit does not stop DC PV surplus trickling the battery up to the inverter's own SOC cutoff, which sat at 100 %. EM now mirrors `battery_target_soc` onto `number.battery_end_of_charge_soc` every cycle, so the inverter hard-stops charging at the target in real time. The register accepts 90-100 %, exactly the range of the floored target, so it always fits; a 100 % target means "no cap". The power limit is kept as a backing control and drives the dashboard action. When `charge_target_enabled` is off EM leaves the register untouched, releasing it to 100 % only if it had previously lowered it. New `end_of_charge_soc_entity` config key; new `_apply_soc_ceiling`; new `TestSocCeiling`. (1.9.9 -> 1.9.10)
 
 - v2.84: **Shaving day-mode decision log now reports the actual decision time.** The once-daily shave-vs-car-day snapshot (Section 4.2.3) is evaluated on the 15-minute battery-control cycle, so the first tick at/after `shaving_decision_hour` lands up to 15 min past the hour (e.g. 08:12 for an 08:00 hour). The log line previously printed the configured hour (`decided at 08:00`), which misrepresented when the snapshot was taken; it now prints the real local time plus the configured hour: `decided at 08:12 (decision hour 08:00)`. Behaviour and the 15-minute cadence are unchanged. (1.9.8 -> 1.9.9)
+
+- v2.89: **The discharge limit is reconciled against the inverter, not only written on a decision
+  change (Section 4.2.2).** `_update_discharge_control` applied the combined block only when its own
+  decision flipped, so an external write to `number.battery_maximum_discharging_power` stood
+  uncorrected for as long as the decision held. On 2026-10-08 the limit was set to 5000 W externally
+  at 03:30 while the EV block was active for cheap-mode charging; the decision never changed, nothing
+  re-asserted it, and the home battery drained from 62 % to 1 % into the car over 75 minutes while
+  the optimiser logged "block" every 15 minutes and its own expensive-import figure climbed from
+  854 Wh to 7047 Wh. The combined result is now re-applied every `DISCHARGE_RECONCILE_S` (60 s) as
+  well as on change, and the EV loop calls it every tick so the timer can fire. Write economy moves
+  to the choke point rather than being lost: `control_battery` already read the current value and
+  returned without writing when it matched, so a clean reconcile costs one read and no write; a drift
+  is logged when corrected. The OCPP server reconciles its wallbox command on the same principle.
+  New `TestWriteEconomy` (3 cases) plus 2 reconciliation cases; the six tests that asserted "no call
+  when the flag is unchanged" asserted at the wrong layer and now assert the call happens.
+  (1.9.34 -> 1.9.35)
 
 - v2.88: **The manual power slider selects an amp step again (Section 4.3.4).** v2.87 passed the
   wallbox maximum as the manual-mode command, so IMMEDIATE and CHEAP ignored
