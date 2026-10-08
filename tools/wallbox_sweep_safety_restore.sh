@@ -1,11 +1,34 @@
 #!/usr/bin/env bash
-# Unconditional, idempotent restore. Runs after the sweep window whatever
-# happened, so the house is never left with the battery pinned or
-# energy-manager stopped.
+# Idempotent restore, for the case where the sweep was killed before its own
+# trap could run.
+#
+# It acts ONLY when both battery power limits are still 0 — the sweep's
+# fingerprint. energy-manager holds DISCHARGE at 0 by itself (the cheap-slot
+# hold) but never charging as well, so an unconditional restore here unpins a
+# battery that energy-manager wants held. On 2026-10-08 that is exactly what
+# happened: this script set the discharge limit back to 5000 W at 03:30 while the
+# car was charging, and the house battery drained from 62 % to 1 % into it over
+# the next 75 minutes. energy-manager kept deciding "block" every 15 minutes and
+# never re-asserted it, because it only writes the limit when its own decision
+# changes.
 set -uo pipefail
 . /home/dev/.secrets/env
 exec >> /home/dev/wallbox-sweep/safety.log 2>&1
 echo "=== $(date -Is) safety restore ==="
+
+read_state() {
+  curl -s -H "Authorization: Bearer $HA_TOKEN" "$HA_URL/api/states/$1" \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])'
+}
+dis=$(read_state number.battery_maximum_discharging_power)
+chg=$(read_state number.battery_maximum_charging_power)
+echo "  discharge=$dis charge=$chg"
+if [ "${dis%.*}" != 0 ] || [ "${chg%.*}" != 0 ]; then
+  echo "  not both pinned — the sweep cleaned up after itself, nothing to do"
+  exit 0
+fi
+echo "  both still pinned — the sweep did not clean up; restoring"
+
 for e in number.battery_maximum_discharging_power number.battery_maximum_charging_power; do
   curl -s -o /dev/null -X POST -H "Authorization: Bearer $HA_TOKEN" -H 'Content-Type: application/json' \
     "$HA_URL/api/services/number/set_value" -d "{\"entity_id\":\"$e\",\"value\":5000}"
