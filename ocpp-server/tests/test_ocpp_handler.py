@@ -2456,16 +2456,16 @@ class TestPhaseDetection:
     def test_correction_single_phase_applies_its_own_gain(self, handler) -> None:
         """1φ applies the measured 1φ gain; 2φ has no measurement and stays raw.
 
-        Regression: 1φ used to pass through uncorrected, which under-reported
-        every single-phase session. Measured 2026-10-04 at 16 A, the house meters
-        put the true draw at 3704 W while MeterValues reported 3527 W.
+        Measured 2026-10-08 02:00 against `dtsu_raw - grid_power`, the car being
+        the only load the EBL meter sees that the DTSU does not: the raw meter was
+        already right to about ±1 % above 10 A, so the gain is near unity.
         """
         assert handler._correct_meter_power(1492, active_phases=1) == pytest.approx(
             handler.METER_SCALE_1P * 1492
         )
-        # The point the gain was measured at.
-        assert handler._correct_meter_power(3527, active_phases=1) == pytest.approx(
-            3703.4, abs=1.0
+        # 16 A: the meter read 3582 raw where the real power was 3548 W.
+        assert handler._correct_meter_power(3582, active_phases=1) == pytest.approx(
+            3550, abs=10
         )
         assert handler._correct_meter_power(1492, active_phases=2) == 1492
 
@@ -2473,9 +2473,25 @@ class TestPhaseDetection:
         """A gain scales with load, so it cannot blow up at the 6 A minimum."""
         lo = handler._correct_meter_power(1380, active_phases=1) - 1380
         hi = handler._correct_meter_power(3680, active_phases=1) - 3680
-        assert lo < hi                     # proportional, not constant
         assert lo / 1380 == pytest.approx(hi / 3680, rel=1e-9)
-        assert lo < 100                    # a +177 W offset would be +13 % here
+        # Near unity, so the absolute adjustment stays small at every step.
+        assert abs(lo) < 50
+        assert abs(hi) < 50
+
+    def test_single_phase_correction_matches_the_measured_sweep(self, handler) -> None:
+        """Regression on the figure itself: the corrected signal must track the
+        real power measured on 2026-10-08, since it feeds the Modbus-proxy
+        correction (FSD 3.6.6). A 1.050 gain — taken from a daytime four-term
+        balance on 2026-10-04 — made it over-report by about 6 %.
+        """
+        # (raw meter reading, real power from dtsu_raw - grid_power)
+        for raw, real in ((2195, 2193), (2898, 2883), (3582, 3548)):
+            corrected = handler._correct_meter_power(raw, active_phases=1)
+            assert abs(corrected - real) / real < 0.02, (
+                f"{raw} W raw corrected to {corrected:.0f} W, real was {real} W"
+            )
+            # What the superseded 1.050 would have produced.
+            assert abs(raw * 1.050 - real) / real > 0.03
 
     def test_correction_linear_three_phase(self, handler) -> None:
         """3φ draw applies the linear regression."""

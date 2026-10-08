@@ -83,22 +83,25 @@ class ChargePointHandler(CP):
     METER_SCALE = 1.023
     METER_OFFSET = -101.0
 
-    # Single-phase gain. The regression above is anchored on 3φ points and its
-    # −101 W offset biases a 1φ reading low, so 1φ gets its own correction —
-    # previously it was left uncorrected, which under-reported every 1φ session.
-    # Measured 2026-10-04 over a 30-minute steady window at 16 A, the wallbox
-    # the only variable load: the house meters put the true draw at 3704 W
-    # (PV − grid − battery − house, with the Shelly 3EM house clamp independent
-    # of the wallbox) while MeterValues reported 3527 W → 1.050.
-    # The same balance over three wallbox-idle windows that day closed to
-    # −35 / +15 / −30 W average, so the method carries no meaningful bias.
-    # **One operating point**, so this is a gain with no offset: a fixed offset
-    # fits the same data equally well (sd 98 vs 103 W) but would apply a +5 %
-    # correction as a +13 % one at the 6 A minimum. A gain cannot misbehave that
-    # way, and a gain error is the ordinary failure mode for this meter. Below
-    # ~3.5 kW the figure is therefore unverified — `tools/wallbox_calibration_sweep.py`
-    # walks 6–16 A and settles it.
-    METER_SCALE_1P = 1.050
+    # Single-phase gain. Measured 2026-10-08 02:00, the wallbox the only variable
+    # load: battery pinned to 0, PV zero, energy-manager stopped, the sweep walking
+    # 6-16 A. Real power is `dtsu_raw - grid_power` — the car sits between the EBL
+    # meter and the DTSU, so only the EBL sees it and everything else (house, PV,
+    # battery) is common to both meters and cancels. Per-step spread 1-13 W.
+    #   commanded   real W   reported W   raw error
+    #        10 A     2193         2305       +0.1 %
+    #        13 A     2883         3043       +0.5 %
+    #        16 A     3548         3761       +1.0 %
+    # The RAW meter is already right to about ±1 % above 10 A, rising to +4.5 %
+    # around 7-9 A; the least-squares gain over the range is 0.991. So a
+    # single-phase draw needs essentially no correction.
+    # This replaces a 1.050 taken on 2026-10-04 from a daytime four-term balance
+    # (PV − grid − battery − house). That method needs the house to hold still and
+    # the meters to sample together; by day neither holds, and the same run's three
+    # estimates spread over 6 %. The night measurement is the one to trust: the
+    # reported/real ratio stays flat across a 2.6x power range, which a wrong idle
+    # offset could not produce.
+    METER_SCALE_1P = 0.991
 
     # Watts drawn per commanded amp, by phase count — see module-level
     # WATTS_PER_AMP, the single conversion constant. Kept as a class attribute

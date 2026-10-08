@@ -74,6 +74,10 @@ GRID_PHASE_CURRENT_ENTITIES = (
     "sensor.grid_phase_2_current",
     "sensor.grid_phase_3_current",
 )
+# The gPlug reports I1/I2/I3 in units of ten amps. Confirmed two ways on
+# 2026-10-08: idle I1 = 0.11 is 1.1 A, matching ~250 W on that phase at night;
+# and at 16 A the power cross-check gives 3548 W / 232 V / 1.50 = 10.2.
+GRID_PHASE_CURRENT_SCALE = 10.0
 
 # The EBL meter is the clock. It reports only every ~16 s (measured 2026-10-07:
 # mean 16.5 s, range 14.6-19.9 s) while the DTSU runs at about 1 Hz — 250x apart.
@@ -201,7 +205,9 @@ def collect(n: int) -> tuple[list[dict], int]:
             avg["grid_w"] = grid_w
             avg["phase_a_list"] = phase_a
             # The whole point: both meters now describe the same interval.
-            avg["car_w"] = grid_w - avg["dtsu_raw_w"]
+            # Both use negative = import, so the car is dtsu - grid: the EBL sees
+            # the car, the DTSU does not, and everything else is common to both.
+            avg["car_w"] = avg["dtsu_raw_w"] - grid_w
             # Kept only as a cross-check on the subtraction above.
             avg["balance_w"] = (avg["pv_w"] - grid_w - avg["battery_w"]) - avg["house_w"]
             samples.append(avg)
@@ -289,7 +295,7 @@ def main() -> None:
           f"the two meters' relative offset, subtracted from every step.")
     if has_phase:
         print(f"  idle phase currents: "
-              f"{', '.join(f'{v:.2f} A' for v in idle_phase)}")
+              f"{', '.join(f'{v * GRID_PHASE_CURRENT_SCALE:.2f} A' for v in idle_phase)}")
     else:
         print("  per-phase currents not exposed — the amp cross-check is off.")
 
@@ -332,7 +338,8 @@ def main() -> None:
         if has_phase:
             now = [statistics.fmean(x["phase_a_list"][i] for x in samples)
                    for i in range(len(idle_phase))]
-            deltas = [n - b for n, b in zip(now, idle_phase, strict=False)]
+            deltas = [(n - b) * GRID_PHASE_CURRENT_SCALE
+                      for n, b in zip(now, idle_phase, strict=False)]
             row["phase_delta_a"] = deltas
             # The car sits on one phase, so exactly one delta should track the
             # commanded amps. This needs no voltage and no watts-per-amp guess,
@@ -366,14 +373,23 @@ def main() -> None:
             got = r["phase_delta_a"][car_phase - 1]
             print(f"{r['amps']:>3} | {r['amps']:>9} | {got:>11.2f} | {got - r['amps']:>+6.2f}")
 
-    print(f"\n{'A':>3} | {'car W':>7} {'±sd':>5} | {'W/A':>6} | {'meter W':>8} "
-          f"| {'meter/car':>9} | {'balance W':>9}")
-    print("-" * 70)
+    # This is the result that matters: sensor.wallbox_power feeds the Modbus-proxy
+    # correction, so it has to match the real power. Everything else is support.
+    print("\nDoes sensor.wallbox_power match the real power? (the control-loop signal)")
+    print(f"\n{'A':>3} | {'real W':>7} {'±sd':>5} | {'reported W':>10} "
+          f"| {'error W':>8} {'error %':>8} | {'balance W':>9}")
+    print("-" * 72)
     for r in results:
+        err = r["meter_w"] - r["true_w"]
         print(f"{r['amps']:>3} | {r['true_w']:>7.0f} {r['sd']:>5.0f} "
-              f"| {r['true_w'] / r['amps']:>6.1f} | {r['meter_w']:>8.0f} "
-              f"| {r['meter_w'] / r['true_w']:>9.3f} | {r['balance_w']:>9.0f}")
-    print("  (balance W is the independent PV-grid-battery-house cross-check)")
+              f"| {r['meter_w']:>10.0f} | {err:>+8.0f} {err / r['true_w'] * 100:>+7.1f}% "
+              f"| {r['balance_w']:>9.0f}")
+    print("  real W = dtsu_raw - grid (the car, since only the EBL sees it)")
+    print("  balance W = independent PV-grid-battery-house cross-check")
+
+    ratios = [r["meter_w"] / r["true_w"] for r in results]
+    print(f"\n  reported/real ranges {min(ratios):.3f}-{max(ratios):.3f}. A flat ratio means "
+          f"the idle\n  offset is right; a wrong one diverges at low power.")
 
     print("\nPer-amp increments (each should be about one amp's worth):")
     bad = 0
@@ -415,10 +431,11 @@ def main() -> None:
           f"{', '.join(str(r['amps']) for r in trusted)} A")
     print(f"WATTS_PER_AMP[{phases}]  = {wpa:.1f}   "
           f"(fit through origin, worst step off by {worst:.0f} W)")
-    print(f"meter residual gain  = {gain:.4f}  (true = this x sensor.wallbox_power)")
-    print("\nNOTE: sensor.wallbox_power ALREADY carries the deployed correction "
-          "(METER_SCALE / METER_SCALE_1P), so the gain above is a *residual*: "
-          "multiply the deployed constant by it, do not replace it.")
+    print(f"meter residual gain  = {gain:.4f}  (real = this x sensor.wallbox_power)")
+    print("\nsensor.wallbox_power ALREADY carries the deployed correction, so that gain "
+          "is a\nRESIDUAL: multiply the deployed METER_SCALE / METER_SCALE_1P by it.")
+    print(f"  e.g. deployed 1.050 x {gain:.4f} = {1.050 * gain:.4f}")
+    print("A residual near 1.000 means the signal already matches the real power.")
     print("WATTS_PER_AMP is absolute and does replace the deployed value.")
     print("Record the method and the date in ocpp-server FSD 7.1 and 7.2.")
 
