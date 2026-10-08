@@ -139,13 +139,23 @@ because all six samples were the same number.
   (sd ~0.01 A against ~47 W for the power subtraction). It also names the car's phase.
 - The car plugged in and **below** its own charging target, or it will refuse to draw.
 
-**Dwell, do not hurry.** The binding cadence is the **wallbox**, which reports MeterValues only about
-once a minute — and the wallbox reading is the quantity being calibrated. Each step therefore settles
-for 10 EBL reports (~160 s, so the wallbox has reported 2–3 times at the new level) and then samples
-15 (~240 s, about 4 independent wallbox reports). The result table carries the standard error of each
-step's mean and the count of distinct wallbox readings behind it, so a figure resting on one meter
-sample is visible rather than disguised as an average. A full 6–16 A sweep takes about 90 minutes,
-which the cheap window accommodates comfortably.
+**Dwell, do not hurry.** The binding cadence is the **wallbox**, not the EBL meter — and the wallbox
+reading is the quantity being calibrated. Measured 2026-10-08, it reports MeterValues on a
+rock-steady **60 s** (`02:03:19`, `02:04:19`, `02:05:19`, …) against the EBL meter's ~16 s.
+
+| | EBL reports | ≈ time | wallbox reports |
+|---|---:|---:|---:|
+| Settle after a step change | 10 | 160 s | 2–3 at the new level |
+| Sample | 25 | 400 s | **6–7** |
+
+Sampling is sized so one bad wallbox report is a seventh of the evidence rather than a quarter. The
+result table carries the standard error of each step's mean **and the number of wallbox reports
+behind it**, counted from `last_reported` advancing (`last_changed` does not move when a steady
+charge reports the same number again). A step resting on one meter sample is therefore visible
+rather than disguised as an average.
+
+A full 6–16 A sweep takes about **two hours**, finishing around 04:00 from a 02:00 start — well
+inside the cheap window, and an hour clear of the 05:00 safety nets.
 
 The idle reference is measured **twice**, before and after, with a longer settle (10 EBL reports) so a
 car that charged right up to the start has actually wound down. It is subtracted from every step, so
@@ -180,7 +190,7 @@ well. The HA automation is the only one that cannot die with the sweep.
 **A net must never fire mid-sweep**, because during the sweep both limits are legitimately 0 and that
 is also the trigger. The runner holds `sweep.running` containing its PID and clears it in its trap;
 the host-side net stands down while that PID is alive and treats a stale lock as a death. Schedule
-the nets well clear of the run regardless — a full 6–16 A sweep takes about 90 minutes.
+the nets well clear of the run regardless — a full 6–16 A sweep takes about two hours.
 
 An unconditional net is actively harmful: on 2026-10-08 one set the discharge limit back to 5000 W at
 03:30 while the car was charging, and the home battery drained from 62 % to 1 % into it.

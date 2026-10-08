@@ -94,10 +94,15 @@ POLL_INTERVAL_S = 1.0
 # MeterValues only about once a minute — and the wallbox reading is the quantity
 # being calibrated. A step therefore has to span several of its reports, or the
 # figure is one meter sample dressed up as an average.
-#   settle  10 EBL reports ~160 s  -> the wallbox has reported 2-3 times at the
-#                                     new level before anything is counted
-#   sample  15 EBL reports ~240 s  -> about 4 independent wallbox reports
-EBL_SAMPLES_PER_STEP = 15
+# The wallbox cadence was measured on 2026-10-08 and is a rock-steady 60 s
+# (02:03:19, 02:04:19, 02:05:19, ...). The EBL meter runs at ~16 s. So:
+#   settle  10 EBL reports ~160 s  -> the wallbox reports 2-3 times at the new
+#                                     level before anything is counted
+#   sample  25 EBL reports ~400 s  -> 6-7 independent wallbox reports, so one
+#                                     bad report is a seventh of the evidence
+#                                     rather than a quarter of it
+# The reported count is carried per step, so a thin step is visible.
+EBL_SAMPLES_PER_STEP = 25
 EBL_SETTLE_SAMPLES = 10
 # The idle reference needs longer than a step change. The car may have been
 # charging hard right up to the start, and the wallbox only reports MeterValues
@@ -169,13 +174,18 @@ def ha_set_state(entity_id: str, value: str) -> None:
 def read_fast() -> dict:
     """Read the fast meters, as close together in time as possible."""
     p = ha_get_attrs(PROXY_ENTITY)
+    wb = ha_get_state(WALLBOX_POWER_ENTITY)
     return {
         "dtsu_raw_w": float(p["dtsu"]),
         "injected_w": float(p["wallbox"]),
         "pv_w": ha_get_float(PV_ENTITY),
         "battery_w": ha_get_float(BATTERY_ENTITY),
         "house_w": ha_get_float(HOUSE_ENTITY),
-        "wallbox_w": ha_get_float(WALLBOX_POWER_ENTITY),
+        "wallbox_w": float(wb["state"]),
+        # When the wallbox last told us anything. `last_reported` advances on
+        # every write even if the value repeats; `last_changed` does not, and a
+        # steady charge reports the same number again and again.
+        "wallbox_stamp": wb.get("last_reported") or wb["last_updated"],
     }
 
 
@@ -207,14 +217,14 @@ def collect(n: int) -> tuple[list[dict], int]:
     pending: list[dict] = []
     # Distinct wallbox readings seen. This is the real measure of how much
     # independent evidence a step has, since the wallbox updates ~60 s.
-    seen_wb: set[int] = set()
+    seen_wb: set[str] = set()
     deadline = time.monotonic() + EBL_TIMEOUT_S
     while len(samples) < n:
         if time.monotonic() > deadline:
             raise RuntimeError("EBL meter stopped reporting")
         fast = read_fast()
         pending.append(fast)
-        seen_wb.add(round(fast["wallbox_w"]))
+        seen_wb.add(fast["wallbox_stamp"])
         grid_w, stamp, phase_a = read_grid()
         if stamp != last_stamp:
             last_stamp = stamp
@@ -222,7 +232,8 @@ def collect(n: int) -> tuple[list[dict], int]:
             if not pending:
                 skipped += 1
                 continue
-            avg = {k: statistics.fmean(x[k] for x in pending) for k in pending[0]}
+            numeric = [k for k, v in pending[0].items() if isinstance(v, float)]
+            avg = {k: statistics.fmean(x[k] for x in pending) for k in numeric}
             avg["grid_w"] = grid_w
             avg["phase_a_list"] = phase_a
             # The whole point: both meters now describe the same interval.
@@ -231,7 +242,7 @@ def collect(n: int) -> tuple[list[dict], int]:
             avg["car_w"] = avg["dtsu_raw_w"] - grid_w
             # Kept only as a cross-check on the subtraction above.
             avg["balance_w"] = (avg["pv_w"] - grid_w - avg["battery_w"]) - avg["house_w"]
-            avg["distinct_wb"] = len(seen_wb)
+            avg["wb_reports"] = len(seen_wb)
             samples.append(avg)
             pending = []
         time.sleep(POLL_INTERVAL_S)
@@ -354,7 +365,7 @@ def main() -> None:
         sem = sd / len(samples) ** 0.5
         row = {
             "amps": amps, "true_w": car, "sd": sd, "n": len(samples),
-            "sem": sem, "distinct_wb": samples[-1].get("distinct_wb", 0),
+            "sem": sem, "wb_reports": samples[-1].get("wb_reports", 0),
             "meter_w": mean(samples, "wallbox_w"),
             "balance_w": mean(samples, "balance_w"),
         }
@@ -374,7 +385,7 @@ def main() -> None:
         results.append(row)
         print(f"{amps:>3} | {car:>7.0f} {sd:>4.0f} {len(samples):>2} "
               f"| {car / amps:>6.1f} | {row['meter_w']:>8.0f}{extra}"
-              f"   (±{sem:.0f} W, {row['distinct_wb']} distinct wallbox reads)")
+              f"   (±{sem:.0f} W, {row['wb_reports']} wallbox reports)")
 
     # Re-measure the idle offset now the sweep is over. It is subtracted from every
     # step, so if it has moved the whole run is suspect — and comparing the two is
@@ -424,13 +435,13 @@ def main() -> None:
     # correction, so it has to match the real power. Everything else is support.
     print("\nDoes sensor.wallbox_power match the real power? (the control-loop signal)")
     print(f"\n{'A':>3} | {'real W':>7} {'±sem':>5} | {'reported W':>10} "
-          f"| {'error W':>8} {'error %':>8} | {'wb reads':>8} | {'balance W':>9}")
+          f"| {'error W':>8} {'error %':>8} | {'wb reps':>8} | {'balance W':>9}")
     print("-" * 86)
     for r in results:
         err = r["meter_w"] - r["true_w"]
         print(f"{r['amps']:>3} | {r['true_w']:>7.0f} {r['sem']:>5.0f} "
               f"| {r['meter_w']:>10.0f} | {err:>+8.0f} {err / r['true_w'] * 100:>+7.1f}% "
-              f"| {r['distinct_wb']:>8} | {r['balance_w']:>9.0f}")
+              f"| {r['wb_reports']:>8} | {r['balance_w']:>9.0f}")
     print("  real W = dtsu_raw - grid (the car, since only the EBL sees it)")
     print("  balance W = independent PV-grid-battery-house cross-check")
 
