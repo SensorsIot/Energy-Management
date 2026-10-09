@@ -127,7 +127,15 @@ by day, all of them verified on 2026-10-07:
 | The home battery moving | Adds a term the subtraction cannot see |
 
 The sweep is **paced by the EBL meter**, which reports only every ~16 s while the DTSU runs near
-1 Hz. It counts a sample only when the meter's timestamp advances. Sampling on a wall clock instead
+1 Hz. It counts a sample only when the meter's timestamp advances — specifically `last_reported`,
+never `last_changed`. A steady load makes the meter publish the same rounded watt value repeatedly
+(on 2026-10-09 it sent −1668 W five times running), and `last_changed` does not move for those: pacing
+on it stalls and looks exactly like a dead meter. The same applies to `sensor.wallbox_power` when
+counting how many reports back a step.
+
+**A stalled step skips; it does not end the run.** On 2026-10-09 one stall killed a two-hour sweep
+after 19 minutes and produced nothing. Only a failed *idle reference* aborts, since every step is
+corrected by it. Sampling on a wall clock instead
 re-reads a stale value: a contaminated run reported `sd 15 W` at 16 A while being 476 W wrong,
 because all six samples were the same number.
 

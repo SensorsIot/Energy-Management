@@ -110,7 +110,7 @@ EBL_SETTLE_SAMPLES = 10
 # On 2026-10-08 a 2-report wait produced a -479 W idle offset that was never
 # explained, and every step is corrected by it.
 EBL_IDLE_SETTLE_SAMPLES = 10
-EBL_TIMEOUT_S = 90            # give up if the meter goes quiet
+EBL_TIMEOUT_S = 150           # give up if the meter really goes quiet
 STATUS_WAIT_TRIES = 6
 STATUS_WAIT_S = 5
 
@@ -190,7 +190,14 @@ def read_fast() -> dict:
 
 
 def read_grid() -> tuple[float, str, list[float]]:
-    """Return EBL total power, its report timestamp, and per-phase currents if any."""
+    """Return EBL total power, its report timestamp, and per-phase currents if any.
+
+    The timestamp must be `last_reported`, which advances on every write. A steady
+    load makes the meter publish the same rounded watt value repeatedly — on
+    2026-10-09 it sent -1668 W five times running during the 6 A step — and
+    `last_changed` does not move for those, so pacing on it stalls and looks
+    exactly like a dead meter.
+    """
     d = ha_get_state(GRID_ENTITY)
     phases = []
     for e in GRID_PHASE_CURRENT_ENTITIES:
@@ -199,7 +206,7 @@ def read_grid() -> tuple[float, str, list[float]]:
         except Exception:                                       # noqa: BLE001
             phases = []
             break
-    return float(d["state"]), d["last_changed"], phases
+    return float(d["state"]), d.get("last_reported") or d["last_changed"], phases
 
 
 def collect(n: int) -> tuple[list[dict], int]:
@@ -221,7 +228,9 @@ def collect(n: int) -> tuple[list[dict], int]:
     deadline = time.monotonic() + EBL_TIMEOUT_S
     while len(samples) < n:
         if time.monotonic() > deadline:
-            raise RuntimeError("EBL meter stopped reporting")
+            raise RuntimeError(
+                f"no EBL report in {EBL_TIMEOUT_S}s — the meter is genuinely quiet"
+            )
         fast = read_fast()
         pending.append(fast)
         seen_wb.add(fast["wallbox_stamp"])
@@ -256,7 +265,9 @@ def settle(n: int) -> None:
     deadline = time.monotonic() + EBL_TIMEOUT_S
     while seen < n:
         if time.monotonic() > deadline:
-            raise RuntimeError("EBL meter stopped reporting")
+            raise RuntimeError(
+                f"no EBL report in {EBL_TIMEOUT_S}s — the meter is genuinely quiet"
+            )
         time.sleep(POLL_INTERVAL_S)
         _, stamp, _ = read_grid()
         if stamp != last_stamp:
@@ -314,8 +325,11 @@ def main() -> None:
     print(f"\nSweeping {first}-{last} A on {phases} phase(s). Ctrl-C restores 0 A.")
     print("Idle reference (waiting for the car to actually stop)", end="", flush=True)
     ha_set_state(CURRENT_LIMIT_ENTITY, "0")
-    settle(EBL_IDLE_SETTLE_SAMPLES)
-    idle, _ = collect(EBL_SAMPLES_PER_STEP)
+    try:
+        settle(EBL_IDLE_SETTLE_SAMPLES)
+        idle, _ = collect(EBL_SAMPLES_PER_STEP)
+    except RuntimeError as exc:
+        raise SystemExit(f"Cannot establish an idle reference: {exc}") from exc
     idle_car = mean(idle, "car_w")
     idle_sd = statistics.pstdev([x["car_w"] for x in idle])
     idle_phase: list[float] | None = None
@@ -355,7 +369,14 @@ def main() -> None:
             print(f"      skipped — wallbox is {status}, not Charging")
             continue
 
-        samples, _ = collect(EBL_SAMPLES_PER_STEP)
+        try:
+            samples, _ = collect(EBL_SAMPLES_PER_STEP)
+        except RuntimeError as exc:
+            # One stalled step must not cost the whole run. On 2026-10-09 a
+            # RuntimeError here killed a two-hour sweep after 19 minutes and
+            # produced no data at all.
+            print(f"      skipped — {exc}")
+            continue
         car = mean(samples, "car_w") - idle_car
         sd = statistics.pstdev([x["car_w"] for x in samples])
         if sd > MAX_STEP_SD_W:
