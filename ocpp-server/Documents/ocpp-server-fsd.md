@@ -256,10 +256,10 @@ same number rather than their own:
 | Phase count | W per amp | Source |
 |:-----------:|----------:|--------|
 | 1φ | **230** | Live single-phase MeterValues (2026-07-09), linear through origin |
-| 2φ | 434 | Mean of the two — rare / transitional |
-| 3φ | **637** | Midpoint of safe range [612, 662], 2026-03-04 M-Bus sweep |
+| 2φ | 444 | Mean of the two — rare / transitional |
+| 3φ | **659** | Origin fit over 8–16 A of the 2026-02-11 grid-meter sweep (§7.2) |
 
-1φ is not 637/3 = 212: a single-phase load draws more per amp than one leg of a 3φ load.
+1φ is not 659/3 = 220: a single-phase load draws more per amp than one leg of a 3φ load.
 
 **Static values** — from configuration, do not change during operation:
 
@@ -407,7 +407,7 @@ each amp delivers is the only thing the phase count changes:
 | Phases | Min | Max |
 |:------:|----:|----:|
 | 1-phase | 6 A = 1380 W | 16 A = 3680 W |
-| 3-phase | 6 A = 3822 W | 16 A = 10192 W |
+| 3-phase | 6 A = 3954 W | 16 A = 10544 W |
 
 **Decision table:**
 
@@ -678,22 +678,27 @@ The result is **hard-capped at `max_current_a`** (16 A): the wallbox does not en
 configured maximum itself (a 1φ cable was seen drawing ~19 A from a 21 A profile), so the
 server caps it (SEC-07).
 
-Watts are derived from amps in **one direction only**, with the single `WATTS_PER_AMP`
-factor of §3.6.1 — for sizing a step against solar surplus, for the Modbus-proxy
-commanded bridge (§3.6.6), and for display. Measured watts per amp, 3-phase sweep:
+Watts are derived from amps in **one direction only**, with the single `WATTS_PER_AMP` factor of
+§3.6.1 — for sizing a step against solar surplus, for the Modbus-proxy commanded bridge (§3.6.6),
+and for display.
 
-| Commanded A | Measured W | W/A |
-|------------:|-----------:|----:|
-| 6 | 3962 | 660 |
-| 7 | 4354 | 622 |
-| 8 | 5117 | 640 |
-| 9 | 5727 | 636 |
-| 10 | 6288 | 629 |
-| 11 | 7034 | 640 |
-| 12 | 7624 | 635 |
+**The reference is the house meters; the wallbox is what gets corrected.** The 2026-02-11 sweep
+measured each commanded amp against the grid meter:
 
-The per-amp figures scatter ±4 % around the 637 W/A midpoint, so a derived watt value is
-accurate to about **±140 W at the low end** and better above 8 A. That error only affects
+| Commanded A | Grid-measured W | W/A |
+|------------:|----------------:|----:|
+| 8 | 5137 | 642 |
+| 10 | 6445 | 645 |
+| 12 | 7852 | 654 |
+| 14 | 9321 | 666 |
+| 16 | 10623 | 664 |
+
+Corroborated at its top end on 2026-10-10 by `dtsu_raw − grid_power` (§7.1): 10646 W at 16 A against
+10623 W, **0.22 % apart eight months later**.
+
+W/A is **not constant** — 642 at 8 A rising to 666 at 15 A — so a single factor is a compromise.
+The origin fit over 8–16 A is **659**, within ~1 % at 16 A and closer mid-range than the 665 of the
+16 A point alone. A derived watt value is therefore accurate to about ±2 %. That error only affects
 how a step is *sized against surplus* — never what is commanded — and the home battery
 absorbs it (§4.2.2 of the energy-manager FSD).
 
@@ -736,9 +741,9 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-16 | Cable phase detection (§3.6.4.1) | L1-only MeterValues ≥400 W → `active_phases`=1, `sensor.wallbox_phases`=1, watt range→1380–3680 W at 230 W/A, `wallbox_power`=raw; all three phases → 3, 637 W/A, linear correction; below 400 W does not flap; `universal`/`external_breaker` ignore detection |
 | TC-32 | Amp range clamp (§3.6.4) | 20 A → clamped to 16 A on either phase count; 5 A → 0 A (pause); 13 A passes through unchanged |
 | TC-33 | Phase detection re-applies the live limit (§3.6.4.1) | 3φ→1φ at 16 A → profile re-sent with `numberPhases`=1, same 16 A; `sensor.wallbox_power_limit` follows to 3680 W (not 10192 W) |
-| TC-34 | Proxy bridge follows the detected phase count (§3.6.6) | 16 A commanded → correction 3680 W + bias on 1φ and 10192 W + bias on 3φ; a 3539 W draw on 1φ is ≥85 % of commanded, so the bridge hands off to measured |
+| TC-34 | Proxy bridge follows the detected phase count (§3.6.6) | 16 A commanded → correction 3680 W + bias on 1φ and 10544 W + bias on 3φ; a 3539 W draw on 1φ is ≥85 % of commanded, so the bridge hands off to measured |
 | TC-35 | Amps reach the profile unconverted (§7.2) | `set_charging_current(10, 3)` → `chargingRateUnit=A`, `limit=10`; 7 and 7.0 dedup to one write; a negative request sends 0 |
-| TC-36 | One factor, one direction (§3.6.1) | `watts_per_amp` is 230/434/637 for 1/2/3 phases and clamps out-of-range phase counts; `amps_to_watts(16, 1)`=3680 and `amps_to_watts(16, 3)`=10192 |
+| TC-36 | One factor, one direction (§3.6.1) | `watts_per_amp` is 230/444/659 for 1/2/3 phases and clamps out-of-range phase counts; `amps_to_watts(16, 1)`=3680 and `amps_to_watts(16, 3)`=10544 |
 | TC-39 | 1-phase meter correction (§7.1) | 1φ power and energy carry `1.050 × raw`; at the measured point 3527 W → 3704 W. The correction is proportional, so the absolute addition at 6 A is far smaller than at 16 A. 2φ stays raw. 1φ energy is time-independent (a gain needs no `dt`) |
 | TC-38 | HA state re-sync re-publishes the factor (§3.6.2) | After re-registration with a 1φ cable → `watts_per_amp`=230, `min/max_power_w`=1380/3680, `wallbox_power_limit` follows the commanded amps |
 | TC-37 | Every amp is reachable on both cables (§3.6.4) | 6–16 A each sent verbatim on 1φ and on 3φ — including 13–16 A, which the former 3-phase watt step table could not express |
@@ -808,6 +813,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.27 | 2026-10-10 | **`WATTS_PER_AMP[3]` corrected 637 → 659, measured against the house meters (§3.6.1, §7.2).** 637 was never a watts-per-amp measurement: it was the midpoint of a *divisor* safe range, chosen so `round(W/637)` landed on the right amp. Repurposed as a multiplier it was **3.3 % low**. The 2026-02-11 grid-meter sweep fits **659 W/A** through the origin over 8–16 A, and a 3-phase measurement on 2026-10-10 using `dtsu_raw − grid_power` read 10646 W at 16 A against that sweep's 10623 W — **0.22 % apart eight months later**, from two independent references. W/A is not constant (642 at 8 A rising to 666 at 15 A), so a single factor is a compromise; 659 is within ~1 % at 16 A and closer mid-range than the 665 of the 16 A point alone. 2φ follows to 444. Consequences: the published 3φ range becomes 3954–10544 W, the proxy's commanded bridge is sized correctly, and the consumer's step ladder is too. The commanded **amps** are unaffected — this factor never enters the control path (§7.2). Same run confirmed the 3-phase meter correction itself is already right: `sensor.wallbox_power` read 10652 W against 10646 W real, **+0.1 %**. ocpp-server 0.9.79 → 0.9.80. |
 | 3.26 | 2026-10-08 | **The single-phase meter gain is measured against the two meters that bracket the wallbox, and drops from 1.050 to 0.991 (§7.1).** The 1.050 shipped in 0.9.78 came from a daytime four-term balance (`PV − grid − battery − house`), which needs the household load to hold still and all four meters to sample together. Neither holds by day: the same run's three estimates of watts-per-amp spread over 6 %. The wallbox sits between the EBL meter and the DTSU, so `dtsu_raw − grid_power` **is** the wallbox and nothing else — house, PV and battery are common to both meters and cancel, and neither the house meter nor the PV figure is needed. Measured 2026-10-08 02:00 with the battery pinned, PV zero and energy-manager stopped, per-step spread 1–13 W: the **raw** meter is already right to ±1 % above 10 A (2195 vs 2193 W at 10 A, 3582 vs 3548 W at 16 A), so 1.050 was making `sensor.wallbox_power` over-report by about 6 % — and that signal feeds the Modbus-proxy correction (§3.6.6), so the inverter was being told of ~200 W of load that did not exist at 16 A. New gain 0.991. The reported/real ratio stays flat across a 2.6× power range, which a wrong idle offset could not produce. TC-39 extended with a regression on the measured figures that also asserts 1.050 would fail. ocpp-server 0.9.78 → 0.9.79; tests 159 → 160. |
 | 3.25 | 2026-10-05 | **Single-phase MeterValues now carry their own gain correction (§7.1).** 1φ power and energy passed through uncorrected because the 3φ regression's −101 W offset would bias them low, so every single-phase session was under-reported — `sensor.wallbox_power`, `sensor.wallbox_energy` and the HA Energy dashboard all under-counted, and the Modbus-proxy correction inherited the same shortfall. Measured on 2026-10-04 from a daytime energy balance (`PV − grid − battery − house`, with the Shelly 3EM house clamp independent of the wallbox): over a 30-minute steady window at 16 A the true draw was 3704 W against 3527 W reported, and over the whole 2.6-hour session 8.52 kWh against 7.96 kWh — **−4.8 % instantaneous, −6.6 % over the session**. The same balance over three wallbox-idle windows closed to −35 / +15 / −30 W, so the method is unbiased. New `METER_SCALE_1P = 1.050`, applied to both the power and the energy path; a gain is a ratio, so the energy increment needs no `dt` term. One operating point, so no offset is fitted: a `+177 W` offset fits equally (sd 98 vs 103 W) but would read as +13 % at the 6 A minimum. Below ~3.5 kW the gain is unverified. Side effect: the +200 W proxy export bias (§3.6.6) was previously cancelled almost exactly by the meter shortfall (net +23 W), and now delivers the ~+200 W export lean it was designed for. TC-39. ocpp-server 0.9.77 → 0.9.78; tests 156 → 159. |
 | 3.24 | 2026-10-05 | **The wallbox is commanded in amps, and watts are derived one way from a single factor (§3.6.1, §3.6.2, §3.6.4, §3.6.6, §7.2).** The control path ran amps → watts → amps: a consumer picked an amp level, published it as watts on `number.wallbox_power_limit`, and the server divided back with `round(W / 637 or 230)`. The round-trip was exact for every table value, but three different watts-per-amp models coexisted — `A × 230 × phases` (690 W/A) in the published range, `DEMAND_DIVISOR` (637) in the command path, and the measured per-amp table (622–660) in the consumer's step table — which is why the published 3φ maximum (11040 W) overstated what 16 A actually delivers (~10192 W) and why an out-of-table watt value could land on the wrong amp. Now: `number.wallbox_current_limit` (A) is the control, `set_charging_current` sends the amps unconverted, and `WATTS_PER_AMP` {1: 230, 2: 434, 3: 637} is the only calibration in the path — used **solely** to derive watts for surplus sizing, the proxy bridge and display. Phase selection no longer needs a power either: `number.wallbox_phase_request` states it, since 6 A is 1380 W on one phase and 3822 W on three. Consequences: the 3681–4139 W dead zone disappears (the amp range is identical on both cables, so `resolve_phase_gap` is gone), and the derived watt range is honest. New `sensor.wallbox_watts_per_amp`, `sensor.wallbox_min_current_a`, `sensor.wallbox_max_current_a`, `sensor.wallbox_power_limit` (derived, display only); `number.wallbox_power_limit` is withdrawn. TC-32…TC-38. ocpp-server 0.9.77; tests 155 → 156. An HA core restart re-registers these entities at their declared defaults while the wallbox WebSocket survives, so `_sync_ha_state` re-publishes the range and the factor as well (TC-38). |

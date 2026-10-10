@@ -32,14 +32,25 @@ logger = logging.getLogger(__name__)
 # to display a limit. Nothing converts watts back to amps, so no rounding
 # round-trip exists and the table below is the only calibration in the path.
 #
-# Measured per phase count, not derived from one another:
-#   3φ = 637 W/A — midpoint of safe range [612, 662], 2026-03-04 M-Bus sweep.
+# Measured per phase count, not derived from one another, and always against
+# the house meters — the EBL meter and the DTSU are the reference, the wallbox
+# is the thing being corrected (see METER_SCALE below).
+#   3φ = 659 W/A — origin fit over 8-16 A of the 2026-02-11 grid-meter sweep,
+#                  corroborated at its top end on 2026-10-10 by `dtsu_raw -
+#                  grid_power`: 10646 W at 16 A against that sweep's 10623 W,
+#                  agreeing to 0.22 % eight months apart. W/A is not constant
+#                  across the range (642 W/A at 8 A rising to 666 at 15 A), so a
+#                  single factor is a compromise; 659 is within ~1 % at 16 A and
+#                  closer mid-range than the 665 of the 16 A point alone.
+#                  Supersedes 637, which was the midpoint of a *divisor* safe
+#                  range chosen so round(W/637) landed on the right amp — a
+#                  different job from converting amps to watts, and 3.3 % low
+#                  for this one.
 #   1φ = 230 W/A — live single-phase OCPP MeterValues (2026-07-09), linear
-#                  through origin. NOT 637/3 = 212: a single-phase load draws
+#                  through origin. NOT 659/3 = 220: a single-phase load draws
 #                  more per amp than one leg of a 3φ load.
 #   2φ          — mean of the two, for a rare/transitional two-phase draw.
-# ---------------------------------------------------------------------------
-WATTS_PER_AMP = {1: 230, 2: 434, 3: 637}
+WATTS_PER_AMP = {1: 230, 2: 444, 3: 659}
 
 
 def watts_per_amp(num_phases: int) -> int:
