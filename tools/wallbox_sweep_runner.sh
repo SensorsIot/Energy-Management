@@ -63,8 +63,10 @@ for i in 1 2 3; do
   [ "${d%.*}" = 0 ] && [ "${c%.*}" = 0 ] && break
 done
 
-echo "--- sweep 6-16 A ---"
-cd /home/dev/wallbox-sweep && python3 -u wallbox_calibration_sweep.py 6 16
+FIRST=${1:-6}
+LAST=${2:-16}
+echo "--- sweep ${FIRST}-${LAST} A ---"
+cd /home/dev/wallbox-sweep && python3 -u wallbox_calibration_sweep.py "$FIRST" "$LAST"
 
 # Push the headline to Telegram, so the result arrives without anyone having to
 # log in and read the log. The acceptance question is the error column: does

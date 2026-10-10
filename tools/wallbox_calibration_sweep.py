@@ -10,11 +10,12 @@ meters, so it yields both calibrations the OCPP server needs:
 The true draw comes from an energy balance over meters that do not involve the
 wallbox, so it is independent of the figure being checked:
 
-    true_ev = (PV - grid - battery) - house
+    car = (-grid_power) - dtsu_raw
 
-`sensor.house_load_power` is a Shelly 3EM clamp on the house circuits, separate
-from the wallbox, so the balance is not circular. Validated on 2026-10-04: over
-three wallbox-idle windows it closed to -35 / +15 / -30 W.
+Only the EBL meter sees the car; the DTSU does not. Everything else — house load,
+PV and the battery — is common to both and cancels exactly, so none of them has to
+be measured and none can disturb the result. That is why a daylight run is valid
+for this quantity even though the four-term balance it replaced was not.
 
 **Run it at night.** PV is the dominant noise term; with PV at zero and the house
 at its most stable the balance reduces to `-grid - house`. Charging from the grid
@@ -220,7 +221,18 @@ def collect(n: int) -> tuple[list[dict], int]:
             avg["phase_a_list"] = phase_a
             # Both meters describe the same interval: the EBL value read now, and
             # the fast meters averaged over the interval leading up to it.
-            avg["car_w"] = avg["dtsu_raw_w"] - grid_w
+            #
+            # The two meters use OPPOSITE conventions: grid_power is
+            # negative-for-import, dtsu is positive-for-import. So the car — which
+            # only the EBL sees — is (-grid) - dtsu. Verified live 2026-10-10 on a
+            # 3-phase charge: -(-11245) - 471 = 10774 W against the independent
+            # four-term balance's 10791 W, agreeing within 17 W.
+            #
+            # Getting this wrong returned car + 2*house instead of car, and the
+            # idle reference then measured 2*house rather than nothing. That is
+            # what the unexplained -479 W and +396 W "meter offsets" were, and why
+            # they moved between nights: the house load differed.
+            avg["car_w"] = -grid_w - avg["dtsu_raw_w"]
             avg["balance_w"] = (avg["pv_w"] - grid_w - avg["battery_w"]) - avg["house_w"]
             avg["wb_reports"] = len(wb_stamps)
             samples.append(avg)
