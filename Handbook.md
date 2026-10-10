@@ -126,16 +126,15 @@ by day, all of them verified on 2026-10-07:
 | PV running | The EBL per-phase currents are **net** magnitudes, so PV on the car's phase subtracts from them |
 | The home battery moving | Adds a term the subtraction cannot see |
 
-The sweep is **paced by the EBL meter**, which reports only every ~16 s while the DTSU runs near
-1 Hz. It counts a sample only when the meter's timestamp advances — specifically `last_reported`,
-never `last_changed`. A steady load makes the meter publish the same rounded watt value repeatedly
-(on 2026-10-09 it sent −1668 W five times running), and `last_changed` does not move for those: pacing
-on it stalls and looks exactly like a dead meter. The same applies to `sensor.wallbox_power` when
-counting how many reports back a step.
+**Do not pace on the EBL meter "reporting" — Home Assistant exposes no signal for it.** Measured
+2026-10-10: `sensor.grid_power` sat at −11245.0 W with **both** `last_changed` and `last_reported`
+frozen for 138 s while the meter was publishing every ~16 s. `last_reported` advances only when the
+*value* changes, so it cannot tell a quiet meter from a steady one. Two nights were lost waiting for
+a report that never came.
 
-**A stalled step skips; it does not end the run.** On 2026-10-09 one stall killed a two-hour sweep
-after 19 minutes and produced nothing. Only a failed *idle reference* aborts, since every step is
-corrected by it. Sampling on a wall clock instead
+The sweep therefore samples on a **fixed 20 s cadence** and reports how many distinct EBL values and
+wallbox reports each step actually saw. A step showing one EBL value is not wrong — a perfectly
+steady load genuinely reads the same — but the evidence is then visible rather than assumed. Sampling on a wall clock instead
 re-reads a stale value: a contaminated run reported `sd 15 W` at 16 A while being 476 W wrong,
 because all six samples were the same number.
 
@@ -151,10 +150,10 @@ because all six samples were the same number.
 reading is the quantity being calibrated. Measured 2026-10-08, it reports MeterValues on a
 rock-steady **60 s** (`02:03:19`, `02:04:19`, `02:05:19`, …) against the EBL meter's ~16 s.
 
-| | EBL reports | ≈ time | wallbox reports |
-|---|---:|---:|---:|
-| Settle after a step change | 10 | 160 s | 2–3 at the new level |
-| Sample | 25 | 400 s | **6–7** |
+| | | wallbox reports |
+|---|---:|---:|
+| Settle after a step change | 170 s | 2–3 at the new level |
+| Sample | 20 × 20 s = 400 s | **6–7** |
 
 Sampling is sized so one bad wallbox report is a seventh of the evidence rather than a quarter. The
 result table carries the standard error of each step's mean **and the number of wallbox reports

@@ -79,38 +79,23 @@ GRID_PHASE_CURRENT_ENTITIES = (
 # and at 16 A the power cross-check gives 3548 W / 232 V / 1.50 = 10.2.
 GRID_PHASE_CURRENT_SCALE = 10.0
 
-# The EBL meter is the clock. It reports only every ~16 s (measured 2026-10-07:
-# mean 16.5 s, range 14.6-19.9 s) while the DTSU runs at about 1 Hz — 250x apart.
-# Sampling on a wall clock therefore re-reads a stale EBL value and makes a step
-# look far steadier than it is: a 2026-10-07 run reported sd 15 W at 16 A and was
-# still 476 W wrong, because all six "samples" were the same stale reading.
-# So: poll fast, but only count a sample when the EBL has actually reported, and
-# pair it with the mean of the DTSU readings taken across that same interval.
-POLL_INTERVAL_S = 1.0
-# Dwell long enough on each step to have real evidence for it. The night is
-# long and samples are free, so nothing here is sized to finish quickly.
+# Pacing. Do NOT block on the EBL meter "reporting": Home Assistant exposes no
+# usable signal for that. Measured 2026-10-10, sensor.grid_power sat at
+# -11245.0 W with BOTH last_changed and last_reported frozen for 138 s while the
+# meter was publishing every ~16 s — last_reported advances only when the value
+# changes, so it cannot distinguish a quiet meter from a steady one. Two nights
+# were lost waiting for a report that never came.
 #
-# The binding cadence is not the EBL meter but the WALLBOX, which reports
-# MeterValues only about once a minute — and the wallbox reading is the quantity
-# being calibrated. A step therefore has to span several of its reports, or the
-# figure is one meter sample dressed up as an average.
-# The wallbox cadence was measured on 2026-10-08 and is a rock-steady 60 s
-# (02:03:19, 02:04:19, 02:05:19, ...). The EBL meter runs at ~16 s. So:
-#   settle  10 EBL reports ~160 s  -> the wallbox reports 2-3 times at the new
-#                                     level before anything is counted
-#   sample  25 EBL reports ~400 s  -> 6-7 independent wallbox reports, so one
-#                                     bad report is a seventh of the evidence
-#                                     rather than a quarter of it
-# The reported count is carried per step, so a thin step is visible.
-EBL_SAMPLES_PER_STEP = 25
-EBL_SETTLE_SAMPLES = 10
-# The idle reference needs longer than a step change. The car may have been
-# charging hard right up to the start, and the wallbox only reports MeterValues
-# about once a minute, so a short wait measures a car that is still winding down.
-# On 2026-10-08 a 2-report wait produced a -479 W idle offset that was never
-# explained, and every step is corrected by it.
-EBL_IDLE_SETTLE_SAMPLES = 10
-EBL_TIMEOUT_S = 150           # give up if the meter really goes quiet
+# The fix is to stop needing one. If the EBL value is constant, reading it again
+# is not stale data — the value simply is the value. Staleness only matters
+# across a change, and a change always shows up. So: sample on a fixed cadence,
+# and report how many distinct EBL values and wallbox reports a step actually
+# saw, so thin evidence is visible rather than assumed away.
+POLL_INTERVAL_S = 1.0
+SAMPLE_EVERY_S = 20.0         # a little over the EBL's ~16 s publish interval
+SAMPLES_PER_STEP = 20         # ~400 s, so 6-7 wallbox reports at its 60 s cadence
+SETTLE_S = 170.0              # ~3 wallbox reports at the new level before counting
+IDLE_SETTLE_S = 190.0         # longer: the car may have been charging until now
 STATUS_WAIT_TRIES = 6
 STATUS_WAIT_S = 5
 
@@ -210,71 +195,47 @@ def read_grid() -> tuple[float, str, list[float]]:
 
 
 def collect(n: int) -> tuple[list[dict], int]:
-    """Gather n samples, each paced by a real EBL report.
+    """Take n samples on a fixed cadence, averaging the fast meters across each.
 
-    Polls at POLL_INTERVAL_S, accumulating the fast meters. When the EBL's
-    timestamp advances, that whole accumulation becomes one sample: the new EBL
-    value paired with the mean of the fast meters across the interval it covers.
-
-    Returns (samples, skipped) where skipped counts EBL reports that arrived with
-    no fast readings behind them.
+    Returns (samples, ebl_updates) where ebl_updates is how many distinct EBL
+    values were seen. A step where that is 1 is not wrong — a perfectly steady
+    load genuinely reads the same — but it means the EBL side contributed one
+    independent number, so it is reported rather than hidden.
     """
-    samples, skipped = [], 0
-    _, last_stamp, _ = read_grid()
+    samples: list[dict] = []
+    ebl_values: list[float] = []
+    wb_stamps: set[str] = set()
     pending: list[dict] = []
-    # Distinct wallbox readings seen. This is the real measure of how much
-    # independent evidence a step has, since the wallbox updates ~60 s.
-    seen_wb: set[str] = set()
-    deadline = time.monotonic() + EBL_TIMEOUT_S
+    next_sample = time.monotonic() + SAMPLE_EVERY_S
     while len(samples) < n:
-        if time.monotonic() > deadline:
-            raise RuntimeError(
-                f"no EBL report in {EBL_TIMEOUT_S}s — the meter is genuinely quiet"
-            )
         fast = read_fast()
         pending.append(fast)
-        seen_wb.add(fast["wallbox_stamp"])
-        grid_w, stamp, phase_a = read_grid()
-        if stamp != last_stamp:
-            last_stamp = stamp
-            deadline = time.monotonic() + EBL_TIMEOUT_S
-            if not pending:
-                skipped += 1
-                continue
+        wb_stamps.add(fast["wallbox_stamp"])
+        if time.monotonic() >= next_sample:
+            grid_w, _stamp, phase_a = read_grid()
+            ebl_values.append(grid_w)
             numeric = [k for k, v in pending[0].items() if isinstance(v, float)]
             avg = {k: statistics.fmean(x[k] for x in pending) for k in numeric}
             avg["grid_w"] = grid_w
             avg["phase_a_list"] = phase_a
-            # The whole point: both meters now describe the same interval.
-            # Both use negative = import, so the car is dtsu - grid: the EBL sees
-            # the car, the DTSU does not, and everything else is common to both.
+            # Both meters describe the same interval: the EBL value read now, and
+            # the fast meters averaged over the interval leading up to it.
             avg["car_w"] = avg["dtsu_raw_w"] - grid_w
-            # Kept only as a cross-check on the subtraction above.
             avg["balance_w"] = (avg["pv_w"] - grid_w - avg["battery_w"]) - avg["house_w"]
-            avg["wb_reports"] = len(seen_wb)
+            avg["wb_reports"] = len(wb_stamps)
             samples.append(avg)
             pending = []
+            next_sample = time.monotonic() + SAMPLE_EVERY_S
         time.sleep(POLL_INTERVAL_S)
-    return samples, skipped
+    return samples, len({round(v) for v in ebl_values})
 
 
-def settle(n: int) -> None:
-    """Discard n EBL reports, so the step is fully established before sampling."""
-    _, last_stamp, _ = read_grid()
-    seen = 0
-    deadline = time.monotonic() + EBL_TIMEOUT_S
-    while seen < n:
-        if time.monotonic() > deadline:
-            raise RuntimeError(
-                f"no EBL report in {EBL_TIMEOUT_S}s — the meter is genuinely quiet"
-            )
-        time.sleep(POLL_INTERVAL_S)
-        _, stamp, _ = read_grid()
-        if stamp != last_stamp:
-            last_stamp = stamp
-            seen += 1
-            deadline = time.monotonic() + EBL_TIMEOUT_S
-            print(".", end="", flush=True)
+def settle(seconds: float) -> None:
+    """Wait for the wallbox and the meters to reflect a change, with progress."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        time.sleep(10)
+        print(".", end="", flush=True)
 
 
 def mean(samples: list[dict], key: str) -> float:
@@ -325,11 +286,8 @@ def main() -> None:
     print(f"\nSweeping {first}-{last} A on {phases} phase(s). Ctrl-C restores 0 A.")
     print("Idle reference (waiting for the car to actually stop)", end="", flush=True)
     ha_set_state(CURRENT_LIMIT_ENTITY, "0")
-    try:
-        settle(EBL_IDLE_SETTLE_SAMPLES)
-        idle, _ = collect(EBL_SAMPLES_PER_STEP)
-    except RuntimeError as exc:
-        raise SystemExit(f"Cannot establish an idle reference: {exc}") from exc
+    settle(IDLE_SETTLE_S)
+    idle, idle_ebl_updates = collect(SAMPLES_PER_STEP)
     idle_car = mean(idle, "car_w")
     idle_sd = statistics.pstdev([x["car_w"] for x in idle])
     idle_phase: list[float] | None = None
@@ -353,11 +311,7 @@ def main() -> None:
     for amps in range(first, last + 1):
         ha_set_state(CURRENT_LIMIT_ENTITY, str(amps))
         print(f"  {amps:>2} A settling", end="", flush=True)
-        try:
-            settle(EBL_SETTLE_SAMPLES)
-        except RuntimeError as exc:
-            print(f"  {exc} — aborting")
-            break
+        settle(SETTLE_S)
         status = ha_get(WALLBOX_STATUS_ENTITY)
         for _ in range(STATUS_WAIT_TRIES):
             if status == "Charging":
@@ -369,14 +323,7 @@ def main() -> None:
             print(f"      skipped — wallbox is {status}, not Charging")
             continue
 
-        try:
-            samples, _ = collect(EBL_SAMPLES_PER_STEP)
-        except RuntimeError as exc:
-            # One stalled step must not cost the whole run. On 2026-10-09 a
-            # RuntimeError here killed a two-hour sweep after 19 minutes and
-            # produced no data at all.
-            print(f"      skipped — {exc}")
-            continue
+        samples, ebl_updates = collect(SAMPLES_PER_STEP)
         car = mean(samples, "car_w") - idle_car
         sd = statistics.pstdev([x["car_w"] for x in samples])
         if sd > MAX_STEP_SD_W:
@@ -387,6 +334,7 @@ def main() -> None:
         row = {
             "amps": amps, "true_w": car, "sd": sd, "n": len(samples),
             "sem": sem, "wb_reports": samples[-1].get("wb_reports", 0),
+            "ebl_updates": ebl_updates,
             "meter_w": mean(samples, "wallbox_w"),
             "balance_w": mean(samples, "balance_w"),
         }
@@ -406,7 +354,8 @@ def main() -> None:
         results.append(row)
         print(f"{amps:>3} | {car:>7.0f} {sd:>4.0f} {len(samples):>2} "
               f"| {car / amps:>6.1f} | {row['meter_w']:>8.0f}{extra}"
-              f"   (±{sem:.0f} W, {row['wb_reports']} wallbox reports)")
+              f"   (±{sem:.0f} W, {row['wb_reports']} wb reports, "
+              f"{ebl_updates} EBL values)")
 
     # Re-measure the idle offset now the sweep is over. It is subtracted from every
     # step, so if it has moved the whole run is suspect — and comparing the two is
@@ -414,21 +363,18 @@ def main() -> None:
     # winding down when the first reference was taken.
     print("\nIdle reference again", end="", flush=True)
     ha_set_state(CURRENT_LIMIT_ENTITY, "0")
-    try:
-        settle(EBL_IDLE_SETTLE_SAMPLES)
-        idle2, _ = collect(EBL_SAMPLES_PER_STEP)
-        idle2_car = mean(idle2, "car_w")
-        drift = idle2_car - idle_car
-        print(f"\n  start {idle_car:+.0f} W, end {idle2_car:+.0f} W, drift {drift:+.0f} W")
-        if abs(drift) > 50:
-            print("  WARNING: the idle offset moved by more than 50 W. Every step is "
-                  "corrected by\n  it, so treat the absolute figures below as suspect "
-                  "— the ratios are still good.")
-        else:
-            print("  The offset held, so it is a real difference between the two meters "
-                  "and not\n  a car still winding down.")
-    except RuntimeError as exc:
-        print(f"\n  could not re-measure: {exc}")
+    settle(IDLE_SETTLE_S)
+    idle2, _ = collect(SAMPLES_PER_STEP)
+    idle2_car = mean(idle2, "car_w")
+    drift = idle2_car - idle_car
+    print(f"\n  start {idle_car:+.0f} W, end {idle2_car:+.0f} W, drift {drift:+.0f} W")
+    if abs(drift) > 50:
+        print("  WARNING: the idle offset moved by more than 50 W. Every step is "
+              "corrected by\n  it, so treat the absolute figures below as suspect "
+              "— the ratios are still good.")
+    else:
+        print("  The offset held, so it is a real difference between the two meters "
+              "and not\n  a car still winding down.")
 
     restore("0")
 
@@ -456,13 +402,13 @@ def main() -> None:
     # correction, so it has to match the real power. Everything else is support.
     print("\nDoes sensor.wallbox_power match the real power? (the control-loop signal)")
     print(f"\n{'A':>3} | {'real W':>7} {'±sem':>5} | {'reported W':>10} "
-          f"| {'error W':>8} {'error %':>8} | {'wb reps':>8} | {'balance W':>9}")
+          f"| {'error W':>8} {'error %':>8} | {'wb reps':>8} {'ebl':>4} | {'balance W':>9}")
     print("-" * 86)
     for r in results:
         err = r["meter_w"] - r["true_w"]
         print(f"{r['amps']:>3} | {r['true_w']:>7.0f} {r['sem']:>5.0f} "
               f"| {r['meter_w']:>10.0f} | {err:>+8.0f} {err / r['true_w'] * 100:>+7.1f}% "
-              f"| {r['wb_reports']:>8} | {r['balance_w']:>9.0f}")
+              f"| {r['wb_reports']:>8} {r['ebl_updates']:>4} | {r['balance_w']:>9.0f}")
     print("  real W = dtsu_raw - grid (the car, since only the EBL sees it)")
     print("  balance W = independent PV-grid-battery-house cross-check")
 
