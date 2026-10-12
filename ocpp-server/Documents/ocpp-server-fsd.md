@@ -402,7 +402,12 @@ draw. In `external_breaker`/`universal` modes the relay/wallbox owns the phase c
 value is not adopted.
 
 **Persistence, and the unplug reset.** The detected count is held in `sensor.wallbox_phases`, which
-survives add-on restarts and is restored into the server on startup.
+survives add-on restarts and is restored into the server on startup — **along with its `measured`
+attribute**. A count that was measured before a restart is still measured after one: the cable cannot
+change without an unplug, an unplug during the downtime shows up as `Available` on reconnect (which
+resets the assumption), a swapped-in car reconnecting as `Preparing` opens the identify window, and
+one already `Charging` is confirmed by the next MeterValues frame. Discarding the provenance on
+restart reported a false "unknown" after every deploy.
 
 Measuring the count needs current to flow, so a stale count that is too **high** is
 self-defending: at 3 phases the published minimum is `min_current_a × watts_per_amp × 3` (3954 W), no
@@ -815,6 +820,7 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-13 | Full charge cycle | Start → Charge → Pause → Resume → Stop |
 | TC-14 | HA restart with active wallbox | Entities re-registered, state re-synced |
 | TC-15 | Cable-lock switch toggled (§3.6.7) | `LOCK`→`ChangeConfiguration(UnlockConnectorOnEVSideDisconnect, false)`, `UNLOCK`→`true`; state follows on Accepted, reverts on reject/offline; `GetConfiguration` on connect syncs the switch |
+| TC-46 | Provenance survives a restart (§3.6.4.1) | A restored count whose `measured` attribute was `true` is republished as measured; an entity with no attribute restores as assumed |
 | TC-45 | Ramp frames do not settle the count (§3.6.4.1) | One L1-only frame → no adoption and no callback; a second agreeing frame → adopt 1; a frame showing three phases → adopt 3 immediately; alternating frames → nothing adopted |
 | TC-16 | Cable phase detection (§3.6.4.1) | L1-only MeterValues ≥400 W → `active_phases`=1, `sensor.wallbox_phases`=1, watt range→1380–3680 W at 230 W/A, `wallbox_power`=raw; all three phases → 3, 637 W/A, linear correction; below 400 W does not flap; `universal`/`external_breaker` ignore detection |
 | TC-32 | Amp range clamp (§3.6.4) | 20 A → clamped to 16 A on either phase count; 5 A → 0 A (pause); 13 A passes through unchanged |
@@ -895,6 +901,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.35 | 2026-10-12 | **The `measured` provenance survives a restart (§3.6.4.1).** 3.32 republished every restored count as assumed, reasoning that the cable might have been swapped while the add-on was down. In practice that reported a false "unknown" after every deploy: on 2026-10-12 the wallbox reported `SuspendedEVSE` straight through a restart — the car never disconnected and the cable demonstrably had not changed — yet the dashboard showed `?` for the phase count. The attribute is now restored with the count. The cases the old reasoning worried about are all still covered: an unplug during the downtime reconnects as `Available` and resets the assumption, a swapped-in car reconnects as `Preparing` and opens the identify window, and one already `Charging` is confirmed by the next frame. New `HAEntityManager.get_attributes`. TC-46. ocpp-server 0.9.86 → 0.9.87; tests 190 → 192. |
 | 3.34 | 2026-10-12 | **A phase count below three now needs two consecutive agreeing frames (§3.6.4.1).** The detector adopted the first frame clearing the 400 W total-power gate, but a car brings its phases up one at a time and the first phase alone clears that gate. On 2026-10-12 a 3-phase cable commanded 6 A produced L1 6.07 A / 1412 W with L2 and L3 at zero — indistinguishable from a settled single-phase draw at 6 A (1380 W), since the gate is on *total* power. The detector concluded 1-phase, the identify window closed on that, and the correction to 3 arrived six minutes later. Three active phases stays conclusive on the first frame, because a ramp never shows more phases than the cable has; fewer than three now requires `PHASE_CONFIRM_FRAMES` (2) in a row, adding about one report cycle. A flapping count is never adopted. TC-45. ocpp-server 0.9.85 → 0.9.86; tests 188 → 190. |
 | 3.33 | 2026-10-12 | **`UnlockConnector` is not exposed; the cable control is one toggle (§3.6.7).** 3.31 added `button.wallbox_unlock_connector` on the theory that a cable which will not release needs the momentary message. The requirement was simpler: one button, tapped to change state, with the icon colour as feedback — which the existing switch already did. The button and its MQTT discovery are removed and the retained discovery topic cleared. `ChargePointHandler.unlock_connector()` stays as an available protocol primitive, unexposed, as it was before 3.31. TC-44 withdrawn. ocpp-server 0.9.85 → 0.9.86; tests 193 → 188. |
 | 3.32 | 2026-10-12 | **All four paths that publish the phase count now carry its provenance (§3.6.4.1).** 0.9.84 routed only the unplug reset and the detection through the publisher; the startup restore and the HA-state resync still wrote the entity directly, so after an HA restart `sensor.wallbox_phases` came back with `measured` absent — observed live. The resync and the restore now publish through it (a restored count is `measured: false`: the cable may have been swapped while the add-on was down), and on a switchable wallbox the relay position *is* the count, so that path is `measured: true`. The resync clears the dedup cache first, since an HA restart removes the entity and a suppressed write would leave it missing. A test asserts zero direct writes to the entity remain, so no future path can drop the attribute silently. ocpp-server 0.9.84 → 0.9.85; tests 189 → 193. |
