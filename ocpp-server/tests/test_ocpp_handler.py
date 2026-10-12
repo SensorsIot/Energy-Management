@@ -2249,16 +2249,19 @@ class TestPhaseProvenance:
         """A count measured before a restart is still measured after one.
 
         Regression for 2026-10-12: every deploy republished the restored count as
-        assumed, so the dashboard showed "?" for the phase count while the car
-        sat connected and the cable demonstrably had not changed — the wallbox
-        reported SuspendedEVSE straight through the restart.
+        assumed, so the dashboard showed "?" while the car sat connected and the
+        cable demonstrably had not changed — the wallbox reported SuspendedEVSE
+        straight through the restart.
+
+        Calls the real restore path. An earlier version of this test mocked
+        `get_attributes` and then reimplemented the restore inline, so it passed
+        against code where the method did not exist at all.
         """
         server.ha.get_state = AsyncMock(return_value="3")
         server.ha.get_attributes = AsyncMock(return_value={"measured": True})
-        server.wallbox_type = "three_phase"
-        attrs = await server.ha.get_attributes("sensor.wallbox_phases")
-        server._current_phases = int(await server.ha.get_state("sensor.wallbox_phases"))
-        server._phases_measured = attrs.get("measured") is True
+        await server._restore_phases_from_ha()
+        assert server._current_phases == 3
+        assert server._phases_measured is True
         await server._publish_phases()
         call = server.ha.set_state.await_args
         assert call.args == ("sensor.wallbox_phases", 3)
@@ -2266,12 +2269,29 @@ class TestPhaseProvenance:
 
     @pytest.mark.asyncio
     async def test_absent_provenance_restores_as_assumed(self, server) -> None:
-        """An entity with no attribute (first ever run) is not claimed measured."""
+        """An entity with no attribute, as on a first-ever run, is not claimed."""
+        server.ha.get_state = AsyncMock(return_value="1")
         server.ha.get_attributes = AsyncMock(return_value={})
-        attrs = await server.ha.get_attributes("sensor.wallbox_phases")
-        server._phases_measured = attrs.get("measured") is True
-        await server._publish_phases()
-        assert server.ha.set_state.await_args.kwargs["attributes"]["measured"] is False
+        await server._restore_phases_from_ha()
+        assert server._phases_measured is False
+
+    @pytest.mark.asyncio
+    async def test_a_missing_entity_leaves_the_count_alone(self, server) -> None:
+        server._current_phases = 3
+        server.ha.get_state = AsyncMock(return_value=None)
+        await server._restore_phases_from_ha()
+        assert server._current_phases == 3
+
+    def test_the_restore_reads_attributes_from_the_real_client(self) -> None:
+        """HAEntityManager must actually implement get_attributes.
+
+        The method is only ever reached through a mocked `ha` in these tests, so
+        assert it exists on the real class — that is what the first version of
+        this suite failed to catch.
+        """
+        from run import HAEntityManager
+
+        assert callable(getattr(HAEntityManager, "get_attributes", None))
 
     def test_no_path_writes_the_entity_directly(self) -> None:
         """All writes go through _publish_phases, or the attribute is lost."""

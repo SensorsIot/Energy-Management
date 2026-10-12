@@ -153,6 +153,20 @@ class HAEntityManager:
             logger.error(f"Error getting {entity_id}: {e}")
             return None
 
+    async def get_attributes(self, entity_id: str) -> dict:
+        """Get an entity's attributes, or {} if it is missing or unreadable."""
+        if not self._session:
+            return {}
+        url = f"{self.url}/states/{entity_id}"
+        try:
+            async with self._session.get(url, headers=self._headers) as resp:
+                if resp.status != 200:
+                    return {}
+                return (await resp.json()).get("attributes") or {}
+        except Exception as e:                                     # noqa: BLE001
+            logger.error(f"Error getting attributes of {entity_id}: {e}")
+            return {}
+
     async def call_service(self, domain: str, service: str, data: dict) -> bool:
         """Call HA service via POST /api/services/{domain}/{service}."""
         if not self._session:
@@ -803,6 +817,28 @@ class OCPPServer:
         # nothing further is needed here. Hand control straight back so the
         # consumer's own limit is re-applied rather than leaving 6 A commanded.
         await self._apply_current_power_limit()
+
+    async def _restore_phases_from_ha(self) -> None:
+        """Restore the phase count **and its provenance** from HA on startup.
+
+        A count that was measured before a restart is still measured after one:
+        the cable cannot change without an unplug, and every way it could have
+        changed while the add-on was down is already covered — an unplug
+        reconnects as `Available` and resets the assumption, a swapped-in car
+        reconnects as `Preparing` and opens the identify window, and one already
+        `Charging` is confirmed by the next MeterValues frame. Discarding the
+        provenance here reported a false "unknown" after every deploy.
+        """
+        persisted = await self.ha.get_state("sensor.wallbox_phases")
+        if persisted not in ("1", "3"):
+            return
+        self._current_phases = int(persisted)
+        attrs = await self.ha.get_attributes("sensor.wallbox_phases")
+        self._phases_measured = attrs.get("measured") is True
+        logger.info(
+            f"Restored cable phase count from HA: {self._current_phases}φ "
+            f"({'measured' if self._phases_measured else 'assumed'})"
+        )
 
     async def _publish_phases(self, *, measured: bool | None = None) -> None:
         """Publish the phase count and whether it was measured or assumed.
@@ -1716,17 +1752,10 @@ class OCPPServer:
             # behind the published 3-phase minimum: EnergyManager won't start a
             # charge from moderate surplus, so the car never draws and detection
             # (§3.6.4.1) can never re-confirm single-phase — a bootstrap deadlock.
-            persisted = await self.ha.get_state("sensor.wallbox_phases")
-            if persisted in ("1", "3"):
-                self._current_phases = int(persisted)
-                logger.info(
-                    f"Restored cable phase count from HA: {self._current_phases}φ"
-                )
+            await self._restore_phases_from_ha()
 
-        # A restored count is an assumption: the cable could have been swapped
-        # while the add-on was down. The identify window on the next plug-in, or
-        # the next qualifying MeterValues frame, promotes it to measured.
-        await self._publish_phases(measured=False)
+        # Publish the restored count with the provenance it was restored with.
+        await self._publish_phases()
 
         # Publish initial min/max power limits based on current phase count
         await self._publish_power_limits()
