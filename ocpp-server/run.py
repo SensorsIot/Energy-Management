@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.81"
+__version__ = "0.9.82"
 
 import asyncio
 import json
@@ -1100,6 +1100,20 @@ class OCPPServer:
                 limit_a = 0
 
         if limit_a > 0 and self.charge_point.transaction_id is None:
+            # No car, no start. `Available` means the connector is empty, so a
+            # RemoteStartTransaction cannot succeed — and attempting it anyway
+            # spends a rung of the escalating back-off on a certain failure.
+            #
+            # Observed 2026-10-12 on a cable swap: the control loop re-entered
+            # this path in the same second the unplug was reported, fired attempt
+            # 1 against no car, and burned the 60 s rung. The first genuine
+            # attempt four seconds later — with the new cable in — was therefore
+            # charged the 300 s rung, delaying charging by five minutes.
+            if self.charge_point.current_status == "Available":
+                logger.debug(
+                    "Connector is Available (no car) — not attempting a start"
+                )
+                return
             # No transaction yet — one start attempt, then back off (FSD 3.5.1).
             if not self._start_attempt_due():
                 since = time.monotonic() - self._last_start_attempt_at

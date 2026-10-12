@@ -2203,6 +2203,62 @@ class TestStateResyncPublishesTheFactor:
         server.ha.set_state.assert_any_call("sensor.wallbox_power_limit", 6590)
 
 
+class TestNoStartWithoutACar:
+    """`Available` means an empty connector, so no start may be attempted.
+
+    Attempting one cannot succeed and spends a rung of the escalating back-off
+    (FSD 3.5.1) on a certain failure.
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {"wallbox_id": "test", "wallbox_type": "three_phase",
+             "min_current_a": 6, "max_current_a": 16}
+        )
+        srv.ha = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        cp = MagicMock()
+        cp.transaction_id = None
+        cp.current_power_w = 0
+        cp.set_charging_current = AsyncMock()
+        cp.remote_start = AsyncMock(return_value=True)
+        srv.charge_point = cp
+        srv.PROFILE_SETTLE_S = 0
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_no_start_attempt_while_available(self, server) -> None:
+        server.charge_point.current_status = "Available"
+        await server._send_current_to_wallbox(16)
+        server.charge_point.remote_start.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_available_does_not_consume_a_backoff_rung(self, server) -> None:
+        """The regression: a doomed attempt at unplug cost the 60 s rung, so the
+        first genuine attempt four seconds later was charged 300 s — a five
+        minute delay on a cable swap.
+        """
+        server.charge_point.current_status = "Available"
+        await server._send_current_to_wallbox(16)
+        assert server._start_retry_count == 0
+        assert server._last_start_attempt_at == 0.0
+        assert server._current_start_backoff == server.START_BACKOFF_INTERVALS[0]
+
+    @pytest.mark.asyncio
+    async def test_preparing_still_attempts(self, server) -> None:
+        """A car present but not yet drawing is exactly when a start is wanted."""
+        server.charge_point.current_status = "Preparing"
+        with patch("run.asyncio.wait_for", new=AsyncMock()):
+            await server._send_current_to_wallbox(16)
+        server.charge_point.remote_start.assert_awaited()
+
+
 class TestPhaseAssumptionOnUnplug:
     """A cable swap must be able to recover (FSD 3.6.4.1).
 
