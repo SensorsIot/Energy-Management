@@ -2203,6 +2203,150 @@ class TestStateResyncPublishesTheFactor:
         server.ha.set_state.assert_any_call("sensor.wallbox_power_limit", 6590)
 
 
+class TestPhaseAssumptionOnUnplug:
+    """A cable swap must be able to recover (FSD 3.6.4.1).
+
+    The phase count is measured, and measuring needs current to flow. A stale
+    count that is too high makes that impossible: at 3 phases the published
+    minimum is 3954 W, no consumer commands current below it, and a 1-phase cable
+    can never draw that much. Observed 2026-10-12: a 1-phase cable sat idle
+    through 3.5 kW of surplus because the threshold was still 4254 W.
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {"wallbox_id": "test", "wallbox_type": "three_phase",
+             "min_current_a": 6, "max_current_a": 16}
+        )
+        srv.ha = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        cp = MagicMock()
+        cp.transaction_id = None
+        cp.current_status = "Available"
+        cp.current_power_w = 0
+        cp.set_charging_current = AsyncMock()
+        srv.charge_point = cp
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_unplug_falls_back_to_one_phase(self, server) -> None:
+        server._current_phases = 3
+        server._on_status_change("status", "Available")
+        await asyncio.sleep(0)
+        assert server._current_phases == 1
+        server.ha.set_state.assert_any_call("sensor.wallbox_phases", 1)
+        server.ha.set_state.assert_any_call("sensor.wallbox_min_power_w", 1380)
+
+    @pytest.mark.asyncio
+    async def test_unplug_costs_no_wallbox_write(self, server) -> None:
+        """A SetChargingProfile is an EEPROM write; the fallback must not spend one.
+
+        There is nothing to command at an unplug — the next real command comes
+        from the consumer once a car is back.
+        """
+        server._current_phases = 3
+        server._on_status_change("status", "Available")
+        await asyncio.sleep(0)
+        server.charge_point.set_charging_current.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unplug_is_a_noop_when_already_one_phase(self, server) -> None:
+        server._current_phases = 1
+        server.ha.set_state.reset_mock()
+        server._on_status_change("status", "Available")
+        await asyncio.sleep(0)
+        phase_writes = [
+            c for c in server.ha.set_state.call_args_list
+            if c.args[0] == "sensor.wallbox_phases"
+        ]
+        assert phase_writes == []
+
+    @pytest.mark.asyncio
+    async def test_switchable_wallbox_keeps_its_phase_count(self, server) -> None:
+        """Only `three_phase` infers the count from the cable (FSD 3.6.4)."""
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "t", "wallbox_type": "universal"})
+        srv.ha = AsyncMock()
+        srv._current_phases = 3
+        srv._assume_single_phase_on_unplug()
+        assert srv._current_phases == 3
+
+
+class TestPhaseProbeFallback:
+    """The probe (A) only runs when the 1-phase assumption (B) cannot converge.
+
+    B needs current to flow so the detector has something to measure. If a
+    commanded car draws nothing at all, there is nothing to measure and the count
+    stays at its assumption — that is the only gap, and the probe fills it at the
+    cost of one EEPROM write.
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {"wallbox_id": "test", "wallbox_type": "three_phase",
+             "min_current_a": 6, "max_current_a": 16}
+        )
+        srv.ha = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.current_status = "Charging"
+        cp.current_power_w = 0
+        cp.set_charging_current = AsyncMock()
+        cp.trigger_meter_values = AsyncMock()
+        srv.charge_point = cp
+        srv.PROFILE_SETTLE_S = 0
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_probe_commands_the_one_phase_minimum(self, server) -> None:
+        """6 A on one phase: safe on either cable, and enough to force a reading."""
+        await server._maybe_probe_phases()
+        server.charge_point.set_charging_current.assert_any_await(
+            6, num_phases=1, force=True
+        )
+        server.charge_point.trigger_meter_values.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_probe_hands_control_back(self, server) -> None:
+        """It must not leave 6 A commanded — the consumer's limit is re-applied."""
+        server.ha.get_state = AsyncMock(return_value="12")
+        await server._maybe_probe_phases()
+        assert server.charge_point.set_charging_current.await_args.args[0] == 12
+
+    @pytest.mark.asyncio
+    async def test_probe_respects_its_cooldown(self, server) -> None:
+        await server._maybe_probe_phases()
+        server.charge_point.set_charging_current.reset_mock()
+        await server._maybe_probe_phases()
+        server.charge_point.set_charging_current.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_probe_skipped_on_a_switchable_wallbox(self, server) -> None:
+        server.wallbox_type = "universal"
+        await server._maybe_probe_phases()
+        server.charge_point.set_charging_current.assert_not_called()
+
+    def test_threshold_exceeds_the_cars_legitimate_idle(self, server) -> None:
+        """A car in Preparing draws 0 for up to ~7 min legitimately (FSD 5.1), so
+        the probe must wait longer than that before concluding anything is wrong.
+        """
+        assert server.PHASE_PROBE_AFTER_CYCLES * 60 > 7 * 60
+
+
 class TestCableLockCommands:
     """OCPP commands backing the cable lock/unlock switch."""
 

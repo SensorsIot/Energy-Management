@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.80"
+__version__ = "0.9.81"
 
 import asyncio
 import json
@@ -256,6 +256,11 @@ class OCPPServer:
         # Phase switching state
         self._current_phases = 3
         self._phase_switching_disabled = False
+        # Phase-probe fallback (see _maybe_probe_phases). Counts consecutive
+        # control cycles where the car is plugged in, a current is commanded, and
+        # yet no current is flowing — the only situation B cannot resolve.
+        self._phase_probe_cycles = 0
+        self._phase_probe_done_at: float = 0.0
         self._last_sent_a: int = 0           # amps last commanded (post-clamp)
         self._last_requested_a: int = 0      # amps asked for (pre-clamp HA value)
         self._last_measured_power_w: float = 0.0   # calibrated measured draw (proxy handoff)
@@ -707,9 +712,10 @@ class OCPPServer:
 
             # Car unplugged — the next plug-in deserves an immediate start
             # attempt, not the back-off left over from the previous car
-            # (FSD 3.5.1).
+            # (FSD 3.5.1), and the cable may be a different one.
             if value == "Available":
                 self._reset_start_backoff()
+                self._assume_single_phase_on_unplug()
 
             # SuspendedEV cloud correction: start/stop polling
             if value == "SuspendedEVSE" and self._last_sent_a > 0:
@@ -725,6 +731,95 @@ class OCPPServer:
                     self._cloud_poll_task.cancel()
                     self._cloud_poll_task = None
                 self._synthesized_suspended_ev = False
+
+    # The fallback probe (A) only earns its keep when the permissive assumption
+    # (B) cannot converge, so it is gated hard:
+    #   - the car must be plugged in and a current commanded,
+    #   - yet nothing is drawing, for this many consecutive cycles.
+    # The control loop runs every ~60 s, so 8 cycles is ~8 minutes of a commanded
+    # car that will not draw. A car in Preparing legitimately draws 0 for up to
+    # ~7 min (§5.1), so the threshold sits just beyond that window.
+    PHASE_PROBE_AFTER_CYCLES = 8
+    # Never probe twice in quick succession.
+    PHASE_PROBE_COOLDOWN_S = 900
+
+    async def _maybe_probe_phases(self) -> None:
+        """Probe the cable when a commanded car stubbornly draws nothing.
+
+        `_assume_single_phase_on_unplug` (B) covers the normal cable swap: 1 phase
+        is reachable on either cable, so current flows and the detector measures
+        the truth. B cannot help when the car does not draw at all — then there is
+        no current to measure and the count stays at its assumption.
+
+        This probe commands the 1-phase minimum (6 A, safe on either cable) and
+        triggers MeterValues, forcing the wallbox to report per-phase current even
+        if the car is passive. It costs one `SetChargingProfile` write, which is
+        why it is a fallback rather than the primary mechanism.
+
+        Does nothing unless `three_phase` — elsewhere the relay or the wallbox owns
+        the phase count (§3.6.4).
+        """
+        if self.wallbox_type != "three_phase" or not self.charge_point:
+            return
+        if time.monotonic() - self._phase_probe_done_at < self.PHASE_PROBE_COOLDOWN_S:
+            return
+        self._phase_probe_done_at = time.monotonic()
+        self._phase_probe_cycles = 0
+        logger.warning(
+            f"Commanded {self._last_sent_a}A but nothing is drawing after "
+            f"{self.PHASE_PROBE_AFTER_CYCLES} cycles — probing the cable's phases "
+            f"at {self.min_current_a}A"
+        )
+        await self.charge_point.set_charging_current(
+            self.min_current_a, num_phases=1, force=True
+        )
+        await asyncio.sleep(self.PROFILE_SETTLE_S)
+        await self.charge_point.trigger_meter_values()
+        # The detector in on_meter_values adopts whatever the wallbox reports;
+        # nothing further is needed here. Hand control straight back so the
+        # consumer's own limit is re-applied rather than leaving 6 A commanded.
+        await self._apply_current_power_limit()
+
+    def _assume_single_phase_on_unplug(self) -> None:
+        """Fall back to 1 phase when the car unplugs, so a cable swap can recover.
+
+        The phase count is **measured**, and measuring needs the car to draw
+        (§3.6.4.1). A stale count that is too *high* makes that impossible: at
+        3 phases the published minimum is `min_current_a × watts_per_amp × 3`
+        (3954 W), the consumer will not command any current below it, and a
+        single-phase cable can never draw that much — so no current flows, no
+        MeterValues arrive, and the wrong count defends itself forever. Observed
+        2026-10-12: a 1-phase cable sat idle through 3.5 kW of surplus because the
+        threshold was still 4254 W.
+
+        1 phase is the **permissive** assumption: its minimum (1380 W) is reachable
+        on either cable, so charging always starts and the detector corrects
+        upward from real current within one MeterValues cycle. The cost of being
+        wrong is that a 3-phase cable is capped near 3680 W for that one cycle.
+
+        Persistence across an add-on restart is still wanted and unaffected — this
+        only fires on a confirmed unplug, which is exactly when the cable may have
+        changed.
+
+        **Costs no wallbox write.** It republishes HA entities only; the commanded
+        amps are untouched. A `SetChargingProfile` is an EEPROM write, and at an
+        unplug there is nothing to command anyway — the next real command comes
+        from the consumer once a car is back. The fallback probe
+        (`_maybe_probe_phases`) is the only path here that writes, which is why it
+        is gated behind B failing.
+        """
+        if self.wallbox_type != "three_phase":
+            return
+        if self._current_phases == 1:
+            return
+        logger.info(
+            f"Car unplugged — assuming 1 phase (was {self._current_phases}φ) so a "
+            f"swapped cable can draw and be re-detected"
+        )
+        self._current_phases = 1
+        self._phase_probe_cycles = 0
+        asyncio.ensure_future(self.ha.set_state("sensor.wallbox_phases", 1))
+        asyncio.ensure_future(self._publish_power_limits())
 
     def _on_phases_detected(self, detected: int) -> None:
         """React to the cable's actual phase count measured from MeterValues.
@@ -1184,6 +1279,24 @@ class OCPPServer:
                             self._pending_a,
                             requested_phases=await self._read_phase_request(),
                         )
+
+                # Count cycles where a current is commanded, the car is plugged
+                # in, and yet nothing is drawing. That is the one case the
+                # permissive 1-phase assumption cannot resolve, since there is no
+                # current to measure. Enough of them in a row triggers the probe.
+                cp = self.charge_point
+                if (
+                    self.wallbox_type == "three_phase"
+                    and cp is not None
+                    and self._last_sent_a > 0
+                    and cp.current_status in ("Charging", "SuspendedEVSE", "Preparing")
+                    and cp.current_power_w <= 0
+                ):
+                    self._phase_probe_cycles += 1
+                    if self._phase_probe_cycles >= self.PHASE_PROBE_AFTER_CYCLES:
+                        await self._maybe_probe_phases()
+                else:
+                    self._phase_probe_cycles = 0
 
                 # Periodic reconciliation: re-send if HA value differs from last-sent
                 if (
