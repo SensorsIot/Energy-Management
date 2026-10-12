@@ -36,7 +36,11 @@ from src.ev_charging import (
 )
 from src.influxdb_writer import SimulationWriter
 from src.longevity import battery_longevity
-from src.integration_observer import CycleSnapshot, IntegrationObserver
+from src.integration_observer import (
+    CycleSnapshot,
+    IntegrationObserver,
+    solar_excess_w,
+)
 from src.flows_daily import FlowsDaily
 from src.mbus_watchdog import MbusWatchdog
 from src.notifications import init_telegram, notify_error, notify_info, notify_warning
@@ -2258,10 +2262,12 @@ class EnergyManager:
                         last_current_limit_sent=self._last_ev_current_limit,
                         wb_connected=wb_connected,
                         idle_since=self._ev_idle_since,
-                        excess_w=(
-                            (pv_power - load_power)
-                            if battery_soc < 100
-                            else (-grid_power + wallbox_power)
+                        excess_w=solar_excess_w(
+                            pv_power_w=pv_power,
+                            load_power_w=load_power,
+                            grid_power_w=grid_power,
+                            wallbox_power_w=wallbox_power,
+                            battery_soc=battery_soc,
                         ),
                         ts=datetime.now(UTC),
                     )

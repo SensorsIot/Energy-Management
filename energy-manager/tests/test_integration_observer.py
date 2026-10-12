@@ -7,10 +7,13 @@ from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from src.ev_state_machine import EVInputs, EVOutput, EVState
 from src.integration_observer import (
     CycleSnapshot,
     IntegrationObserver,
+    solar_excess_w,
     _REPORT_VERSION,
     _TEST_DEFS,
 )
@@ -484,3 +487,45 @@ class TestDetectors:
             prev_state=EVState.SOLAR,
         )
         assert obs._detect_ec16(None, snap) is None
+
+
+class TestSolarExcess:
+    """`excess_w` — the surplus available to the car (FSD 1.9 derived values).
+
+    Observability only: the value reaches one log line and nothing in the
+    control path reads it. These pin the sign convention, which was inverted in
+    the grid term until 2026-10-12.
+    """
+
+    def test_below_full_battery_is_pv_minus_load(self) -> None:
+        """A charging battery absorbs PV, so the grid understates what is free."""
+        assert solar_excess_w(
+            pv_power_w=6000.0, load_power_w=800.0,
+            grid_power_w=0.0, wallbox_power_w=0.0, battery_soc=70.0,
+        ) == pytest.approx(5200.0)
+
+    def test_full_battery_adds_the_cars_own_draw_back(self) -> None:
+        """Regression: the grid term is positive on export, so both terms add.
+
+        Live meters 2026-10-12 — exporting 158 W while the car drew 1541 W. The
+        surplus is 1699 W; the former `-grid_power + wallbox_power` gave 1383 W,
+        understating it by twice the export.
+        """
+        assert solar_excess_w(
+            pv_power_w=0.0, load_power_w=0.0,
+            grid_power_w=158.0, wallbox_power_w=1541.0, battery_soc=100.0,
+        ) == pytest.approx(1699.0)
+
+    def test_importing_reduces_the_surplus(self) -> None:
+        """Negative grid (import) must subtract — the car outruns the PV."""
+        assert solar_excess_w(
+            pv_power_w=0.0, load_power_w=0.0,
+            grid_power_w=-400.0, wallbox_power_w=3000.0, battery_soc=100.0,
+        ) == pytest.approx(2600.0)
+
+    def test_full_battery_ignores_pv_and_load(self) -> None:
+        """At 100 % the meters carry the answer; pv/load must not leak in."""
+        assert solar_excess_w(
+            pv_power_w=9999.0, load_power_w=9999.0,
+            grid_power_w=500.0, wallbox_power_w=1000.0, battery_soc=100.0,
+        ) == pytest.approx(1500.0)

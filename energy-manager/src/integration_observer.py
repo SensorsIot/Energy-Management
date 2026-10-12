@@ -22,6 +22,33 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Derived observability values
+# ---------------------------------------------------------------------------
+
+def solar_excess_w(
+    *,
+    pv_power_w: float,
+    load_power_w: float,
+    grid_power_w: float,
+    wallbox_power_w: float,
+    battery_soc: float,
+) -> float:
+    """Surplus available to the car (FSD 1.9 derived values).
+
+    Below a full battery the surplus is PV minus house load: the battery is
+    still absorbing, so what reaches the grid understates what is available.
+
+    At 100 % the battery no longer absorbs, so the surplus is what leaves the
+    house **plus** what the car is already taking — the car's own draw has to be
+    added back or the figure collapses as the car ramps up. `grid_power_w` is
+    positive on export, so both terms add.
+    """
+    if battery_soc < 100:
+        return pv_power_w - load_power_w
+    return grid_power_w + wallbox_power_w
+
+
+# ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
 
