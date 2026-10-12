@@ -409,6 +409,32 @@ detection corrects upward from real current within one MeterValues cycle. Being 
 an EEPROM write. Persistence across a restart is unaffected; only a confirmed unplug resets, which is
 exactly when the cable may have changed.
 
+**The phase-identify window.** Neither assumption is safe to *charge* on: at 1 phase a 3-phase car is
+capped below its ~4.4 kW minimum and trickles, at 3 phases the 3954 W floor is beyond a 1-phase
+cable. Both were observed on 2026-10-12. So from the moment a car appears (`Preparing`), the server
+commands **`min_current_a` (6 A) unconditionally** — ignoring the consumer's limit, ignoring surplus,
+accepting grid import — until the count is measured. 6 A is the lowest current either cable supports
+and draws 1380 W on one phase or 3954 W on three, both far above the 400 W detection gate, so one
+command always resolves it.
+
+`binary_sensor.car_ready` is held **off** for the duration. The count decides the published power
+range, so a consumer acting earlier would size its request against the wrong cable. Holding
+`car_ready` off means no consumer needs to know the window exists — they see a car that is not ready
+yet. **This is entirely an OCPP-server concern**: it decides from its own `min_current_a` and the
+wallbox's MeterValues, and restores from its own control entity.
+
+It waits for a **conclusive** MeterValues packet, not merely the first. The wallbox reports about
+once a minute and the first packet after a start is usually a ramp sample — on 2026-10-12 it read
+23 W total (0.86 A per phase), below the gate, and the conclusive one arrived 71 s after the command.
+`SuspendedEVSE` therefore does **not** close the window; the AcTec reports it between the command and
+the ramp-up (§5.4), which is the state being waited through.
+
+**Safe cutoff.** The window ends on whichever comes first: a count is measured (~70–90 s in
+practice), `IDENTIFY_MAX_S` (300 s, about four report cycles) elapses, or the car unplugs, refuses
+(`SuspendedEV`) or finishes. Every exit re-applies the consumer's own limit and restores `car_ready`,
+so the window can never leave 6 A commanded. The deadline is evaluated by the 1 Hz control loop and
+checked *before* any status test, so it cannot be outlived by a wallbox that never answers.
+
 **Fallback probe.** The permissive assumption still needs the car to draw *something*. When a current
 is commanded, the car is plugged in, and nothing is drawing for `PHASE_PROBE_AFTER_CYCLES` (8)
 consecutive control cycles — about 8 minutes at the 60 s MeterValues cadence, chosen to sit beyond
@@ -771,6 +797,7 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-35 | Amps reach the profile unconverted (§7.2) | `set_charging_current(10, 3)` → `chargingRateUnit=A`, `limit=10`; 7 and 7.0 dedup to one write; a negative request sends 0 |
 | TC-36 | One factor, one direction (§3.6.1) | `watts_per_amp` is 230/444/659 for 1/2/3 phases and clamps out-of-range phase counts; `amps_to_watts(16, 1)`=3680 and `amps_to_watts(16, 3)`=10544 |
 | TC-39 | 1-phase meter correction (§7.1) | 1φ power and energy carry `1.050 × raw`; at the measured point 3527 W → 3704 W. The correction is proportional, so the absolute addition at 6 A is far smaller than at 16 A. 2φ stays raw. 1φ energy is time-independent (a gain needs no `dt`) |
+| TC-43 | Phase-identify window (§3.6.4.1) | `Preparing` → 6 A commanded regardless of the consumer's limit, `car_ready` off; sent once only; a measured count closes it and restores the limit and `car_ready`; `SuspendedEVSE` keeps it open, `SuspendedEV`/`Available` close it; `IDENTIFY_MAX_S` is the cutoff and restores the limit; switchable wallboxes never identify |
 | TC-42 | No start attempt on an empty connector (§3.5.2) | `Available` + a commanded current → no `RemoteStartTransaction`, retry count and back-off untouched; `Preparing` still attempts |
 | TC-40 | Unplug resets the phase assumption (§3.6.4.1) | `Available` with 3φ believed → `wallbox_phases`=1, range→1380–3680 W, **no `SetChargingProfile`**; already-1φ is a no-op; `universal`/`external_breaker` keep their count |
 | TC-41 | Fallback probe when nothing draws (§3.6.4.1) | Commanded >0 A, plugged in, 0 W for 8 cycles → 6 A on 1 phase with `force`, MeterValues triggered, then the consumer's limit re-applied; a second probe inside 900 s is suppressed; skipped for switchable wallboxes |
@@ -842,6 +869,7 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.30 | 2026-10-12 | **A connected car is identified at 6 A before `car_ready` goes on (§3.6.4.1).** 3.28 assumed 1 phase after an unplug on the grounds that it is the permissive choice. It is not: a 3-phase car commanded at a 1-phase scale is capped near 3680 W, below its ~4.4 kW three-phase minimum, so it trickled at 23 W and never reached the 400 W detection gate — the mirror of the deadlock 3.28 fixed. Observed both ways on 2026-10-12. There is no safe default, so the count is now **measured before anything charges**: from `Preparing` the server commands `min_current_a` (6 A) unconditionally, ignoring the consumer's limit and accepting grid import, and holds `binary_sensor.car_ready` **off** until a conclusive MeterValues packet yields a count. 6 A draws 1380 W (1φ) or 3954 W (3φ), both well above the gate. Holding `car_ready` off keeps the window invisible to every other add-on — no consumer change was needed. Safe cutoff: a measurement, `IDENTIFY_MAX_S` (300 s), or the car unplugging/refusing/finishing; every exit restores the consumer's limit and `car_ready`, and the deadline is checked by the 1 Hz loop before any status test. `SuspendedEVSE` deliberately does not close it — the AcTec reports it between the command and the ramp-up, and the first packet after a start is a ramp sample (23 W observed; conclusive at +71 s). TC-43. ocpp-server 0.9.82 → 0.9.83; tests 172 → 184. |
 | 3.29 | 2026-10-12 | **A start is no longer attempted on an empty connector (§3.5.2).** The control loop re-entered the start path in the same second an unplug was reported, fired a `RemoteStartTransaction` against no car, and consumed the first rung of the escalating back-off (60/300/900 s). The next attempt — four seconds later, with a new cable plugged in — was therefore charged the 300 s rung, so a cable swap cost five minutes of lost charging rather than one. `Available` now short-circuits the start path before the attempt counter is touched. TC-42. ocpp-server 0.9.81 → 0.9.82; tests 169 → 172. |
 | 3.28 | 2026-10-12 | **A cable swap can recover: an unplug resets the phase assumption to 1, with a probe as fallback (§3.6.4.1).** Phase detection needs current to flow, which makes a stale count that is too high self-defending — at 3 phases the published minimum is 3954 W, no consumer commands current below it, and a 1-phase cable cannot draw that much. A swapped 1-phase cable therefore stayed at 3φ indefinitely: observed 2026-10-12 sitting idle through 3.5 kW of surplus against a 4254 W threshold. Persistence (3.18) fixed the restart case and created this one. Now `Available` resets the assumption to 1 phase, the permissive choice whose 1380 W minimum is reachable on either cable, so charging starts and detection corrects upward within one MeterValues cycle; a 3-phase cable is capped near 3680 W for that single cycle. The reset republishes HA entities only and costs **no** wallbox write. Where the car draws nothing at all there is nothing to measure, so after 8 consecutive cycles of commanded-but-not-drawing the server probes with 6 A on one phase (valid on either cable), triggers MeterValues, and hands control straight back — one EEPROM write, on a 900 s cooldown. TC-40, TC-41. ocpp-server 0.9.80 → 0.9.81; tests 160 → 169. |
 | 3.27 | 2026-10-10 | **`WATTS_PER_AMP[3]` corrected 637 → 659, measured against the house meters (§3.6.1, §7.2).** 637 was never a watts-per-amp measurement: it was the midpoint of a *divisor* safe range, chosen so `round(W/637)` landed on the right amp. Repurposed as a multiplier it was **3.3 % low**. The 2026-02-11 grid-meter sweep fits **659 W/A** through the origin over 8–16 A, and a 3-phase measurement on 2026-10-10 using `dtsu_raw − grid_power` read 10646 W at 16 A against that sweep's 10623 W — **0.22 % apart eight months later**, from two independent references. W/A is not constant (642 at 8 A rising to 666 at 15 A), so a single factor is a compromise; 659 is within ~1 % at 16 A and closer mid-range than the 665 of the 16 A point alone. 2φ follows to 444. Consequences: the published 3φ range becomes 3954–10544 W, the proxy's commanded bridge is sized correctly, and the consumer's step ladder is too. The commanded **amps** are unaffected — this factor never enters the control path (§7.2). Same run confirmed the 3-phase meter correction itself is already right: `sensor.wallbox_power` read 10652 W against 10646 W real, **+0.1 %**. ocpp-server 0.9.79 → 0.9.80. |

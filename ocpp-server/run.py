@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.82"
+__version__ = "0.9.83"
 
 import asyncio
 import json
@@ -261,6 +261,10 @@ class OCPPServer:
         # yet no current is flowing — the only situation B cannot resolve.
         self._phase_probe_cycles = 0
         self._phase_probe_done_at: float = 0.0
+        # Phase-identify window: 6 A is commanded unconditionally from plug-in
+        # until the cable's phase count is measured. 0.0 = not identifying.
+        self._identify_started_at: float = 0.0
+        self._identify_amps_sent = False
         self._last_sent_a: int = 0           # amps last commanded (post-clamp)
         self._last_requested_a: int = 0      # amps asked for (pre-clamp HA value)
         self._last_measured_power_w: float = 0.0   # calibrated measured draw (proxy handoff)
@@ -363,8 +367,18 @@ class OCPPServer:
         return self.RESEND_INTERVALS[idx]
 
     async def _update_car_ready(self) -> None:
-        """Update binary_sensor.car_ready from wallbox status."""
-        if not self._setup_complete.is_set():
+        """Update binary_sensor.car_ready from wallbox status.
+
+        Held **off** while the phase count is being identified (§3.6.4.1). The
+        count decides the published power range, so a consumer acting on
+        `car_ready` before it is known would size its request against the wrong
+        cable — and neither assumption is safe: 1 phase caps a 3-phase car below
+        its minimum, 3 phases sets a floor a 1-phase cable cannot reach. Both
+        deadlocks were observed on 2026-10-12. Keeping `car_ready` off for the
+        ~70-90 s of identification means no consumer has to know the window
+        exists; this is entirely an OCPP-server concern.
+        """
+        if not self._setup_complete.is_set() or self._identifying:
             await self.ha.set_state("binary_sensor.car_ready", "off")
             return
         status = self.charge_point.current_status if self.charge_point else None
@@ -716,6 +730,11 @@ class OCPPServer:
             if value == "Available":
                 self._reset_start_backoff()
                 self._assume_single_phase_on_unplug()
+                asyncio.ensure_future(self._end_identify("car unplugged"))
+            elif value == "Preparing":
+                # A car has appeared, so the cable may be a different one. The
+                # count cannot be trusted until current has been measured.
+                self._begin_identify()
 
             # SuspendedEV cloud correction: start/stop polling
             if value == "SuspendedEVSE" and self._last_sent_a > 0:
@@ -780,6 +799,93 @@ class OCPPServer:
         # consumer's own limit is re-applied rather than leaving 6 A commanded.
         await self._apply_current_power_limit()
 
+    # Phase-identify window (§3.6.4.1). The phase count is measured from
+    # per-phase current, so current must flow before anything is known — and
+    # neither assumption is safe to charge on: 1 phase caps a 3-phase car below
+    # its ~4.4 kW minimum, 3 phases sets a 3954 W floor a 1-phase cable can never
+    # reach. Observed both ways on 2026-10-12.
+    #
+    # So from plug-in, 6 A (min_current_a, the lowest either cable supports) is
+    # commanded **unconditionally** — ignoring surplus, accepting grid import —
+    # until the count is measured. 6 A draws 1380 W on one phase or 3954 W on
+    # three, both far above the 400 W detection gate, so one command always
+    # resolves it.
+    #
+    # It must wait for a CONCLUSIVE MeterValues packet, not merely the first one.
+    # The wallbox reports about once a minute and the first packet after a start
+    # is usually a ramp sample: on 2026-10-12 it read 23 W total (0.86 A per
+    # phase), below the 400 W gate, and the conclusive one arrived 71 s after the
+    # command. The window therefore stays open until `on_meter_values` actually
+    # adopts a count — the detector's own gate decides what counts as conclusive,
+    # and this window simply does not close early.
+    #
+    # SAFE CUTOFF. The window ends on whichever comes first:
+    #   - a count is measured (the normal exit, ~70-90 s in practice),
+    #   - IDENTIFY_MAX_S elapses — room for about four MeterValues cycles,
+    #   - the car unplugs, refuses, or finishes.
+    # On every exit the consumer's own limit is re-applied, so the window can
+    # never leave 6 A commanded. The deadline is checked by the 1 Hz control
+    # loop, so it cannot be outlived by a stuck await.
+    IDENTIFY_MAX_S = 300
+
+    @property
+    def _identifying(self) -> bool:
+        """Whether the phase-identify window is open."""
+        return self._identify_started_at > 0.0
+
+    def _begin_identify(self) -> None:
+        """Open the identify window — the cable may have changed."""
+        if self.wallbox_type != "three_phase" or self._identifying:
+            return
+        self._identify_started_at = time.monotonic()
+        self._identify_amps_sent = False
+        # car_ready drops immediately, so no consumer acts on an unknown count.
+        asyncio.ensure_future(self._update_car_ready())
+        logger.info(
+            f"Car connected — identifying the cable: commanding "
+            f"{self.min_current_a}A regardless of surplus for up to "
+            f"{self.IDENTIFY_MAX_S}s (grid import accepted)"
+        )
+
+    async def _end_identify(self, reason: str) -> None:
+        """Close the window and hand control back to the consumer's limit."""
+        if not self._identifying:
+            return
+        elapsed = time.monotonic() - self._identify_started_at
+        self._identify_started_at = 0.0
+        self._identify_amps_sent = False
+        logger.info(
+            f"Phase identify finished after {elapsed:.0f}s ({reason}) — "
+            f"restoring the commanded limit"
+        )
+        await self._update_car_ready()
+        await self._apply_current_power_limit()
+
+    async def _service_identify(self) -> None:
+        """Drive the identify window from the 1 Hz control loop.
+
+        Deliberately does the deadline check *first*, so the cutoff holds even if
+        the wallbox never answers.
+        """
+        if not self._identifying:
+            return
+        if time.monotonic() - self._identify_started_at >= self.IDENTIFY_MAX_S:
+            await self._end_identify(f"timed out after {self.IDENTIFY_MAX_S}s")
+            return
+        cp = self.charge_point
+        if cp is None or cp.current_status == "Available":
+            await self._end_identify("car gone")
+            return
+        # Only a CONFIRMED refusal ends the window. `SuspendedEVSE` must not:
+        # the AcTec reports it between the command and the car ramping up, which
+        # is exactly the state the window is waiting through (§5.4).
+        if cp.current_status in ("SuspendedEV", "Finishing"):
+            await self._end_identify(f"car not charging ({cp.current_status})")
+            return
+        if not self._identify_amps_sent:
+            self._identify_amps_sent = True
+            await self._send_current_to_wallbox(self.min_current_a)
+
     def _assume_single_phase_on_unplug(self) -> None:
         """Fall back to 1 phase when the car unplugs, so a cable swap can recover.
 
@@ -842,6 +948,8 @@ class OCPPServer:
         self._current_phases = detected
         asyncio.ensure_future(self.ha.set_state("sensor.wallbox_phases", detected))
         asyncio.ensure_future(self._publish_power_limits())
+        # The identify window exists only to produce this measurement.
+        asyncio.ensure_future(self._end_identify(f"measured {detected}-phase"))
         # Re-apply the HA limit through the new phase range. Publishing the range
         # alone left the *live* command at its old phase scale: a 3φ→1φ change kept
         # `_last_sent_a` at a 3φ-scale value, which the proxy correction then injected
@@ -1249,6 +1357,16 @@ class OCPPServer:
                     await self.ha.register_entities()
                     await self._sync_ha_state()
                     await asyncio.sleep(5)
+                    continue
+
+                # Phase identify runs before anything acts on that value: while
+                # the window is open the consumer's limit is deliberately
+                # ignored, and the deadline must be honoured even if nothing else
+                # in this loop progresses. `_last_current_limit` is still updated
+                # below on the next pass, so the limit restored at the end of the
+                # window is the current one.
+                await self._service_identify()
+                if self._identifying:
                     continue
 
                 # Detect change

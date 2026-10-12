@@ -2203,6 +2203,151 @@ class TestStateResyncPublishesTheFactor:
         server.ha.set_state.assert_any_call("sensor.wallbox_power_limit", 6590)
 
 
+class TestPhaseIdentifyWindow:
+    """From plug-in, 6 A is commanded unconditionally until the count is measured.
+
+    Neither assumption is safe to charge on: 1 phase caps a 3-phase car below its
+    ~4.4 kW minimum, 3 phases sets a 3954 W floor a 1-phase cable can never
+    reach. Both deadlocks were observed on 2026-10-12. 6 A is the lowest current
+    either cable supports and draws 1380 W (1φ) or 3954 W (3φ), both far above the
+    400 W detection gate, so one command always resolves it.
+
+    Entirely inside the OCPP server: it decides from its own `min_current_a` and
+    the wallbox's MeterValues, and restores from its own control entity.
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer(
+            {"wallbox_id": "test", "wallbox_type": "three_phase",
+             "min_current_a": 6, "max_current_a": 16}
+        )
+        srv.ha = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        cp = MagicMock()
+        cp.transaction_id = 1
+        cp.current_status = "Preparing"
+        cp.current_power_w = 0
+        cp.set_charging_current = AsyncMock()
+        srv.charge_point = cp
+        srv.PROFILE_SETTLE_S = 0
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_plug_in_opens_the_window(self, server) -> None:
+        server._on_status_change("status", "Preparing")
+        await asyncio.sleep(0)
+        assert server._identifying
+
+    @pytest.mark.asyncio
+    async def test_window_commands_the_minimum_ignoring_surplus(self, server) -> None:
+        """6 A regardless of what the consumer asked for — grid import accepted."""
+        server.ha.get_state = AsyncMock(return_value="0")  # consumer says pause
+        server._begin_identify()
+        await server._service_identify()
+        assert server.charge_point.set_charging_current.await_args.args[0] == 6
+
+    @pytest.mark.asyncio
+    async def test_window_sends_only_once(self, server) -> None:
+        """Repeated loop passes must not re-write the same profile (EEPROM)."""
+        server._begin_identify()
+        await server._service_identify()
+        server.charge_point.set_charging_current.reset_mock()
+        await server._service_identify()
+        await server._service_identify()
+        server.charge_point.set_charging_current.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_measurement_closes_the_window_and_restores(self, server) -> None:
+        """The normal exit: a count is adopted, the consumer's limit comes back."""
+        server._begin_identify()
+        server._current_phases = 1
+        server.ha.get_state = AsyncMock(return_value="12")
+        server._on_phases_detected(3)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not server._identifying
+        assert server.charge_point.set_charging_current.await_args.args[0] == 12
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_the_safe_cutoff(self, server) -> None:
+        """It cannot hold 6 A forever if the wallbox never reports a count."""
+        server._begin_identify()
+        await server._service_identify()
+        server._identify_started_at = time.monotonic() - server.IDENTIFY_MAX_S - 1
+        server.ha.get_state = AsyncMock(return_value="9")
+        await server._service_identify()
+        assert not server._identifying
+        assert server.charge_point.set_charging_current.await_args.args[0] == 9
+
+    @pytest.mark.asyncio
+    async def test_unplug_closes_the_window(self, server) -> None:
+        server._begin_identify()
+        server.charge_point.current_status = "Available"
+        await server._service_identify()
+        assert not server._identifying
+
+    @pytest.mark.asyncio
+    async def test_refusal_closes_the_window(self, server) -> None:
+        """SuspendedEV means the car declined; pushing current proves nothing."""
+        server._begin_identify()
+        server.charge_point.current_status = "SuspendedEV"
+        await server._service_identify()
+        assert not server._identifying
+
+    @pytest.mark.asyncio
+    async def test_suspended_evse_keeps_the_window_open(self, server) -> None:
+        """The AcTec reports SuspendedEVSE between the command and the ramp-up
+        (§5.4) — the very state the window waits through. Closing on it would
+        abandon the measurement before the first MeterValues arrives.
+        """
+        server._begin_identify()
+        server.charge_point.current_status = "SuspendedEVSE"
+        await server._service_identify()
+        assert server._identifying
+
+    def test_window_outlasts_the_wallbox_report_interval(self, server) -> None:
+        """The first packet after a start is a ramp sample — on 2026-10-12 it read
+        23 W, and the conclusive one came 71 s after the command. The deadline
+        must span several ~60 s MeterValues cycles.
+        """
+        assert server.IDENTIFY_MAX_S >= 240
+
+    @pytest.mark.asyncio
+    async def test_car_ready_is_off_while_identifying(self, server) -> None:
+        """No consumer may act before the count is known — the range depends on it.
+
+        This is what makes the window invisible to every other app: they simply
+        see a car that is not ready yet.
+        """
+        server._setup_complete.set()
+        server.charge_point.current_status = "Preparing"   # normally ready = on
+        server._begin_identify()
+        await server._update_car_ready()
+        server.ha.set_state.assert_any_call("binary_sensor.car_ready", "off")
+
+    @pytest.mark.asyncio
+    async def test_car_ready_returns_when_the_count_is_known(self, server) -> None:
+        server._setup_complete.set()
+        server.charge_point.current_status = "Preparing"
+        server._begin_identify()
+        await server._end_identify("measured")
+        calls = [c for c in server.ha.set_state.call_args_list
+                 if c.args[0] == "binary_sensor.car_ready"]
+        assert calls[-1].args[1] == "on"
+
+    def test_switchable_wallbox_never_identifies(self, server) -> None:
+        """Only `three_phase` infers the count from the cable (FSD 3.6.4)."""
+        server.wallbox_type = "universal"
+        server._begin_identify()
+        assert not server._identifying
+
+
 class TestNoStartWithoutACar:
     """`Available` means an empty connector, so no start may be attempted.
 
