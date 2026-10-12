@@ -2280,67 +2280,6 @@ class TestPhaseProvenance:
         server.ha.set_state.assert_called_once()
 
 
-class TestUnlockConnectorButton:
-    """`UnlockConnector` releases the socket lock NOW.
-
-    A different OCPP message from the cable-lock switch, which only sets
-    `UnlockConnectorOnEVSideDisconnect` — a policy evaluated at the next unplug.
-    Verified 2026-10-12 that the switch's path works end to end and the value
-    persists across a reconnect, so a cable that is currently held can only be
-    freed by this message.
-    """
-
-    @pytest.fixture
-    def server(self):
-        for mod in ("aiomqtt", "aiohttp", "websockets"):
-            if mod not in sys.modules:
-                sys.modules[mod] = MagicMock()
-        from run import OCPPServer
-
-        srv = OCPPServer({"wallbox_id": "test"})
-        srv.ha = AsyncMock()
-        srv._mqtt_client = AsyncMock()
-        cp = MagicMock()
-        cp.unlock_connector = AsyncMock(return_value="Unlocked")
-        srv.charge_point = cp
-        return srv
-
-    @pytest.mark.asyncio
-    async def test_press_sends_unlock_connector(self, server) -> None:
-        await server._press_unlock_connector()
-        server.charge_point.unlock_connector.assert_awaited()
-
-    @pytest.mark.asyncio
-    async def test_raw_status_is_published(self, server) -> None:
-        """OCPP allows NotSupported; it must be visible, not swallowed."""
-        server.charge_point.unlock_connector = AsyncMock(return_value="NotSupported")
-        await server._press_unlock_connector()
-        pub = [c for c in server._mqtt_client.publish.await_args_list
-               if c.args[0] == server._unlock_result_topic]
-        assert pub and pub[-1].args[1] == "NotSupported"
-
-    @pytest.mark.asyncio
-    async def test_offline_wallbox_is_ignored(self, server) -> None:
-        server.charge_point = None
-        await server._press_unlock_connector()   # must not raise
-
-    @pytest.mark.asyncio
-    async def test_an_exception_does_not_escape(self, server) -> None:
-        server.charge_point.unlock_connector = AsyncMock(side_effect=RuntimeError("boom"))
-        await server._press_unlock_connector()
-        pub = [c for c in server._mqtt_client.publish.await_args_list
-               if c.args[0] == server._unlock_result_topic]
-        assert pub and "boom" in pub[-1].args[1]
-
-    def test_discovery_declares_a_momentary_button(self, server) -> None:
-        import json as _json
-
-        d = _json.loads(server._unlock_discovery_payload())
-        assert d["payload_press"] == "PRESS"
-        assert "state_topic" not in d, "a button has no state"
-        assert d["unique_id"] == "ocpp_wallbox_unlock_connector"
-
-
 class TestPhaseIdentifyWindow:
     """From plug-in, 6 A is commanded unconditionally until the count is measured.
 
@@ -2886,13 +2825,19 @@ class TestPhaseDetection:
 
     @pytest.mark.asyncio
     async def test_single_phase_cable_detected(self, mock_connection) -> None:
-        """L1-only draw → active_phases=1 and a phases_active callback."""
+        """L1-only draw → active_phases=1, but only once confirmed.
+
+        One such frame is ambiguous: a 3-phase car mid-ramp looks identical.
+        """
         cb = MagicMock()
         h = ChargePointHandler("t", mock_connection, on_status_change=cb)
         h.transaction_id = 1
         h.current_status = "Charging"
-        await h.on_meter_values(connector_id=1,
-                                meter_value=_phase_mv(1492, 0, 0, 6.5, 0.0, 0.0))
+        frame = _phase_mv(1492, 0, 0, 6.5, 0.0, 0.0)
+        await h.on_meter_values(connector_id=1, meter_value=frame)
+        assert h.active_phases == 3, "one L1-only frame must not conclude 1-phase"
+        assert not any(c.args[0] == "phases_active" for c in cb.call_args_list)
+        await h.on_meter_values(connector_id=1, meter_value=frame)
         assert h.active_phases == 1
         cb.assert_any_call("phases_active", 1)
 
@@ -2917,9 +2862,12 @@ class TestPhaseDetection:
         h = ChargePointHandler("t", mock_connection, on_status_change=cb)
         h.transaction_id = 1
         h.current_status = "Charging"
-        await h.on_meter_values(connector_id=1,
-                                meter_value=_phase_mv(1492, 0, 0, 6.5, 0.0, 0.0))
+        one = _phase_mv(1492, 0, 0, 6.5, 0.0, 0.0)
+        await h.on_meter_values(connector_id=1, meter_value=one)
+        await h.on_meter_values(connector_id=1, meter_value=one)
         assert h.active_phases == 1
+        # Three active phases is conclusive on the first frame — a ramp never
+        # shows more phases than the cable has.
         await h.on_meter_values(connector_id=1,
                                 meter_value=_phase_mv(1600, 1600, 1600, 7.0, 7.0, 7.0))
         assert h.active_phases == 3
@@ -3060,6 +3008,44 @@ class TestPhaseDetection:
         t[0] += 60.0
         handler._accumulate_energy(50, active_phases=3)  # register went backwards
         assert handler.session_energy_wh == 0.0
+
+    @pytest.mark.asyncio
+    async def test_three_phase_ramp_is_not_read_as_single_phase(self, mock_connection) -> None:
+        """Regression for 2026-10-12: a 3-phase cable read as 1-phase.
+
+        Commanded 6 A, the first qualifying frame was L1 6.07 A / 1412 W with L2
+        and L3 at zero — the car brings its phases up one at a time, and the
+        total-power gate is cleared by the first phase alone. 1412 W is
+        indistinguishable from a settled 1-phase draw at 6 A (1380 W), so the
+        detector concluded 1-phase, closed the identify window, and the truth
+        only surfaced six minutes later.
+        """
+        cb = MagicMock()
+        h = ChargePointHandler("t", mock_connection, on_status_change=cb)
+        h.transaction_id = 1
+        h.current_status = "Charging"
+        await h.on_meter_values(connector_id=1,
+                                meter_value=_phase_mv(1412, 0, 0, 6.07, 0.0, 0.0))
+        assert h.active_phases == 3, "must not conclude 1-phase from a ramp frame"
+        assert not any(c.args[0] == "phases_active" for c in cb.call_args_list)
+        await h.on_meter_values(connector_id=1,
+                                meter_value=_phase_mv(1400, 1340, 1370, 6.02, 5.74, 5.89))
+        assert h.active_phases == 3
+        cb.assert_any_call("phases_active", 3)
+
+    @pytest.mark.asyncio
+    async def test_a_flapping_count_is_never_adopted(self, mock_connection) -> None:
+        """Alternating frames must not be taken as confirmation of either."""
+        cb = MagicMock()
+        h = ChargePointHandler("t", mock_connection, on_status_change=cb)
+        h.transaction_id = 1
+        h.current_status = "Charging"
+        h.active_phases = 3
+        one = _phase_mv(1492, 0, 0, 6.5, 0.0, 0.0)
+        two = _phase_mv(900, 900, 0, 4.0, 4.0, 0.0)
+        for frame in (one, two, one, two):
+            await h.on_meter_values(connector_id=1, meter_value=frame)
+        assert h.active_phases == 3, "no count held long enough to be confirmed"
 
     def test_watts_per_amp_per_phase(self) -> None:
         """One factor, measured per phase count: 637 (3φ), 230 (1φ), ~434 (2φ)."""

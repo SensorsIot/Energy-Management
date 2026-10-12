@@ -376,9 +376,18 @@ Behavior depends on `wallbox_type`:
 
 A charging cable may connect one phase or three. The car draws only on the connected phases, so a
 **single-phase cable draws ~⅓ of the commanded watts** if the server assumes three. In `three_phase`
-mode the server therefore measures the active phase count from each MeterValues frame — a phase
-counts as drawing when its `Current.Import` is ≥ **0.5 A**, evaluated only once total draw is ≥ **400 W**
-so idle/ramp noise cannot flap it. The detected count (1 or 3) drives:
+mode the server therefore measures the active phase count from MeterValues — a phase counts as
+drawing when its `Current.Import` is ≥ **0.5 A**, evaluated only once total draw is ≥ **400 W**.
+
+**A count below three needs two consecutive agreeing frames; three is conclusive at once.** The
+asymmetry is physical: a car brings its phases up one at a time, and the total-power gate is cleared
+by the first phase alone — but a ramp never shows *more* phases than the cable has. Observed
+2026-10-12 on a 3-phase cable commanded 6 A: the first qualifying frame read L1 6.07 A / 1412 W with
+L2 and L3 at zero, which is indistinguishable from a settled single-phase draw at 6 A (1380 W).
+Power cannot separate them; only persistence can. Without confirmation the detector concluded
+1-phase, closed the identify window, and the truth surfaced six minutes later.
+
+The detected count (1 or 3) drives:
 
 - `sensor.wallbox_phases`, `sensor.wallbox_watts_per_amp` and the derived
   `min/max_power_w` watt range (§3.6.1) — the **amp** range is unchanged by phase count,
@@ -538,22 +547,20 @@ The measured MeterValues also drive the `sensor.wallbox_power` HA entity (displa
 
 #### 3.6.7 Cable lock control (user)
 
-Two **different** OCPP messages, often confused:
+The switch sets `UnlockConnectorOnEVSideDisconnect` via `ChangeConfiguration`. It is a **policy**:
+it decides whether the wallbox releases the cable at the *next* unplug, and cannot move a lock that
+is currently held.
 
-| Control | OCPP message | Effect |
-|---|---|---|
-| `switch.wallbox_cable_lock` | `ChangeConfiguration(UnlockConnectorOnEVSideDisconnect)` | **Policy** — decides whether the wallbox releases the cable at the *next* unplug. Cannot move a lock that is currently held. |
-| `button.wallbox_unlock_connector` | `UnlockConnector` | **Action** — releases the socket lock now. Frees a stuck cable. |
+Verified 2026-10-12 that this path works end to end and that the value persists: setting `false`
+returned `Accepted`, and an independent `GetConfiguration` after a reconnect read back `false`. A
+cable that stays held after a toggle is therefore not a fault in this path — the toggle changes
+behaviour at the next unplug, not now.
 
-Verified 2026-10-12 that the switch's path works end to end and that the value persists: setting
-`false` returned `Accepted`, and an independent `GetConfiguration` after a reconnect read back
-`false`. So a cable that will not release is not a fault in that path — it is the wrong message for
-the job, which is what the button is for.
+OCPP's momentary alternative, `UnlockConnector`, releases the socket immediately and is available as
+`ChargePointHandler.unlock_connector()`. It is deliberately **not exposed**: the user-facing control
+is a single toggle whose icon colour reports the state, and a second control for an action that looks
+similar invites mistakes. It has never been sent to this wallbox.
 
-The button is momentary (MQTT discovery, `payload_press`, no state topic). Its raw status —
-`Unlocked`, `UnlockFailed` or `NotSupported` — is logged and published to
-`ocpp-server/unlock_connector/result`, so a wallbox that does not implement the message is visible
-rather than silently doing nothing.
 
 
 `switch.wallbox_cable_lock` is a user-facing lock/unlock toggle for the socket cable, mirroring the
@@ -808,6 +815,7 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-13 | Full charge cycle | Start → Charge → Pause → Resume → Stop |
 | TC-14 | HA restart with active wallbox | Entities re-registered, state re-synced |
 | TC-15 | Cable-lock switch toggled (§3.6.7) | `LOCK`→`ChangeConfiguration(UnlockConnectorOnEVSideDisconnect, false)`, `UNLOCK`→`true`; state follows on Accepted, reverts on reject/offline; `GetConfiguration` on connect syncs the switch |
+| TC-45 | Ramp frames do not settle the count (§3.6.4.1) | One L1-only frame → no adoption and no callback; a second agreeing frame → adopt 1; a frame showing three phases → adopt 3 immediately; alternating frames → nothing adopted |
 | TC-16 | Cable phase detection (§3.6.4.1) | L1-only MeterValues ≥400 W → `active_phases`=1, `sensor.wallbox_phases`=1, watt range→1380–3680 W at 230 W/A, `wallbox_power`=raw; all three phases → 3, 637 W/A, linear correction; below 400 W does not flap; `universal`/`external_breaker` ignore detection |
 | TC-32 | Amp range clamp (§3.6.4) | 20 A → clamped to 16 A on either phase count; 5 A → 0 A (pause); 13 A passes through unchanged |
 | TC-33 | Phase detection re-applies the live limit (§3.6.4.1) | 3φ→1φ at 16 A → profile re-sent with `numberPhases`=1, same 16 A; `sensor.wallbox_power_limit` follows to 3680 W (not 10192 W) |
@@ -815,7 +823,6 @@ This section is the canonical home for OCPP-server test-case specs; it is indexe
 | TC-35 | Amps reach the profile unconverted (§7.2) | `set_charging_current(10, 3)` → `chargingRateUnit=A`, `limit=10`; 7 and 7.0 dedup to one write; a negative request sends 0 |
 | TC-36 | One factor, one direction (§3.6.1) | `watts_per_amp` is 230/444/659 for 1/2/3 phases and clamps out-of-range phase counts; `amps_to_watts(16, 1)`=3680 and `amps_to_watts(16, 3)`=10544 |
 | TC-39 | 1-phase meter correction (§7.1) | 1φ power and energy carry `1.050 × raw`; at the measured point 3527 W → 3704 W. The correction is proportional, so the absolute addition at 6 A is far smaller than at 16 A. 2φ stays raw. 1φ energy is time-independent (a gain needs no `dt`) |
-| TC-44 | Unlock-connector button (§3.6.7) | A press sends `UnlockConnector` and publishes the raw status; `NotSupported` is published, not swallowed; an offline wallbox or an exception is handled without escaping; discovery declares a momentary button with no state topic |
 | TC-43 | Phase-identify window (§3.6.4.1) | `Preparing` → 6 A commanded regardless of the consumer's limit, `car_ready` off; sent once only; a measured count closes it and restores the limit and `car_ready`; `SuspendedEVSE` keeps it open, `SuspendedEV`/`Available` close it; `IDENTIFY_MAX_S` is the cutoff and restores the limit; switchable wallboxes never identify |
 | TC-42 | No start attempt on an empty connector (§3.5.2) | `Available` + a commanded current → no `RemoteStartTransaction`, retry count and back-off untouched; `Preparing` still attempts |
 | TC-40 | Unplug resets the phase assumption (§3.6.4.1) | `Available` with 3φ believed → `wallbox_phases`=1, range→1380–3680 W, **no `SetChargingProfile`**; already-1φ is a no-op; `universal`/`external_breaker` keep their count |
@@ -888,6 +895,8 @@ The wallbox accepts watts in `SetChargingProfile` but internally converts to int
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.34 | 2026-10-12 | **A phase count below three now needs two consecutive agreeing frames (§3.6.4.1).** The detector adopted the first frame clearing the 400 W total-power gate, but a car brings its phases up one at a time and the first phase alone clears that gate. On 2026-10-12 a 3-phase cable commanded 6 A produced L1 6.07 A / 1412 W with L2 and L3 at zero — indistinguishable from a settled single-phase draw at 6 A (1380 W), since the gate is on *total* power. The detector concluded 1-phase, the identify window closed on that, and the correction to 3 arrived six minutes later. Three active phases stays conclusive on the first frame, because a ramp never shows more phases than the cable has; fewer than three now requires `PHASE_CONFIRM_FRAMES` (2) in a row, adding about one report cycle. A flapping count is never adopted. TC-45. ocpp-server 0.9.85 → 0.9.86; tests 188 → 190. |
+| 3.33 | 2026-10-12 | **`UnlockConnector` is not exposed; the cable control is one toggle (§3.6.7).** 3.31 added `button.wallbox_unlock_connector` on the theory that a cable which will not release needs the momentary message. The requirement was simpler: one button, tapped to change state, with the icon colour as feedback — which the existing switch already did. The button and its MQTT discovery are removed and the retained discovery topic cleared. `ChargePointHandler.unlock_connector()` stays as an available protocol primitive, unexposed, as it was before 3.31. TC-44 withdrawn. ocpp-server 0.9.85 → 0.9.86; tests 193 → 188. |
 | 3.32 | 2026-10-12 | **All four paths that publish the phase count now carry its provenance (§3.6.4.1).** 0.9.84 routed only the unplug reset and the detection through the publisher; the startup restore and the HA-state resync still wrote the entity directly, so after an HA restart `sensor.wallbox_phases` came back with `measured` absent — observed live. The resync and the restore now publish through it (a restored count is `measured: false`: the cable may have been swapped while the add-on was down), and on a switchable wallbox the relay position *is* the count, so that path is `measured: true`. The resync clears the dedup cache first, since an HA restart removes the entity and a suppressed write would leave it missing. A test asserts zero direct writes to the entity remain, so no future path can drop the attribute silently. ocpp-server 0.9.84 → 0.9.85; tests 189 → 193. |
 | 3.31 | 2026-10-12 | **`UnlockConnector` is exposed as a button, and the phase count carries its provenance (§3.6.7, §3.6.4.1).** `unlock_connector()` had been implemented and tested since 0.9.68 but wired to nothing, so the only cable control was the `ChangeConfiguration` policy — which by design cannot release a cable that is currently held. Verified that policy path works and persists (set `false` → `Accepted`, read back `false` after a reconnect), so the gap was the missing momentary action, not a fault. New `button.wallbox_unlock_connector` (MQTT discovery, momentary) publishes the raw `Unlocked`/`UnlockFailed`/`NotSupported` status to `ocpp-server/unlock_connector/result`; it has never been sent to the AcTec, so the first press is the experiment. Separately, `sensor.wallbox_phases` now carries a `measured` attribute: the count alone cannot say whether it was measured or assumed, since an unplug resets it to an assumption and the identify window runs on one. The state stays numeric so the startup restore and consumers keep parsing it. The detector reports a count on every qualifying frame rather than only on a change — a confirming frame is still a measurement — and the publisher dedups. TC-44. ocpp-server 0.9.83 → 0.9.84; tests 184 → 189. |
 | 3.30 | 2026-10-12 | **A connected car is identified at 6 A before `car_ready` goes on (§3.6.4.1).** 3.28 assumed 1 phase after an unplug on the grounds that it is the permissive choice. It is not: a 3-phase car commanded at a 1-phase scale is capped near 3680 W, below its ~4.4 kW three-phase minimum, so it trickled at 23 W and never reached the 400 W detection gate — the mirror of the deadlock 3.28 fixed. Observed both ways on 2026-10-12. There is no safe default, so the count is now **measured before anything charges**: from `Preparing` the server commands `min_current_a` (6 A) unconditionally, ignoring the consumer's limit and accepting grid import, and holds `binary_sensor.car_ready` **off** until a conclusive MeterValues packet yields a count. 6 A draws 1380 W (1φ) or 3954 W (3φ), both well above the gate. Holding `car_ready` off keeps the window invisible to every other add-on — no consumer change was needed. Safe cutoff: a measurement, `IDENTIFY_MAX_S` (300 s), or the car unplugging/refusing/finishing; every exit restores the consumer's limit and `car_ready`, and the deadline is checked by the 1 Hz loop before any status test. `SuspendedEVSE` deliberately does not close it — the AcTec reports it between the command and the ramp-up, and the first packet after a start is a ramp sample (23 W observed; conclusive at +71 s). TC-43. ocpp-server 0.9.82 → 0.9.83; tests 172 → 184. |

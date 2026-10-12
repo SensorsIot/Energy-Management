@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.85"
+__version__ = "0.9.86"
 
 import asyncio
 import json
@@ -248,16 +248,6 @@ class OCPPServer:
             "homeassistant/switch/ocpp_wallbox_cable_lock/config"
         )
         self._cable_lock_state = "UNLOCK"  # safe default: never trap the cable
-        # Momentary unlock (button.wallbox_unlock_connector). A *different* OCPP
-        # message from the cable-lock switch: `UnlockConnector` releases the
-        # socket lock NOW, where `UnlockConnectorOnEVSideDisconnect` only decides
-        # what happens at the next unplug. Pressing the switch can therefore
-        # never free a cable that is currently held — this can.
-        self._unlock_cmd_topic = "ocpp-server/unlock_connector/press"
-        self._unlock_result_topic = "ocpp-server/unlock_connector/result"
-        self._unlock_discovery_topic = (
-            "homeassistant/button/ocpp_wallbox_unlock_connector/config"
-        )
         # Proxy correction: while we are commanding the car to charge, feed the
         # ESP32 Modbus proxy the COMMANDED power (not the measured MeterValues),
         # so the SUN2000 sees the load the instant charging is commanded.
@@ -454,9 +444,7 @@ class OCPPServer:
                     # Announce the cable-lock switch (HA MQTT discovery), restore
                     # its last-known state, and listen for user commands.
                     await client.subscribe(self._cable_lock_cmd_topic)
-                    await client.subscribe(self._unlock_cmd_topic)
                     await self._publish_cable_lock_discovery()
-                    await self._publish_unlock_discovery()
                     await self._publish_cable_lock_state()
                     # Re-publish last known power every 10s (Modbus Proxy 30s
                     # staleness timeout on the ESP32) — runs alongside the
@@ -464,11 +452,8 @@ class OCPPServer:
                     republish = asyncio.create_task(self._mqtt_power_republish_loop())
                     try:
                         async for message in client.messages:
-                            topic = str(message.topic)
-                            if topic == self._cable_lock_cmd_topic:
+                            if str(message.topic) == self._cable_lock_cmd_topic:
                                 await self._handle_cable_lock_command(message)
-                            elif topic == self._unlock_cmd_topic:
-                                await self._press_unlock_connector()
                     finally:
                         republish.cancel()
             except aiomqtt.MqttError as e:
@@ -534,60 +519,6 @@ class OCPPServer:
                 "icon": "mdi:ev-plug-type2",
             }
         )
-
-    def _unlock_discovery_payload(self) -> str:
-        """HA MQTT-discovery config for button.wallbox_unlock_connector."""
-        return json.dumps(
-            {
-                "name": "Wallbox Unlock Connector",
-                "unique_id": "ocpp_wallbox_unlock_connector",
-                "object_id": "wallbox_unlock_connector",
-                "command_topic": self._unlock_cmd_topic,
-                "payload_press": "PRESS",
-                "icon": "mdi:lock-open-variant",
-            }
-        )
-
-    async def _publish_unlock_discovery(self) -> None:
-        """Publish the retained discovery config so HA creates the button."""
-        if self._mqtt_client is None:
-            return
-        try:
-            await self._mqtt_client.publish(
-                self._unlock_discovery_topic,
-                self._unlock_discovery_payload(),
-                retain=True,
-            )
-            logger.info("Published unlock-connector MQTT discovery config")
-        except Exception as e:                                     # noqa: BLE001
-            logger.warning(f"Unlock-connector discovery publish failed: {e}")
-
-    async def _press_unlock_connector(self) -> None:
-        """Send `UnlockConnector` and surface the raw result.
-
-        The status is published and logged rather than swallowed: OCPP allows
-        `Unlocked`, `UnlockFailed` and `NotSupported`, and a wallbox that does
-        not implement the message would otherwise fail silently.
-        """
-        if not self.charge_point:
-            logger.warning("Unlock-connector: wallbox offline, ignoring press")
-            return
-        try:
-            status = await self.charge_point.unlock_connector()
-        except Exception as e:                                     # noqa: BLE001
-            logger.error(f"Unlock-connector failed: {e}")
-            status = f"Error: {e}"
-        if status == "Unlocked":
-            logger.info("Connector unlocked (UnlockConnector: Unlocked)")
-        else:
-            logger.warning(f"UnlockConnector returned {status}")
-        if self._mqtt_client is not None:
-            try:
-                await self._mqtt_client.publish(
-                    self._unlock_result_topic, str(status), retain=True
-                )
-            except Exception as e:                                 # noqa: BLE001
-                logger.warning(f"Unlock-connector result publish failed: {e}")
 
     async def _publish_cable_lock_discovery(self) -> None:
         """Publish the retained MQTT-discovery config so HA creates the switch."""

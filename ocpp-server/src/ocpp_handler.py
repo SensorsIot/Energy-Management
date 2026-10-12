@@ -126,6 +126,14 @@ class ChargePointHandler(CP):
     # (≥0.6 A/phase at ~400 W total) from a 1φ cable (L1 only).
     PHASE_ACTIVE_MIN_A = 0.5
     PHASE_DETECT_MIN_TOTAL_W = 400
+    # A frame showing FEWER than three active phases is ambiguous: a 3-phase car
+    # brings its phases up one at a time, and the total-power gate is cleared by
+    # the first phase alone. Observed 2026-10-12 on a 3-phase cable commanded
+    # 6 A: L1 6.07 A / 1412 W with L2 and L3 at zero — indistinguishable from a
+    # settled 1-phase draw at 6 A (1380 W). Power cannot tell them apart; only
+    # persistence can. A frame showing three active phases, by contrast, is
+    # conclusive at once — a ramp never shows more phases than the cable has.
+    PHASE_CONFIRM_FRAMES = 2
 
     def __init__(
         self,
@@ -167,6 +175,9 @@ class ChargePointHandler(CP):
         # Phases actually drawing current (detected from MeterValues). Defaults to
         # 3 until the first meaningful draw reveals the connected cable's phases.
         self.active_phases = 3
+        # Consecutive-frame confirmation (see PHASE_CONFIRM_FRAMES).
+        self._phase_candidate: int | None = None
+        self._phase_candidate_frames = 0
 
     # ========== Incoming messages from wallbox ==========
 
@@ -314,18 +325,33 @@ class ChargePointHandler(CP):
         if has_power_measurand and total_power >= self.PHASE_DETECT_MIN_TOTAL_W and phase_current:
             active = sum(1 for a in phase_current.values() if a >= self.PHASE_ACTIVE_MIN_A)
             if active in (1, 2, 3):
-                if active != self.active_phases:
+                # Count how many consecutive frames agree, so a mid-ramp frame
+                # cannot be mistaken for a settled reading.
+                if active == self._phase_candidate:
+                    self._phase_candidate_frames += 1
+                else:
+                    self._phase_candidate = active
+                    self._phase_candidate_frames = 1
+                needed = 1 if active == 3 else self.PHASE_CONFIRM_FRAMES
+                if self._phase_candidate_frames < needed:
                     logger.info(
-                        f"Phase detection: {self.active_phases} → {active} active "
+                        f"Phase detection: {active} active, awaiting confirmation "
+                        f"({self._phase_candidate_frames}/{needed}) "
                         f"(per-phase A: {phase_current})"
                     )
-                    self.active_phases = active
-                # Reported on every qualifying frame, not only on a change: a
-                # frame that *confirms* the current count is still a measurement,
-                # and the consumer needs to know the difference between a
-                # measured count and an assumed one. The consumer dedups.
-                if self.on_status_change:
-                    self.on_status_change("phases_active", active)
+                else:
+                    if active != self.active_phases:
+                        logger.info(
+                            f"Phase detection: {self.active_phases} → {active} "
+                            f"active (per-phase A: {phase_current})"
+                        )
+                        self.active_phases = active
+                    # Reported on every confirmed frame, not only on a change: a
+                    # frame that *confirms* the current count is still a
+                    # measurement, and the consumer needs to tell a measured
+                    # count from an assumed one. The consumer dedups.
+                    if self.on_status_change:
+                        self.on_status_change("phases_active", active)
 
         total_power = self._correct_meter_power(total_power, self.active_phases)
 
