@@ -68,7 +68,7 @@ bridged by the OCPP Server add-on, which turns the setpoint into OCPP commands.
                                   │
                       ┌───────────────────────┐
                       │   ESP32 Modbus Proxy  │  Intercepts RS485, adds wallbox power
-                      │   (ESP32-C3)          │  corrected = dtsu + wallbox_power
+                      │   (ESP32-C3)          │  corrected = dtsu + wallbox_power_ocpp
                       └───────────────────────┘
                                   │
           ┌───────────────────────┼───────────────────────┐
@@ -84,7 +84,7 @@ bridged by the OCPP Server add-on, which turns the setpoint into OCPP commands.
 └─────────────────┘    └─────────────────────┘
 ```
 
-**Modbus Proxy Power Correction:** The wallbox is wired between the grid and the DTSU meter, so the SUN2000 doesn't see wallbox consumption. Without correction, the SUN2000 would see grid export when the wallbox is actually importing from the grid. The ESP32 Modbus Proxy sits on the RS485 bus between the DTSU and SUN2000, intercepts meter responses, and adds the wallbox power: `corrected = dtsu_power + wallbox_power`. The wallbox power arrives via MQTT (topic `wallbox`) published by the OCPP Server add-on every 10 seconds. The Modbus Proxy itself is a separate ESP32 component (no in-repo FSD).
+**Modbus Proxy Power Correction:** The wallbox is wired between the grid and the DTSU meter, so the SUN2000 doesn't see wallbox consumption. Without correction, the SUN2000 would see grid export when the wallbox is actually importing from the grid. The ESP32 Modbus Proxy sits on the RS485 bus between the DTSU and SUN2000, intercepts meter responses, and adds the wallbox power: `corrected = dtsu_power + wallbox_power_ocpp`. The wallbox power arrives via MQTT (topic `wallbox`) published by the OCPP Server add-on every 10 seconds. It is sourced from the wallbox's **own** meter, never from `sensor.wallbox_power`: that signal is derived from the DTSU the correction is injected into, so feeding it back would close the loop on the server's own output (ocpp-server-fsd §3.6.6, §3.6.8). The Modbus Proxy itself is a separate ESP32 component (no in-repo FSD).
 
 **Example** (wallbox charging at 4343W, PV covering house load):
 ```
@@ -1146,7 +1146,7 @@ From the EnergyManager's perspective, the wallbox is controlled through HA entit
 | Direction | Entity | Type | Description |
 |-----------|--------|------|-------------|
 | **Control** | `number.wallbox_current_limit` | number | Current setpoint (A). `0` = pause, `>= min_current_a` = charge at that current. |
-| **Feedback** | `sensor.wallbox_power` | sensor (W) | Actual measured charging power from wallbox MeterValues |
+| **Feedback** | `sensor.wallbox_power` | sensor (W) | Charging power, derived by the OCPP server from the two meters bracketing the wallbox (~16 s cadence, ocpp-server-fsd §3.6.8). `sensor.wallbox_power_ocpp` carries the wallbox's own ~60 s meter and is reserved for the proxy correction and the meter-chain watchdogs. |
 | **Feedback** | `sensor.wallbox_status` | sensor | OCPP status: `Preparing`, `Charging`, `SuspendedEV`, `SuspendedEVSE`, `Finishing`, `Faulted` |
 | **Feedback** | `binary_sensor.wallbox_connected` | binary | WebSocket connection to wallbox (`on`/`off`). If `off`, EV control is skipped entirely. |
 | **Feedback** | `binary_sensor.car_ready` | binary | Car plugged in and ready to charge (`on`/`off`) |

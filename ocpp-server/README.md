@@ -58,7 +58,8 @@ All options are in the add-on **Configuration tab**:
 
 | Entity | Unit | Description |
 |--------|------|-------------|
-| `sensor.wallbox_power` | W | Current charging power |
+| `sensor.wallbox_power` | W | Charging power, from the two meters bracketing the wallbox (~16 s) |
+| `sensor.wallbox_power_ocpp` | W | The wallbox's own meter from `MeterValues` (~60 s) — feeds the Modbus-proxy correction and the meter-chain watchdogs |
 | `sensor.wallbox_energy` | Wh | Session energy delivered |
 | `sensor.wallbox_status` | — | Available / Preparing / Charging / SuspendedEV / Finishing / Faulted |
 | `sensor.wallbox_transaction` | — | idle / charging |
