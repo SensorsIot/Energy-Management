@@ -16,6 +16,26 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.ocpp_handler import ChargePointHandler
 
 
+
+def _assert_phases_published(server, count, *, measured) -> None:
+    """sensor.wallbox_phases carries the count as state and its provenance as an
+    attribute, so assertions have to look at both."""
+    for c in server.ha.set_state.call_args_list:
+        if c.args and c.args[0] == "sensor.wallbox_phases" and c.args[1] == count:
+            attrs = c.kwargs.get("attributes") or {}
+            if attrs.get("measured") is measured:
+                return
+    seen = [
+        (c.args, (c.kwargs.get("attributes") or {}).get("measured"))
+        for c in server.ha.set_state.call_args_list
+        if c.args and c.args[0] == "sensor.wallbox_phases"
+    ]
+    raise AssertionError(
+        f"no publish of sensor.wallbox_phases={count} with "
+        f"measured={measured}; saw {seen}"
+    )
+
+
 @pytest.fixture
 def mock_connection():
     """Create a mock WebSocket connection."""
@@ -2137,7 +2157,7 @@ class TestAmpRangeClamp:
         await asyncio.sleep(0)
 
         assert server._current_phases == 1
-        server.ha.set_state.assert_any_call("sensor.wallbox_phases", 1)
+        _assert_phases_published(server, 1, measured=True)
         server.charge_point.set_charging_current.assert_awaited_with(
             16, num_phases=1, force=False
         )
@@ -2201,6 +2221,67 @@ class TestStateResyncPublishesTheFactor:
         server.ha.set_state.assert_any_call("sensor.wallbox_max_power_w", 10544)
         # The commanded amps are re-expressed in watts for display.
         server.ha.set_state.assert_any_call("sensor.wallbox_power_limit", 6590)
+
+
+class TestUnlockConnectorButton:
+    """`UnlockConnector` releases the socket lock NOW.
+
+    A different OCPP message from the cable-lock switch, which only sets
+    `UnlockConnectorOnEVSideDisconnect` — a policy evaluated at the next unplug.
+    Verified 2026-10-12 that the switch's path works end to end and the value
+    persists across a reconnect, so a cable that is currently held can only be
+    freed by this message.
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "test"})
+        srv.ha = AsyncMock()
+        srv._mqtt_client = AsyncMock()
+        cp = MagicMock()
+        cp.unlock_connector = AsyncMock(return_value="Unlocked")
+        srv.charge_point = cp
+        return srv
+
+    @pytest.mark.asyncio
+    async def test_press_sends_unlock_connector(self, server) -> None:
+        await server._press_unlock_connector()
+        server.charge_point.unlock_connector.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_raw_status_is_published(self, server) -> None:
+        """OCPP allows NotSupported; it must be visible, not swallowed."""
+        server.charge_point.unlock_connector = AsyncMock(return_value="NotSupported")
+        await server._press_unlock_connector()
+        pub = [c for c in server._mqtt_client.publish.await_args_list
+               if c.args[0] == server._unlock_result_topic]
+        assert pub and pub[-1].args[1] == "NotSupported"
+
+    @pytest.mark.asyncio
+    async def test_offline_wallbox_is_ignored(self, server) -> None:
+        server.charge_point = None
+        await server._press_unlock_connector()   # must not raise
+
+    @pytest.mark.asyncio
+    async def test_an_exception_does_not_escape(self, server) -> None:
+        server.charge_point.unlock_connector = AsyncMock(side_effect=RuntimeError("boom"))
+        await server._press_unlock_connector()
+        pub = [c for c in server._mqtt_client.publish.await_args_list
+               if c.args[0] == server._unlock_result_topic]
+        assert pub and "boom" in pub[-1].args[1]
+
+    def test_discovery_declares_a_momentary_button(self, server) -> None:
+        import json as _json
+
+        d = _json.loads(server._unlock_discovery_payload())
+        assert d["payload_press"] == "PRESS"
+        assert "state_topic" not in d, "a button has no state"
+        assert d["unique_id"] == "ocpp_wallbox_unlock_connector"
 
 
 class TestPhaseIdentifyWindow:
@@ -2441,7 +2522,7 @@ class TestPhaseAssumptionOnUnplug:
         server._on_status_change("status", "Available")
         await asyncio.sleep(0)
         assert server._current_phases == 1
-        server.ha.set_state.assert_any_call("sensor.wallbox_phases", 1)
+        _assert_phases_published(server, 1, measured=False)
         server.ha.set_state.assert_any_call("sensor.wallbox_min_power_w", 1380)
 
     @pytest.mark.asyncio
@@ -2768,7 +2849,9 @@ class TestPhaseDetection:
         await h.on_meter_values(connector_id=1,
                                 meter_value=_phase_mv(1600, 1600, 1600, 7.0, 7.0, 7.0))
         assert h.active_phases == 3
-        assert ("phases_active", 3) not in [c.args for c in cb.call_args_list]
+        # A confirming frame still reports: that is what turns an assumed count
+        # into a measured one. The consumer dedups the HA write.
+        assert ("phases_active", 3) in [c.args for c in cb.call_args_list]
 
     @pytest.mark.asyncio
     async def test_switch_back_to_three_phase(self, mock_connection) -> None:
@@ -3006,7 +3089,7 @@ class TestServerPhaseAdoption:
         server._current_phases = 3
         server._on_phases_detected(1)
         await asyncio.sleep(0)
-        server.ha.set_state.assert_any_await("sensor.wallbox_phases", 1)
+        _assert_phases_published(server, 1, measured=True)
 
 
 class TestProfileDedup:

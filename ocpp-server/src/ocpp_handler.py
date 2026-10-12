@@ -313,12 +313,17 @@ class ChargePointHandler(CP):
         # count once the total draw is meaningful, so idle/ramp noise never flaps it.
         if has_power_measurand and total_power >= self.PHASE_DETECT_MIN_TOTAL_W and phase_current:
             active = sum(1 for a in phase_current.values() if a >= self.PHASE_ACTIVE_MIN_A)
-            if active in (1, 2, 3) and active != self.active_phases:
-                logger.info(
-                    f"Phase detection: {self.active_phases} → {active} active "
-                    f"(per-phase A: {phase_current})"
-                )
-                self.active_phases = active
+            if active in (1, 2, 3):
+                if active != self.active_phases:
+                    logger.info(
+                        f"Phase detection: {self.active_phases} → {active} active "
+                        f"(per-phase A: {phase_current})"
+                    )
+                    self.active_phases = active
+                # Reported on every qualifying frame, not only on a change: a
+                # frame that *confirms* the current count is still a measurement,
+                # and the consumer needs to know the difference between a
+                # measured count and an assumed one. The consumer dedups.
                 if self.on_status_change:
                     self.on_status_change("phases_active", active)
 

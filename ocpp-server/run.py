@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.83"
+__version__ = "0.9.84"
 
 import asyncio
 import json
@@ -248,6 +248,16 @@ class OCPPServer:
             "homeassistant/switch/ocpp_wallbox_cable_lock/config"
         )
         self._cable_lock_state = "UNLOCK"  # safe default: never trap the cable
+        # Momentary unlock (button.wallbox_unlock_connector). A *different* OCPP
+        # message from the cable-lock switch: `UnlockConnector` releases the
+        # socket lock NOW, where `UnlockConnectorOnEVSideDisconnect` only decides
+        # what happens at the next unplug. Pressing the switch can therefore
+        # never free a cable that is currently held — this can.
+        self._unlock_cmd_topic = "ocpp-server/unlock_connector/press"
+        self._unlock_result_topic = "ocpp-server/unlock_connector/result"
+        self._unlock_discovery_topic = (
+            "homeassistant/button/ocpp_wallbox_unlock_connector/config"
+        )
         # Proxy correction: while we are commanding the car to charge, feed the
         # ESP32 Modbus proxy the COMMANDED power (not the measured MeterValues),
         # so the SUN2000 sees the load the instant charging is commanded.
@@ -265,6 +275,11 @@ class OCPPServer:
         # until the cable's phase count is measured. 0.0 = not identifying.
         self._identify_started_at: float = 0.0
         self._identify_amps_sent = False
+        # Whether the published phase count came from a measurement or is an
+        # assumption. Published as the `measured` attribute of
+        # sensor.wallbox_phases so a consumer can tell the two apart.
+        self._phases_measured = False
+        self._phases_published: tuple[int, bool] | None = None
         self._last_sent_a: int = 0           # amps last commanded (post-clamp)
         self._last_requested_a: int = 0      # amps asked for (pre-clamp HA value)
         self._last_measured_power_w: float = 0.0   # calibrated measured draw (proxy handoff)
@@ -439,7 +454,9 @@ class OCPPServer:
                     # Announce the cable-lock switch (HA MQTT discovery), restore
                     # its last-known state, and listen for user commands.
                     await client.subscribe(self._cable_lock_cmd_topic)
+                    await client.subscribe(self._unlock_cmd_topic)
                     await self._publish_cable_lock_discovery()
+                    await self._publish_unlock_discovery()
                     await self._publish_cable_lock_state()
                     # Re-publish last known power every 10s (Modbus Proxy 30s
                     # staleness timeout on the ESP32) — runs alongside the
@@ -447,8 +464,11 @@ class OCPPServer:
                     republish = asyncio.create_task(self._mqtt_power_republish_loop())
                     try:
                         async for message in client.messages:
-                            if str(message.topic) == self._cable_lock_cmd_topic:
+                            topic = str(message.topic)
+                            if topic == self._cable_lock_cmd_topic:
                                 await self._handle_cable_lock_command(message)
+                            elif topic == self._unlock_cmd_topic:
+                                await self._press_unlock_connector()
                     finally:
                         republish.cancel()
             except aiomqtt.MqttError as e:
@@ -514,6 +534,60 @@ class OCPPServer:
                 "icon": "mdi:ev-plug-type2",
             }
         )
+
+    def _unlock_discovery_payload(self) -> str:
+        """HA MQTT-discovery config for button.wallbox_unlock_connector."""
+        return json.dumps(
+            {
+                "name": "Wallbox Unlock Connector",
+                "unique_id": "ocpp_wallbox_unlock_connector",
+                "object_id": "wallbox_unlock_connector",
+                "command_topic": self._unlock_cmd_topic,
+                "payload_press": "PRESS",
+                "icon": "mdi:lock-open-variant",
+            }
+        )
+
+    async def _publish_unlock_discovery(self) -> None:
+        """Publish the retained discovery config so HA creates the button."""
+        if self._mqtt_client is None:
+            return
+        try:
+            await self._mqtt_client.publish(
+                self._unlock_discovery_topic,
+                self._unlock_discovery_payload(),
+                retain=True,
+            )
+            logger.info("Published unlock-connector MQTT discovery config")
+        except Exception as e:                                     # noqa: BLE001
+            logger.warning(f"Unlock-connector discovery publish failed: {e}")
+
+    async def _press_unlock_connector(self) -> None:
+        """Send `UnlockConnector` and surface the raw result.
+
+        The status is published and logged rather than swallowed: OCPP allows
+        `Unlocked`, `UnlockFailed` and `NotSupported`, and a wallbox that does
+        not implement the message would otherwise fail silently.
+        """
+        if not self.charge_point:
+            logger.warning("Unlock-connector: wallbox offline, ignoring press")
+            return
+        try:
+            status = await self.charge_point.unlock_connector()
+        except Exception as e:                                     # noqa: BLE001
+            logger.error(f"Unlock-connector failed: {e}")
+            status = f"Error: {e}"
+        if status == "Unlocked":
+            logger.info("Connector unlocked (UnlockConnector: Unlocked)")
+        else:
+            logger.warning(f"UnlockConnector returned {status}")
+        if self._mqtt_client is not None:
+            try:
+                await self._mqtt_client.publish(
+                    self._unlock_result_topic, str(status), retain=True
+                )
+            except Exception as e:                                 # noqa: BLE001
+                logger.warning(f"Unlock-connector result publish failed: {e}")
 
     async def _publish_cable_lock_discovery(self) -> None:
         """Publish the retained MQTT-discovery config so HA creates the switch."""
@@ -799,6 +873,32 @@ class OCPPServer:
         # consumer's own limit is re-applied rather than leaving 6 A commanded.
         await self._apply_current_power_limit()
 
+    async def _publish_phases(self, *, measured: bool | None = None) -> None:
+        """Publish the phase count and whether it was measured or assumed.
+
+        `sensor.wallbox_phases` carries the count as its **state** — numeric, so
+        the startup restore and any consumer can parse it — and the provenance as
+        a `measured` attribute. The count alone cannot say whether it is known: an
+        unplug resets it to an assumption, and the identify window runs on an
+        assumption until MeterValues confirm one.
+
+        Deduped: the detector reports a measurement on every qualifying frame
+        (~1/min while charging), and re-writing an unchanged entity is noise.
+        """
+        if measured is not None:
+            self._phases_measured = measured
+        key = (self._current_phases, self._phases_measured)
+        if key == self._phases_published:
+            return
+        self._phases_published = key
+        defn = {k: v for k, v in SENSORS["sensor.wallbox_phases"].items()
+                if k != "initial_state"}
+        await self.ha.set_state(
+            "sensor.wallbox_phases",
+            self._current_phases,
+            attributes={**defn, "measured": self._phases_measured},
+        )
+
     # Phase-identify window (§3.6.4.1). The phase count is measured from
     # per-phase current, so current must flow before anything is known — and
     # neither assumption is safe to charge on: 1 phase caps a 3-phase car below
@@ -924,7 +1024,7 @@ class OCPPServer:
         )
         self._current_phases = 1
         self._phase_probe_cycles = 0
-        asyncio.ensure_future(self.ha.set_state("sensor.wallbox_phases", 1))
+        asyncio.ensure_future(self._publish_phases(measured=False))
         asyncio.ensure_future(self._publish_power_limits())
 
     def _on_phases_detected(self, detected: int) -> None:
@@ -939,15 +1039,18 @@ class OCPPServer:
         """
         if self.wallbox_type != "three_phase":
             return
-        if detected not in (1, 3) or detected == self._current_phases:
+        if detected not in (1, 3):
             return
-        logger.info(
-            f"Cable phase count changed: {self._current_phases} → {detected} "
-            f"(measured from MeterValues) — re-publishing range/limits"
-        )
-        self._current_phases = detected
-        asyncio.ensure_future(self.ha.set_state("sensor.wallbox_phases", detected))
-        asyncio.ensure_future(self._publish_power_limits())
+        if detected != self._current_phases:
+            logger.info(
+                f"Cable phase count changed: {self._current_phases} → {detected} "
+                f"(measured from MeterValues) — re-publishing range/limits"
+            )
+            self._current_phases = detected
+            asyncio.ensure_future(self._publish_power_limits())
+        # Reached on a confirmation too, which is what turns an assumed count
+        # into a measured one without any value changing.
+        asyncio.ensure_future(self._publish_phases(measured=True))
         # The identify window exists only to produce this measurement.
         asyncio.ensure_future(self._end_identify(f"measured {detected}-phase"))
         # Re-apply the HA limit through the new phase range. Publishing the range
