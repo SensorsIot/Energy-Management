@@ -54,7 +54,9 @@ except OSError as e:
 
 # Status change callback key → HA entity mapping
 STATUS_ENTITY_MAP = {
-    "power_w": "sensor.wallbox_power",
+    # The wallbox's own metered draw. sensor.wallbox_power is NOT fed from here
+    # — it is derived from the two house meters (see _meter_power_w).
+    "power_w": "sensor.wallbox_power_ocpp",
     "energy_wh": "sensor.wallbox_energy",
     "status": "sensor.wallbox_status",
     "connected": "binary_sensor.wallbox_connected",
@@ -247,6 +249,12 @@ class OCPPServer:
         self._mqtt_port = options.get("mqtt_port", 1883)
         self._mqtt_topic = options.get("mqtt_topic", "wallbox")
         self._mqtt_client: aiomqtt.Client | None = None
+        # The two meters that bracket the wallbox, read straight off the broker
+        # at their native cadence (no HA round-trip). See _meter_power_w.
+        self._meter_dtsu_topic = options.get("meter_dtsu_topic", "MBUS-PROXY/power")
+        self._meter_grid_topic = options.get(
+            "meter_grid_topic", "B0-81-84-25-22-5C/SENSOR"
+        )
         self._last_mqtt_power: float = (
             0.0  # re-publish periodically to prevent staleness
         )
@@ -288,6 +296,14 @@ class OCPPServer:
         self._last_requested_a: int = 0      # amps asked for (pre-clamp HA value)
         self._last_measured_power_w: float = 0.0   # calibrated measured draw (proxy handoff)
         self._last_measured_time: float = 0.0      # monotonic time of last measured update
+        # Latest sample from each bracketing meter, with the monotonic time it
+        # arrived. Sign conventions differ and are NOT normalised here — see
+        # _meter_power_w for the subtraction.
+        self._meter_grid_w: float = 0.0   # (Po − Pi) × 1000; positive = export
+        self._meter_grid_at: float = 0.0
+        self._meter_dtsu_w: float = 0.0   # raw, pre-injection; positive = import
+        self._meter_dtsu_at: float = 0.0
+        self._meter_power_published: int | None = None
         self._last_phase_switch_time: float = 0.0
         self.PHASE_SWITCH_LOCK_S = 300  # 5-minute time lock after phase switch
 
@@ -460,14 +476,29 @@ class OCPPServer:
                     await client.subscribe(self._cable_lock_cmd_topic)
                     await self._publish_cable_lock_discovery()
                     await self._publish_cable_lock_state()
+                    # The two bracketing meters, for the fast charging-power
+                    # signal (sensor.wallbox_power).
+                    for topic in (self._meter_grid_topic, self._meter_dtsu_topic):
+                        if topic:
+                            await client.subscribe(topic)
+                    logger.info(
+                        f"Meter subscriptions: grid={self._meter_grid_topic} "
+                        f"dtsu={self._meter_dtsu_topic}"
+                    )
                     # Re-publish last known power every 10s (Modbus Proxy 30s
                     # staleness timeout on the ESP32) — runs alongside the
                     # command listener below.
                     republish = asyncio.create_task(self._mqtt_power_republish_loop())
                     try:
                         async for message in client.messages:
-                            if str(message.topic) == self._cable_lock_cmd_topic:
+                            topic = str(message.topic)
+                            if topic == self._cable_lock_cmd_topic:
                                 await self._handle_cable_lock_command(message)
+                            elif topic in (
+                                self._meter_grid_topic,
+                                self._meter_dtsu_topic,
+                            ):
+                                await self._handle_meter_message(topic, message)
                     finally:
                         republish.cancel()
             except aiomqtt.MqttError as e:
@@ -688,6 +719,111 @@ class OCPPServer:
         """Recompute and publish the proxy correction value."""
         asyncio.ensure_future(self._publish_mqtt_power(self._proxy_power_w()))
 
+    # --- Fast charging power from the two bracketing meters ----------------
+    #
+    # The wallbox sits physically between the gPlug grid meter and the DTSU
+    # meter, and is the only load between them (a measured idle residual of
+    # +8 W). So the difference of the two readings IS the charging power, and it
+    # follows the grid meter's ~16 s cadence instead of the wallbox's ~60 s
+    # MeterValues.
+    #
+    # Staleness bound. The grid meter publishes every ~16 s and repeats values,
+    # so neither last_changed nor last_reported can be used to age it — only the
+    # arrival time of the MQTT message, which is what is recorded. 60 s tolerates
+    # two missed publishes before the signal is declared dead.
+    _METER_MAX_AGE_S = 60
+    # Below this the difference is meter noise, not charging: the smallest real
+    # charge is 6 A on one phase (~1.4 kW), so nothing real is suppressed. Needed
+    # because consumers treat "> 0" as "charging".
+    _METER_DEADBAND_W = 150
+
+    def _meter_power_w(self) -> float | None:
+        """Charging power from the bracketing meters, or None if unavailable.
+
+        `car = (−grid) − dtsu_raw`. The two meters use opposite sign conventions:
+        gPlug `grid_power` is positive on export, the DTSU is positive on import.
+
+        `dtsu_raw` must be the **pre-injection** reading (the `dtsu` key of the
+        proxy payload), never the corrected `sun2000` value — the proxy
+        correction is itself derived from the wallbox power, so reading the
+        corrected meter would close the loop on our own output.
+
+        The subtraction is invariant to anything the inverter does: PV, battery
+        and house load are common to both meters and cancel. Only the car, which
+        sits between them, survives.
+
+        Returns None when either meter is missing or stale, so the caller can
+        leave the last good value in place rather than publish a wrong zero.
+        """
+        if self._meter_grid_at == 0.0 or self._meter_dtsu_at == 0.0:
+            return None
+        now = time.monotonic()
+        if (now - self._meter_grid_at) > self._METER_MAX_AGE_S:
+            return None
+        if (now - self._meter_dtsu_at) > self._METER_MAX_AGE_S:
+            return None
+
+        cp = self.charge_point
+        if cp is None or cp.transaction_id is None:
+            return 0.0  # nothing can be drawing; don't report meter noise
+
+        car = -self._meter_grid_w - self._meter_dtsu_w
+        if car < self._METER_DEADBAND_W:
+            return 0.0
+        # Ceiling at the physical maximum of a three-phase cable regardless of
+        # the detected phase count: clamping to the detected count would cap a
+        # real 3-phase draw whenever detection is still pending or wrong.
+        ceiling = float(amps_to_watts(self.max_current_a, 3))
+        return min(car, ceiling)
+
+    async def _handle_meter_message(self, topic: str, message) -> None:
+        """Record a meter sample and refresh the charging power on the grid one."""
+        try:
+            payload = json.loads(message.payload.decode())
+        except (ValueError, UnicodeDecodeError, AttributeError) as e:
+            logger.debug(f"Meter payload on {topic} not JSON: {e}")
+            return
+
+        if topic == self._meter_dtsu_topic:
+            # The proxy publishes dtsu/wallbox/sun2000; `dtsu` is pre-injection.
+            raw = payload.get("dtsu")
+            if raw is None:
+                return
+            try:
+                self._meter_dtsu_w = float(raw)
+            except (TypeError, ValueError):
+                return
+            self._meter_dtsu_at = time.monotonic()
+            return  # 1 Hz — publishing here would spam HA; wait for the grid
+
+        # Grid meter: the slower of the two, so it gates the cadence. Recompute
+        # on its arrival, pairing it with a DTSU sample at most ~1 s old.
+        try:
+            grid_w = (float(payload["Po"]) - float(payload["Pi"])) * 1000.0
+        except (KeyError, TypeError, ValueError):
+            return
+        self._meter_grid_w = grid_w
+        self._meter_grid_at = time.monotonic()
+        await self._publish_meter_power()
+
+    async def _publish_meter_power(self) -> None:
+        """Publish the charging power, deduped on the rounded value.
+
+        Falls back to the wallbox's own OCPP meter whenever the bracketing
+        meters are missing or stale, so losing the gPlug MQTT bridge costs
+        responsiveness (~60 s instead of ~16 s) and nothing else. Holding the
+        last meter-derived value instead would leave a charging figure frozen on
+        screen after the car stopped.
+        """
+        car = self._meter_power_w()
+        if car is None:
+            car = float(self._last_measured_power_w)
+        value = round(car)
+        if value == self._meter_power_published:
+            return
+        self._meter_power_published = value
+        await self.ha.set_state("sensor.wallbox_power", value)
+
     def _on_status_change(self, key: str, value) -> None:
         """Handle a wallbox status change: update HA entity and MQTT."""
         if key == "phases_active":
@@ -711,6 +847,10 @@ class OCPPServer:
                 self._last_requested_a = 0
                 self._proxy_charging = False
                 self._publish_proxy_power()
+                # Zero the fast signal now rather than waiting for the next
+                # grid-meter publish ~16 s out. transaction_id is already clear,
+                # so _meter_power_w returns 0.
+                asyncio.ensure_future(self._publish_meter_power())
                 # Re-apply current HA power limit (car may reconnect quickly)
                 asyncio.ensure_future(self._apply_current_power_limit())
         elif key == "power_w":
@@ -721,6 +861,10 @@ class OCPPServer:
             self._last_measured_power_w = float(value)
             self._last_measured_time = time.monotonic()
             self._publish_proxy_power()
+            # Keeps sensor.wallbox_power alive on the OCPP fallback when the
+            # bracketing meters are stale; a no-op (deduped) when they are live
+            # and already agree.
+            asyncio.ensure_future(self._publish_meter_power())
         else:
             state = value
 
@@ -1401,8 +1545,15 @@ class OCPPServer:
         )
         if cp:
             await self.ha.set_state("sensor.wallbox_status", cp.current_status)
-            await self.ha.set_state("sensor.wallbox_power", round(cp.current_power_w))
+            await self.ha.set_state(
+                "sensor.wallbox_power_ocpp", round(cp.current_power_w)
+            )
             await self.ha.set_state("sensor.wallbox_energy", cp.session_energy_wh)
+            # sensor.wallbox_power is meter-derived; re-publish it from the
+            # meters (falling back to the OCPP value) rather than copying
+            # cp.current_power_w over it.
+            self._meter_power_published = None  # force a write after HA restart
+            await self._publish_meter_power()
             txn = "charging" if cp.transaction_id is not None else "idle"
             await self.ha.set_state("sensor.wallbox_transaction", txn)
         await self._update_car_ready()

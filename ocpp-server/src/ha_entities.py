@@ -7,6 +7,10 @@ and watches control entities for EnergyManager commands.
 
 # Sensor entities (wallbox state → HA)
 SENSORS = {
+    # Charging power derived from the two meters that bracket the wallbox:
+    # (−grid_power) − dtsu_raw. Updates at the grid meter's ~16 s cadence, four
+    # times faster than the wallbox's own ~60 s MeterValues. This is the
+    # charging power every consumer reads.
     "sensor.wallbox_power": {
         "name": "Wallbox Power",
         "unique_id": "ocpp_wallbox_power",
@@ -14,6 +18,19 @@ SENSORS = {
         "state_class": "measurement",
         "unit_of_measurement": "W",
         "icon": "mdi:ev-station",
+        "initial_state": 0,
+    },
+    # The wallbox's own metered draw from OCPP MeterValues, calibrated. Slower
+    # (~60 s) but independent of the house meters, which is what makes it a
+    # valid cross-check: the Modbus-proxy correction and the HA divergence
+    # watchdog both read this, never sensor.wallbox_power.
+    "sensor.wallbox_power_ocpp": {
+        "name": "Wallbox Power (OCPP meter)",
+        "unique_id": "ocpp_wallbox_power_ocpp",
+        "device_class": "power",
+        "state_class": "measurement",
+        "unit_of_measurement": "W",
+        "icon": "mdi:counter",
         "initial_state": 0,
     },
     # Derived from the commanded amps (amps × watts-per-amp). Display only —

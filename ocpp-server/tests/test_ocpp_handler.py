@@ -1,6 +1,7 @@
 """Tests for OCPP handler and server throttle logic."""
 
 import asyncio
+import json
 import math
 import time
 
@@ -564,7 +565,10 @@ class TestThrottle:
         }
         assert calls["binary_sensor.wallbox_connected"] == "on"
         assert calls["sensor.wallbox_status"] == "Charging"
-        assert calls["sensor.wallbox_power"] == 5000
+        # The wallbox's own meter goes to the _ocpp sensor; sensor.wallbox_power
+        # is meter-derived and re-published from _publish_meter_power (here the
+        # bracketing meters have no samples, so it falls back to 0).
+        assert calls["sensor.wallbox_power_ocpp"] == 5000
         assert calls["sensor.wallbox_energy"] == 1200
         assert calls["sensor.wallbox_transaction"] == "charging"
 
@@ -3354,3 +3358,159 @@ class TestStartBackoff:
             8, num_phases=3, force=False
         )
         server.charge_point.remote_start.assert_not_awaited()
+
+
+class TestMeterDerivedPower:
+    """sensor.wallbox_power comes from the two meters bracketing the wallbox.
+
+    `car = (−grid) − dtsu_raw`, where the gPlug grid meter is positive on export
+    and the DTSU is positive on import. The grid meter publishes every ~16 s
+    against the wallbox's ~60 s MeterValues, so the difference is the faster
+    signal — that is the whole point of deriving it.
+    """
+
+    @pytest.fixture
+    def server(self):
+        """An OCPPServer with mocked HA and an active transaction."""
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "test", "max_current_a": 16})
+        srv.ha = AsyncMock()
+        srv.ha.set_state = AsyncMock()
+        cp = MagicMock()
+        cp.transaction_id = 1
+        srv.charge_point = cp
+        return srv
+
+    def _feed(self, server, *, grid_w, dtsu_w, age_s=0.0):
+        """Place fresh samples directly, bypassing MQTT."""
+        now = time.monotonic() - age_s
+        server._meter_grid_w = grid_w
+        server._meter_grid_at = now
+        server._meter_dtsu_w = dtsu_w
+        server._meter_dtsu_at = now
+
+    def test_difference_is_the_charging_power(self, server) -> None:
+        """The live 2026-10-12 sample: export 176 W at the grid, 1711 W at the DTSU."""
+        self._feed(server, grid_w=176.0, dtsu_w=-1711.2)
+        assert round(server._meter_power_w()) == 1535
+
+    def test_invariant_to_pv_and_battery(self, server) -> None:
+        """House, PV and battery are common to both meters and must cancel.
+
+        Same 3000 W car, once served entirely from the grid and once entirely
+        from PV. Both must report 3000 W.
+        """
+        # house 500 W, car 3000 W, no PV: grid imports 3500 W (negative = import)
+        self._feed(server, grid_w=-3500.0, dtsu_w=500.0)
+        from_grid = server._meter_power_w()
+        # same car, PV now covers everything: grid balanced, DTSU exports 3000 W
+        self._feed(server, grid_w=0.0, dtsu_w=-3000.0)
+        from_pv = server._meter_power_w()
+        assert from_grid == pytest.approx(3000.0)
+        assert from_pv == pytest.approx(3000.0)
+
+    def test_no_transaction_reports_zero(self, server) -> None:
+        """With no transaction nothing can draw, so meter noise is not charging."""
+        server.charge_point.transaction_id = None
+        self._feed(server, grid_w=-400.0, dtsu_w=0.0)
+        assert server._meter_power_w() == 0.0
+
+    def test_deadband_suppresses_meter_noise(self, server) -> None:
+        """Below the deadband reads as 0 — consumers treat `> 0` as charging.
+
+        The smallest real charge is 6 A on one phase (~1.4 kW), so nothing real
+        is suppressed.
+        """
+        self._feed(server, grid_w=-120.0, dtsu_w=0.0)   # 120 W of skew
+        assert server._meter_power_w() == 0.0
+        self._feed(server, grid_w=-1400.0, dtsu_w=0.0)  # 6 A, one phase
+        assert server._meter_power_w() == pytest.approx(1400.0)
+
+    def test_clamped_to_three_phase_maximum(self, server) -> None:
+        """A wild reading is capped at what a 3-phase cable can physically carry.
+
+        The cap uses three phases regardless of the detected count, so a real
+        3-phase draw is never clipped while detection is pending.
+        """
+        server._current_phases = 1
+        self._feed(server, grid_w=-50000.0, dtsu_w=0.0)
+        from src.ocpp_handler import amps_to_watts
+
+        assert server._meter_power_w() == pytest.approx(amps_to_watts(16, 3))
+
+    def test_stale_meter_returns_none(self, server) -> None:
+        """Stale samples yield None so the caller can fall back, not publish junk."""
+        self._feed(server, grid_w=-3000.0, dtsu_w=0.0,
+                   age_s=server._METER_MAX_AGE_S + 5)
+        assert server._meter_power_w() is None
+
+    def test_never_sampled_returns_none(self, server) -> None:
+        """Before the first MQTT message there is nothing to derive from."""
+        assert server._meter_power_w() is None
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_ocpp_meter_when_stale(self, server) -> None:
+        """Losing the gPlug bridge costs responsiveness, not the signal.
+
+        Regression guard: returning early instead would leave a charging value
+        frozen on the dashboard after the car stopped.
+        """
+        server._last_measured_power_w = 2250.0
+        await server._publish_meter_power()
+        server.ha.set_state.assert_awaited_with("sensor.wallbox_power", 2250)
+
+    @pytest.mark.asyncio
+    async def test_grid_message_publishes_dtsu_message_does_not(self, server) -> None:
+        """The grid meter gates the cadence; the 1 Hz DTSU must not spam HA."""
+        dtsu = MagicMock()
+        dtsu.payload = json.dumps(
+            {"dtsu": -1711.2, "wallbox": 1500, "sun2000": -211.2}
+        ).encode()
+        await server._handle_meter_message(server._meter_dtsu_topic, dtsu)
+        server.ha.set_state.assert_not_awaited()
+        assert server._meter_dtsu_w == pytest.approx(-1711.2)
+
+        # Po/Pi are kW in the gPlug payload: 0.176 kW export → +176 W
+        grid = MagicMock()
+        grid.payload = json.dumps({"Po": 0.176, "Pi": 0.0}).encode()
+        await server._handle_meter_message(server._meter_grid_topic, grid)
+        server.ha.set_state.assert_awaited_with("sensor.wallbox_power", 1535)
+
+    @pytest.mark.asyncio
+    async def test_unchanged_value_published_once(self, server) -> None:
+        """Deduped on the rounded watt value — no repeated writes to HA."""
+        self._feed(server, grid_w=0.0, dtsu_w=-2000.0)
+        await server._publish_meter_power()
+        await server._publish_meter_power()
+        assert server.ha.set_state.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_malformed_payload_ignored(self, server) -> None:
+        """A bad payload leaves the last good sample in place."""
+        self._feed(server, grid_w=0.0, dtsu_w=-2000.0)
+        before = (server._meter_grid_w, server._meter_dtsu_w)
+        for payload in (b"not json", b"{}", json.dumps({"Po": "x"}).encode()):
+            msg = MagicMock()
+            msg.payload = payload
+            await server._handle_meter_message(server._meter_grid_topic, msg)
+            await server._handle_meter_message(server._meter_dtsu_topic, msg)
+        assert (server._meter_grid_w, server._meter_dtsu_w) == before
+
+    def test_ocpp_meter_has_its_own_entity(self) -> None:
+        """The wallbox's own meter must stay separately published.
+
+        The Modbus-proxy correction and the HA divergence watchdog cross-check
+        against it; if it were folded into sensor.wallbox_power the watchdog
+        would be comparing the correction against a value derived from the same
+        meters it is meant to police.
+        """
+        from run import STATUS_ENTITY_MAP
+        from src.ha_entities import SENSORS
+
+        assert STATUS_ENTITY_MAP["power_w"] == "sensor.wallbox_power_ocpp"
+        assert "sensor.wallbox_power_ocpp" in SENSORS
+        assert "sensor.wallbox_power" in SENSORS

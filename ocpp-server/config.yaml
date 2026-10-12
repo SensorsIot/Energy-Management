@@ -1,5 +1,5 @@
 name: "OCPP Server"
-version: "0.9.88"
+version: "0.9.89"
 slug: "ocpp-server"
 description: "OCPP 1.6j server for EV wallbox control via HA entities"
 url: "https://github.com/SensorsIot/Energy-Management"
@@ -34,6 +34,8 @@ options:
   mqtt_host: "192.168.0.203"
   mqtt_port: 1883
   mqtt_topic: "wallbox"
+  meter_dtsu_topic: "MBUS-PROXY/power"
+  meter_grid_topic: "B0-81-84-25-22-5C/SENSOR"
   wallbox_type: "three_phase"
   power_update_interval_s: 60
   current_sensor_entity: "sensor.earu_breaker_bl0942_current"
@@ -48,6 +50,8 @@ schema:
   mqtt_host: str?
   mqtt_port: int?
   mqtt_topic: str?
+  meter_dtsu_topic: str?
+  meter_grid_topic: str?
   wallbox_type: "list(universal|external_breaker|three_phase)"
   power_update_interval_s: "int?"
   current_sensor_entity: "str?"
