@@ -2223,6 +2223,63 @@ class TestStateResyncPublishesTheFactor:
         server.ha.set_state.assert_any_call("sensor.wallbox_power_limit", 6590)
 
 
+class TestPhaseProvenance:
+    """Every path that publishes the count must say whether it was measured.
+
+    A consumer reading only the state cannot tell a measurement from a guess, and
+    four separate code paths write this entity — a restore, a resync, an unplug
+    reset and a detection. One of them bypassing the publisher silently drops the
+    attribute, which is what happened on first deploy.
+    """
+
+    @pytest.fixture
+    def server(self):
+        for mod in ("aiomqtt", "aiohttp", "websockets"):
+            if mod not in sys.modules:
+                sys.modules[mod] = MagicMock()
+        from run import OCPPServer
+
+        srv = OCPPServer({"wallbox_id": "test", "wallbox_type": "three_phase"})
+        srv.ha = AsyncMock()
+        srv.ha.get_state = AsyncMock(return_value="0")
+        return srv
+
+    def test_no_path_writes_the_entity_directly(self) -> None:
+        """All writes go through _publish_phases, or the attribute is lost."""
+        import pathlib
+
+        src = (pathlib.Path(__file__).parent.parent / "run.py").read_text()
+        direct = src.count('set_state("sensor.wallbox_phases"')
+        assert direct == 0, (
+            f"{direct} direct write(s) to sensor.wallbox_phases bypass "
+            f"_publish_phases and would drop the `measured` attribute"
+        )
+
+    @pytest.mark.asyncio
+    async def test_publish_carries_the_attribute(self, server) -> None:
+        server._current_phases = 3
+        await server._publish_phases(measured=True)
+        call = server.ha.set_state.await_args
+        assert call.args == ("sensor.wallbox_phases", 3)
+        assert call.kwargs["attributes"]["measured"] is True
+
+    @pytest.mark.asyncio
+    async def test_publish_dedups(self, server) -> None:
+        """The detector reports every frame (~1/min); writes must not follow."""
+        await server._publish_phases(measured=True)
+        server.ha.set_state.reset_mock()
+        await server._publish_phases(measured=True)
+        server.ha.set_state.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_provenance_change_alone_republishes(self, server) -> None:
+        """An assumed 3 becoming a measured 3 is a real change to publish."""
+        await server._publish_phases(measured=False)
+        server.ha.set_state.reset_mock()
+        await server._publish_phases(measured=True)
+        server.ha.set_state.assert_called_once()
+
+
 class TestUnlockConnectorButton:
     """`UnlockConnector` releases the socket lock NOW.
 

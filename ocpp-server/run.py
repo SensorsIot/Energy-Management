@@ -5,7 +5,7 @@ Provides OCPP 1.6j WebSocket server for wallbox communication.
 Communicates with EnergyManager via HA entities (REST API).
 """
 
-__version__ = "0.9.84"
+__version__ = "0.9.85"
 
 import asyncio
 import json
@@ -1417,7 +1417,10 @@ class OCPPServer:
             "binary_sensor.wallbox_single_phase_supported",
             "on" if self.single_phase_supported else "off",
         )
-        await self.ha.set_state("sensor.wallbox_phases", self._current_phases)
+        # Force a re-publish: after an HA restart the entity is gone, so the
+        # dedup cache must not suppress it.
+        self._phases_published = None
+        await self._publish_phases()
         # The amp range, the conversion factor and the derived watt range are
         # part of the state a consumer depends on (FSD 3.6.1), so they are
         # re-published here too. Registration alone leaves them at their
@@ -1769,7 +1772,9 @@ class OCPPServer:
                 self._current_phases = 1
             else:
                 self._current_phases = 3  # default if unavailable
-            await self.ha.set_state("sensor.wallbox_phases", self._current_phases)
+            # On a switchable wallbox the relay position *is* the phase count,
+            # so this is known rather than assumed.
+            await self._publish_phases(measured=relay_state in ("on", "off"))
             logger.info(
                 f"Phase switch entity: {self.phase_switch_entity}, "
                 f"relay={relay_state}, phases={self._current_phases}"
@@ -1786,6 +1791,11 @@ class OCPPServer:
                 logger.info(
                     f"Restored cable phase count from HA: {self._current_phases}φ"
                 )
+
+        # A restored count is an assumption: the cable could have been swapped
+        # while the add-on was down. The identify window on the next plug-in, or
+        # the next qualifying MeterValues frame, promotes it to measured.
+        await self._publish_phases(measured=False)
 
         # Publish initial min/max power limits based on current phase count
         await self._publish_power_limits()
