@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.35"
+__version__ = "1.9.37"
 
 import json
 import logging
@@ -764,8 +764,43 @@ class EnergyManager:
 
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=point)
 
-    def control_battery(self, discharge_allowed: bool) -> None:
-        """Control battery discharge via Home Assistant - reads actual state and adjusts."""
+    # How long to wait for the discharge register to show its new value in the
+    # Home Assistant state machine, and how often to look. The Huawei Solar
+    # integration republishes the entity asynchronously after the Modbus write
+    # — measured at ~2.4 s on 2026-10-22 — so a single read 1 s after the POST
+    # raced it, read the pre-write value and reported a false mismatch at both
+    # tariff flips every day.
+    VERIFY_TIMEOUT_S = 10.0
+    VERIFY_POLL_S = 1.0
+
+    def _await_discharge_register(self, entity_id: str, target_value: float) -> float | None:
+        """Read `entity_id` until it holds `target_value`, up to `VERIFY_TIMEOUT_S`.
+
+        Returns as soon as the register matches, so the common case still costs
+        one read. Returns the last value seen when the reads run out — `None`
+        if it was never readable, which the caller treats as "unverified"
+        rather than as a mismatch.
+        """
+        attempts = max(1, round(self.VERIFY_TIMEOUT_S / self.VERIFY_POLL_S))
+        value = None
+        for attempt in range(attempts):
+            value = self.ha_client.get_battery_discharge_power(entity_id)
+            if value is not None and abs(value - target_value) < 1:
+                return value
+            if attempt < attempts - 1:
+                time.sleep(self.VERIFY_POLL_S)
+        return value
+
+    def control_battery(self, discharge_allowed: bool, force: bool = False) -> None:
+        """Control battery discharge via Home Assistant - reads actual state and adjusts.
+
+        `force` says the decision itself just changed, which is what licenses a
+        write against a register that cannot be read (FSD 4.7.1). A routine
+        reconcile passes `force=False` and skips instead: fail-open exists so an
+        unreadable register is never stranded, but re-applying it every
+        `DISCHARGE_RECONCILE_S` turned one unreachable inverter into a write per
+        minute, none of which could land.
+        """
         if not self.ha_client.token:
             logger.warning("No HA token, cannot control battery")
             return
@@ -780,10 +815,20 @@ class EnergyManager:
         current_value = self.ha_client.get_battery_discharge_power(self.discharge_control_entity)
 
         if current_value is None:
+            if not force:
+                # Nothing changed and nothing can be read, so there is no drift
+                # to correct and a write would be blind. Skipping self-heals:
+                # the next reconcile that *can* read the register corrects it.
+                logger.warning(
+                    f"{self.discharge_control_entity} is unreadable and the decision "
+                    f"has not changed — skipping the reconcile write"
+                )
+                return
             logger.warning(
-                f"Could not read current discharge power from {self.discharge_control_entity}"
+                f"Could not read current discharge power from "
+                f"{self.discharge_control_entity} — writing {target_value}W anyway "
+                f"because the decision changed"
             )
-            # Continue anyway - we should try to set the value
         elif abs(current_value - target_value) < 1:
             # Already correct. At the reconciliation cadence this is the common
             # case, so it stays at debug or it would bury everything else.
@@ -820,9 +865,11 @@ class EnergyManager:
             )
             return
 
-        # Verify the change took effect
-        time.sleep(1)  # Give HA time to process
-        verified_value = self.ha_client.get_battery_discharge_power(self.discharge_control_entity)
+        # Verify the change took effect. The register appears in the state
+        # machine only after the integration republishes it, so this polls.
+        verified_value = self._await_discharge_register(
+            self.discharge_control_entity, target_value
+        )
 
         if verified_value is not None and abs(verified_value - target_value) < 1:
             self.last_discharge_allowed = discharge_allowed
@@ -890,7 +937,7 @@ class EnergyManager:
                 f"{' by ' + ' + '.join(reason) if reason else ''}"
             )
         self._last_discharge_reconcile_at = time.monotonic()
-        self.control_battery(discharge_allowed)
+        self.control_battery(discharge_allowed, force=changed)
 
     def _car_is_full(self):
         """Return whether the EV is at/above its charging target (True/False/None).

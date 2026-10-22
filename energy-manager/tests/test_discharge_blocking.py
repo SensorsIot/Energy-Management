@@ -81,25 +81,25 @@ class TestUpdateDischargeControl:
         manager._discharge_blocked_by_protection = False
         manager._discharge_blocked_by_ev = False
         manager._update_discharge_control()
-        manager.control_battery.assert_called_once_with(True)
+        manager.control_battery.assert_called_once_with(True, force=True)
 
     def test_protection_blocks(self, manager) -> None:
         manager._discharge_blocked_by_protection = True
         manager._discharge_blocked_by_ev = False
         manager._update_discharge_control()
-        manager.control_battery.assert_called_once_with(False)
+        manager.control_battery.assert_called_once_with(False, force=True)
 
     def test_ev_blocks(self, manager) -> None:
         manager._discharge_blocked_by_protection = False
         manager._discharge_blocked_by_ev = True
         manager._update_discharge_control()
-        manager.control_battery.assert_called_once_with(False)
+        manager.control_battery.assert_called_once_with(False, force=True)
 
     def test_both_block(self, manager) -> None:
         manager._discharge_blocked_by_protection = True
         manager._discharge_blocked_by_ev = True
         manager._update_discharge_control()
-        manager.control_battery.assert_called_once_with(False)
+        manager.control_battery.assert_called_once_with(False, force=True)
 
     def test_no_call_when_unchanged_and_not_yet_due(self, manager) -> None:
         """An unchanged decision does not re-apply until the reconcile is due."""
@@ -130,7 +130,7 @@ class TestUpdateDischargeControl:
             _t.monotonic() - manager.DISCHARGE_RECONCILE_S - 1
         )
         manager._update_discharge_control()
-        manager.control_battery.assert_called_once_with(False)
+        manager.control_battery.assert_called_once_with(False, force=False)
 
     def test_reconcile_timer_resets_after_applying(self, manager) -> None:
         """Two ticks in quick succession apply once, not twice."""
@@ -149,14 +149,14 @@ class TestUpdateDischargeControl:
         manager.last_discharge_allowed = True
         manager._discharge_blocked_by_ev = True
         manager._update_discharge_control()
-        manager.control_battery.assert_called_once_with(False)
+        manager.control_battery.assert_called_once_with(False, force=True)
 
     def test_calls_on_transition_block_to_allow(self, manager) -> None:
         manager.last_discharge_allowed = False
         manager._discharge_blocked_by_protection = False
         manager._discharge_blocked_by_ev = False
         manager._update_discharge_control()
-        manager.control_battery.assert_called_once_with(True)
+        manager.control_battery.assert_called_once_with(True, force=True)
 
 
 # ===================================================================
@@ -222,7 +222,7 @@ class TestEVFlagOnCharging:
         assert manager._discharge_blocked_by_ev is False
         _setup_ev_charging(manager, mode="immediate")
         assert manager._discharge_blocked_by_ev is True
-        manager.control_battery.assert_called_with(False)
+        manager.control_battery.assert_called_with(False, force=True)
 
     def test_immediate_zero_power_clears_flag(self, manager) -> None:
         """Immediate mode with car not connected → 0W → clears flag."""
@@ -231,7 +231,7 @@ class TestEVFlagOnCharging:
         # wb_status=Available → wallbox_available=False → NORMAL state → 0W
         _setup_ev_charging(manager, mode="immediate", wb_status="Available")
         assert manager._discharge_blocked_by_ev is False
-        manager.control_battery.assert_called_with(True)
+        manager.control_battery.assert_called_with(True, force=True)
 
     def test_flag_not_toggled_when_already_set(self, manager) -> None:
         """No redundant control_battery calls when flag is already True."""
@@ -266,7 +266,7 @@ class TestSolarModeClearsEVFlag:
         manager.last_discharge_allowed = False
         _setup_ev_charging(manager, mode="solar")
         assert manager._discharge_blocked_by_ev is False
-        manager.control_battery.assert_called_with(True)
+        manager.control_battery.assert_called_with(True, force=True)
 
     def test_solar_mode_noop_when_flag_already_clear(self, manager) -> None:
         manager._discharge_blocked_by_ev = False
@@ -328,7 +328,7 @@ class TestCombinedBlocking:
         manager._discharge_blocked_by_protection = False
         manager._discharge_blocked_by_ev = False
         manager._update_discharge_control()
-        manager.control_battery.assert_called_once_with(True)
+        manager.control_battery.assert_called_once_with(True, force=True)
 
     def test_ev_starts_during_protection_block(self, manager) -> None:
         """EV starts charging while protection already blocks — stays blocked."""
@@ -357,7 +357,7 @@ class TestCheapModeBlocksDischarge:
         assert manager._discharge_blocked_by_ev is False
         _setup_ev_charging(manager, mode="cheap", is_cheap=True)
         assert manager._discharge_blocked_by_ev is True
-        manager.control_battery.assert_called_with(False)
+        manager.control_battery.assert_called_with(False, force=True)
 
     def test_cheap_zero_power_clears_flag(self, manager) -> None:
         """Cheap mode + expensive tariff → 0W → clears discharge block."""
@@ -365,7 +365,7 @@ class TestCheapModeBlocksDischarge:
         manager.last_discharge_allowed = False
         _setup_ev_charging(manager, mode="cheap", is_cheap=False)
         assert manager._discharge_blocked_by_ev is False
-        manager.control_battery.assert_called_with(True)
+        manager.control_battery.assert_called_with(True, force=True)
 
 
 # ===================================================================

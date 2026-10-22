@@ -181,3 +181,137 @@ class TestRestartAmplification:
 
         req.post.assert_not_called()
         assert mgr._last_charge_power_w == 5000
+
+
+# ---------------------------------------------------------------------------
+# Post-write verification on the discharge register
+# ---------------------------------------------------------------------------
+
+
+DISCHARGE_ENTITY = "number.battery_maximum_discharging_power"
+
+_MANAGER_OPTIONS = {
+    "influxdb": {"host": "localhost", "port": 8087, "token": "x", "org": "t"},
+    "home_assistant": {"url": "http://localhost:8123", "token": "fake"},
+    "battery": {"capacity_kwh": 10.0, "max_discharge_w": 5000},
+    "tariff": {},
+    "ev_charging": {"enabled": False},
+    "schedule": {"update_interval_minutes": 15},
+}
+
+
+@pytest.fixture()
+def manager():
+    """An EnergyManager whose HA client is a mock and whose polls do not sleep."""
+    from run import EnergyManager
+
+    with patch("run.ForecastReader"), \
+         patch("run.SimulationWriter"), \
+         patch("run.init_telegram"):
+        mgr = EnergyManager(_MANAGER_OPTIONS)
+
+    mgr.ha_client = MagicMock()
+    mgr.ha_client.token = "fake"
+    mgr.ha_client.set_battery_discharge_power.return_value = (True, "")
+    mgr.discharge_control_entity = DISCHARGE_ENTITY
+    return mgr
+
+
+class TestDischargeVerification:
+    """The register appears in the HA state machine *after* the Modbus write.
+
+    The Huawei Solar integration republishes the entity asynchronously, measured
+    at ~2.4 s on 2026-10-22. A single read 1 s after the POST therefore returned
+    the pre-write value and reported a false mismatch at both tariff flips every
+    day. Verification polls instead (FSD 4.7.1).
+    """
+
+    def test_verification_waits_out_the_state_machine_lag(self, manager) -> None:
+        """Stale reads are not a mismatch while the poll window is open."""
+        manager.ha_client.get_battery_discharge_power.side_effect = [
+            5000.0,  # pre-write read: the register really is at 5000
+            5000.0,  # verify poll 1: integration has not republished yet
+            5000.0,  # verify poll 2: still stale
+            0.0,     # verify poll 3: caught up
+        ]
+
+        with patch("run.notify_error") as notify, patch("run.time.sleep"):
+            manager.control_battery(False)
+
+        notify.assert_not_called()
+        assert manager.last_discharge_allowed is False
+
+    def test_verification_alerts_when_the_register_never_arrives(self, manager) -> None:
+        """A register that stays wrong past the window is a real mismatch."""
+        manager.ha_client.get_battery_discharge_power.return_value = 5000.0
+
+        with patch("run.notify_error") as notify, patch("run.time.sleep"):
+            manager.control_battery(False)
+
+        assert notify.call_count == 1
+        assert "Verification Failed" in notify.call_args.kwargs["title"]
+        # The gate stays untouched so the next cycle retries.
+        assert manager.last_discharge_allowed is None
+
+    def test_successful_flip_is_not_written_twice(self, manager) -> None:
+        """Regression: a false mismatch left the gate unset, so the second
+        caller of `_update_discharge_control` wrote the same value again —
+        two flash cycles per tariff flip instead of one.
+        """
+        manager.ha_client.get_battery_discharge_power.side_effect = [
+            5000.0,  # caller 1 pre-write read
+            5000.0,  # verify poll 1 (stale — this is what used to alert)
+            5000.0,  # verify poll 2 (still stale)
+            0.0,     # verify poll 3 (caught up)
+        ]
+        manager._discharge_blocked_by_protection = True
+        assert manager.last_discharge_allowed is None
+
+        with patch("run.notify_error"), patch("run.time.sleep"):
+            manager._update_discharge_control()   # protection flag flipped
+            manager._update_discharge_control()   # EV path, same tick
+
+        assert manager.ha_client.set_battery_discharge_power.call_count == 1
+
+
+class TestUnreadableRegisterStorm:
+    """Fail-open must not become a write-per-minute loop.
+
+    Fail-open exists so an unreadable register is never stranded, but the
+    60 s reconcile cadence re-applied it indefinitely: on 2026-10-21 the Huawei
+    integration was `unavailable` for 14 minutes and the register took 14 writes
+    of a value it already held, none of which could land (FSD 4.7.1).
+    """
+
+    def test_unreadable_register_skips_the_reconcile_write(self, manager) -> None:
+        """Nothing changed and nothing can be read -> no write."""
+        manager.ha_client.get_battery_discharge_power.return_value = None
+
+        with patch("run.notify_error") as notify, patch("run.time.sleep"):
+            manager.control_battery(False, force=False)
+
+        manager.ha_client.set_battery_discharge_power.assert_not_called()
+        notify.assert_not_called()
+
+    def test_unreadable_register_still_writes_on_a_decision_change(self, manager) -> None:
+        """A real decision change still fails open, so nothing is stranded."""
+        manager.ha_client.get_battery_discharge_power.return_value = None
+
+        with patch("run.notify_error"), patch("run.time.sleep"):
+            manager.control_battery(False, force=True)
+
+        assert manager.ha_client.set_battery_discharge_power.call_count == 1
+
+    def test_reconcile_corrects_once_the_register_is_readable_again(self, manager) -> None:
+        """The skip self-heals: real drift is still corrected."""
+        manager.ha_client.get_battery_discharge_power.side_effect = [
+            None,    # unavailable -> reconcile skipped
+            5000.0,  # readable again, and drifted
+            0.0,     # verify
+        ]
+
+        with patch("run.notify_error"), patch("run.time.sleep"):
+            manager.control_battery(False, force=False)
+            manager.control_battery(False, force=False)
+
+        assert manager.ha_client.set_battery_discharge_power.call_count == 1

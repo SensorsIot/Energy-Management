@@ -2121,9 +2121,13 @@ All three home-battery control entities — `number.battery_maximum_discharging_
 
 This guard is independent of each control path's own change-gate (`last_discharge_allowed`, `_last_charge_power_w`, `_last_soc_ceiling`). Those caches live in memory only, so after an add-on restart they are empty and cannot suppress the first write of each cycle; the register read catches those no-ops instead.
 
-**An unreadable register fails open** — the write proceeds. A missing entity, an `unknown`/`unavailable` state, or a failed read must not strand the register at whatever it happens to hold.
+**An unreadable register fails open for a decision change, and only for a decision change.** A missing entity, an `unknown`/`unavailable` state, or a failed read must not strand the register at whatever it happens to hold, so a discharge decision that has just changed is written blind. A routine reconcile (Section 4.2.2) is skipped instead: with the current value unknown there is no drift to correct, and the reconcile cadence would otherwise re-apply the same blind write every `DISCHARGE_RECONCILE_S` for as long as the inverter stays unreachable — writes that cannot land, onto a register that may already hold the target. The skip self-heals, because the first reconcile that can read the register corrects it. `control_battery` takes the decision-changed flag as `force`; `_update_discharge_control` is the only caller and passes its own change-gate result.
 
 **Retries never multiply writes.** Before every re-post the register is re-read, and a reading that already matches the target reports success without a second write. A response lost after Home Assistant accepted the call therefore costs one register write, not up to five.
+
+**The discharge register is verified by polling, not by a single read.** The Huawei Solar integration republishes the entity asynchronously after the Modbus write, so the new value reaches the Home Assistant state machine seconds behind the accepted service call. Verification re-reads up to `VERIFY_TIMEOUT_S` (10 s) at `VERIFY_POLL_S` (1 s) intervals and returns on the first reading that matches the target, so the common case still costs one read and a register that is merely slow is not reported as a mismatch. A register still holding the wrong value when the reads run out is a genuine mismatch and notifies (Section 4.7.2). One that was never readable is recorded as unverified, which is not an error.
+
+Verification owns the change-gate: `last_discharge_allowed` advances once the register is confirmed, or once it is recorded unverified. A mismatch leaves the gate untouched so the next cycle retries. Both flags feed one combined decision and either can call `_update_discharge_control` within a cycle, so the gate must advance on a landed write — an unadvanced gate makes the second caller of that cycle write the same value again.
 
 **Retry Configuration:**
 - Maximum attempts: 5
@@ -2158,12 +2162,24 @@ Error: [error details]
 The battery may not be in the expected state!
 ```
 
+A write Home Assistant accepted but whose register never reaches the target within the verification window (Section 4.7.1) notifies separately:
+
+```
+Error: Battery Control Verification Failed
+
+Set discharge power to [0/5000]W but verification read [value]W.
+
+Entity: number.battery_maximum_discharging_power
+The battery may not be in the expected state!
+```
+
 ### 4.7.3 Error Flow
 
 ```
-control_battery(discharge_allowed)
+control_battery(discharge_allowed, force=decision_changed)
     |
     +-- Read register -> already at target -> done (no write)
+    +-- Read register -> unreadable and not force -> skip (no write)
     |
     +-- Attempt 1 -> Fail -> Wait 2s
     +-- Re-read -> at target -> done (write landed, response lost)
@@ -2173,9 +2189,21 @@ control_battery(discharge_allowed)
     +-- Attempt 5 -> Fail
            |
            v
-    Send Telegram Error Notification
+    Send Telegram Error Notification ("Battery Control Failed")
     Log error
     (last_discharge_allowed unchanged - will retry next cycle)
+
+Write accepted
+    |
+    +-- Poll register, up to VERIFY_TIMEOUT_S at VERIFY_POLL_S
+           |
+           +-- Reads target -> verified, gate advances
+           +-- Never readable -> unverified, gate advances
+           +-- Still wrong when reads run out
+                  |
+                  v
+           Send Telegram Error Notification ("Battery Control Verification Failed")
+           (last_discharge_allowed unchanged - will retry next cycle)
 ```
 
 ### 4.7.4 Underlying Communication Chains
@@ -2797,15 +2825,15 @@ Tests the two-flag discharge blocking logic (Section 4.2.2) where battery protec
 
 | Test | Description | Protection | EV | Expected |
 |------|-------------|-----------|-----|----------|
-| `test_both_off_allows_discharge` | Neither flag set | off | off | `control_battery(True)` |
-| `test_protection_blocks` | Protection flag only | on | off | `control_battery(False)` |
-| `test_ev_blocks` | EV flag only | off | on | `control_battery(False)` |
-| `test_both_block` | Both flags set | on | on | `control_battery(False)` |
+| `test_both_off_allows_discharge` | Neither flag set | off | off | `control_battery(True, force=True)` |
+| `test_protection_blocks` | Protection flag only | on | off | `control_battery(False, force=True)` |
+| `test_ev_blocks` | EV flag only | off | on | `control_battery(False, force=True)` |
+| `test_both_block` | Both flags set | on | on | `control_battery(False, force=True)` |
 | `test_no_call_when_unchanged_and_not_yet_due` | Already allowed, still allowed, reconcile not due | off | off | No call |
-| `test_reapplies_when_the_reconcile_is_due` | Unchanged decision, past `DISCHARGE_RECONCILE_S` | off | on | `control_battery(False)` — re-applied |
+| `test_reapplies_when_the_reconcile_is_due` | Unchanged decision, past `DISCHARGE_RECONCILE_S` | off | on | `control_battery(False, force=False)` — re-applied, fail-open withheld |
 | `test_reconcile_timer_resets_after_applying` | Two ticks in quick succession | off | on | One call, not two |
-| `test_calls_on_transition_allow_to_block` | Was allowed, now blocked | — | on | `control_battery(False)` |
-| `test_calls_on_transition_block_to_allow` | Was blocked, now allowed | off | off | `control_battery(True)` |
+| `test_calls_on_transition_allow_to_block` | Was allowed, now blocked | — | on | `control_battery(False, force=True)` |
+| `test_calls_on_transition_block_to_allow` | Was blocked, now allowed | off | off | `control_battery(True, force=True)` |
 
 #### Write economy — the choke point is `control_battery`
 
@@ -3066,7 +3094,7 @@ Report version: **3** (bumped when test definitions change — invalidates stale
 
 Test file: `energy-manager/tests/test_inverter_writes.py`
 
-Tests the no-op write suppression on the Huawei inverter registers (Section 4.7.1), enforced in `HAClient.set_number` — the single choke point for all three control entities.
+Tests the write economy on the Huawei inverter registers (Section 4.7.1): no-op suppression in `HAClient.set_number` — the single choke point for all three control entities — plus the bounded fail-open and the post-write verification that `EnergyManager.control_battery` applies to the discharge register.
 
 #### No-op suppression
 
@@ -3096,6 +3124,22 @@ Tests the no-op write suppression on the Huawei inverter registers (Section 4.7.
 | Test | Description | Conditions | Expected Result |
 |------|-------------|------------|-----------------|
 | `test_cold_cache_does_not_rewrite_unchanged_register` | Add-on restart with empty in-memory cache | `_last_charge_power_w is None`, register already at 5000 W | No POST sent; cache seeded to 5000 |
+
+#### Post-write verification on the discharge register
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_verification_waits_out_the_state_machine_lag` | The integration republishes the entity late | Verify reads 5000, 5000, then 0; target 0 | Verified, no notification, gate advances |
+| `test_verification_alerts_when_the_register_never_arrives` | The register really is wrong | Every read returns 5000; target 0 | One `Verification Failed` notification; gate untouched |
+| `test_successful_flip_is_not_written_twice` | Both flags call in one cycle | Protection flag flips, then the EV path calls again | Exactly one write |
+
+#### Fail-open is bounded to a decision change
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_unreadable_register_skips_the_reconcile_write` | Nothing changed, nothing readable | Pre-read `None`, `force=False` | No write, no notification |
+| `test_unreadable_register_still_writes_on_a_decision_change` | Decision changed, register unreadable | Pre-read `None`, `force=True` | Exactly one write |
+| `test_reconcile_corrects_once_the_register_is_readable_again` | The skip self-heals | Reconcile 1 unreadable, reconcile 2 reads 5000 against target 0 | One write, on the second reconcile |
 
 **Run tests:**
 ```bash
@@ -3401,6 +3445,8 @@ See Section 4.3.8 for adaptive polling logic.
 ## Changelog
 
 - v3.00: **The logged `excess_w` had the grid term inverted (Section 1.9).** With a full battery the surplus available to the car is what leaves the house **plus** what the car is already taking — the car's own draw has to be added back or the figure collapses as the car ramps up. `grid_power` is positive on export (the adjacent `grid_export = max(0.0, grid_power)` reads the same convention, and both sources `_read_grid_power()` can return were confirmed live to agree on it), but the code computed `-grid_power + wallbox_power`. At live meters of +158 W export and a 1541 W car that reported **1383 W instead of 1699 W**, understating the surplus by twice the export, and inverting whenever export exceeded the car's draw. The canonical §1.9 formula table was already right, so this is a code fix, not a spec change. **Observability only** — `excess_w` reaches one `IntegrationObserver` log line and nothing in the control path reads it, so no charging decision was ever affected. The formula moved out of the `CycleSnapshot` constructor into `solar_excess_w()` in `src/integration_observer.py`, which owns the field, so it is testable: new `TestSolarExcess` (4 cases), 3 of which fail on the old sign. 394 tests pass. (1.9.35 -> 1.9.36)
+
+- v3.00: **The discharge register took 17–18 writes/day against a 1.1/day baseline (Section 4.7.1).** Three defects on the discharge control path, measured live 2026-10-22 on the deployed add-on. (1) Verification slept 1 s and read once, but the Huawei Solar integration republishes the entity ~2.4 s after the Modbus write, so the read returned the pre-write value and raised a false `Battery Control Verification Failed` notification at **both tariff flips every day** (06:28 release, 21:28 block — eight consecutive occurrences in the log, register verified correct each time). Verification now polls up to `VERIFY_TIMEOUT_S` (10 s) at `VERIFY_POLL_S` (1 s) and returns on the first matching read. (2) A mismatch skips the `last_discharge_allowed` update, so the second caller of `_update_discharge_control` in the same cycle still saw a changed decision and wrote the same value again — two flash cycles per flip instead of one; fixed as a consequence of (1). (3) `_already_at` fails open on an unreadable register and the `DISCHARGE_RECONCILE_S` cadence re-applied it indefinitely: on 2026-10-21 15:46→16:00 the integration was `unavailable` and the register took **14 writes in 14 minutes**, all of 5000 onto a register already at 5000, none able to land. `control_battery` now takes `force` (the caller's change-gate result) and skips the write when the register is unreadable and nothing changed; a real decision change still fails open, and the skip self-heals on the first readable reconcile. `__version__` was also stale at 1.9.35 against `config.yaml`'s 1.9.36. Six new cases in `test_inverter_writes.py`, Section 6.8; the 13 `control_battery` assertions in `test_discharge_blocking.py` now pin `force` as well. 400 tests pass. (1.9.36 -> 1.9.37)
 
 - v2.99: **Removed an unreachable Influx writer and a day-mode fallback that had become wrong (Sections 4.2.2, 4.6.4).** `SimulationWriter.write_decision()` was never called — `discharge_decision` is written by `EnergyManager.write_decision` through its own `write_api`, so the method was a second, dead implementation of the same measurement; deleted along with the import it alone needed. The battery card inferred the day mode as `a.shaving_day_mode || (useCase === 'B' ? 'shaving_day' : 'car_day')`. The attribute has been published unconditionally since 1.9.16, so the fallback never fired, but it had silently become incorrect: `charge_use_case == 'B'` now also covers the longevity hold (4.2.4), which is **not** a shaving day, so the branch would have mislabelled a longevity hold as peak-shaving had it ever run. Now `a.shaving_day_mode || 'car_day'` — the published value, with the safe default. 353 tests pass. (1.9.23 -> 1.9.24)
 
