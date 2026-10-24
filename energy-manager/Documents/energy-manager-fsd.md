@@ -587,7 +587,12 @@ The former `ev_charging.reserve_percent` key is accepted as a compatibility fall
 - **Internal time**: UTC everywhere. Tariff comparisons convert to `Europe/Zurich` locally; display strings also use Swiss time.
 - **Time slot**: 15 minutes. All forecasts, simulations, and the optimization cycle align to `:00/:15/:30/:45`.
 - **Energy**: Wh. **Power**: W. **SOC**: % (0–100), converted from Wh via `capacity_wh`.
-- **Cycle cadence**: battery optimization every 15 min; EV charging control every 10 s.
+- **Cycle cadence**: one control job, `energy_tick`, every `TICK_S` (10 s). It runs the battery
+  optimization on its own `update_interval` (15 min) and the EV charging control every tick. Both
+  paths share the discharge decision, so they run on **one thread** — as separate scheduler jobs
+  each could read the change-gate before the other advanced it and both would write the same
+  register. Each path keeps its own `try/except`, so a failure in one still leaves the other
+  controlled. Only the daily flows summary (23:58) is a separate job; it writes to no device.
 
 ---
 
@@ -695,6 +700,11 @@ together. Applying the result only when the *decision* changes is not enough: an
 writes the entity (a dashboard slider, Spook, a maintenance script, an HA restart) then stands
 uncorrected for as long as the decision holds. So the combined result is re-applied every
 `DISCHARGE_RECONCILE_S` (60 s) as well, and a drift is logged when it is corrected.
+
+Both flags are set and applied from the same `energy_tick` thread (§1.9), so the change-gate is
+never read concurrently. `_update_discharge_control` additionally holds `_discharge_lock` across
+the gate read, the write and its verification, which states the invariant rather than resting on
+the job list staying as it is.
 
 Write economy is preserved at the choke point rather than by skipping the check: `control_battery`
 reads the current value first and returns without writing when it already matches, so a reconcile
@@ -2125,6 +2135,36 @@ This guard is independent of each control path's own change-gate (`last_discharg
 
 **Retries never multiply writes.** Before every re-post the register is re-read, and a reading that already matches the target reports success without a second write. A response lost after Home Assistant accepted the call therefore costs one register write, not up to five.
 
+**Dedup bounds writes by value; the write guard bounds them by rate.** Refusing to re-send a value
+the register already holds does nothing about a decision that changes legitimately but often — each
+of those changes is a flash-erase cycle. `RegisterWriteGuard` (`src/register_guard.py`) sits in
+front of all three registers at one choke point, `_guarded_register_write`, with two mechanisms of
+different kind:
+
+| Mechanism | Setting | Bounds |
+|---|---|---|
+| **Dead zone** — minimum interval between writes to one register | `dead_zone_s` = 60 s | collapses a burst into a single write |
+| **Rolling 24 h budget** — per register | `warn_per_day` = 20, `max_per_day` = 50 | chatter a dead zone cannot bound, since a dead zone alone still permits one write per interval forever |
+
+Crossing `warn_per_day` logs and sends one Telegram notification per window crossing, not one per
+write. Reaching `max_per_day` refuses further non-protective writes.
+
+**Both mechanisms yield to a protective write, and the protective direction differs per register.**
+It is the caller's judgement, not the guard's:
+
+| Register | Protective value | Why it is never held back |
+|---|---|---|
+| discharge limit | `0` | a block deferred is a block that did not happen — the house battery drains into the car |
+| charge limit | `charge_max_w` | a limit left stuck at `0` means a battery that never fills again |
+| end-of-charge SOC | always | the register is held at a constant, so the only write that occurs is one restoring it after something else lowered it; its minimum is 90 %, so a ceiling left there would cap the battery with nothing to put it back |
+
+A held write is **not a failure**: nothing is notified, and the caller leaves its change-gate
+(`last_discharge_allowed`, `_last_charge_power_w`) untouched so the next tick re-applies the same
+target.
+
+The budget counts flash-erase cycles, not calls. `HAClient.set_number` sets `last_write_sent`,
+and the guard is credited only when that is true, so a value deduped away costs no budget.
+
 **The discharge register is verified by polling, not by a single read.** The Huawei Solar integration republishes the entity asynchronously after the Modbus write, so the new value reaches the Home Assistant state machine seconds behind the accepted service call. Verification re-reads up to `VERIFY_TIMEOUT_S` (10 s) at `VERIFY_POLL_S` (1 s) intervals and returns on the first reading that matches the target, so the common case still costs one read and a register that is merely slow is not reported as a mismatch. A register still holding the wrong value when the reads run out is a genuine mismatch and notifies (Section 4.7.2). One that was never readable is recorded as unverified, which is not an error.
 
 Verification owns the change-gate: `last_discharge_allowed` advances once the register is confirmed, or once it is recorded unverified. A mismatch leaves the gate untouched so the next cycle retries.
@@ -3144,9 +3184,50 @@ Tests the write economy on the Huawei inverter registers (Section 4.7.1): no-op 
 | `test_unreadable_register_still_writes_on_a_decision_change` | Decision changed, register unreadable | Pre-read `None`, `force=True` | Exactly one write |
 | `test_reconcile_corrects_once_the_register_is_readable_again` | The skip self-heals | Reconcile 1 unreadable, reconcile 2 reads 5000 against target 0 | One write, on the second reconcile |
 
+#### Write-rate guard
+
+Test file: `energy-manager/tests/test_register_guard.py`
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_first_write_is_allowed` | Nothing written yet | fresh guard | allowed |
+| `test_second_write_inside_the_dead_zone_is_held` | Burst | 30 s after a write, `dead_zone_s` 60 | held, reason names the dead zone |
+| `test_write_after_the_dead_zone_is_allowed` | Interval elapsed | 61 s after a write | allowed |
+| `test_dead_zone_is_per_register` | Registers are independent | write A, then ask B | B allowed |
+| `test_protective_write_ignores_the_dead_zone` | A block must never wait | 1 s after a write, `protective=True` | allowed |
+| `test_budget_holds_a_non_protective_write` | Budget reached | `max_per_day` writes in window | held, reason names the budget |
+| `test_budget_never_holds_a_protective_write` | Over budget | 20 writes, `protective=True` | allowed |
+| `test_budget_is_a_rolling_window` | Window ages out | advance 24 h | allowed again, count 0 |
+| `test_counts_are_per_register` | Counts are independent | fill A | A counted, B zero |
+| `test_warning_fires_at_the_threshold` | First crossing | the `warn_per_day`-th write | warning returned |
+| `test_warning_does_not_repeat_every_write` | No notification storm | 8 writes past the threshold | exactly one warning |
+| `test_warning_rearms_once_the_window_clears` | New window | advance 24 h, cross again | warns again |
+
+#### One control job, and the guard at the registers
+
+Test file: `energy-manager/tests/test_energy_tick.py`
+
+| Test | Description | Conditions | Expected Result |
+|------|-------------|------------|-----------------|
+| `test_only_one_control_job_is_scheduled` | Regression: two jobs meant two threads | `start()` | `energy_tick` registered; no `optimization`, no `ev_charging` |
+| `test_optimization_waits_for_its_own_interval` | Cadences preserved | two ticks inside 15 min | EV twice, optimization never |
+| `test_optimization_runs_once_its_interval_elapses` | Cadences preserved | tick past 15 min | optimization once |
+| `test_a_failing_optimization_still_leaves_the_ev_controlled` | Fault isolation | optimization raises | tick does not raise; EV still runs |
+| `test_a_failing_ev_path_does_not_escape_the_tick` | Fault isolation | EV raises | tick does not raise; optimization still ran |
+| `test_ev_path_is_skipped_when_ev_is_disabled` | EV disabled | `ev_charging.enabled: false` | EV never called |
+| `test_a_release_inside_the_dead_zone_is_held` | Permissive write | guard just recorded a write | no write sent |
+| `test_a_held_write_leaves_the_gate_alone_so_it_retries` | Held is not applied | as above | `last_discharge_allowed` unchanged |
+| `test_a_block_inside_the_dead_zone_still_writes` | Protective write | target 0 inside the dead zone | one write; gate advances |
+| `test_a_held_write_sends_no_failure_notification` | Held is not an error | permissive write held | no notification |
+| `test_releasing_to_full_power_is_never_held` | Charge release is protective | target `charge_max_w` inside the dead zone | one write |
+| `test_deferring_inside_the_dead_zone_is_held` | Charge defer is permissive | target 0 inside the dead zone | no write; cache unchanged |
+| `test_a_deduped_no_op_costs_no_budget` | Budget counts flash cycles | `last_write_sent` false | count stays 0 |
+| `test_a_real_write_counts` | Budget counts flash cycles | `last_write_sent` true | count 1 |
+| `test_crossing_the_warning_threshold_notifies_once` | One notification | 6 writes, `warn_per_day` 3 | one `notify_warning` |
+
 **Run tests:**
 ```bash
-cd energy-manager && python -m pytest tests/test_inverter_writes.py -v
+cd energy-manager && python -m pytest tests/test_inverter_writes.py tests/test_register_guard.py tests/test_energy_tick.py -v
 ```
 
 ---
@@ -3448,6 +3529,8 @@ See Section 4.3.8 for adaptive polling logic.
 ## Changelog
 
 - v3.00: **The logged `excess_w` had the grid term inverted (Section 1.9).** With a full battery the surplus available to the car is what leaves the house **plus** what the car is already taking — the car's own draw has to be added back or the figure collapses as the car ramps up. `grid_power` is positive on export (the adjacent `grid_export = max(0.0, grid_power)` reads the same convention, and both sources `_read_grid_power()` can return were confirmed live to agree on it), but the code computed `-grid_power + wallbox_power`. At live meters of +158 W export and a 1541 W car that reported **1383 W instead of 1699 W**, understating the surplus by twice the export, and inverting whenever export exceeded the car's draw. The canonical §1.9 formula table was already right, so this is a code fix, not a spec change. **Observability only** — `excess_w` reaches one `IntegrationObserver` log line and nothing in the control path reads it, so no charging decision was ever affected. The formula moved out of the `CycleSnapshot` constructor into `solar_excess_w()` in `src/integration_observer.py`, which owns the field, so it is testable: new `TestSolarExcess` (4 cases), 3 of which fail on the old sign. 394 tests pass. (1.9.35 -> 1.9.36)
+
+- v3.02: **One control job, and the inverter write rate is now bounded (Sections 1.9, 4.2.2, 4.7.1).** The two interval jobs, `optimization` (15 min) and `ev_charging` (10 s), both set a discharge-block flag and applied the combined decision, and `max_instances=1` bounds each job alone — so they ran on separate scheduler threads and raced the change-gate. v3.01 serialised that with a lock; the race is now removed by construction instead. A single `energy_tick` job at `TICK_S` (10 s) runs the EV path every tick and the battery optimization on its own `update_interval`, preserving both cadences exactly. Each path keeps its own `try/except`, so one job does not mean one point of failure — the fault isolation the two jobs provided is retained. `_discharge_lock` is kept to state the invariant rather than rest on the job list. Decision logic is unchanged. Second half: dedup bounds writes by *value* but nothing bounded them by *rate*, so a decision changing legitimately but often still cost a flash-erase cycle each time. New `RegisterWriteGuard` (`src/register_guard.py`) in front of all three registers at one choke point, `_guarded_register_write`: a 60 s per-register dead zone to collapse bursts, plus a rolling 24 h budget (warn 20, hard 50) for chatter a dead zone cannot bound. Both yield to a **protective** write, whose direction differs per register — discharge `0`, charge `charge_max_w`, SOC ceiling always — because a deferred block drains the battery into the car and a charge limit stuck at 0 means a battery that never fills. A held write is not a failure: nothing notifies and the caller's change-gate is left untouched so the next tick re-applies. `HAClient.set_number` now reports `last_write_sent`, so the budget counts flash-erase cycles rather than calls and a deduped no-op costs nothing. Measured genuine change rates before the change (from HA's own InfluxDB export, which records only state *changes*): discharge 3–5/day, charge 0–2/day, ceiling 0–1/day. New `test_register_guard.py` (12 cases) and `test_energy_tick.py` (15 cases), Section 6.8. 428 tests pass. (1.9.38 -> 1.9.39)
 
 - v3.01: **The duplicate write per decision flip is a thread race, not a sequential one (Section 4.7.1).** v3.00 advanced `last_discharge_allowed` on a landed write so the second caller in a cycle would find nothing to do, which assumed the two callers run in sequence. They do not: `optimization` (15 min) and `ev_charging` (10 s) are separate APScheduler jobs on separate threads, and `max_instances=1` bounds each job alone. Both threads read the change-gate before either advanced it, so both wrote — verified live on 1.9.37, where every flip logged its `Discharge blocked`/`drifted` pair twice at the same second and wrote twice seconds apart (2026-10-23 01:00/03:00/04:00/04:45/06:00/06:15, 12 writes for 6 flips; 2026-10-24 07:15). `_update_discharge_control` now holds a `threading.Lock` from the gate read through the write and its verification, so the second thread re-evaluates after the first has advanced the gate. The v3.00 verification poll and bounded fail-open are confirmed working over the same window: **zero** verification mismatches and no false notifications in 37 h, against twice daily before. New `test_concurrent_callers_write_once` (two real threads, reproduces 2-writes deterministically). 401 tests pass. (1.9.37 -> 1.9.38)
 

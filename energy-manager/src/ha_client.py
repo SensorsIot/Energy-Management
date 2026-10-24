@@ -25,6 +25,10 @@ class HAClient:
         self.url = url.rstrip("/")
         self._provided_token = token
         self._token = None
+        # Set by `set_number`: True when that call actually sent a value, False
+        # when it was deduped away. The inverter write-rate budget reads it so
+        # it counts flash-erase cycles rather than calls.
+        self.last_write_sent = False
 
     @property
     def token(self) -> str | None:
@@ -168,6 +172,11 @@ class HAClient:
         if not self.token:
             return False, "No HA token available"
 
+        # Whether this call actually put a value on the wire. The write-rate
+        # budget must count flash-erase cycles, not calls, and a deduped no-op
+        # costs none.
+        self.last_write_sent = False
+
         if self._already_at(entity_id, value):
             logger.debug(f"{entity_id} already at {value} — no write sent")
             return True, ""
@@ -194,6 +203,7 @@ class HAClient:
                     url, headers=self._headers(), json=data, timeout=30
                 )
                 response.raise_for_status()
+                self.last_write_sent = True
                 logger.info(f"Set {entity_id} to {value}")
                 return True, ""
             except requests.Timeout:

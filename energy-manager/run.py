@@ -4,7 +4,7 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.38"
+__version__ = "1.9.39"
 
 import json
 import logging
@@ -36,6 +36,7 @@ from src.ev_charging import (
     step_watts,
 )
 from src.influxdb_writer import SimulationWriter
+from src.register_guard import RegisterWriteGuard
 from src.longevity import battery_longevity
 from src.integration_observer import (
     CycleSnapshot,
@@ -277,12 +278,15 @@ class EnergyManager:
         self._discharge_blocked_by_protection = False
         self._discharge_blocked_by_ev = False
         self._last_discharge_reconcile_at: float = 0.0
-        # `optimization` (15 min) and `ev_charging` (10 s) are separate
-        # APScheduler jobs on separate threads, and `max_instances=1` is per
-        # job. Both set a flag and apply the combined decision, so the
-        # change-gate is a check-then-act that has to be serialised or both
-        # threads read it before either advances it and both write.
+        # Both control paths run on one scheduler job, so nothing can race the
+        # change-gate. The lock makes that invariant explicit rather than
+        # resting on the job list staying as it is.
         self._discharge_lock = threading.Lock()
+        # Bounds the write rate on the three inverter holding registers, which
+        # dedup alone cannot do: a decision that changes legitimately but often
+        # still costs a flash-erase cycle every time (FSD 4.7.1).
+        self._write_guard = RegisterWriteGuard()
+        self._last_optimization_at: float = 0.0
 
         # SimulationWriter for FSD 4.2.3 output
         self.simulation_writer = SimulationWriter(
@@ -771,6 +775,40 @@ class EnergyManager:
 
         self.write_api.write(bucket=self.output_bucket, org=self.influx_org, record=point)
 
+    def _guarded_register_write(
+        self,
+        entity_id: str,
+        value: float,
+        *,
+        protective: bool,
+        label: str,
+        writer=None,
+    ) -> tuple[bool, str, bool]:
+        """Write an inverter holding register through the write-rate guard.
+
+        Returns `(success, error, held)`. `held` means the guard refused the
+        write, which is not a failure: the caller leaves its change-gate alone
+        and the next tick tries again. A protective write is never held.
+
+        The guard is only credited once `set_number` reports it actually sent
+        something, so a value the register already held costs no budget.
+        """
+        ok, why = self._write_guard.allow(entity_id, protective=protective)
+        if not ok:
+            logger.info(f"{label} → {value} held back: {why}")
+            return False, why, True
+
+        write = writer or self.ha_client.set_number
+        success, error_msg = write(entity_id, value, max_retries=5)
+
+        if success and self.ha_client.last_write_sent:
+            warning = self._write_guard.record(entity_id)
+            if warning:
+                logger.warning(warning)
+                notify_warning(title="Inverter Register Write Rate", message=warning)
+
+        return success, error_msg, False
+
     # How long to wait for the discharge register to show its new value in the
     # Home Assistant state machine, and how often to look. The Huawei Solar
     # integration republishes the entity asynchronously after the Modbus write
@@ -851,11 +889,20 @@ class EnergyManager:
             )
 
         # Set the new value
-        success, error_msg = self.ha_client.set_battery_discharge_power(
+        # A block (0 W) is protective — the house battery is about to be
+        # drained into the car, so it is never held back. A release can wait.
+        success, error_msg, held = self._guarded_register_write(
             self.discharge_control_entity,
             target_value,
-            max_retries=5,
+            protective=(target_value == 0),
+            label="Discharge limit",
+            writer=self.ha_client.set_battery_discharge_power,
         )
+
+        if held:
+            # Not a failure. The gate is deliberately left where it is so the
+            # next tick re-applies the same target.
+            return
 
         if not success:
             # All retries failed - send Telegram notification
@@ -1377,9 +1424,18 @@ class EnergyManager:
             f"Battery charge {'allowed' if charge_allowed else 'deferred'} "
             f"→ {self.charge_control_entity}={target}W ({reason})"
         )
-        success, error_msg = self.ha_client.set_number(
-            self.charge_control_entity, target, max_retries=5
+        # Releasing to full charge power is protective: a limit left stuck at 0
+        # means a battery that never fills again, so a release is never held
+        # back. Deferring to a lower power or to 0 can wait.
+        success, error_msg, held = self._guarded_register_write(
+            self.charge_control_entity,
+            target,
+            protective=(target == self.charge_max_w),
+            label="Charge limit",
         )
+        if held:
+            # Leave `_last_charge_power_w` alone so the next cycle re-applies.
+            return
         if not success:
             logger.error(f"Failed to set charge power: {error_msg}")
             notify_error(
@@ -1415,8 +1471,15 @@ class EnergyManager:
             logger.info(
                 f"Inverter end-of-charge SOC → {self.end_of_charge_soc_entity}={ceiling}%"
             )
-        success, error_msg = self.ha_client.set_number(
-            self.end_of_charge_soc_entity, ceiling, max_retries=5
+        # Always protective. The register is held at a constant, so dedup means
+        # the only write that ever occurs is one restoring it after something
+        # else lowered it — and the register's minimum is 90 %, so a ceiling
+        # left there would cap the battery with nothing to put it back.
+        success, error_msg, _held = self._guarded_register_write(
+            self.end_of_charge_soc_entity,
+            ceiling,
+            protective=True,
+            label="End-of-charge SOC",
         )
         if not success:
             logger.error(f"Failed to set end-of-charge SOC: {error_msg}")
@@ -2449,6 +2512,37 @@ class EnergyManager:
         except Exception as e:
             logger.error(f"Daily flows summary failed: {e}", exc_info=True)
 
+    # The single control cadence. The EV path needs it this fast to track
+    # surplus; the battery optimization runs on its own slower interval from
+    # inside the tick rather than from a second job.
+    TICK_S = 10
+
+    def energy_tick(self) -> None:
+        """Run both control paths, in order, on one thread.
+
+        This is the only scheduled control job. The two paths share the
+        discharge decision — battery protection and EV charging each block it
+        independently — and as separate jobs they ran on separate scheduler
+        threads, so both could read the change-gate before either advanced it
+        and both would write the same register.
+
+        One job removes that by construction. Each path keeps its own
+        `try/except` so a failure in one still leaves the other controlled,
+        which is the isolation the two jobs used to provide.
+        """
+        if time.monotonic() - self._last_optimization_at >= self.update_interval * 60:
+            self._last_optimization_at = time.monotonic()
+            try:
+                self.run_optimization()
+            except Exception as e:
+                logger.error(f"Battery optimization failed: {e}", exc_info=True)
+
+        if self.ev_charging_enabled:
+            try:
+                self.control_ev_charging()
+            except Exception as e:
+                logger.error(f"EV charging control failed: {e}", exc_info=True)
+
     def start(self) -> None:
         """Start the scheduler."""
         logger.info(f"Starting scheduler (every {self.update_interval} minutes)")
@@ -2464,16 +2558,18 @@ class EnergyManager:
             except Exception as e:
                 logger.warning(f"Failed to read EV charging mode on startup: {e}")
 
-        # Run immediately
+        # Run both control paths immediately, then let the tick take over.
         self.run_optimization()
+        self._last_optimization_at = time.monotonic()
+        if self.ev_charging_enabled:
+            self.control_ev_charging()
 
-        # Schedule regular updates
         self.scheduler.add_job(
-            self.run_optimization,
+            self.energy_tick,
             "interval",
-            minutes=self.update_interval,
-            id="optimization",
-            name="Battery Optimization",
+            seconds=self.TICK_S,
+            id="energy_tick",
+            name="Energy Management",
             max_instances=1,
             coalesce=True,
         )
@@ -2490,27 +2586,12 @@ class EnergyManager:
             coalesce=True,
         )
 
-        # Schedule EV charging control (10-second interval)
-        if self.ev_charging_enabled:
-            self.control_ev_charging()  # Run immediately
-            self.scheduler.add_job(
-                self.control_ev_charging,
-                "interval",
-                seconds=10,
-                id="ev_charging",
-                name="EV Charging Control",
-                max_instances=1,
-                coalesce=True,
-            )
-            logger.info("EV charging control enabled (10-second interval)")
-
-
         self.scheduler.start()
-
-        # Log next run time
-        job = self.scheduler.get_job("optimization")
-        if job:
-            logger.info(f"Next optimization at {swiss_datetime(job.next_run_time)}")
+        logger.info(
+            f"Energy management tick every {self.TICK_S}s; "
+            f"battery optimization every {self.update_interval} min"
+            + ("" if self.ev_charging_enabled else "; EV charging disabled")
+        )
 
     def stop(self) -> None:
         """Stop the scheduler."""
