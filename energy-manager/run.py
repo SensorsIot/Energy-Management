@@ -4,12 +4,13 @@
 Optimizes battery usage based on PV and load forecasts.
 """
 
-__version__ = "1.9.37"
+__version__ = "1.9.38"
 
 import json
 import logging
 import signal
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta, UTC
 from pathlib import Path
@@ -276,6 +277,12 @@ class EnergyManager:
         self._discharge_blocked_by_protection = False
         self._discharge_blocked_by_ev = False
         self._last_discharge_reconcile_at: float = 0.0
+        # `optimization` (15 min) and `ev_charging` (10 s) are separate
+        # APScheduler jobs on separate threads, and `max_instances=1` is per
+        # job. Both set a flag and apply the combined decision, so the
+        # change-gate is a check-then-act that has to be serialised or both
+        # threads read it before either advances it and both write.
+        self._discharge_lock = threading.Lock()
 
         # SimulationWriter for FSD 4.2.3 output
         self.simulation_writer = SimulationWriter(
@@ -915,29 +922,34 @@ class EnergyManager:
         every `DISCHARGE_RECONCILE_S` so external drift is corrected. The write
         itself stays economical: `control_battery` reads the current value first
         and returns without writing when it already matches (FSD 4.2.2).
+
+        Held under `_discharge_lock` from the change-gate read through the write
+        and its verification, so the two scheduler threads that call this apply
+        one decision between them instead of one each.
         """
-        discharge_allowed = not (
-            self._discharge_blocked_by_protection or self._discharge_blocked_by_ev
-        )
-        changed = discharge_allowed != self.last_discharge_allowed
-        due = (
-            time.monotonic() - self._last_discharge_reconcile_at
-            >= self.DISCHARGE_RECONCILE_S
-        )
-        if not (changed or due):
-            return
-        if changed:
-            reason = []
-            if self._discharge_blocked_by_protection:
-                reason.append("battery protection")
-            if self._discharge_blocked_by_ev:
-                reason.append("EV charging")
-            logger.info(
-                f"Discharge {'allowed' if discharge_allowed else 'blocked'}"
-                f"{' by ' + ' + '.join(reason) if reason else ''}"
+        with self._discharge_lock:
+            discharge_allowed = not (
+                self._discharge_blocked_by_protection or self._discharge_blocked_by_ev
             )
-        self._last_discharge_reconcile_at = time.monotonic()
-        self.control_battery(discharge_allowed, force=changed)
+            changed = discharge_allowed != self.last_discharge_allowed
+            due = (
+                time.monotonic() - self._last_discharge_reconcile_at
+                >= self.DISCHARGE_RECONCILE_S
+            )
+            if not (changed or due):
+                return
+            if changed:
+                reason = []
+                if self._discharge_blocked_by_protection:
+                    reason.append("battery protection")
+                if self._discharge_blocked_by_ev:
+                    reason.append("EV charging")
+                logger.info(
+                    f"Discharge {'allowed' if discharge_allowed else 'blocked'}"
+                    f"{' by ' + ' + '.join(reason) if reason else ''}"
+                )
+            self._last_discharge_reconcile_at = time.monotonic()
+            self.control_battery(discharge_allowed, force=changed)
 
     def _car_is_full(self):
         """Return whether the EV is at/above its charging target (True/False/None).

@@ -315,3 +315,44 @@ class TestUnreadableRegisterStorm:
             manager.control_battery(False, force=False)
 
         assert manager.ha_client.set_battery_discharge_power.call_count == 1
+
+
+class TestConcurrentCallers:
+    """`optimization` (15 min) and `ev_charging` (10 s) are separate APScheduler
+    jobs on separate threads, and `max_instances=1` is per job. Both set a
+    discharge flag and call `_update_discharge_control`, so without a lock both
+    evaluate the change-gate before either advances it and both write — two
+    flash cycles per decision flip, observed live 2026-10-23 and 10-24.
+    """
+
+    def test_concurrent_callers_write_once(self, manager) -> None:
+        import threading
+        import time as _t
+
+        written = threading.Event()
+
+        def slow_set(entity_id, value, max_retries=5):
+            # Hold the window open the way a real HA round trip does.
+            _t.sleep(0.2)
+            written.set()
+            return True, ""
+
+        def read(entity_id):
+            return 0.0 if written.is_set() else 5000.0
+
+        manager.ha_client.set_battery_discharge_power.side_effect = slow_set
+        manager.ha_client.get_battery_discharge_power.side_effect = read
+        manager._discharge_blocked_by_protection = True
+
+        threads = [
+            threading.Thread(target=manager._update_discharge_control) for _ in range(2)
+        ]
+        with patch("run.notify_error") as notify:
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+
+        assert manager.ha_client.set_battery_discharge_power.call_count == 1
+        assert manager.last_discharge_allowed is False
+        notify.assert_not_called()
